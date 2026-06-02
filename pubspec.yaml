@@ -50,6 +50,10 @@ dependencies:
   web: ^0.5.1                            # window.localStorage for web profile persistence
   sqlite3: ^2.4.0                        # SQLite for wapp social store (reactions, comments)
   sqlite3_flutter_libs: ^0.5.24          # Native SQLite libs for Flutter builds
+  media_kit: ^1.1.10                     # Video/audio engine for the movies wapp video group
+  media_kit_video: ^1.2.4                # Flutter video render surface for media_kit
+  media_kit_libs_video: ^1.0.4           # Bundled native libs (libmpv) — no system install needed
+  media_kit_native_event_loop: ^1.0.9
 
 dev_dependencies:
   flutter_test:

@@ -28,6 +28,7 @@ import 'services/task_monitor_service.dart';
 import 'services/wapp_signing_service.dart';
 import 'services/functionality_registry.dart';
 import 'util/wapp_icons.dart';
+import 'wapp/native/media_kit_video_backend.dart';
 import 'wapp/wapp_engine.dart';
 import 'wapp/wapp_page.dart';
 
@@ -40,6 +41,12 @@ final GlobalKey<ScaffoldMessengerState> rootMessengerKey =
 Future<void> main() async {
   // Required before any async work that touches platform channels.
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Register the platform media backend behind the `media.video`
+  // capability (the mediapack library wapp). No-op on unsupported
+  // platforms. media_kit lives entirely inside this backend module —
+  // the launcher and wapp runtime never import it directly.
+  registerMediaKitBackend(platform.platformName());
 
   // Register core host services as parallel boot tasks so they run
   // through the orchestrator (and show up in the tasks wapp with the
@@ -184,15 +191,18 @@ class WappManifest {
   /// `wappDataStorageFor()`.
   final String name;
 
-  /// Human-readable display name. Read from `manifest.description`
-  /// (which is the convention used by every hand-written wapp —
-  /// short title in `description`, long text in `summary`). Falls
-  /// back to the folder name when `description` is blank.
+  /// Short launcher label (1–3 words). Read from `manifest.title`.
+  /// Falls back to `manifest.description` for legacy wapps that
+  /// predate the explicit `title` field, then to the folder name.
   final String title;
 
-  /// Long-form description. Read from `manifest.summary`, falling
-  /// back to `manifest.description`.
+  /// One-line explanation. Read from `manifest.description` (current
+  /// schema). For legacy wapps — where `description` actually held the
+  /// title — this is empty so the long text lives in [summary].
   final String description;
+
+  /// Paragraph-long explanation. Read from `manifest.summary`.
+  final String summary;
 
   final String kind;
   final String? icon;
@@ -234,11 +244,20 @@ class WappManifest {
   /// [WappFileAssociations].
   final List<WappFileHandler> fileHandlers;
 
+  /// OS platforms this wapp advertises support for (`manifest.platforms`)
+  /// — linux/windows/macos/android/ios/web. Empty = unspecified (any).
+  final List<String> supportedPlatforms;
+
+  /// Hardware targets this wapp advertises (`manifest.hardware`) —
+  /// intel/arm/esp32/N/A/… Empty = unspecified (any).
+  final List<String> supportedHardware;
+
   WappManifest({
     required this.id,
     required this.name,
     required this.title,
     required this.description,
+    this.summary = '',
     required this.kind,
     this.icon,
     required this.dirPath,
@@ -250,7 +269,15 @@ class WappManifest {
     this.requiredHal = const [],
     this.requiredEvents = const [],
     this.fileHandlers = const [],
+    this.supportedPlatforms = const [],
+    this.supportedHardware = const [],
   });
+
+  /// Whether this wapp advertises support for [host] (an OS name from
+  /// `platform.platformName()`). An empty `platforms` list means the
+  /// wapp made no claim, so we treat it as universally supported.
+  bool supportsPlatform(String host) =>
+      supportedPlatforms.isEmpty || supportedPlatforms.contains(host);
 
   factory WappManifest.fromJson(
     Map<String, dynamic> json,
@@ -259,7 +286,22 @@ class WappManifest {
   }) {
     final id = json['id'] as String? ?? '';
     final folderName = dirPath.split(platform.pathSeparator).last;
-    final manifestDescription = json['description'] as String? ?? '';
+
+    // Field semantics (current schema, as used by the mature wapps):
+    //   title       — short launcher label  ("Maps")
+    //   description — one-line explanation   ("Satellite maps with…")
+    //   summary     — paragraph-long text
+    // Legacy schema (older wapps, no explicit title): `description`
+    // WAS the title and `summary` the long text. Detect legacy by the
+    // absence of a non-empty `title` so old wapps still show a sensible
+    // label instead of dumping their one-liner onto the tile.
+    final hasTitle =
+        json['title'] is String && (json['title'] as String).trim().isNotEmpty;
+    final manifestTitle = hasTitle
+        ? (json['title'] as String).trim()
+        : (json['description'] as String? ?? '');
+    final manifestDescription =
+        hasTitle ? (json['description'] as String? ?? '') : '';
     final manifestSummary = json['summary'] as String? ?? '';
 
     // Parse provides.functionalities — accepts both bare strings
@@ -310,13 +352,23 @@ class WappManifest {
       return raw.whereType<String>().where((s) => s.isNotEmpty).toList();
     }
 
+    // Top-level platform / hardware advertisement.
+    List<String> topList(String key) {
+      final raw = json[key];
+      if (raw is! List) return const [];
+      return raw
+          .whereType<String>()
+          .map((s) => s.toLowerCase())
+          .where((s) => s.isNotEmpty)
+          .toList();
+    }
+
     return WappManifest(
       id: id,
       name: folderName.isNotEmpty ? folderName : id.split('.').last,
-      title: manifestDescription.isNotEmpty ? manifestDescription : folderName,
-      description: manifestSummary.isNotEmpty
-          ? manifestSummary
-          : manifestDescription,
+      title: manifestTitle.isNotEmpty ? manifestTitle : folderName,
+      description: manifestDescription,
+      summary: manifestSummary,
       kind: json['kind'] as String? ?? 'app',
       icon: json['icon'] as String?,
       dirPath: dirPath,
@@ -328,6 +380,8 @@ class WappManifest {
       requiredHal: reqList('hal'),
       requiredEvents: reqList('events'),
       fileHandlers: fileHandlers,
+      supportedPlatforms: topList('platforms'),
+      supportedHardware: topList('hardware'),
     );
   }
 

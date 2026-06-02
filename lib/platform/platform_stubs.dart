@@ -53,6 +53,9 @@ String get pathSeparator => '/';
 /// lookups should gate on [kIsWeb] and skip that path entirely.
 String currentDirectory() => '';
 
+/// Web build → 'web'. Matches wapp `platforms` advertisement.
+String platformName() => 'web';
+
 /// Read an arbitrary file's contents as bytes. Used for preview
 /// fetches (e.g. showing the user-picked SVG). Returns null on web
 /// — file access there flows through the browser file picker which

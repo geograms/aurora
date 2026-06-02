@@ -7,10 +7,13 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
 
 import '../platform/platform.dart' as platform;
+
+import 'native/media_capability.dart';
 
 import '../geoui/geoui_ast.dart';
 import '../geoui/geoui_parser.dart';
@@ -93,6 +96,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// Storage rooted at the wapp package dir (read-only source of manifest,
   /// app.wasm, screens, media).
   late final ProfileStorage _pkg = wappPackageStorage(widget.wappDir);
+
+  // ── Video group state (movies wapp) ────────────────────────────────
+  // A MediaSession from the active media.video backend (the mediapack
+  // capability). Lazily created on first `video.load` so the engine
+  // cost is only paid by wapps that actually use it. Null when the
+  // capability isn't installed/supported. Disposed in [dispose].
+  MediaSession? _mediaSession;
+  String? _videoCurrentPath;
 
   /// Storage for installed wapps (extracted .wapp packages) — used by the
   /// install/uninstall flow.
@@ -1183,11 +1194,24 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     _engine.setStorage(wappData);
 
     // Auto-configure the install wapp's `source` KV to point at the
-    // in-repo wapps/binaries/ dir when running from a source checkout.
+    // in-repo wapps/binaries/ catalog when running from a source
+    // checkout. Resolve from the runtime cwd and probe for index.json
+    // across a few candidate layouts — deriving from widget.wappDir was
+    // off by one level after the wapps/archive -> wapps move, which
+    // left the store with no catalog ("not working").
     if (_wappName == 'install' && !_engine.hasKvKey('source')) {
-      final binStorage = wappPackageStorage('${widget.wappDir}/../../binaries');
-      if (await binStorage.directoryExists('')) {
-        _engine.kvSet('source', binStorage.basePath);
+      final cwd = platform.currentDirectory();
+      final candidates = [
+        '$cwd/../wapps/binaries',    // sibling repo (canonical)
+        '$cwd/../../wapps/binaries', // nested workspace fallback
+        '$cwd/wapps/binaries',       // legacy in-tree
+      ];
+      for (final candidate in candidates) {
+        final binStorage = wappPackageStorage(candidate);
+        if (await binStorage.exists('index.json')) {
+          _engine.kvSet('source', binStorage.basePath);
+          break;
+        }
       }
     }
 
@@ -1401,6 +1425,22 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           unawaited(_handleCompile(data));
         } else if (type == 'install') {
           unawaited(_handleInstall(data));
+        } else if (type == 'file.pick') {
+          // A wapp wants the user to pick a file (e.g. movies'
+          // pick_video / pick_subtitle). Show the native picker and
+          // deliver the result back as a file.open message.
+          unawaited(_handleFilePick(data));
+        } else if (type == 'video.load') {
+          _handleVideoLoad(data);
+          changed = true;
+        } else if (type == 'video.subtitle') {
+          _handleVideoSubtitle(data);
+        } else if (type == 'video.play' ||
+            type == 'video.pause' ||
+            type == 'video.stop' ||
+            type == 'video.seek' ||
+            type == 'video.skip') {
+          _handleVideoCommand(type, data);
         }
       } catch (_) {}
     }
@@ -1490,7 +1530,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final parent = normalized.contains('/')
         ? normalized.substring(0, normalized.lastIndexOf('/'))
         : normalized;
-    final archiveRoot = '$parent/archive';
+    // Built-in wapps live directly under the wapps/ root (the parent of
+    // wapps/binaries/), not under a wapps/archive/ subtree — that path
+    // went away with the archive->flat move.
+    final archiveRoot = parent;
     final result = <dynamic>[];
     for (final rawEntry in catalog) {
       if (rawEntry is! Map<String, dynamic>) {
@@ -1599,6 +1642,216 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     if (mounted) setState(() {});
   }
 
+  // ── Video bridge (movies wapp `$type:"video"` group) ────────────────
+
+  /// Lazily create a [MediaSession] from the active media.video backend
+  /// the first time the wapp asks to load a video. No-op (stays null)
+  /// when the mediapack capability isn't installed/supported.
+  void _ensureVideoStack() {
+    _mediaSession ??= MediaCapabilities.newSession();
+  }
+
+  /// {type:"video.load","path":"…","autoplay":true} — open a local file.
+  void _handleVideoLoad(Map<String, dynamic> data) {
+    final path = (data['path'] as String? ?? '').trim();
+    if (path.isEmpty) return;
+    _ensureVideoStack();
+    final session = _mediaSession;
+    if (session == null) return; // capability unavailable
+    final autoplay = data['autoplay'] != false;
+    // Re-loading the file that's already open just resumes it instead
+    // of restarting from scratch.
+    if (path == _videoCurrentPath) {
+      if (autoplay) session.play();
+      return;
+    }
+    _videoCurrentPath = path;
+    session.open(path, autoplay: autoplay);
+    if (mounted) setState(() {});
+  }
+
+  /// {type:"video.subtitle","path":"…"} — attach an external subtitle.
+  void _handleVideoSubtitle(Map<String, dynamic> data) {
+    final path = (data['path'] as String? ?? '').trim();
+    if (path.isEmpty) return;
+    _mediaSession?.setSubtitle(path);
+  }
+
+  /// Transport controls: play / pause / stop / seek / skip.
+  void _handleVideoCommand(String type, Map<String, dynamic> data) {
+    final session = _mediaSession;
+    if (session == null) return;
+    switch (type) {
+      case 'video.play':
+        session.play();
+        break;
+      case 'video.pause':
+        session.pause();
+        break;
+      case 'video.stop':
+        session.stop();
+        _videoCurrentPath = null;
+        if (mounted) setState(() {});
+        break;
+      case 'video.seek':
+        final ms = (data['ms'] as num?)?.toInt();
+        if (ms != null) session.seek(Duration(milliseconds: ms));
+        break;
+      case 'video.skip':
+        final deltaMs = (data['ms'] as num?)?.toInt() ?? 0;
+        session.skip(Duration(milliseconds: deltaMs));
+        break;
+    }
+  }
+
+  /// {type:"file.pick","extensions":[…],"title":"…","mode":"view"} —
+  /// show the native picker and return a file.open to the module.
+  Future<void> _handleFilePick(Map<String, dynamic> data) async {
+    final extensions = (data['extensions'] as List?)
+        ?.map((e) => e.toString().toLowerCase())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    final title = (data['title'] as String?) ?? 'Pick a file';
+    final mode = (data['mode'] as String?) ?? 'view';
+    try {
+      final typeGroup = XTypeGroup(
+        label: title,
+        extensions: (extensions != null && extensions.isNotEmpty)
+            ? extensions
+            : null,
+      );
+      final XFile? file = await openFile(acceptedTypeGroups: [typeGroup]);
+      if (file == null) return;
+      final path = file.path;
+      final dot = path.lastIndexOf('.');
+      final ext = dot >= 0 ? path.substring(dot + 1).toLowerCase() : '';
+      _engine.sendMessage(jsonEncode({
+        'type': 'file.open',
+        'path': path,
+        'name': file.name,
+        'extension': ext,
+        'mode': mode,
+        'size': -1,
+      }));
+      _engine.handleEvent();
+      _drainOutbox();
+    } catch (_) {}
+  }
+
+  /// Render a `$type:"video"` screen: the media_kit surface fills the
+  /// body; everything else on the screen (the header-actions menu) is
+  /// laid over the top-right so the user can still pick a video.
+  Widget _buildVideoScreen(GeoUiBlock screen, GeoUiBlock videoGroup) {
+    final overlayChildren = screen.children
+        .where((c) => !(c.keyword == 'group' && c.type == 'video'))
+        .toList();
+
+    Widget? overlay;
+    if (overlayChildren.isNotEmpty) {
+      overlay = Container(
+        decoration: BoxDecoration(
+          color: Colors.black.withAlpha(140),
+          borderRadius: BorderRadius.circular(28),
+        ),
+        child: IconTheme(
+          data: const IconThemeData(color: Colors.white),
+          child: GeoUiScreenRenderer(
+            screen: GeoUiBlock(keyword: 'screen', children: overlayChildren),
+            bindings:
+                _WappFieldBindings(_engine, _fieldValues, () => setState(() {})),
+            i18n: _i18n,
+            onAction: (action) {
+              _engine.sendMessage(
+                  jsonEncode({'type': 'action', 'action': action}));
+              _engine.handleEvent();
+              _drainOutbox();
+            },
+          ),
+        ),
+      );
+    }
+
+    Widget body;
+    final session = _mediaSession;
+    if (session != null) {
+      // A video is loaded (or about to be) — paint the backend surface.
+      final fit = _videoFitFromName(videoGroup.getString('fit') ?? 'contain');
+      body = ColoredBox(color: Colors.black, child: session.buildSurface(fit));
+    } else if (!MediaCapabilities.backendAvailable) {
+      body = _videoPlaceholder(
+        Icons.videocam_off_outlined,
+        'Video not supported on this platform.',
+        'No media backend is available here.',
+      );
+    } else if (MediaCapabilities.active == null) {
+      body = _videoPlaceholder(
+        Icons.extension_outlined,
+        'Media support not installed.',
+        'Install the Mediapack wapp from the Wapp Store to play video.',
+      );
+    } else {
+      body = _videoPlaceholder(
+        Icons.movie_outlined,
+        'No video loaded.',
+        'Use the menu (top-right) to pick a video.',
+      );
+    }
+
+    if (overlay == null) return body;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        body,
+        Positioned(top: 8, right: 8, child: overlay),
+      ],
+    );
+  }
+
+  BoxFit _videoFitFromName(String name) {
+    switch (name) {
+      case 'cover':
+        return BoxFit.cover;
+      case 'fill':
+        return BoxFit.fill;
+      case 'fitWidth':
+        return BoxFit.fitWidth;
+      case 'fitHeight':
+        return BoxFit.fitHeight;
+      case 'none':
+        return BoxFit.none;
+      case 'scaleDown':
+        return BoxFit.scaleDown;
+      case 'contain':
+      default:
+        return BoxFit.contain;
+    }
+  }
+
+  /// Centered icon + title + subtitle placeholder for the video surface
+  /// (no media loaded, capability missing, or platform unsupported).
+  Widget _videoPlaceholder(IconData icon, String title, String subtitle) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 64),
+            const SizedBox(height: 12),
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _sendCommand(String cmd) {
     // Bundle a scalar projection of the current field values so the
     // wapp's module_handle_event can read (source, wapp_id, ...) from
@@ -1628,6 +1881,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     TaskMonitorService.instance.unregister(_tickTaskId);
     EventBus().fire(WappUnloadedEvent(wappId: _wappName, wappName: _wappName));
     _localeSub?.cancel();
+    // Tear down the media session if the video group was used.
+    _mediaSession?.dispose();
+    _mediaSession = null;
+    _videoCurrentPath = null;
     _engine.dispose();
     _cmdController.dispose();
     _scrollController.dispose();
@@ -1739,6 +1996,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         .where((c) => c.keyword == 'group' && c.type == 'map')
         .firstOrNull;
     if (mapGroup != null) return _buildMapScreen(screen, mapGroup);
+
+    // Video group (movies wapp) — host renders the media_kit surface
+    // with the screen's other children (the header-actions menu) as an
+    // overlay so pick_video / pick_subtitle stay reachable.
+    final videoGroup = screen.children
+        .where((c) => c.keyword == 'group' && c.type == 'video')
+        .firstOrNull;
+    if (videoGroup != null) return _buildVideoScreen(screen, videoGroup);
 
     // Tasks viewer — host renders cards from the cached MonitoredTask
     // snapshot kept in _taskSnapshot, refreshed each time the wapp polls.
@@ -6161,7 +6426,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   Widget _buildSettingsScreen(GeoUiBlock screen) {
     final renderer = GeoUiScreenRenderer(
       screen: screen,
-      bindings: _WappFieldBindings(_fieldValues, () => setState(() {})),
+      bindings: _WappFieldBindings(_engine, _fieldValues, () => setState(() {})),
       i18n: _i18n,
       onAction: (action) {
         if (action == 'save') {
@@ -6995,9 +7260,10 @@ class _CatalogWapp {
 }
 
 class _WappFieldBindings implements GeoUiBindings {
+  final WappEngine _engine;
   final Map<String, dynamic> _values;
   final VoidCallback _onChange;
-  _WappFieldBindings(this._values, this._onChange);
+  _WappFieldBindings(this._engine, this._values, this._onChange);
 
   @override
   dynamic getValue(String fieldName) => _values[fieldName];
@@ -7005,6 +7271,15 @@ class _WappFieldBindings implements GeoUiBindings {
   @override
   void setValue(String fieldName, dynamic value) {
     _values[fieldName] = value;
+    // Mirror scalar edits straight into the module's KV so the wapp
+    // reads them via hal_kv_get — this is how settings forms (e.g. the
+    // terminal's) actually take effect. Without it, edits live only in
+    // a host-side map the module never sees.
+    if (value is String) {
+      _engine.kvSet(fieldName, value);
+    } else if (value is num || value is bool) {
+      _engine.kvSet(fieldName, value.toString());
+    }
     _onChange();
   }
 }

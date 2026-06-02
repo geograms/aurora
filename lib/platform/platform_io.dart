@@ -81,6 +81,19 @@ Future<PlatformProcessResult> runSubprocess(
 
 String get pathSeparator => Platform.pathSeparator;
 
+/// Canonical OS name used for wapp `platforms` advertisement matching:
+/// one of linux/macos/windows/android/ios/fuchsia/unknown (web returns
+/// 'web' from the stub).
+String platformName() {
+  if (Platform.isLinux) return 'linux';
+  if (Platform.isMacOS) return 'macos';
+  if (Platform.isWindows) return 'windows';
+  if (Platform.isAndroid) return 'android';
+  if (Platform.isIOS) return 'ios';
+  if (Platform.isFuchsia) return 'fuchsia';
+  return 'unknown';
+}
+
 String currentDirectory() {
   try {
     return Directory.current.path;

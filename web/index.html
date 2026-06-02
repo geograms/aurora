@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    Flutter web bootstrap scaffold for iwi (geogram launcher).
+    `flutter build web` / `flutter run -d chrome` emit
+    flutter_bootstrap.js which then loads main.dart.js. Replacing
+    the previous hand-written vanilla-JS implementation so the web
+    build renders through the SAME Dart/GeoUI codebase as desktop.
+  -->
+
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="geogram — offgrid wapp launcher">
+
+  <!-- iOS meta -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="geogram">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png">
+
+  <title>geogram</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!--
+    One-shot service-worker purge. Earlier builds registered a
+    Flutter PWA service worker that kept serving stale main.dart.js
+    from Cache Storage even after we rebuilt with --pwa-strategy=none
+    (which only prevents NEW registrations, it doesn't unregister
+    old ones). Incognito is unaffected because it gets a fresh SW
+    scope. This block unregisters any lingering SW, wipes the asset
+    cache, and hard-reloads — guarded by sessionStorage so we don't
+    loop.
+  -->
+  <script>
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      if (sessionStorage.getItem('geogram.sw.purged') === '1') return;
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        if (regs.length === 0) return;
+        sessionStorage.setItem('geogram.sw.purged', '1');
+        Promise.all(regs.map(function (r) { return r.unregister(); }))
+          .then(function () {
+            if (window.caches && caches.keys) {
+              return caches.keys().then(function (keys) {
+                return Promise.all(keys.map(function (k) {
+                  return caches.delete(k);
+                }));
+              });
+            }
+          })
+          .then(function () { window.location.reload(); });
+      });
+    })();
+  </script>
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

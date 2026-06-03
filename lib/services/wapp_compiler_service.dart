@@ -25,7 +25,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import '../models/monitored_task.dart';
-import 'profile_storage.dart';
+import '../profile/profile_storage.dart';
 import 'task_monitor_service.dart';
 import 'wapp_compiler_backend_web.dart'
     if (dart.library.io) 'wapp_compiler_backend_io.dart';

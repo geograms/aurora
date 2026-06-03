@@ -20,7 +20,7 @@
  *   - integration into GeoUiScreenRenderer + WappEngine + WappPage
  */
 
-import 'profile_storage.dart';
+import '../profile/profile_storage.dart';
 
 class I18nContext {
   /// The effective locale tag for this wapp. Never empty.

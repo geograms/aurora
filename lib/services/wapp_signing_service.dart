@@ -21,8 +21,8 @@ import 'package:flutter/foundation.dart';
 
 import '../util/nostr_crypto.dart';
 import '../util/nostr_event.dart';
-import 'profile_service.dart';
-import 'profile_storage.dart';
+import '../profile/profile_service.dart';
+import '../profile/profile_storage.dart';
 
 class WappSigningService {
   WappSigningService._();

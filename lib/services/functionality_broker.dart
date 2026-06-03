@@ -28,7 +28,7 @@ import '../launcher/launcher.dart' show WappManifest;
 import '../models/monitored_task.dart';
 import '../wapp/wapp_engine.dart';
 import 'preferences_service.dart';
-import 'storage_paths.dart' show wappPackageStorage;
+import '../profile/storage_paths.dart' show wappPackageStorage;
 import 'functionality_registry.dart';
 import 'task_monitor_service.dart';
 

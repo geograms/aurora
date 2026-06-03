@@ -15,7 +15,7 @@
 import '../launcher/launcher.dart' show WappManifest;
 import '../models/wapp_file_handler.dart';
 import 'functionality_registry.dart';
-import 'storage_paths.dart';
+import '../profile/storage_paths.dart';
 
 /// One row of a lookup: a wapp plus the handler declaration that
 /// matched.

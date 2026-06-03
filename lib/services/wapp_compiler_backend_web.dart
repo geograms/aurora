@@ -8,7 +8,7 @@
  * wasm-clang as a browser-side WASM module. Out of scope for now.
  */
 
-import 'profile_storage.dart';
+import '../profile/profile_storage.dart';
 import 'wapp_compiler_service.dart';
 
 CompilerBackend makeCompilerBackend() => const _WebStubBackend();

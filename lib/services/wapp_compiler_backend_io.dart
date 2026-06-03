@@ -12,7 +12,7 @@ import 'dart:async';
 import 'dart:io'
     show Directory, File, Platform, Process, ProcessResult;
 
-import 'profile_storage.dart';
+import '../profile/profile_storage.dart';
 import 'wapp_compiler_service.dart';
 
 CompilerBackend makeCompilerBackend() => const NativeWasiSdkBackend();

@@ -10,7 +10,7 @@ import 'dart:io'
 import 'package:wasm_run/wasm_run.dart';
 
 import '../services/i18n_context.dart';
-import '../services/profile_storage.dart';
+import '../profile/profile_storage.dart';
 import '../services/wapp_event_broker.dart';
 
 /// State for a single hal_process_exec subprocess. Lives in

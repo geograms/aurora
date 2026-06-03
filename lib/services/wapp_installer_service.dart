@@ -21,8 +21,8 @@ import 'package:archive/archive.dart';
 import 'package:http/http.dart' as http;
 
 import 'event_bus.dart';
-import 'profile_storage.dart';
-import 'storage_paths.dart';
+import '../profile/profile_storage.dart';
+import '../profile/storage_paths.dart';
 import 'wapp_signing_service.dart';
 
 /// Where an installed wapp came from, persisted as `source.json` inside

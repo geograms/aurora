@@ -15,8 +15,8 @@
 
 import 'package:flutter/material.dart';
 
-import '../models/iwi_profile.dart';
-import '../services/profile_service.dart';
+import 'iwi_profile.dart';
+import 'profile_service.dart';
 
 class WelcomePage extends StatefulWidget {
   /// Fired once the profile has been persisted and activated. The

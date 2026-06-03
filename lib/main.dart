@@ -5,7 +5,7 @@ import 'platform/platform.dart' as platform;
 import 'models/monitored_task.dart';
 import 'services/host_event_bridge.dart';
 import 'services/notification_service.dart';
-import 'services/profile_service.dart';
+import 'profile/profile_service.dart';
 import 'services/task_monitor_service.dart';
 import 'wapp/native/media_kit_video_backend.dart';
 

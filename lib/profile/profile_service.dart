@@ -17,7 +17,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
-import '../models/iwi_profile.dart';
+import 'iwi_profile.dart';
 import '../util/nostr_key_generator.dart';
 import 'profile_storage.dart';
 import 'storage_paths.dart';

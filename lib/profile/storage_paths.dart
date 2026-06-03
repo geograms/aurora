@@ -23,7 +23,7 @@
  */
 
 import '../platform/platform.dart' as platform;
-import 'preferences_service.dart';
+import '../services/preferences_service.dart';
 import 'profile_service.dart';
 import 'profile_storage.dart';
 import 'profile_storage_factory.dart';

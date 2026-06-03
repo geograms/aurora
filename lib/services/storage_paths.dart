@@ -5,7 +5,7 @@
  *
  * Layout under the user home:
  *
- *   ~/.local/share/geogram/
+ *   ~/.local/share/aurora/
  *     profiles.json             ← ProfileService state (list + active id)
  *     profiles/<callsign>/
  *       apps/<wapp-id>/         ← extracted .wapp packages (installed wapps)
@@ -15,8 +15,11 @@
  * active ProfileService profile, so switching profiles silently switches
  * which `apps/` and `wapps/` folders the launcher sees.
  *
- * The previous "iwi" codename left data under ~/.local/share/iwi/. We do not
- * auto-migrate it; if old data is present the user can copy it manually.
+ * IMPORTANT: aurora stores under ~/.local/share/aurora — NOT
+ * ~/.local/share/geogram. The geogram dir belongs to the separate, real
+ * geogram app and holds the user's real data; aurora must never read,
+ * write, or delete there. (The old iwi fork wrongly pointed here at
+ * geogram's dir; that is fixed.)
  */
 
 import '../platform/platform.dart' as platform;
@@ -27,7 +30,7 @@ import 'profile_storage_factory.dart';
 
 String _geogramBaseDir() {
   final home = platform.homeDir() ?? '/tmp';
-  return '$home/.local/share/geogram';
+  return '$home/.local/share/aurora';
 }
 
 /// Root storage — everything the geogram launcher persists lives under this.

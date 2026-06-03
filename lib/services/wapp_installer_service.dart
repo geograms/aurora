@@ -325,7 +325,11 @@ class WappInstallerService {
       return InstallResult.failure(wappId, 'extract failed: $e');
     }
 
-    if (!await installed.exists('$folder/app.wasm')) {
+    // app.wasm is required for runnable wapps (app/system/addon) but NOT
+    // for `kind: library` providers like mediapack, which are backed by
+    // native host capabilities and ship no wasm.
+    if (!await installed.exists('$folder/app.wasm') &&
+        !await _isLibraryWapp(installed, folder)) {
       await installed.deleteDirectory(folder, recursive: true);
       return InstallResult.failure(wappId, 'invalid wapp: no app.wasm');
     }
@@ -386,7 +390,11 @@ class WappInstallerService {
     } catch (e) {
       return InstallResult.failure(wappId, 'copy failed: $e');
     }
-    if (!await installed.exists('$folder/app.wasm')) {
+    // app.wasm is required for runnable wapps (app/system/addon) but NOT
+    // for `kind: library` providers like mediapack, which are backed by
+    // native host capabilities and ship no wasm.
+    if (!await installed.exists('$folder/app.wasm') &&
+        !await _isLibraryWapp(installed, folder)) {
       await installed.deleteDirectory(folder, recursive: true);
       return InstallResult.failure(wappId, 'invalid wapp: no app.wasm');
     }
@@ -466,6 +474,13 @@ class WappInstallerService {
     );
     EventBus().fire(WappLoadedEvent(wappId: id, wappName: title));
     return InstallResult.success(id);
+  }
+
+  /// True when the just-written wapp declares `kind: library` — such
+  /// wapps are capability providers with no app.wasm.
+  Future<bool> _isLibraryWapp(ProfileStorage installed, String folder) async {
+    final m = await installed.readJson('$folder/manifest.json');
+    return (m?['kind'] as String?) == 'library';
   }
 
   /// Sanitise a user-provided folder slug. Keeps alphanumerics,

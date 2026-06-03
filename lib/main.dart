@@ -1,13 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 
-import 'package:archive/archive.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:http/http.dart' as http;
 
 import 'platform/platform.dart' as platform;
 
@@ -23,8 +18,8 @@ import 'services/profile_storage.dart';
 import 'services/profile_storage_factory.dart';
 import 'services/dependency_resolver.dart';
 import 'services/storage_paths.dart';
-import 'services/wapp_file_associations.dart';
 import 'services/task_monitor_service.dart';
+import 'services/wapp_installer_service.dart';
 import 'services/wapp_signing_service.dart';
 import 'services/functionality_registry.dart';
 import 'util/wapp_icons.dart';
@@ -97,12 +92,85 @@ Future<void> main() async {
       }
     },
   );
+  BootOrchestrator.instance.register(
+    id: 'seed-default-wapps',
+    name: 'Seed default wapps',
+    description:
+        'On a brand-new profile, installs the default set (Wapp Store, '
+        'Maps, and the system wapps) into the profile so the launcher is '
+        'usable. Runs once per profile (guarded by a .seeded marker). '
+        'Must run after profile-service so the active profile exists.',
+    mode: BootStart.sequential,
+    init: ensureProfileSeeded,
+  );
 
   // Run every registered boot task. Sequential boot tasks run first,
   // alone, in registration order; then all parallels run concurrently.
   await BootOrchestrator.instance.runAll();
 
   runApp(IwiApp(messengerKey: rootMessengerKey));
+}
+
+// ── First-run wapp seeding ───────────────────────────────────────────
+
+/// Folder names always auto-installed on first run, on top of every
+/// `kind: "system"` wapp. Keeps the default set in one place.
+const _kDefaultSeedNames = {'install', 'maps'};
+
+/// First-run bootstrap, run as a boot task BEFORE the UI so the launcher
+/// never renders an empty grid mid-seed. Installs the curated default
+/// set into the active profile exactly once; a per-profile
+/// `.seeded.json` marker means a later "uninstall everything" sticks —
+/// we never re-seed.
+Future<void> ensureProfileSeeded() async {
+  final profileRoot = activeProfileRoot();
+  if (await profileRoot.readJson('.seeded.json') != null) return;
+
+  final installed = installedAppsStorage();
+  if (await installed.directoryExists('')) {
+    final entries = await installed.listDirectory('');
+    if (entries.any((e) => e.isDirectory)) {
+      // Already has installs — mark seeded and leave them alone.
+      await profileRoot.writeJson('.seeded.json', {'seeded': true});
+      return;
+    }
+  }
+
+  final copied = await _seedDefaults();
+  if (copied > 0) {
+    await profileRoot
+        .writeJson('.seeded.json', {'seeded': true, 'count': copied});
+  }
+}
+
+/// Copy the default set from the in-repo ../wapps library into the
+/// profile: the Wapp Store + Maps, plus every `kind: "system"` wapp.
+/// Everything else (forum, movies, terminal, mediapack) is left for the
+/// user to install via the store. Returns the count installed.
+Future<int> _seedDefaults() async {
+  var count = 0;
+  final cwd = platform.currentDirectory();
+  for (final libPath in ['$cwd/../wapps', '$cwd/../../wapps']) {
+    final lib = wappPackageStorage(libPath);
+    if (!await lib.directoryExists('')) continue;
+    final entries = await lib.listDirectory('');
+    for (final entry in entries) {
+      if (!entry.isDirectory) continue;
+      final dir = lib.getAbsolutePath(entry.path);
+      final pkg = wappPackageStorage(dir);
+      final manifest = await pkg.readJson('manifest.json');
+      if (manifest == null) continue;
+      final kind = manifest['kind'] as String? ?? 'app';
+      if (!_kDefaultSeedNames.contains(entry.name) && kind != 'system') {
+        continue;
+      }
+      final res = await WappInstallerService.instance
+          .installFromPath(wappId: entry.name, sourceDir: dir);
+      if (res.ok) count++;
+    }
+    break; // first existing library dir wins
+  }
+  return count;
 }
 
 class IwiApp extends StatefulWidget {
@@ -488,13 +556,12 @@ class _LauncherPageState extends State<LauncherPage> {
   }
 
   Future<void> _scanArchiveBody() async {
+    // The grid shows ONLY wapps installed in the active profile. The
+    // default set is installed once at boot by [ensureProfileSeeded];
+    // the shared ../wapps library is the catalog, never shown directly.
     final wapps = <WappManifest>[];
     final seen = <String>{};
 
-    // 1. User-installed wapps first so a forked built-in overrides
-    //    the source-tree original — this is how editing a built-in
-    //    via the App Creator Projects tab actually takes effect on
-    //    the launcher grid.
     final installed = installedAppsStorage();
     if (await installed.directoryExists('')) {
       final entries = await installed.listDirectory('');
@@ -503,37 +570,6 @@ class _LauncherPageState extends State<LauncherPage> {
         final pkg = wappPackageStorage(installed.getAbsolutePath(entry.path));
         await _scanManifest(pkg, wapps, seen);
       }
-    }
-
-    // 2. Built-in wapps from the in-repo wapps/ tree. The
-    //    seen-set dedup means any id already brought in by a user
-    //    install is skipped here. The archive path is derived from
-    //    the runtime CWD — works for desktop dev builds where the
-    //    binary runs next to the repo. On web the CWD is empty and
-    //    there is no filesystem archive at all, so we fall back to
-    //    the fetch-based loader below.
-    if (!kIsWeb) {
-      final cwd = platform.currentDirectory();
-      final archiveCandidates = [
-        '$cwd/../wapps',
-        '$cwd/../../wapps',
-      ];
-      for (final archivePath in archiveCandidates) {
-        final archive = wappPackageStorage(archivePath);
-        if (!await archive.directoryExists('')) continue;
-        final entries = await archive.listDirectory('');
-        for (final entry in entries) {
-          if (!entry.isDirectory) continue;
-          final pkg = wappPackageStorage(archive.getAbsolutePath(entry.path));
-          await _scanManifest(pkg, wapps, seen);
-        }
-        break; // first archive dir that exists wins
-      }
-    } else {
-      // Web path — fetch /wapps.json relative to the served page,
-      // download each .wapp zip, extract in-memory, feed every
-      // wapp into the same _scanManifest call as native.
-      await _scanWebArchive(wapps, seen);
     }
 
     // Rebuild the widget registry from the fresh scan. Wapps that
@@ -546,56 +582,6 @@ class _LauncherPageState extends State<LauncherPage> {
     }
 
     if (mounted) setState(() => _wapps = wapps);
-  }
-
-  /// Web-only scan: fetch /wapps.json from the same origin the app
-  /// is being served from, download each listed `.wapp` archive,
-  /// extract it into an in-memory ProfileStorage, and feed the
-  /// resulting virtual package into the same [_scanManifest] path
-  /// the native scan uses. Every wapp ends up looking the same to
-  /// the launcher grid and to `WappPage._loadWapp` regardless of
-  /// whether it came from the filesystem or from HTTP.
-  Future<void> _scanWebArchive(
-      List<WappManifest> wapps, Set<String> seen) async {
-    try {
-      final indexRes = await http.get(Uri.parse('wapps.json'));
-      if (indexRes.statusCode != 200) return;
-      final decoded = jsonDecode(indexRes.body);
-      if (decoded is! List) return;
-      for (final entry in decoded) {
-        if (entry is! Map<String, dynamic>) continue;
-        final wappUrl = entry['wapp'] as String?;
-        if (wappUrl == null || wappUrl.isEmpty) continue;
-        try {
-          final zipRes = await http.get(Uri.parse(wappUrl));
-          if (zipRes.statusCode != 200) continue;
-          final archive = ZipDecoder().decodeBytes(zipRes.bodyBytes);
-          // Go through `makeFilesystemStorage` so the extracted
-          // contents land in the web registry keyed by wappUrl.
-          // Anyone who later calls `wappPackageStorage(wappUrl)` —
-          // e.g. `WappPage._loadWapp` when the user taps the tile —
-          // gets the SAME instance back and sees the files we just
-          // wrote. Without this the fetch-scan and the wapp-open
-          // path would each own their own empty memory map and
-          // every wapp would render as "app.wasm not found".
-          final pkg = makeFilesystemStorage(wappUrl);
-          for (final file in archive) {
-            if (!file.isFile) continue;
-            final bytes = file.content as List<int>;
-            await pkg.writeBytes(
-              file.name.replaceAll('\\', '/'),
-              Uint8List.fromList(bytes),
-            );
-          }
-          await _scanManifest(pkg, wapps, seen);
-        } catch (_) {
-          // Skip this wapp on any per-entry failure — one bad zip
-          // shouldn't take down the whole launcher.
-        }
-      }
-    } catch (_) {
-      // Index fetch failed entirely; launcher stays empty.
-    }
   }
 
   Future<void> _scanManifest(
@@ -696,99 +682,6 @@ class _LauncherPageState extends State<LauncherPage> {
     ).then((_) => _scanArchive());
   }
 
-  /// "Open with…" flow: pick a file, find wapps that registered a
-  /// handler for its extension, honour a saved default or show a
-  /// picker, then launch the chosen wapp with the file delivered via
-  /// the file.open protocol.
-  Future<void> _openWith() async {
-    final XFile? file = await openFile();
-    if (file == null || !mounted) return;
-    final path = file.path;
-    final dot = path.lastIndexOf('.');
-    final slash = path.replaceAll('\\', '/').lastIndexOf('/');
-    final ext = (dot > slash && dot >= 0) ? path.substring(dot + 1) : '';
-
-    final assoc = WappFileAssociations.instance;
-    var chosen = await assoc.defaultFor(ext, mode: 'view');
-    if (chosen == null) {
-      final hits = assoc.lookup(extension: ext, mode: 'view');
-      if (hits.isEmpty) {
-        rootMessengerKey.currentState?.showSnackBar(
-          SnackBar(content: Text('No installed wapp can open .$ext files')),
-        );
-        return;
-      }
-      if (hits.length == 1) {
-        chosen = hits.first;
-      } else {
-        if (!mounted) return;
-        chosen = await _showOpenWithDialog(ext, hits);
-      }
-    }
-    if (chosen == null || !mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => WappPage(
-          wappDir: chosen!.manifest.dirPath,
-          title: chosen.label,
-          openFilePath: path,
-        ),
-      ),
-    );
-    _scanArchive();
-  }
-
-  Future<WappAssociation?> _showOpenWithDialog(
-      String ext, List<WappAssociation> hits) {
-    var remember = false;
-    return showDialog<WappAssociation>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => AlertDialog(
-          title: Text('Open .$ext with…'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final a in hits)
-                ListTile(
-                  leading: const Icon(Icons.extension),
-                  title: Text(a.label),
-                  subtitle: Text(a.manifest.id,
-                      style: const TextStyle(
-                          fontFamily: 'monospace', fontSize: 11)),
-                  onTap: () async {
-                    if (remember) {
-                      await assocSetDefault(ext, a.manifest.id);
-                    }
-                    if (ctx.mounted) Navigator.pop(ctx, a);
-                  },
-                ),
-              CheckboxListTile(
-                value: remember,
-                onChanged: (v) => setLocal(() => remember = v ?? false),
-                title: const Text('Always use the selected wapp'),
-                controlAffinity: ListTileControlAffinity.leading,
-                contentPadding: EdgeInsets.zero,
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Tiny indirection so the dialog can persist a default without
-  /// reaching into the service import from inside the builder closure.
-  Future<void> assocSetDefault(String ext, String wappId) =>
-      WappFileAssociations.instance.setDefaultFor(ext, wappId);
-
   Future<_DepAction?> _showDependencyDialog(
       WappManifest manifest, UnmetDependencies unmet) {
     final cs = Theme.of(context).colorScheme;
@@ -853,11 +746,6 @@ class _LauncherPageState extends State<LauncherPage> {
       appBar: AppBar(
         title: const _ProfileSwitcher(),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.file_open_outlined),
-            tooltip: 'Open file with a wapp…',
-            onPressed: _openWith,
-          ),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',

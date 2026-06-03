@@ -11,6 +11,7 @@ import 'package:wasm_run/wasm_run.dart';
 
 import 'i18n_context.dart';
 import '../profile/profile_storage.dart';
+import '../connections/hal/connection_hal_imports.dart';
 import 'wapp_event_broker.dart';
 
 /// State for a single hal_process_exec subprocess. Lives in
@@ -593,12 +594,10 @@ class WappEngine {
       WasmImport('hal', 'file_read', halFileRead),
       WasmImport('hal', 'file_write', halFileWrite),
       WasmImport('hal', 'file_close', halFileClose),
-      // HTTP (stubs)
-      WasmImport('hal', 'http_request', stubI32([ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32], -1)),
-      WasmImport('hal', 'http_poll', stubI32([ValueTy.i32], -1)),
-      WasmImport('hal', 'http_read_response', stubI32([ValueTy.i32, ValueTy.i32, ValueTy.i32], 0)),
-      WasmImport('hal', 'http_status', stubI32([ValueTy.i32], -1)),
-      WasmImport('hal', 'http_free', stubVoid([ValueTy.i32])),
+      // Transport HAL (hal.http / hal.lora / hal.ble) — stubs defined in
+      // lib/connections/hal/. The ABI is unchanged; the wiring just lives
+      // with the rest of the connection code now.
+      ...connectionHalImports(stubVoid: stubVoid, stubI32: stubI32),
       // Process (host subprocess, no sandbox)
       WasmImport('hal', 'process_exec', halProcessExec),
       WasmImport('hal', 'process_poll', halProcessPoll),
@@ -606,17 +605,6 @@ class WappEngine {
       WasmImport('hal', 'process_read_stdout', halProcessReadStdout),
       WasmImport('hal', 'process_read_stderr', halProcessReadStderr),
       WasmImport('hal', 'process_free', halProcessFree),
-      // LoRa (stubs)
-      WasmImport('hal', 'lora_available_hw', stubI32([], 0)),
-      WasmImport('hal', 'lora_send', stubI32([ValueTy.i32, ValueTy.i32], -1)),
-      WasmImport('hal', 'lora_available', stubI32([], 0)),
-      WasmImport('hal', 'lora_recv', stubI32([ValueTy.i32, ValueTy.i32], 0)),
-      // BLE (stubs)
-      WasmImport('hal', 'ble_scan_start', stubI32([], -1)),
-      WasmImport('hal', 'ble_scan_stop', stubVoid([])),
-      WasmImport('hal', 'ble_scan_read', stubI32([ValueTy.i32, ValueTy.i32], 0)),
-      WasmImport('hal', 'ble_advertise', stubI32([ValueTy.i32, ValueTy.i32], -1)),
-      WasmImport('hal', 'ble_advertise_stop', stubVoid([])),
       // Sensors (stubs — INT32_MIN)
       WasmImport('hal', 'sensor_temperature', stubI32([], -2147483648)),
       WasmImport('hal', 'sensor_humidity', stubI32([], -2147483648)),

@@ -180,7 +180,7 @@ class ProfileService {
   }
 
   /// Absolute path to the active profile's per-profile storage root
-  /// (i.e. `<geogram root>/profiles/<callsign>/`). Called from
+  /// (i.e. `<aurora root>/devices/<id>/`). Called from
   /// storage_paths.dart when resolving apps/ and wapps/ per profile.
   /// Returns null when there is no active profile.
   ProfileStorage? activeProfileStorage() {
@@ -188,7 +188,7 @@ class ProfileService {
     if (active == null) return null;
     return ScopedProfileStorage(
       geogramRootStorage(),
-      'profiles/${active.id}',
+      'devices/${active.id}',
     );
   }
 }

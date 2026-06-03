@@ -17,6 +17,8 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
+import 'package:aurora/connections/internet/http_transport.dart';
+
 // ── FFI typedefs ─────────────────────────────────────────────────────
 
 typedef _CreateNative = Pointer<Void> Function();
@@ -1170,43 +1172,41 @@ void _performSearch(
       'format': 'json',
       'limit': '8',
     });
-    final request = HttpClient()
-      ..userAgent = 'Geogram/1.0';
-    final req = request.getUrl(uri);
-    req.then((r) => r.close()).then((resp) {
-      resp.transform(utf8.decoder).join().then((body) {
-        request.close();
-        final results = (jsonDecode(body) as List).map((r) {
-          final lat = double.tryParse(r['lat']?.toString() ?? '') ?? 0.0;
-          final lon = double.tryParse(r['lon']?.toString() ?? '') ?? 0.0;
-          final name = r['display_name'] as String? ?? '';
-          return (name: name, lat: lat, lon: lon);
-        }).toList();
+    HttpTransport.shared.get(
+      uri,
+      headers: const {'User-Agent': 'Geogram/1.0'},
+    ).then((resp) {
+      final body = resp.bodyString;
+      final results = (jsonDecode(body) as List).map((r) {
+        final lat = double.tryParse(r['lat']?.toString() ?? '') ?? 0.0;
+        final lon = double.tryParse(r['lon']?.toString() ?? '') ?? 0.0;
+        final name = r['display_name'] as String? ?? '';
+        return (name: name, lat: lat, lon: lon);
+      }).toList();
 
-        if (results.isEmpty) {
-          stdout.writeln('${_yellow}No results found.$_reset');
-          return;
-        }
+      if (results.isEmpty) {
+        stdout.writeln('${_yellow}No results found.$_reset');
+        return;
+      }
 
-        stdout.writeln('${_bold}Results:$_reset');
-        for (var i = 0; i < results.length; i++) {
-          final r = results[i];
-          final display = r.name.length > 70
-              ? '${r.name.substring(0, 70)}...'
-              : r.name;
-          stdout.writeln(
-              '  $_cyan${i + 1}$_reset  $display  $_dim${r.lat.toStringAsFixed(5)}, ${r.lon.toStringAsFixed(5)}$_reset');
-        }
+      stdout.writeln('${_bold}Results:$_reset');
+      for (var i = 0; i < results.length; i++) {
+        final r = results[i];
+        final display = r.name.length > 70
+            ? '${r.name.substring(0, 70)}...'
+            : r.name;
         stdout.writeln(
-            '${_dim}Type a number to go there, or press Enter to cancel.$_reset');
+            '  $_cyan${i + 1}$_reset  $display  $_dim${r.lat.toStringAsFixed(5)}, ${r.lon.toStringAsFixed(5)}$_reset');
+      }
+      stdout.writeln(
+          '${_dim}Type a number to go there, or press Enter to cancel.$_reset');
 
-        // Read selection from stdin (next line)
-        // Since we're in raw mode, we can't easily do this synchronously.
-        // Store results for the next input line.
-        _pendingSearchResults = results
-            .map((r) => _PendingResult(r.name, r.lat, r.lon))
-            .toList();
-      });
+      // Read selection from stdin (next line)
+      // Since we're in raw mode, we can't easily do this synchronously.
+      // Store results for the next input line.
+      _pendingSearchResults = results
+          .map((r) => _PendingResult(r.name, r.lat, r.lon))
+          .toList();
     });
   } catch (e) {
     stderr.writeln('${_red}Search failed: $e$_reset');
@@ -1365,19 +1365,17 @@ void _handleWappInstall(Map<String, dynamic> data) {
     final url = '$baseUrl$file';
     stdout.writeln('${_dim}Downloading $url...$_reset');
     try {
-      final client = HttpClient()..userAgent = 'Geogram/1.0';
-      final req = client.getUrl(Uri.parse(url));
-      req.then((r) => r.close()).then((resp) {
+      HttpTransport.shared.get(
+        Uri.parse(url),
+        headers: const {'User-Agent': 'Geogram/1.0'},
+      ).then((resp) {
         final installDir =
             '${Directory.systemTemp.path}/geogram_cli/wapps/$name';
         Directory(installDir).createSync(recursive: true);
         final destPath = '$installDir/$name-$version.wapp';
-        final sink = File(destPath).openWrite();
-        resp.pipe(sink).then((_) {
-          client.close();
-          stdout.writeln(
-              '$_green$name v$version installed → $destPath$_reset');
-        });
+        File(destPath).writeAsBytesSync(resp.bodyBytes);
+        stdout.writeln(
+            '$_green$name v$version installed → $destPath$_reset');
       });
     } catch (e) {
       stderr.writeln('${_red}Download failed: $e$_reset');

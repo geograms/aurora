@@ -170,6 +170,17 @@ class FilesystemProfileStorage extends ProfileStorage {
     if (await d.exists()) await d.delete(recursive: recursive);
   }
 
+  @override
+  Future<void> renameDirectory(
+      String fromRelative, String toRelative) async {
+    final src = Directory(_resolve(fromRelative));
+    if (!await src.exists()) return;
+    final dest = Directory(_resolve(toRelative));
+    if (await dest.exists()) return; // never clobber an existing dir
+    await dest.parent.create(recursive: true);
+    await src.rename(dest.path);
+  }
+
   // ── Sync variants ─────────────────────────────────────────────
 
   @override

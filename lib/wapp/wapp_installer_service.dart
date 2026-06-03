@@ -18,8 +18,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
-import 'package:http/http.dart' as http;
 
+import '../connections/internet/http_transport.dart';
 import '../services/event_bus.dart';
 import '../profile/profile_storage.dart';
 import '../profile/storage_paths.dart';
@@ -350,7 +350,7 @@ class WappInstallerService {
     required String url,
   }) async {
     try {
-      final res = await http.get(Uri.parse(url));
+      final res = await HttpTransport.shared.get(Uri.parse(url));
       if (res.statusCode != 200) {
         return InstallResult.failure(wappId, 'HTTP ${res.statusCode} for $url');
       }

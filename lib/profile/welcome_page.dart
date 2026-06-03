@@ -385,7 +385,7 @@ class _WelcomePageState extends State<WelcomePage> {
                             Expanded(
                               child: Text(
                                 'Your profile lives at '
-                                '~/.local/share/geogram/profiles/<callsign>/. '
+                                '~/.local/share/aurora/devices/<id>/. '
                                 'Back it up by copying the folder. Your '
                                 'nsec is stored inside profiles.json — keep '
                                 'it secret.',

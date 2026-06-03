@@ -9,8 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:http/http.dart' as http;
 
+import '../connections/internet/http_transport.dart';
 import '../platform/platform.dart' as platform;
 
 import 'native/media_capability.dart';
@@ -4505,16 +4505,15 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   }
 
   /// Fetch [url] and return true if it responds 200 with a JSON array
-  /// body. Uses package:http so the same code runs on desktop (via
-  /// dart:io sockets) and web (via browser fetch). Six-second
-  /// deadline matches the previous HttpClient implementation.
+  /// body. Goes through the connections internet transport so the same
+  /// code runs on desktop and web. Six-second deadline matches the
+  /// previous implementation.
   Future<bool> _probeJsonUrl(String url) async {
     try {
-      final resp = await http
-          .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 6));
-      if (resp.statusCode < 200 || resp.statusCode >= 300) return false;
-      final parsed = jsonDecode(resp.body);
+      final resp = await HttpTransport.shared
+          .get(Uri.parse(url), timeout: const Duration(seconds: 6));
+      if (!resp.isOk) return false;
+      final parsed = jsonDecode(resp.bodyString);
       return parsed is List;
     } catch (_) {
       return false;
@@ -7122,8 +7121,8 @@ class _ProjectEntry {
   final String description;
 
   /// Absolute path to the wapp's package directory. For user
-  /// installs that's `~/.local/share/geogram/apps/<folder>/`; for
-  /// built-ins it's `<cwd>/wapps/<folder>/` (or an ancestor).
+  /// installs that's `~/.local/share/aurora/devices/<id>/apps/<folder>/`;
+  /// for built-ins it's `<cwd>/wapps/<folder>/` (or an ancestor).
   /// `_loadProject` reads manifest + home.ui.json + app.wasm from
   /// here.
   final String dirPath;
@@ -7376,10 +7375,12 @@ class _SlippyMapState extends State<_SlippyMap> {
         'limit': '8',
         'addressdetails': '1',
       });
-      final resp = await http.get(uri, headers: const {
-        'User-Agent': 'Geogram/1.0',
-      }).timeout(const Duration(seconds: 10));
-      final body = resp.body;
+      final resp = await HttpTransport.shared.get(
+        uri,
+        headers: const {'User-Agent': 'Geogram/1.0'},
+        timeout: const Duration(seconds: 10),
+      );
+      final body = resp.bodyString;
 
       final results = (jsonDecode(body) as List).map((r) {
         final lat = double.tryParse(r['lat']?.toString() ?? '') ?? 0;

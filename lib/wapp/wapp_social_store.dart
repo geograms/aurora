@@ -24,7 +24,7 @@ class WappSocialStore {
 
   /// Open (or reuse) the social database for a specific wapp.
   /// [wappDirPath] is the absolute path to the wapp's package
-  /// directory (e.g. `~/.local/share/geogram/profiles/X1/apps/maps/`
+  /// directory (e.g. `~/.local/share/aurora/devices/X1/apps/maps/`
   /// or `<repo>/wapps/maps/`).
   Database? open(String wappDirPath) {
     if (kIsWeb) return null;

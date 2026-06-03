@@ -15,7 +15,7 @@
 
 class IwiProfile {
   /// Stable identifier. We use the callsign so paths on disk are
-  /// human-readable (`profiles/X1ABCD/`) and a profile can be swapped
+  /// human-readable (`devices/X1ABCD/`) and a profile can be swapped
   /// across machines by copying its folder name.
   final String id;
 

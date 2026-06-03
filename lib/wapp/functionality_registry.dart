@@ -13,100 +13,14 @@
  */
 
 import '../launcher/launcher.dart' show WappManifest;
+import '../connections/hal/connection_functionalities.dart';
 
-// ── API definition data classes ─────────────────────────────────────
-
-class ParamDef {
-  final String name;
-  final String type;
-  final String description;
-  const ParamDef(this.name, this.type, [this.description = '']);
-
-  factory ParamDef.fromJson(Map<String, dynamic> json) => ParamDef(
-        json['name'] as String? ?? '',
-        json['type'] as String? ?? 'any',
-        json['description'] as String? ?? '',
-      );
-
-  Map<String, dynamic> toJson() => {
-        'name': name,
-        'type': type,
-        if (description.isNotEmpty) 'description': description,
-      };
-}
-
-class ReturnDef {
-  final String type;
-  final String description;
-  final Map<String, String> fields;
-  const ReturnDef(this.type, [this.description = '', this.fields = const {}]);
-
-  factory ReturnDef.fromJson(dynamic json) {
-    if (json is String) return ReturnDef(json);
-    if (json is Map<String, dynamic>) {
-      final fields = <String, String>{};
-      final rawFields = json['fields'];
-      if (rawFields is Map) {
-        for (final e in rawFields.entries) {
-          fields[e.key.toString()] = e.value?.toString() ?? 'any';
-        }
-      }
-      return ReturnDef(
-        json['type'] as String? ?? 'void',
-        json['description'] as String? ?? '',
-        fields,
-      );
-    }
-    return const ReturnDef('void');
-  }
-}
-
-class EndpointDef {
-  final String name;
-  final String description;
-  final List<ParamDef> params;
-  final ReturnDef returns;
-  const EndpointDef(this.name, this.description, this.params, this.returns);
-
-  factory EndpointDef.fromJson(Map<String, dynamic> json) {
-    final rawParams = json['params'];
-    final params = rawParams is List
-        ? rawParams
-            .whereType<Map<String, dynamic>>()
-            .map(ParamDef.fromJson)
-            .toList()
-        : const <ParamDef>[];
-    return EndpointDef(
-      json['name'] as String? ?? '',
-      json['description'] as String? ?? '',
-      params,
-      ReturnDef.fromJson(json['returns'] ?? 'void'),
-    );
-  }
-}
-
-class FunctionalityDef {
-  final String id;
-  final String description;
-  final List<EndpointDef> endpoints;
-  const FunctionalityDef(this.id, this.description,
-      [this.endpoints = const []]);
-
-  factory FunctionalityDef.fromJson(Map<String, dynamic> json) {
-    final rawEndpoints = json['endpoints'];
-    final endpoints = rawEndpoints is List
-        ? rawEndpoints
-            .whereType<Map<String, dynamic>>()
-            .map(EndpointDef.fromJson)
-            .toList()
-        : const <EndpointDef>[];
-    return FunctionalityDef(
-      json['id'] as String? ?? '',
-      json['description'] as String? ?? '',
-      endpoints,
-    );
-  }
-}
+// The API definition data classes (ParamDef/ReturnDef/EndpointDef/
+// FunctionalityDef) live in functionality_def.dart so lib/connections/ can
+// build transport [FunctionalityDef]s without importing this registry. They
+// are re-exported here so existing importers keep compiling unchanged.
+export 'functionality_def.dart';
+import 'functionality_def.dart';
 
 // ── Registry ────────────────────────────────────────────────────────
 
@@ -252,26 +166,10 @@ class FunctionalityRegistry {
         ParamDef('handle', 'int'),
       ], ReturnDef('void')),
     ]),
-    'hal.http':
-        FunctionalityDef('hal.http', 'HTTP requests (async polling)', [
-      EndpointDef('hal_http_request', 'Start an HTTP request', [
-        ParamDef('method', 'int', '0=GET, 1=POST, 2=PUT, 3=DELETE'),
-        ParamDef('url', 'string'),
-        ParamDef('body', 'string', 'Request body (empty for GET)'),
-      ], ReturnDef('int', 'Request ID or -1 on error')),
-      EndpointDef('hal_http_poll', 'Check if request is complete', [
-        ParamDef('request_id', 'int'),
-      ], ReturnDef('int', '0=pending, 1=complete, -1=error')),
-      EndpointDef('hal_http_read_response', 'Read response body', [
-        ParamDef('request_id', 'int'),
-      ], ReturnDef('bytes', 'Response body bytes')),
-      EndpointDef('hal_http_status', 'Get HTTP status code', [
-        ParamDef('request_id', 'int'),
-      ], ReturnDef('int', 'HTTP status code or -1 if pending')),
-      EndpointDef('hal_http_free', 'Free request resources', [
-        ParamDef('request_id', 'int'),
-      ], ReturnDef('void')),
-    ]),
+    // hal.http / hal.lora / hal.ble — the transport HAL — are defined in
+    // lib/connections/, the single home for connection code, and spread in
+    // here so the registry still advertises them as core functionalities.
+    ...connectionFunctionalities,
     'hal.process': FunctionalityDef(
         'hal.process', 'Host subprocess execution (async polling)', [
       EndpointDef('hal_process_exec', 'Spawn a host process', [
@@ -328,30 +226,6 @@ class FunctionalityRegistry {
         ParamDef('args', 'string', 'JSON arguments'),
       ], ReturnDef('string',
           'JSON result. Errors: -1=lib not found, -2=fn not found, -3=buffer too small, -4=internal')),
-    ]),
-    'hal.lora': FunctionalityDef('hal.lora', 'LoRa radio communication', [
-      EndpointDef('hal_lora_available_hw', 'Check if LoRa hardware is present', [],
-          ReturnDef('int', '1 if present, 0 otherwise')),
-      EndpointDef('hal_lora_send', 'Send data over LoRa', [
-        ParamDef('data', 'bytes'),
-      ], ReturnDef('int', '0 on success, -1 on error')),
-      EndpointDef('hal_lora_available', 'Bytes available to read', [],
-          ReturnDef('uint32')),
-      EndpointDef('hal_lora_recv', 'Receive LoRa data', [],
-          ReturnDef('bytes', 'Received data')),
-    ]),
-    'hal.ble': FunctionalityDef('hal.ble', 'Bluetooth Low Energy', [
-      EndpointDef('hal_ble_scan_start', 'Start BLE scanning', [],
-          ReturnDef('int', '0 on success')),
-      EndpointDef('hal_ble_scan_stop', 'Stop BLE scanning', [],
-          ReturnDef('void')),
-      EndpointDef('hal_ble_scan_read', 'Read scan results (JSON)', [],
-          ReturnDef('string', 'JSON scan results, empty if none')),
-      EndpointDef('hal_ble_advertise', 'Start BLE advertising', [
-        ParamDef('data', 'bytes', 'Advertisement payload'),
-      ], ReturnDef('int', '0 on success')),
-      EndpointDef('hal_ble_advertise_stop', 'Stop BLE advertising', [],
-          ReturnDef('void')),
     ]),
     'hal.sensor': FunctionalityDef(
         'hal.sensor', 'Hardware sensors (returns INT32_MIN if N/A)', [

@@ -68,6 +68,15 @@ abstract class ProfileStorage {
   Future<bool> directoryExists(String relativePath);
   Future<void> deleteDirectory(String relativePath, {bool recursive = false});
 
+  /// Move/rename a directory subtree from one relative path to another.
+  /// Filesystem backends do an atomic rename; in-memory backends move
+  /// keys by prefix. Implementations must no-op when the source does not
+  /// exist and must NOT clobber an existing destination. Backends that
+  /// cannot move throw [UnsupportedError].
+  Future<void> renameDirectory(String fromRelative, String toRelative) async {
+    throw UnsupportedError('renameDirectory not supported on $runtimeType');
+  }
+
   // ── Sync ops for WASM HAL callbacks ───────────────────────────────────
   //
   // WASM imports run synchronously; Dart Futures cannot be awaited from
@@ -313,6 +322,30 @@ class MemoryProfileStorage extends ProfileStorage {
     if (_files.length != before) onMutate();
   }
 
+  @override
+  Future<void> renameDirectory(
+      String fromRelative, String toRelative) async {
+    final from = _normalize(fromRelative);
+    final to = _normalize(toRelative);
+    if (from.isEmpty || to.isEmpty || from == to) return;
+    // Don't clobber an existing destination subtree.
+    if (await directoryExists(to)) return;
+    final fromPrefix = '$from/';
+    final toPrefix = '$to/';
+    final moved = <String, Uint8List>{};
+    for (final k in _files.keys.toList()) {
+      if (k == from || k.startsWith(fromPrefix)) {
+        final rest = k == from ? '' : k.substring(fromPrefix.length);
+        final newKey = rest.isEmpty ? to : '$toPrefix$rest';
+        moved[newKey] = _files.remove(k)!;
+      }
+    }
+    if (moved.isNotEmpty) {
+      _files.addAll(moved);
+      onMutate();
+    }
+  }
+
   // ── Sync variants ─────────────────────────────────────────────
 
   @override
@@ -438,6 +471,11 @@ class ScopedProfileStorage extends ProfileStorage {
   @override
   Future<void> deleteDirectory(String r, {bool recursive = false}) =>
       _inner.deleteDirectory(_prefixPath(r), recursive: recursive);
+
+  @override
+  Future<void> renameDirectory(String fromRelative, String toRelative) =>
+      _inner.renameDirectory(
+          _prefixPath(fromRelative), _prefixPath(toRelative));
 
   // ── Sync variants forward through ────────────────────────────────────
 

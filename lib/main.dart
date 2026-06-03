@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'platform/platform.dart' as platform;
 
 import 'models/monitored_task.dart';
+import 'connections/builtin_connections.dart';
 import 'wapp/host_event_bridge.dart';
 import 'services/notification_service.dart';
 import 'profile/profile_service.dart';
+import 'profile/storage_paths.dart';
 import 'services/task_monitor_service.dart';
 import 'wapp/native/media_kit_video_backend.dart';
 
@@ -41,6 +43,19 @@ Future<void> main() async {
     },
   );
   BootOrchestrator.instance.register(
+    id: 'register-connections',
+    name: 'Register connections',
+    description:
+        'Registers the built-in transports (internet live; LAN, Bluetooth, '
+        'LoRa, USB as capability-declaring stubs) into the '
+        'ConnectionRegistry so wapps can reason about available connections '
+        'and their characteristics.',
+    mode: BootStart.parallel,
+    init: () async {
+      registerBuiltinConnections();
+    },
+  );
+  BootOrchestrator.instance.register(
     id: 'host-event-bridge',
     name: 'Host → wapp event bridge',
     description:
@@ -50,6 +65,17 @@ Future<void> main() async {
     init: () async {
       HostEventBridge.instance.install();
     },
+  );
+  BootOrchestrator.instance.register(
+    id: 'migrate-storage-layout',
+    name: 'Migrate storage layout',
+    description:
+        'One-time on-disk renames: profiles/<id>/ -> devices/<id>/, then '
+        'per-device apps/ -> wapps/ (installed packages) and old wapps/ '
+        '-> data/ (per-wapp settings). No-op once migrated. Must run '
+        'before profile-service and the launcher scan.',
+    mode: BootStart.sequential,
+    init: migrateStorageLayout,
   );
   BootOrchestrator.instance.register(
     id: 'profile-service',

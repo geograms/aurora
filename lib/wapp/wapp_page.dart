@@ -33,7 +33,7 @@ import '../services/wapp_compiler_service.dart';
 import '../services/wapp_installer_service.dart';
 import '../services/wapp_signing_service.dart';
 import '../services/wapp_social_store.dart';
-import '../main.dart' show WappManifest;
+import '../launcher/launcher.dart' show WappManifest;
 import '../services/functionality_broker.dart';
 import '../services/functionality_registry.dart';
 import '../util/wapp_icons.dart';

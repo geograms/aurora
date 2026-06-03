@@ -24,7 +24,7 @@
 
 import 'dart:convert';
 
-import '../main.dart' show WappManifest;
+import '../launcher/launcher.dart' show WappManifest;
 import '../models/monitored_task.dart';
 import '../wapp/wapp_engine.dart';
 import 'preferences_service.dart';

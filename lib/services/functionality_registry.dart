@@ -12,7 +12,7 @@
  * providers know exactly what contract they must implement.
  */
 
-import '../main.dart' show WappManifest;
+import '../launcher/launcher.dart' show WappManifest;
 
 // ── API definition data classes ─────────────────────────────────────
 

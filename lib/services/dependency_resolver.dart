@@ -19,7 +19,7 @@
  * Pure / no Flutter deps so it can be unit-tested in isolation.
  */
 
-import '../main.dart' show WappManifest;
+import '../launcher/launcher.dart' show WappManifest;
 import 'functionality_registry.dart';
 
 class UnmetDependencies {

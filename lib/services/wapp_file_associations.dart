@@ -12,7 +12,7 @@
  * survives restarts.
  */
 
-import '../main.dart' show WappManifest;
+import '../launcher/launcher.dart' show WappManifest;
 import '../models/wapp_file_handler.dart';
 import 'functionality_registry.dart';
 import 'storage_paths.dart';

@@ -13,7 +13,7 @@
  */
 
 import '../launcher/launcher.dart' show WappManifest;
-import '../models/wapp_file_handler.dart';
+import 'wapp_file_handler.dart';
 import 'functionality_registry.dart';
 import '../profile/storage_paths.dart';
 

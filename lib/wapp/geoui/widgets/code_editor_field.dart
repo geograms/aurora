@@ -12,7 +12,7 @@
 
 import 'package:flutter/material.dart';
 
-import '../../widgets/syntax_highlight_controller.dart';
+import 'syntax_highlight_controller.dart';
 
 class CodeEditorField extends StatefulWidget {
   /// GeoUI field name used as the key in the bindings map.

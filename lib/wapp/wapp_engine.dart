@@ -9,9 +9,9 @@ import 'dart:io'
 
 import 'package:wasm_run/wasm_run.dart';
 
-import '../services/i18n_context.dart';
+import 'i18n_context.dart';
 import '../profile/profile_storage.dart';
-import '../services/wapp_event_broker.dart';
+import 'wapp_event_broker.dart';
 
 /// State for a single hal_process_exec subprocess. Lives in
 /// [WappEngine._procs] keyed by handle. The wapp polls hal_process_poll

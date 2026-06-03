@@ -15,10 +15,10 @@ import '../platform/platform.dart' as platform;
 
 import 'native/media_capability.dart';
 
-import '../geoui/geoui_ast.dart';
-import '../geoui/geoui_parser.dart';
-import '../geoui/geoui_renderer.dart';
-import '../geoui/widgets/code_editor_field.dart';
+import 'geoui/geoui_ast.dart';
+import 'geoui/geoui_parser.dart';
+import 'geoui/geoui_renderer.dart';
+import 'geoui/widgets/code_editor_field.dart';
 import '../profile/iwi_profile.dart';
 import '../models/monitored_task.dart';
 import '../services/event_bus.dart';
@@ -27,16 +27,16 @@ import '../services/preferences_service.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
 import '../profile/storage_paths.dart';
-import '../services/i18n_context.dart';
+import 'i18n_context.dart';
 import '../services/task_monitor_service.dart';
-import '../services/wapp_compiler_service.dart';
-import '../services/wapp_installer_service.dart';
-import '../services/wapp_signing_service.dart';
-import '../services/wapp_social_store.dart';
+import 'wapp_compiler_service.dart';
+import 'wapp_installer_service.dart';
+import 'wapp_signing_service.dart';
+import 'wapp_social_store.dart';
 import '../launcher/launcher.dart' show WappManifest;
-import '../services/functionality_broker.dart';
-import '../services/functionality_registry.dart';
-import '../util/wapp_icons.dart';
+import 'functionality_broker.dart';
+import 'functionality_registry.dart';
+import 'wapp_icons.dart';
 import 'wapp_engine.dart';
 
 /// Generic wapp page — loads .ui.json screens from a wapp directory,

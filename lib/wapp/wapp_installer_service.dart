@@ -20,7 +20,7 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:http/http.dart' as http;
 
-import 'event_bus.dart';
+import '../services/event_bus.dart';
 import '../profile/profile_storage.dart';
 import '../profile/storage_paths.dart';
 import 'wapp_signing_service.dart';

@@ -14,7 +14,7 @@
 
 import 'dart:collection';
 
-import 'event_bus.dart';
+import '../services/event_bus.dart';
 
 class _PendingEvent {
   final String topic;

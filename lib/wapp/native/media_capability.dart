@@ -22,7 +22,7 @@
 
 import 'package:flutter/widgets.dart';
 
-import '../../services/functionality_registry.dart';
+import '../functionality_registry.dart';
 
 /// The capability id a media-backend library wapp must advertise under
 /// `provides.functionalities` for video to light up.

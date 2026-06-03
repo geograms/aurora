@@ -26,7 +26,7 @@
 
 import 'dart:convert';
 
-import 'event_bus.dart';
+import '../services/event_bus.dart';
 import 'wapp_event_broker.dart';
 
 class HostEventBridge {

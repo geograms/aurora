@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'platform/platform.dart' as platform;
 
 import 'models/monitored_task.dart';
-import 'services/host_event_bridge.dart';
+import 'wapp/host_event_bridge.dart';
 import 'services/notification_service.dart';
 import 'profile/profile_service.dart';
 import 'services/task_monitor_service.dart';

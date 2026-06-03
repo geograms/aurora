@@ -2,7 +2,7 @@
 
 import 'package:flutter/material.dart';
 
-import '../services/i18n_context.dart';
+import '../i18n_context.dart';
 import 'geoui_ast.dart';
 import 'widgets/code_editor_field.dart';
 import 'widgets/icon_field.dart';

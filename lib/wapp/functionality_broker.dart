@@ -26,11 +26,11 @@ import 'dart:convert';
 
 import '../launcher/launcher.dart' show WappManifest;
 import '../models/monitored_task.dart';
-import '../wapp/wapp_engine.dart';
-import 'preferences_service.dart';
+import 'wapp_engine.dart';
+import '../services/preferences_service.dart';
 import '../profile/storage_paths.dart' show wappPackageStorage;
 import 'functionality_registry.dart';
-import 'task_monitor_service.dart';
+import '../services/task_monitor_service.dart';
 
 class FunctionalityBroker {
   FunctionalityBroker._();

@@ -24,7 +24,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import '../platform/platform.dart' as platform;
 
-import '../models/wapp_file_handler.dart';
+import '../wapp/wapp_file_handler.dart';
 import '../profile/welcome_page.dart';
 import '../services/event_bus.dart';
 import '../services/notification_service.dart';
@@ -32,13 +32,13 @@ import '../services/preferences_service.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
 import '../profile/profile_storage_factory.dart';
-import '../services/dependency_resolver.dart';
+import '../wapp/dependency_resolver.dart';
 import '../profile/storage_paths.dart';
 import '../services/task_monitor_service.dart';
-import '../services/wapp_installer_service.dart';
-import '../services/wapp_signing_service.dart';
-import '../services/functionality_registry.dart';
-import '../util/wapp_icons.dart';
+import '../wapp/wapp_installer_service.dart';
+import '../wapp/wapp_signing_service.dart';
+import '../wapp/functionality_registry.dart';
+import '../wapp/wapp_icons.dart';
 import '../wapp/wapp_engine.dart';
 import '../wapp/wapp_page.dart';
 

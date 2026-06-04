@@ -27,6 +27,8 @@ import 'geoui/geoui_renderer.dart';
 import '../editor/code_editor_field.dart';
 import 'geoui/widgets/log_view_field.dart';
 import 'geoui/widgets/chat_view_field.dart';
+import 'geoui/conversation_store.dart';
+import 'geoui/widgets/conversations_field.dart';
 import '../profile/iwi_profile.dart';
 import '../models/monitored_task.dart';
 import '../services/event_bus.dart';
@@ -52,7 +54,6 @@ import 'wapp_engine.dart';
 part '../editor/wapp_editor.dart';
 part '../editor/wapp_robot.dart';
 part 'wapp_maps.dart';
-part 'wapp_messenger.dart';
 
 /// Generic wapp page — loads .ui.json screens from a wapp directory,
 /// instantiates the WASM module, and renders screens as tabs.
@@ -284,16 +285,13 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     }
   }
 
-  // ── Messenger (Telegram-style) ─────────────────────────────────────
-  // Conversations keyed by id: a callsign for 1:1, "#GROUP" for a bulletin
-  // room. _msgOrder keeps them most-recent-first; _msgUnread counts unread
-  // incoming; _msgOpenConvo is the conversation shown in the right pane
-  // (wide layout) or full-screen (narrow). The append/open helpers live in
-  // wapp_messenger.dart (extension _WappMessenger).
-  final Map<String, List<Map<String, dynamic>>> _msgConvos = {};
-  final List<String> _msgOrder = [];
-  final Map<String, int> _msgUnread = {};
-  String? _msgOpenConvo;
+  // Generic conversation stores keyed by the GeoUI field name. A wapp drives
+  // these via the ui.convo.* protocol; the host renders them with the generic
+  // ConversationsField. No app-specific (e.g. APRS) knowledge lives here.
+  final Map<String, ConversationStore> _convStores = {};
+
+  ConversationStore _convStore(String field) =>
+      _convStores.putIfAbsent(field, () => ConversationStore());
 
   // Cached MonitoredTask snapshot (refreshed when the wapp polls
   // system.tasks.list — see _refreshTaskSnapshot).
@@ -704,9 +702,6 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             if (fieldName == 'geochat') {
               // Split into Live vs Beacons (repeat detection).
               _geoChatAdd(msg);
-            } else if (fieldName == 'messages') {
-              // Telegram-style Messenger: group by conversation id.
-              _msgAdd(msg.map((k, v) => MapEntry(k.toString(), v)));
             } else {
               final existing = _fieldValues[fieldName];
               final List<Map<String, dynamic>> buf;
@@ -726,12 +721,6 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             _geoLive.clear();
             _geoBeacons.clear();
             changed = true;
-          } else if (fieldName == 'messages') {
-            _msgConvos.clear();
-            _msgOrder.clear();
-            _msgUnread.clear();
-            _msgOpenConvo = null;
-            changed = true;
           } else {
             final existing = _fieldValues[fieldName];
             if (existing is List && existing.isNotEmpty) {
@@ -739,6 +728,27 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
               changed = true;
             }
           }
+        } else if (type == 'ui.convo.upsert') {
+          _convStore(data['field'] as String? ?? 'conversations').upsert(data);
+          changed = true;
+        } else if (type == 'ui.convo.msg') {
+          _convStore(data['field'] as String? ?? 'conversations').addMessage(data);
+          changed = true;
+        } else if (type == 'ui.convo.pin') {
+          _convStore(data['field'] as String? ?? 'conversations').pin(data);
+          changed = true;
+        } else if (type == 'ui.convo.unpin') {
+          _convStore(data['field'] as String? ?? 'conversations').unpin(data);
+          changed = true;
+        } else if (type == 'ui.convo.clear') {
+          _convStore(data['field'] as String? ?? 'conversations')
+              .clear(data['id'] as String?);
+          changed = true;
+        } else if (type == 'ui.prompt') {
+          // Generic prompt: the wapp asks the host to show a dialog (title +
+          // optional text input + optional chips) and returns the result as a
+          // "prompt" command. No app knowledge here.
+          _showWappPrompt(data);
         } else if (type == 'ui.toast') {
           // Legacy message shape — route through the unified service
           // so old wapps inherit system-tray delivery + history.
@@ -1269,6 +1279,218 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     _drainOutbox();
   }
 
+  // ── Generic conversations primitive ($type:"conversations") ─────────
+  // Renders the wapp-owned ConversationStore. Carries no app knowledge:
+  // titles/badges/icons/pinned are supplied by the wapp via ui.convo.*, and
+  // user intent is forwarded as generic, field-name-derived commands.
+  Widget _buildConversationsScreen(GeoUiBlock screen, GeoUiBlock group) {
+    final field = group.name ?? 'conversations';
+    final store = _convStore(field);
+    final listActions = <ConvAction>[];
+    final roomActions = <ConvAction>[];
+    for (final a in group.childrenOf('action')) {
+      final ca = ConvAction(a.name ?? '', a.getString('icon') ?? 'add',
+          a.getString('tip') ?? a.name ?? '');
+      if ((a.getString('slot') ?? 'list') == 'room') {
+        roomActions.add(ca);
+      } else {
+        listActions.add(ca);
+      }
+    }
+    // Composer toggles: bool field children. State is held in _fieldValues so
+    // it rides along with conversations_send like any other scalar field.
+    final toggles = <ComposerToggle>[];
+    for (final f in group.childrenOf('field')) {
+      if (f.type != 'bool') continue;
+      final name = f.name ?? '';
+      if (name.isEmpty) continue;
+      final cur = _fieldValues[name];
+      final value = cur is bool ? cur : (f.getBool('default') ?? false);
+      _fieldValues[name] = value;
+      toggles.add(ComposerToggle(name, f.getString('label') ?? name, value));
+    }
+    return ConversationsField(
+      store: store,
+      title: group.getString('label') ?? screen.name ?? 'Conversations',
+      listActions: listActions,
+      roomActions: roomActions,
+      toggles: toggles,
+      onToggle: (name, value) => setState(() => _fieldValues[name] = value),
+      onLocate: _locateFromMessage,
+      onSelect: (id) => setState(() => store.clearUnread(id)),
+      onSend: (id, text) {
+        _fieldValues['${field}_convo'] = id;
+        _fieldValues['${field}_input'] = text;
+        _sendCommand('${field}_send');
+      },
+      onAction: (name, openId) {
+        _fieldValues['${field}_convo'] = openId;
+        _sendCommand(name);
+      },
+      onPinnedDismiss: (id, key) {
+        _fieldValues['${field}_convo'] = id;
+        _fieldValues['${field}_pinkey'] = key;
+        _sendCommand('${field}_unpin');
+      },
+    );
+  }
+
+  // Show a chat message's sender on the map: switch to the screen hosting the
+  // map and frame the sender's location alongside our own (the radius centre)
+  // so the two can be compared. Coordinates come from the message (lat/lon).
+  // Highlighted target from the last "locate" tap (drawn as a reticle on the
+  // map so the station is unmistakable).
+  double? _locateLat, _locateLon;
+
+  void _locateFromMessage(Map<String, dynamic> m) {
+    final lat = (m['lat'] as num?)?.toDouble();
+    final lon = (m['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) return;
+    final idx = _screens.indexWhere((s) =>
+        s.children.any((c) => c.keyword == 'group' && c.type == 'map'));
+    if (idx >= 0 && _tabController != null && _tabController!.index != idx) {
+      _tabController!.animateTo(idx);
+    }
+    // Centre directly on the target and zoom in so it's clearly visible. The
+    // zoom adapts to how far the station is from us (closer → tighter) but is
+    // clamped to a zoomed-in range so the target is always easy to see.
+    final myLat = _mapCenterLat, myLon = _mapCenterLon;
+    int zoom = 14;
+    if (myLat != null && myLon != null) {
+      final span = (max((myLat - lat).abs(), (myLon - lon).abs()) * 2.2) + 0.003;
+      zoom = (log(360 * 700 / (256 * span)) / log(2)).clamp(12, 16).floor();
+    }
+    setState(() {
+      _mapLat = lat;
+      _mapLon = lon;
+      _mapZoom = zoom;
+      _locateLat = lat;
+      _locateLon = lon;
+    });
+  }
+
+  // Generic prompt dialog requested by a wapp via ui.prompt. Shows a title,
+  // optional body, optional chips (single-select), and an optional text
+  // input, then returns the result as a "prompt" command with fields
+  // prompt_id / prompt_value / prompt_input. No app knowledge here.
+  void _showWappPrompt(Map<String, dynamic> data) {
+    final id = (data['id'] ?? '').toString();
+    final title = (data['title'] ?? '').toString();
+    final body = (data['body'] ?? '').toString();
+    final chips = (data['chips'] as List?)
+            ?.whereType<Map>()
+            .map((c) => MapEntry(
+                (c['label'] ?? '').toString(), (c['value'] ?? '').toString()))
+            .toList() ??
+        const <MapEntry<String, String>>[];
+    final instant = (data['chipMode'] ?? 'instant') == 'instant';
+    final input = data['input'] as Map?;
+    final confirmLabel = (data['confirm'] ?? '').toString();
+
+    final controller = TextEditingController();
+    void result(String value, String text) {
+      _fieldValues['prompt_id'] = id;
+      _fieldValues['prompt_value'] = value;
+      _fieldValues['prompt_input'] = text;
+      _sendCommand('prompt');
+    }
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        String selected = '';
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            final cs = Theme.of(ctx).colorScheme;
+            return AlertDialog(
+              title: Text(title),
+              content: SizedBox(
+                width: 380,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (body.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Text(body,
+                            style: TextStyle(
+                                color: cs.onSurfaceVariant, fontSize: 12.5)),
+                      ),
+                    if (chips.isNotEmpty)
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final c in chips)
+                            instant
+                                ? ActionChip(
+                                    label: Text(c.key),
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      result(c.value, '');
+                                    },
+                                  )
+                                : ChoiceChip(
+                                    label: Text(c.key),
+                                    selected: selected == c.value,
+                                    onSelected: (_) =>
+                                        setLocal(() => selected = c.value),
+                                  ),
+                        ],
+                      ),
+                    if (input != null) ...[
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: controller,
+                              autofocus: true,
+                              maxLength: (input['max'] as num?)?.toInt(),
+                              textCapitalization: TextCapitalization.sentences,
+                              decoration: InputDecoration(
+                                hintText: (input['hint'] ?? '').toString(),
+                                prefixText: (input['prefix'] ?? '').toString(),
+                                border: const OutlineInputBorder(),
+                                isDense: true,
+                                counterText: '',
+                              ),
+                              onSubmitted: (t) {
+                                if (t.trim().isEmpty && selected.isEmpty) return;
+                                Navigator.pop(ctx);
+                                result(selected, t.trim());
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Cancel')),
+                if (confirmLabel.isNotEmpty)
+                  FilledButton(
+                    onPressed: () {
+                      final t = controller.text.trim();
+                      if (t.isEmpty && selected.isEmpty) return;
+                      Navigator.pop(ctx);
+                      result(selected, t);
+                    },
+                    child: Text(confirmLabel),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   void dispose() {
     _tickTimer?.cancel();
@@ -1369,14 +1591,12 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         .firstOrNull;
     if (mapGroup != null) return _buildMapScreen(screen, mapGroup);
 
-    // Messenger (Telegram-style) — host renders the contact list +
-    // conversation view from the grouped _msgConvos state.
-    final messengerGroup = screen.children
-        .where((c) => c.keyword == 'group' && c.type == 'messenger')
+    // Conversations (generic, data-driven messenger primitive) — host renders
+    // the contact list + chat view from the wapp-pushed ConversationStore.
+    final convoGroup = screen.children
+        .where((c) => c.keyword == 'group' && c.type == 'conversations')
         .firstOrNull;
-    if (messengerGroup != null) {
-      return _buildMessengerScreen(screen, messengerGroup);
-    }
+    if (convoGroup != null) return _buildConversationsScreen(screen, convoGroup);
 
     // Video group (movies wapp) — host renders the media_kit surface
     // with the screen's other children (the header-actions menu) as an

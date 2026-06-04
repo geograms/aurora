@@ -32,6 +32,15 @@ class ChatViewField extends StatefulWidget {
   /// box, no label/tip chrome) — used inside the map's floating overlay.
   final bool fill;
 
+  /// Optional widget rendered just above the compose bar (a generic slot for
+  /// composer extras — e.g. host-declared toggles). No semantics here.
+  final Widget? composerAccessory;
+
+  /// Tapping a message's meta line calls this with the message map. The host
+  /// decides what to do (e.g. show the sender on a map). Only offered when the
+  /// message carries `lat`/`lon`.
+  final void Function(Map<String, dynamic>)? onLocate;
+
   const ChatViewField({
     super.key,
     required this.fieldName,
@@ -41,6 +50,8 @@ class ChatViewField extends StatefulWidget {
     this.tip,
     this.hint = 'Message…',
     this.fill = false,
+    this.composerAccessory,
+    this.onLocate,
   });
 
   @override
@@ -117,6 +128,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
         children: [
           Expanded(child: _messageList(cs, messages)),
           const Divider(height: 1),
+          if (widget.composerAccessory != null) widget.composerAccessory!,
           _composeBar(cs),
         ],
       );
@@ -149,6 +161,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
               children: [
                 Expanded(child: _messageList(cs, messages)),
                 const Divider(height: 1),
+                if (widget.composerAccessory != null) widget.composerAccessory!,
                 _composeBar(cs),
               ],
             ),
@@ -219,6 +232,8 @@ class _ChatViewFieldState extends State<ChatViewField> {
               ),
             Text(text,
                 style: const TextStyle(color: Colors.white, fontSize: 14)),
+            if ((m['meta']?.toString() ?? '').isNotEmpty)
+              _metaLine(m),
             if (time.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 2),
@@ -231,6 +246,40 @@ class _ChatViewFieldState extends State<ChatViewField> {
           ],
         ),
       ),
+    );
+  }
+
+  /// The small meta/distance line under a bubble. When the message carries a
+  /// location and a handler is set, it becomes a tappable link.
+  Widget _metaLine(Map<String, dynamic> m) {
+    final tappable =
+        widget.onLocate != null && m['lat'] != null && m['lon'] != null;
+    final color = tappable
+        ? const Color(0xFF7FB0E0)
+        : Colors.white.withAlpha(165);
+    final row = Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.near_me, size: 11, color: color),
+          const SizedBox(width: 3),
+          Text(
+            m['meta'].toString(),
+            style: TextStyle(
+              color: color,
+              fontSize: 10.5,
+              decoration: tappable ? TextDecoration.underline : null,
+              decorationColor: color,
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!tappable) return row;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(onTap: () => widget.onLocate!(m), child: row),
     );
   }
 

@@ -72,6 +72,12 @@ class _SlippyMap extends StatefulWidget {
   /// Fired to clear a geo-chat tab (0 = Live, 1 = Beacons).
   final void Function(int tab)? onClearChat;
 
+  /// Tapping a geo-chat message's location meta (carries lat/lon).
+  final void Function(Map<String, dynamic>)? onLocate;
+
+  /// A highlighted point (the last "locate" target) drawn as a reticle.
+  final double? highlightLat, highlightLon;
+
   const _SlippyMap({
     required this.lat,
     required this.lon,
@@ -91,13 +97,17 @@ class _SlippyMap extends StatefulWidget {
     this.chatBeacons = const [],
     this.onChatSend,
     this.onClearChat,
+    this.onLocate,
+    this.highlightLat,
+    this.highlightLon,
   });
 
   @override
   State<_SlippyMap> createState() => _SlippyMapState();
 }
 
-class _SlippyMapState extends State<_SlippyMap> {
+class _SlippyMapState extends State<_SlippyMap>
+    with SingleTickerProviderStateMixin {
   static const _tileSize = 256.0;
 
   late double _pxX, _pxY; // top-left in world pixels
@@ -105,10 +115,11 @@ class _SlippyMapState extends State<_SlippyMap> {
   Offset? _dragStart;
   double? _dragPxX, _dragPxY;
 
-  // Circle interaction: 'move' (drag centre) or 'resize' (drag edge);
-  // null means the pan moves the map. Drag overrides apply live.
+  // Circle interaction: 'move' (drag anywhere inside) or 'resize' (drag the
+  // edge band); null means the pan moves the map. Drag overrides apply live.
   String? _circleDrag;
   double? _dragCenterLat, _dragCenterLon, _dragRadiusKm;
+  Offset? _circleC0; // circle centre (screen px) captured when a move begins
 
   // Search
   final _searchController = TextEditingController();
@@ -137,6 +148,26 @@ class _SlippyMapState extends State<_SlippyMap> {
     final groundRes =
         cos(lat * pi / 180) * 2 * pi * 6378137 / (_tileSize * pow(2, _zoom));
     return (km * 1000) / groundRes;
+  }
+
+  /// True when the whole viewport sits inside the circle, so its edge isn't
+  /// visible anywhere. In that state the circle is just a full-screen tint
+  /// that would hijack every drag — so we stop drawing it and let drags pan
+  /// the map normally (zoom out to bring the circle back into play).
+  bool _circleEngulfsView(double w, double h) {
+    final c = _circleCenterPx();
+    if (c == null) return false;
+    final rPx = _radiusPx(_dragRadiusKm ?? widget.radiusKm!);
+    var far = 0.0;
+    for (final p in [
+      const Offset(0, 0),
+      Offset(w, 0),
+      Offset(0, h),
+      Offset(w, h),
+    ]) {
+      far = max(far, (p - c).distance);
+    }
+    return far < rPx;
   }
 
   List<Widget> _buildChatOverlay(double w, double h) {
@@ -236,6 +267,7 @@ class _SlippyMapState extends State<_SlippyMap> {
               hint: _geoTab == 0 ? 'Message…' : 'Repeated beacons',
               fill: true,
               messages: showing,
+              onLocate: widget.onLocate,
               onSend: (t) => widget.onChatSend?.call(t),
             ),
           ),
@@ -268,11 +300,16 @@ class _SlippyMapState extends State<_SlippyMap> {
     );
   }
 
+  late final AnimationController _pulse;
+
   @override
   void initState() {
     super.initState();
     _zoom = widget.zoom;
     _centerOn(widget.lat, widget.lon);
+    _pulse = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1200))
+      ..repeat();
   }
 
   @override
@@ -291,6 +328,7 @@ class _SlippyMapState extends State<_SlippyMap> {
     _searchController.dispose();
     _searchFocus.dispose();
     _debounce?.cancel();
+    _pulse.dispose();
     super.dispose();
   }
 
@@ -433,6 +471,73 @@ class _SlippyMapState extends State<_SlippyMap> {
       }
     }
     return out;
+  }
+
+  /// Draw a pulsing reticle on the last "locate" target so the user can
+  /// immediately spot it among the other pins.
+  List<Widget> _buildHighlight(double w, double h) {
+    final lat = widget.highlightLat, lon = widget.highlightLon;
+    if (lat == null || lon == null) return const [];
+    final px = _lon2px(lon, _zoom) - _pxX;
+    final py = _lat2px(lat, _zoom) - _pxY;
+    if (px < -80 || px > w + 80 || py < -80 || py > h + 80) return const [];
+    const box = 120.0;
+    return [
+      Positioned(
+        left: px - box / 2,
+        top: py - box / 2,
+        width: box,
+        height: box,
+        child: IgnorePointer(
+          child: AnimatedBuilder(
+            animation: _pulse,
+            builder: (context, _) {
+              final t = _pulse.value; // 0..1
+              final ringSize = 26.0 + t * 70.0;
+              return Stack(
+                alignment: Alignment.center,
+                children: [
+                  // Expanding fading pulse ring.
+                  Opacity(
+                    opacity: (1 - t) * 0.7,
+                    child: Container(
+                      width: ringSize,
+                      height: ringSize,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                            color: const Color(0xFF00E5FF), width: 3),
+                      ),
+                    ),
+                  ),
+                  // Steady reticle: bright ring + centre dot.
+                  Container(
+                    width: 26,
+                    height: 26,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border:
+                          Border.all(color: const Color(0xFF00E5FF), width: 3),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black54, blurRadius: 4),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF00E5FF),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    ];
   }
 
   /// A cluster bubble: orange circle with the callsign count; tap to
@@ -604,21 +709,25 @@ class _SlippyMapState extends State<_SlippyMap> {
 
       final mapStack = GestureDetector(
         onPanStart: (d) {
-          // Grab the circle's centre handle (move) or its edge (resize)
-          // when the pan starts there; otherwise pan the map.
-          final c = _circleCenterPx();
+          // The edge band resizes; anywhere else inside the circle moves it
+          // (relative to the grab, so it doesn't jump). Outside pans the map.
+          // When the circle engulfs the whole view it's not manipulable —
+          // skip it entirely so the drag pans the map.
+          final c = _circleEngulfsView(w, h) ? null : _circleCenterPx();
           if (c != null) {
             final dist = (d.localPosition - c).distance;
             final rPx = _radiusPx(_dragRadiusKm ?? widget.radiusKm!);
-            if (dist <= 22) {
-              _circleDrag = 'move';
-              _dragCenterLat = widget.centerLat;
-              _dragCenterLon = widget.centerLon;
-              return;
-            }
             if ((dist - rPx).abs() <= 16) {
               _circleDrag = 'resize';
               _dragRadiusKm = widget.radiusKm;
+              return;
+            }
+            if (dist < rPx) {
+              _circleDrag = 'move';
+              _circleC0 = c;
+              _dragStart = d.localPosition;
+              _dragCenterLat = widget.centerLat;
+              _dragCenterLon = widget.centerLon;
               return;
             }
           }
@@ -629,9 +738,11 @@ class _SlippyMapState extends State<_SlippyMap> {
         },
         onPanUpdate: (d) {
           if (_circleDrag == 'move') {
+            // Move the centre by the same delta as the pointer (relative).
+            final np = _circleC0! + (d.localPosition - _dragStart!);
             setState(() {
-              _dragCenterLon = _px2lon(_pxX + d.localPosition.dx, _zoom);
-              _dragCenterLat = _px2lat(_pxY + d.localPosition.dy, _zoom);
+              _dragCenterLon = _px2lon(_pxX + np.dx, _zoom);
+              _dragCenterLat = _px2lat(_pxY + np.dy, _zoom);
             });
             return;
           }
@@ -684,7 +795,11 @@ class _SlippyMapState extends State<_SlippyMap> {
               ...tiles,
               // Coverage radius circle (filter area). Centre + radius
               // honour an in-progress move/resize drag for live feedback.
-              if (widget.radiusKm != null && widget.centerLat != null)
+              // Hidden when it engulfs the whole view (zoomed in past its
+              // edge) so the map stays clear and pannable.
+              if (widget.radiusKm != null &&
+                  widget.centerLat != null &&
+                  !_circleEngulfsView(w, h))
                 Positioned.fill(
                   child: CustomPaint(
                     painter: _RadiusCirclePainter(
@@ -698,6 +813,8 @@ class _SlippyMapState extends State<_SlippyMap> {
                 ),
               // Marker pins (clustered when they would overlap).
               ..._clusterMarkers(w, h),
+              // Highlighted "locate" target — a pulsing reticle on top.
+              ..._buildHighlight(w, h),
               // Search bar
               Positioned(
                 top: 12,
@@ -983,6 +1100,9 @@ extension _WappMaps on _WappPageState {
         _sendCommand('geochat_send');
         if (mounted) setState(() {});
       },
+      onLocate: _locateFromMessage,
+      highlightLat: _locateLat,
+      highlightLon: _locateLon,
           ),
         ),
       ],

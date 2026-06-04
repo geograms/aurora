@@ -29,6 +29,7 @@ import 'geoui/widgets/log_view_field.dart';
 import 'geoui/widgets/chat_view_field.dart';
 import 'geoui/conversation_store.dart';
 import 'geoui/widgets/conversations_field.dart';
+import 'geoui/tile_cache.dart';
 import '../profile/iwi_profile.dart';
 import '../models/monitored_task.dart';
 import '../services/event_bus.dart';
@@ -670,6 +671,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
               'label': data['label'] as String? ?? id,
               if (data['color'] != null) 'color': data['color'],
               if (data['kind'] != null) 'kind': data['kind'],
+              if (data['heard'] != null) 'heard': data['heard'],
+              if (data['detail'] != null) 'detail': data['detail'],
             };
             changed = true;
           }

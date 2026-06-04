@@ -39,6 +39,11 @@ class _SlippyMap extends StatefulWidget {
   final double lat, lon;
   final int zoom, minZoom, maxZoom;
   final String tileUrl;
+
+  /// Optional transparent reference layer drawn over the base tiles to label
+  /// places (countries, cities, villages…). The tile service supplies the
+  /// zoom-appropriate level of detail.
+  final String? labelUrl;
   final void Function(double lat, double lon, int zoom) onViewportChanged;
 
   /// Pins to overlay on the map. Each map is {id, lat, lon, label, color?,
@@ -86,6 +91,7 @@ class _SlippyMap extends StatefulWidget {
     required this.minZoom,
     required this.maxZoom,
     required this.onViewportChanged,
+    this.labelUrl,
     this.markers = const [],
     this.onMarkerTap,
     this.radiusKm,
@@ -120,6 +126,9 @@ class _SlippyMapState extends State<_SlippyMap>
   String? _circleDrag;
   double? _dragCenterLat, _dragCenterLon, _dragRadiusKm;
   Offset? _circleC0; // circle centre (screen px) captured when a move begins
+
+  // Id of the marker whose info popup is open (null = none).
+  String? _popupId;
 
   // Search
   final _searchController = TextEditingController();
@@ -473,6 +482,150 @@ class _SlippyMapState extends State<_SlippyMap>
     return out;
   }
 
+  /// Info popup anchored next to a tapped marker: its position, when it was
+  /// last heard, and the message/comment it sent.
+  List<Widget> _buildMarkerPopup(double w, double h) {
+    final id = _popupId;
+    if (id == null) return const [];
+    Map<String, dynamic>? m;
+    for (final x in widget.markers) {
+      if (x['id']?.toString() == id) { m = x; break; }
+    }
+    if (m == null) return const [];
+    final lat = (m['lat'] as num?)?.toDouble();
+    final lon = (m['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) return const [];
+    final px = _lon2px(lon, _zoom) - _pxX;
+    final py = _lat2px(lat, _zoom) - _pxY;
+    final label = (m['label'] as String?) ?? id;
+    final heard = (m['heard'] as num?)?.toInt();
+    final detail = (m['detail'] as String?) ?? '';
+    final coords = '${lat.toStringAsFixed(5)}, ${lon.toStringAsFixed(5)}';
+
+    const pw = 230.0;
+    final left = (px - pw / 2).clamp(8.0, (w - pw - 8).clamp(8.0, w));
+    final below = py < 150; // not enough room above → place below the pin
+    final top = below ? (py + 14).clamp(8.0, h - 40) : (py - 132).clamp(8.0, h);
+
+    return [
+      Positioned(
+        left: left,
+        top: top,
+        width: pw,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 8, 6, 10),
+          decoration: BoxDecoration(
+            color: const Color(0xF0161b22),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFF30363d)),
+            boxShadow: const [
+              BoxShadow(color: Colors.black54, blurRadius: 6, offset: Offset(0, 2)),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13)),
+                  ),
+                  InkWell(
+                    onTap: () => setState(() => _popupId = null),
+                    child: const Icon(Icons.close, size: 16, color: Color(0xFF8b949e)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              // Coordinates with a copy button.
+              Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.place, size: 13, color: Color(0xFF8b949e)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(coords,
+                          style: const TextStyle(
+                              color: Color(0xFFe6edf3), fontSize: 11.5)),
+                    ),
+                    InkWell(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: coords));
+                        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                          const SnackBar(
+                            content: Text('Coordinates copied'),
+                            duration: Duration(seconds: 1),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.only(left: 4),
+                        child: Icon(Icons.copy,
+                            size: 14, color: Color(0xFF7FB0E0)),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (heard != null)
+                _popupRow(Icons.schedule, 'Last heard ${_relativeTime(heard)}'),
+              if (detail.isNotEmpty) _popupRow(Icons.message, detail),
+            ],
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// "just now" / "N minutes ago" / "N hours ago" / "N days ago" from an
+  /// epoch (seconds).
+  String _relativeTime(int epochSeconds) {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    var s = now - epochSeconds;
+    if (s < 0) s = 0;
+    if (s < 45) return 'just now';
+    if (s < 3600) {
+      final m = (s / 60).round();
+      return '$m minute${m == 1 ? "" : "s"} ago';
+    }
+    if (s < 86400) {
+      final hrs = (s / 3600).round();
+      return '$hrs hour${hrs == 1 ? "" : "s"} ago';
+    }
+    final d = (s / 86400).round();
+    return '$d day${d == 1 ? "" : "s"} ago';
+  }
+
+  Widget _popupRow(IconData icon, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 13, color: const Color(0xFF8b949e)),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(text,
+                style: const TextStyle(
+                    color: Color(0xFFe6edf3), fontSize: 11.5, height: 1.3),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Draw a pulsing reticle on the last "locate" target so the user can
   /// immediately spot it among the other pins.
   List<Widget> _buildHighlight(double w, double h) {
@@ -595,7 +748,11 @@ class _SlippyMapState extends State<_SlippyMap>
       width: pinW,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => widget.onMarkerTap?.call(m['id']?.toString() ?? ''),
+        onTap: () {
+          final id = m['id']?.toString() ?? '';
+          widget.onMarkerTap?.call(id);
+          setState(() => _popupId = id);
+        },
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -680,35 +837,51 @@ class _SlippyMapState extends State<_SlippyMap>
       final tileYMax = ((_pxY + h) / _tileSize).floor();
       final maxTile = pow(2, _zoom).toInt() - 1;
 
-      final tiles = <Widget>[];
-      for (var ty = tileYMin; ty <= tileYMax; ty++) {
-        for (var tx = tileXMin; tx <= tileXMax; tx++) {
-          final wrappedX = ((tx % (maxTile + 1)) + (maxTile + 1)) % (maxTile + 1);
-          if (ty < 0 || ty > maxTile) continue;
-          final url = widget.tileUrl
-              .replaceAll('{z}', '$_zoom')
-              .replaceAll('{x}', '$wrappedX')
-              .replaceAll('{y}', '$ty');
-          tiles.add(Positioned(
-            left: tx * _tileSize - _pxX,
-            top: ty * _tileSize - _pxY,
-            width: _tileSize,
-            height: _tileSize,
-            child: Image.network(
-              url,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
-                  Container(color: const Color(0xFF0a0e14)),
-            ),
-          ));
+      // Build a layer of tiles for a {z}/{x}/{y} template. `transparent`
+      // layers (the place-label overlay) fall back to nothing on error.
+      List<Widget> buildTiles(String template, {required bool transparent}) {
+        final out = <Widget>[];
+        for (var ty = tileYMin; ty <= tileYMax; ty++) {
+          for (var tx = tileXMin; tx <= tileXMax; tx++) {
+            final wrappedX =
+                ((tx % (maxTile + 1)) + (maxTile + 1)) % (maxTile + 1);
+            if (ty < 0 || ty > maxTile) continue;
+            final url = template
+                .replaceAll('{z}', '$_zoom')
+                .replaceAll('{x}', '$wrappedX')
+                .replaceAll('{y}', '$ty');
+            out.add(Positioned(
+              left: tx * _tileSize - _pxX,
+              top: ty * _tileSize - _pxY,
+              width: _tileSize,
+              height: _tileSize,
+              child: Image(
+                image: tileImageProvider(url),
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => transparent
+                    ? const SizedBox.shrink()
+                    : Container(color: const Color(0xFF0a0e14)),
+              ),
+            ));
+          }
         }
+        return out;
       }
+
+      final tiles = buildTiles(widget.tileUrl, transparent: false);
+      // Place-name labels (countries/cities/villages) — a transparent
+      // reference layer over the imagery; the service scales detail by zoom.
+      final labelTiles = (widget.labelUrl == null || widget.labelUrl!.isEmpty)
+          ? const <Widget>[]
+          : buildTiles(widget.labelUrl!, transparent: true);
 
       final centerLat = _px2lat(_pxY + h / 2, _zoom);
       final centerLon = _px2lon(_pxX + w / 2, _zoom);
 
       final mapStack = GestureDetector(
         onPanStart: (d) {
+          _popupId = null; // any drag dismisses an open marker popup
           // The edge band resizes; anywhere else inside the circle moves it
           // (relative to the grab, so it doesn't jump). Outside pans the map.
           // When the circle engulfs the whole view it's not manipulable —
@@ -793,6 +966,7 @@ class _SlippyMapState extends State<_SlippyMap>
             children: [
               Container(color: const Color(0xFF0a0e14)),
               ...tiles,
+              ...labelTiles,
               // Coverage radius circle (filter area). Centre + radius
               // honour an in-progress move/resize drag for live feedback.
               // Hidden when it engulfs the whole view (zoomed in past its
@@ -815,6 +989,8 @@ class _SlippyMapState extends State<_SlippyMap>
               ..._clusterMarkers(w, h),
               // Highlighted "locate" target — a pulsing reticle on top.
               ..._buildHighlight(w, h),
+              // Info popup for a tapped marker.
+              ..._buildMarkerPopup(w, h),
               // Search bar
               Positioned(
                 top: 12,
@@ -1039,6 +1215,7 @@ extension _WappMaps on _WappPageState {
       lon: _mapLon,
       zoom: _mapZoom,
       tileUrl: _tileUrl,
+      labelUrl: mapGroup.getString('label-url'),
       minZoom: mapGroup.getNumber('min-zoom')?.toInt() ?? 2,
       maxZoom: mapGroup.getNumber('max-zoom')?.toInt() ?? 18,
       markers: _mapMarkers.values.toList(),

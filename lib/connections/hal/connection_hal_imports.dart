@@ -32,11 +32,8 @@ List<WasmImport> connectionHalImports({
     WasmImport('hal', 'lora_send', stubI32([ValueTy.i32, ValueTy.i32], -1)),
     WasmImport('hal', 'lora_available', stubI32([], 0)),
     WasmImport('hal', 'lora_recv', stubI32([ValueTy.i32, ValueTy.i32], 0)),
-    // BLE (stubs)
-    WasmImport('hal', 'ble_scan_start', stubI32([], -1)),
-    WasmImport('hal', 'ble_scan_stop', stubVoid([])),
-    WasmImport('hal', 'ble_scan_read', stubI32([ValueTy.i32, ValueTy.i32], 0)),
-    WasmImport('hal', 'ble_advertise', stubI32([ValueTy.i32, ValueTy.i32], -1)),
-    WasmImport('hal', 'ble_advertise_stop', stubVoid([])),
+    // BLE (ble_*) is implemented for real in WappEngine, backed by the shared
+    // BleService (lib/connections/bluetooth/ble_service.dart) — NOT stubbed
+    // here, so multiple wapps share the single adapter.
   ];
 }

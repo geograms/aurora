@@ -5,13 +5,14 @@ import 'dart:typed_data';
 
 import 'dart:io'
     if (dart.library.html) '../platform/io_stub.dart'
-    show File, FileMode, Process;
+    show File, FileMode, Process, Socket, RawSynchronousSocket;
 
 import 'package:wasm_run/wasm_run.dart';
 
 import 'i18n_context.dart';
 import '../profile/profile_storage.dart';
 import '../connections/hal/connection_hal_imports.dart';
+import '../connections/bluetooth/ble_service.dart';
 import 'wapp_event_broker.dart';
 
 /// State for a single hal_process_exec subprocess. Lives in
@@ -38,6 +39,17 @@ class _WappFileState {
   Uint8List? readBuf;
   int readOffset = 0;
   final List<int> writeBuf = <int>[];
+}
+
+/// State for a single hal_socket_* handle. Lives in [WappEngine._sockets]
+/// keyed by handle. A background `Socket.connect` fills [socket] when it
+/// resolves; inbound bytes accumulate in [rxBuf] (drained by recv).
+/// [state]: 0 = connecting, 1 = open, 2 = closed/error.
+class _WappSocketState {
+  Socket? socket;
+  int state = 0;
+  final List<int> rxBuf = <int>[];
+  StreamSubscription<List<int>>? sub;
 }
 
 /// Log entry from a WASM module.
@@ -88,6 +100,23 @@ class WappEngine {
   // hal_file_* state. Same handle convention as _procs.
   final Map<int, _WappFileState> _files = {};
   int _nextFileHandle = 1;
+
+  // hal_socket_* state. Same handle convention as _procs.
+  final Map<int, _WappSocketState> _sockets = {};
+  int _nextSocketHandle = 1;
+
+  // hal_socket_*_sync state — blocking sockets for synchronous test code
+  // (the wasm test runner can't await async I/O). Keyed by handle.
+  final Map<int, RawSynchronousSocket> _syncSockets = {};
+  int _nextSyncSocketHandle = 1;
+
+  // hal_ble_* state — this engine's view of the SHARED BleService. Inbound
+  // frames are buffered per-engine (each as JSON bytes) so every wapp receives
+  // every frame; advertising is multiplexed by the shared service keyed on
+  // this engine instance.
+  final List<List<int>> _bleRx = [];
+  StreamSubscription<BleInboundFrame>? _bleSub;
+  bool _bleScanning = false;
 
   /// Translation tables handed over by [WappPage._reloadI18n]. Used
   /// by the `hal_i18n_get` import to resolve `@key` / bare-key lookups
@@ -552,6 +581,168 @@ class WappEngine {
       params: [ValueTy.i32],
     );
 
+    // ── Socket HAL (raw TCP, host network, no sandbox) ──
+    //
+    // Abstracts dart:io Socket behind the wasm ABI so any wapp can open a
+    // TCP connection (e.g. APRS-IS). Async, mirroring hal_process_*:
+    // `open` kicks off Socket.connect and returns a handle immediately;
+    // the wapp polls `status` until it reports open, then send/recv.
+    // Inbound bytes buffer in rxBuf and are drained by `recv`.
+
+    final halSocketOpen = WasmFunction(
+      (int hostPtr, int hostLen, int port) {
+        final host = _readStr(hostPtr, hostLen);
+        if (host.isEmpty || port <= 0 || port > 65535) return -1;
+        final s = _WappSocketState();
+        final h = _nextSocketHandle++;
+        _sockets[h] = s;
+        Socket.connect(host, port,
+                timeout: const Duration(seconds: 15))
+            .then((sock) {
+          s.socket = sock;
+          s.state = 1;
+          s.sub = sock.listen(
+            (data) => s.rxBuf.addAll(data),
+            onDone: () => s.state = 2,
+            onError: (_) => s.state = 2,
+            cancelOnError: true,
+          );
+        }).catchError((_) {
+          s.state = 2;
+        });
+        return h;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketStatus = WasmFunction(
+      (int h) => _sockets[h]?.state ?? 2,
+      params: [ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketSend = WasmFunction(
+      (int h, int bufPtr, int bufLen) {
+        final s = _sockets[h];
+        if (s == null || s.state != 1 || s.socket == null) return -1;
+        if (bufLen <= 0) return 0;
+        final mem = _memory!.view;
+        final out = List<int>.generate(bufLen, (i) => mem[bufPtr + i]);
+        try {
+          s.socket!.add(out);
+          return bufLen;
+        } catch (_) {
+          s.state = 2;
+          return -1;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketRecv = WasmFunction(
+      (int h, int bufPtr, int bufLen) {
+        final s = _sockets[h];
+        if (s == null) return 0;
+        return drainBuf(s.rxBuf, bufPtr, bufLen);
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketClose = WasmFunction.voidReturn(
+      (int h) {
+        final s = _sockets.remove(h);
+        if (s == null) return;
+        s.state = 2;
+        s.sub?.cancel();
+        try { s.socket?.destroy(); } catch (_) {}
+      },
+      params: [ValueTy.i32],
+    );
+
+    // ── Synchronous socket HAL (blocking; for the test runner) ──
+    //
+    // The wasm test runner (module_run_tests) is one synchronous call —
+    // it can't await the async hal_socket_* above. These blocking
+    // variants (backed by RawSynchronousSocket) let a test connect,
+    // write, and drain bytes within that single call: connect blocks,
+    // `avail` reports kernel-buffered bytes without blocking, and `read`
+    // only pulls what's already there. A test loop bounded by
+    // hal_time_ms() spins while the kernel fills the socket. Blocks the
+    // calling isolate — fine for a one-shot, headless test engine.
+
+    final halSocketOpenSync = WasmFunction(
+      (int hostPtr, int hostLen, int port) {
+        final host = _readStr(hostPtr, hostLen);
+        if (host.isEmpty || port <= 0 || port > 65535) return -1;
+        try {
+          final sock = RawSynchronousSocket.connectSync(host, port);
+          final h = _nextSyncSocketHandle++;
+          _syncSockets[h] = sock;
+          return h;
+        } catch (_) {
+          return -1;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketAvailSync = WasmFunction(
+      (int h) {
+        final s = _syncSockets[h];
+        if (s == null) return -1;
+        try {
+          return s.available();
+        } catch (_) {
+          return -1;
+        }
+      },
+      params: [ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketReadSync = WasmFunction(
+      (int h, int bufPtr, int bufLen) {
+        final s = _syncSockets[h];
+        if (s == null) return -1;
+        try {
+          final avail = s.available();
+          if (avail <= 0) return 0;
+          final want = avail < bufLen ? avail : bufLen;
+          final data = s.readSync(want);
+          if (data == null) return -1; // EOF
+          final mem = _memory!.view;
+          for (var i = 0; i < data.length; i++) mem[bufPtr + i] = data[i];
+          return data.length;
+        } catch (_) {
+          return -1;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketWriteSync = WasmFunction(
+      (int h, int bufPtr, int bufLen) {
+        final s = _syncSockets[h];
+        if (s == null || bufLen <= 0) return -1;
+        try {
+          final mem = _memory!.view;
+          final out = List<int>.generate(bufLen, (i) => mem[bufPtr + i]);
+          s.writeFromSync(out);
+          return bufLen;
+        } catch (_) {
+          return -1;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSocketCloseSync = WasmFunction.voidReturn(
+      (int h) {
+        final s = _syncSockets.remove(h);
+        if (s == null) return;
+        try { s.closeSync(); } catch (_) {}
+      },
+      params: [ValueTy.i32],
+    );
+
     // ── Stubs (return sentinel values) ──
 
     WasmFunction stubVoid(List<ValueTy> p) =>
@@ -566,6 +757,69 @@ class WappEngine {
         return 0;
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+
+    // ── BLE (shared adapter via BleService) ──
+    // Each wapp drains its own inbound queue (fed from the shared broadcast
+    // stream) and advertises through the shared multiplexed queue, so BLE is
+    // never owned exclusively by one wapp.
+    final ble = BleService.instance;
+    final halBleScanStart = WasmFunction(
+      () {
+        if (!_bleScanning) {
+          _bleScanning = true;
+          _bleSub = ble.inbound.listen((f) {
+            _bleRx.add(jsonEncode({
+              'from': f.from,
+              'rssi': f.rssi,
+              'data': String.fromCharCodes(f.data),
+            }).codeUnits);
+            if (_bleRx.length > 256) {
+              _bleRx.removeRange(0, _bleRx.length - 256);
+            }
+          });
+          ble.startScan();
+        }
+        return 0;
+      },
+      params: [], results: [ValueTy.i32],
+    );
+    final halBleScanStop = WasmFunction.voidReturn(
+      () {
+        if (_bleScanning) {
+          _bleScanning = false;
+          _bleSub?.cancel();
+          _bleSub = null;
+          ble.stopScan();
+        }
+      },
+      params: [],
+    );
+    final halBleScanRead = WasmFunction(
+      (int bufPtr, int bufLen) {
+        if (_bleRx.isEmpty || bufLen <= 0) return 0;
+        final rec = _bleRx.removeAt(0);
+        final n = rec.length < bufLen ? rec.length : bufLen;
+        final mem = _memory!.view;
+        for (var i = 0; i < n; i++) mem[bufPtr + i] = rec[i];
+        return n;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halBleAdvertise = WasmFunction(
+      (int bufPtr, int bufLen) {
+        if (bufLen <= 0) return -1;
+        final mem = _memory!.view;
+        final bytes = Uint8List(bufLen);
+        for (var i = 0; i < bufLen; i++) bytes[i] = mem[bufPtr + i];
+        ble.enqueueAdvert(this, bytes);
+        return 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halBleAdvertiseStop = WasmFunction.voidReturn(
+      () => ble.clearAdverts(this),
+      params: [],
     );
 
     final allImports = [
@@ -594,9 +848,27 @@ class WappEngine {
       WasmImport('hal', 'file_read', halFileRead),
       WasmImport('hal', 'file_write', halFileWrite),
       WasmImport('hal', 'file_close', halFileClose),
-      // Transport HAL (hal.http / hal.lora / hal.ble) — stubs defined in
-      // lib/connections/hal/. The ABI is unchanged; the wiring just lives
-      // with the rest of the connection code now.
+      // Socket (raw TCP, host network)
+      WasmImport('hal', 'socket_open', halSocketOpen),
+      WasmImport('hal', 'socket_status', halSocketStatus),
+      WasmImport('hal', 'socket_send', halSocketSend),
+      WasmImport('hal', 'socket_recv', halSocketRecv),
+      WasmImport('hal', 'socket_close', halSocketClose),
+      // Synchronous (blocking) socket — test runner only.
+      WasmImport('hal', 'socket_open_sync', halSocketOpenSync),
+      WasmImport('hal', 'socket_avail_sync', halSocketAvailSync),
+      WasmImport('hal', 'socket_read_sync', halSocketReadSync),
+      WasmImport('hal', 'socket_write_sync', halSocketWriteSync),
+      WasmImport('hal', 'socket_close_sync', halSocketCloseSync),
+      // BLE (shared adapter via BleService — receive on all wapps, multiplexed
+      // transmit). Real implementation, not a stub.
+      WasmImport('hal', 'ble_scan_start', halBleScanStart),
+      WasmImport('hal', 'ble_scan_stop', halBleScanStop),
+      WasmImport('hal', 'ble_scan_read', halBleScanRead),
+      WasmImport('hal', 'ble_advertise', halBleAdvertise),
+      WasmImport('hal', 'ble_advertise_stop', halBleAdvertiseStop),
+      // Transport HAL (hal.http / hal.lora) — stubs defined in
+      // lib/connections/hal/. (hal.ble is implemented above, not stubbed.)
       ...connectionHalImports(stubVoid: stubVoid, stubI32: stubI32),
       // Process (host subprocess, no sandbox)
       WasmImport('hal', 'process_exec', halProcessExec),
@@ -666,6 +938,11 @@ class WappEngine {
   void handleEvent() { _instance?.getFunction('module_handle_event')?.call([]); }
   void destroy() { _instance?.getFunction('module_destroy')?.call([]); }
 
+  /// Invoke the test runner export (present only in a `tests.wasm`
+  /// built from a wapp's `tests/`). The runner emits `tests.case` /
+  /// `tests.complete` JSON via `hal_msg_send`, drained from [drainOutbox].
+  void runTests() { _instance?.getFunction('module_run_tests')?.call([]); }
+
   int get tickIntervalMs {
     final fn = _instance?.getFunction('module_tick_interval_ms');
     if (fn == null) return 5000;
@@ -696,6 +973,25 @@ class WappEngine {
       }
     }
     _files.clear();
+    // Close any sockets the wapp left open.
+    for (final s in _sockets.values) {
+      s.sub?.cancel();
+      try { s.socket?.destroy(); } catch (_) {}
+    }
+    _sockets.clear();
+    for (final s in _syncSockets.values) {
+      try { s.closeSync(); } catch (_) {}
+    }
+    _syncSockets.clear();
+    // Release this wapp's share of the BLE adapter.
+    _bleSub?.cancel();
+    _bleSub = null;
+    if (_bleScanning) {
+      _bleScanning = false;
+      BleService.instance.stopScan();
+    }
+    BleService.instance.clearAdverts(this);
+    _bleRx.clear();
     _byId.remove(engineId);
     WappEventBroker.instance.unregisterEngine(engineId);
     _stopwatch.stop();

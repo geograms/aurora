@@ -54,6 +54,9 @@ dependencies:
   media_kit_video: ^1.2.4                # Flutter video render surface for media_kit
   media_kit_libs_video: ^1.0.4           # Bundled native libs (libmpv) — no system install needed
   media_kit_native_event_loop: ^1.0.9
+  bluetooth_low_energy: ^6.0.0            # BLE central (scan) + peripheral (advertise) for APRS-over-BLE
+  bluez: ^0.8.2                           # BlueZ D-Bus client — Linux BLE advertising (peripheral)
+  dbus: ^0.7.10                           # D-Bus values for the BlueZ advertising payload
 
 dev_dependencies:
   flutter_test:
@@ -80,6 +83,14 @@ flutter:
   assets:
     - assets/hello_world.wasm
     - assets/terminal_settings.ui.json
+    # Built-in wapp editor, installed to storage on boot (see
+    # lib/editor/editor_install.dart). Each subdir is listed explicitly —
+    # Flutter does not recurse into nested asset folders.
+    - assets/editor/app-creator/
+    - assets/editor/app-creator/screens/
+    - assets/editor/app-creator/lang/
+    - assets/editor/app-creator/media/icons/
+    - assets/editor/app-creator/store/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

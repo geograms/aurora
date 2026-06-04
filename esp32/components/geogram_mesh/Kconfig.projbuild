@@ -1,0 +1,45 @@
+menu "Geogram Mesh Networking"
+
+    config GEOGRAM_MESH_ENABLED
+        bool "Enable ESP-Mesh-Lite support"
+        default y if IDF_TARGET_ESP32C3
+        default n
+        depends on IDF_TARGET_ESP32 || IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C3
+        help
+            Enable ESP-Mesh-Lite protocol for multi-node mesh networks.
+            ESP-Mesh-Lite provides native SoftAP support per node, allowing
+            phones/laptops to connect directly without requiring a router.
+            ESP32-C3 is supported with reduced memory limits.
+            Requires CONFIG_MESH_LITE_ENABLE=y in sdkconfig.
+
+    config GEOGRAM_MESH_CHANNEL
+        int "Mesh WiFi Channel"
+        default 1
+        range 1 13
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            WiFi channel for mesh network. All nodes must use the same channel.
+            Avoid channels used by nearby WiFi networks for best performance.
+
+    config GEOGRAM_MESH_MAX_LAYER
+        int "Maximum mesh tree depth"
+        default 3 if IDF_TARGET_ESP32C3
+        default 6
+        range 2 15
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Maximum depth of the mesh tree topology. Root node is level 1.
+            Larger values allow more nodes but increase latency.
+            Default is 3 for ESP32-C3 (limited SRAM), 6 for other chips.
+
+    config GEOGRAM_MESH_EXTERNAL_AP_MAX_CONN
+        int "Max phone connections per node"
+        default 2 if IDF_TARGET_ESP32C3
+        default 4
+        range 1 10
+        depends on GEOGRAM_MESH_ENABLED
+        help
+            Maximum number of phones that can connect to each node's SoftAP.
+            Default is 2 for ESP32-C3 (limited SRAM), 4 for other chips.
+
+endmenu

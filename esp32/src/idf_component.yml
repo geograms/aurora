@@ -1,0 +1,2 @@
+dependencies:
+  jimmyw/ssh_cli_server: "*"

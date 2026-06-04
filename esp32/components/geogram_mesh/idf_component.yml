@@ -1,0 +1,6 @@
+## IDF Component Manager manifest file
+## Geogram Mesh component - ESP-Mesh-Lite based networking
+
+dependencies:
+  espressif/mesh_lite:
+    version: ">=1.0.0"

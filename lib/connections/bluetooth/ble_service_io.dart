@@ -14,6 +14,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:bluetooth_low_energy/bluetooth_low_energy.dart';
+import 'package:ble_peripheral/ble_peripheral.dart' as bp;
 import 'package:bluez/bluez.dart';
 import 'package:dbus/dbus.dart' show DBusArray;
 import 'package:flutter/foundation.dart';
@@ -41,14 +42,19 @@ class BleService {
   static final BleService instance = BleService._();
 
   CentralManager? _central;
-  PeripheralManager? _peripheral;
   bool _inited = false;
   bool _advertiseSupported = true;
 
-  // Linux advertising fallback via BlueZ D-Bus (the bluetooth_low_energy
-  // package has no Linux peripheral). Transparent to wapps — hal_ble_advertise
-  // works the same; the host just uses a different backend here.
-  bool _useBluez = false;
+  // Advertising backend: on Android/iOS use the ble_peripheral package (the
+  // bluetooth_low_energy PeripheralManager doesn't reliably radiate on some
+  // Android chipsets — geogram uses ble_peripheral for the same reason). On
+  // Linux fall back to BlueZ D-Bus. Scanning always uses CentralManager above.
+  bool get _useBlePeripheral => Platform.isAndroid || Platform.isIOS;
+  bool _blePeripheralReady = false;
+
+  // Linux advertising via BlueZ D-Bus (no ble_peripheral on Linux).
+  // Transparent to wapps — hal_ble_advertise works the same; the host just
+  // uses ble_peripheral (Android/iOS) or BlueZ (Linux) underneath.
   BlueZClient? _bluez;
   BlueZAdapter? _bzAdapter;
   BlueZAdvertisement? _bzAdvert;
@@ -67,6 +73,8 @@ class BleService {
   final List<_Advert> _adverts = [];
   Timer? _rotateTimer;
   int _rotateIdx = 0;
+  int _dutyTick = 0;       // scan/advertise duty-cycle phase
+  bool _rotating = false;  // re-entrancy guard for _rotate
 
   // Noise control: skip re-registering an unchanged advert, and rate-limit
   // the repetitive BlueZ failure / oversized-frame messages so they don't
@@ -106,25 +114,23 @@ class BleService {
       _central = null;
       debugPrint('BleService: central unavailable: $e');
     }
-    try {
-      _peripheral = PeripheralManager();
+    // Advertising backend.
+    if (_useBlePeripheral) {
       try {
-        // Bounded like the central authorize above — on Android this can stall.
-        await _peripheral!.authorize().timeout(const Duration(seconds: 3),
-            onTimeout: () => true);
-      } catch (_) {}
-    } catch (e) {
-      _peripheral = null;
-      // No package peripheral here — on Linux fall back to BlueZ D-Bus so
-      // advertising (send) still works; elsewhere it's genuinely unsupported.
-      if (Platform.isLinux) {
-        _useBluez = true;
+        await bp.BlePeripheral.initialize();
+        _blePeripheralReady = true;
         _advertiseSupported = true;
-        debugPrint('BleService: using BlueZ D-Bus for advertising');
-      } else {
+      } catch (e) {
+        _blePeripheralReady = false;
         _advertiseSupported = false;
-        debugPrint('BleService: advertising unavailable (scan-only): $e');
+        debugPrint('BleService: ble_peripheral init failed: $e');
       }
+    } else if (Platform.isLinux) {
+      _advertiseSupported = true; // BlueZ D-Bus (lazily connected in _bluezReady)
+      debugPrint('BleService: using BlueZ D-Bus for advertising');
+    } else {
+      _advertiseSupported = false; // no advertise backend (e.g. desktop w/o BlueZ)
+      debugPrint('BleService: advertising unavailable (scan-only)');
     }
   }
 
@@ -140,7 +146,6 @@ class BleService {
       return _bzAdapter != null;
     } catch (e) {
       debugPrint('BleService: BlueZ connect failed: $e');
-      _useBluez = false;
       _advertiseSupported = false;
       return false;
     }
@@ -199,10 +204,13 @@ class BleService {
     }
   }
 
-  // True when BlueZ is the advertising backend AND we have something to
-  // advertise AND we also want to scan — i.e. we must time-slice the radio.
-  bool get _dutyCycling =>
-      _peripheral == null && _useBluez && _adverts.isNotEmpty && _scanRefs > 0;
+  // True whenever we both want to scan AND have something to advertise — then
+  // the rotation owns the radio and time-slices it (scan-primary), so
+  // _applyScan must not also drive discovery. This holds for BOTH backends:
+  // BlueZ literally can't scan+advertise at once, and on Android doing both
+  // concurrently makes the outbound advert unreliable on some chipsets. We
+  // are a receiver first — advertise only in brief bursts between scans.
+  bool get _dutyCycling => _adverts.isNotEmpty && _scanRefs > 0;
 
   // ── Outbound advertising ──────────────────────────────────────────
   void enqueueAdvert(Object owner, Uint8List payload,
@@ -223,13 +231,22 @@ class BleService {
     _adverts.removeWhere((a) => a.owner == owner);
     if (_adverts.isEmpty) {
       _stopRotation();
-      _bzAdv = false;
       _stopAdvertise();
       _applyScan(); // resume continuous scanning now the radio is free
     }
   }
 
   Future<void> _rotate() async {
+    if (_rotating) return; // don't let slow ticks overlap
+    _rotating = true;
+    try {
+      await _rotateBody();
+    } finally {
+      _rotating = false;
+    }
+  }
+
+  Future<void> _rotateBody() async {
     await _ensure();
     if (!_advertiseSupported) {
       _stopRotation();
@@ -239,10 +256,15 @@ class BleService {
     _adverts.removeWhere((a) => a.expiresMs <= now);
     // On the legacy BlueZ backend, drop anything that won't fit a 31-byte
     // advert (once), rather than retrying it forever.
-    if (_peripheral == null && _useBluez) {
+    // Drop frames that won't fit a 31-byte legacy advert (once), rather than
+    // retrying them forever. The package/Android backend has less room than
+    // BlueZ because Android prepends a 3-byte flags AD to connectable adverts
+    // (max manufacturer payload ~24B vs ~27B on BlueZ).
+    {
+      final maxLen = _useBlePeripheral ? 24 : 27;
       int dropped = 0;
       _adverts.removeWhere((a) {
-        if (a.payload.length > 27) { dropped++; return true; }
+        if (a.payload.length > maxLen) { dropped++; return true; }
         return false;
       });
       if (dropped > 0) {
@@ -250,13 +272,12 @@ class BleService {
         if (t - _dropLogMs > 10000) {
           _dropLogMs = t;
           debugPrint('BleService: dropped $dropped BLE frame(s) too long for '
-              'legacy advertising (>27B)');
+              'legacy advertising (>${maxLen}B)');
         }
       }
     }
     if (_adverts.isEmpty) {
       _stopRotation();
-      _bzAdv = false;
       await _stopAdvertise();
       await _applyScan();
       return;
@@ -264,44 +285,69 @@ class BleService {
     if (_rotateIdx >= _adverts.length) _rotateIdx = 0;
     final payload = _adverts[_rotateIdx++].payload;
 
-    // Concurrent-capable backend (package peripheral): just (re)advertise.
-    final p = _peripheral;
-    if (p != null) {
+    // Nothing to receive → advertise continuously.
+    if (_scanRefs == 0) {
+      await _advertiseFrame(payload);
+      return;
+    }
+
+    // Scan-primary duty cycle: we are a receiver first. Spend most ticks
+    // scanning and only one tick in three on a brief advertise burst, so the
+    // outbound frame radiates cleanly (never concurrent with scanning, which
+    // is unreliable on BlueZ and on some Android chipsets) while a peer that
+    // is also scanning still catches the burst.
+    _dutyTick = (_dutyTick + 1) % 3;
+    if (_dutyTick == 0) {
+      await _stopScanWindow();
+      await _advertiseFrame(payload);
+    } else {
+      await _stopAdvertise();
+      await _startScanWindow();
+    }
+  }
+
+  /// Advertise one frame via whichever backend is available (package
+  /// PeripheralManager, else BlueZ). The caller owns the scan/advertise
+  /// time-slicing.
+  Future<void> _advertiseFrame(Uint8List payload) async {
+    if (_useBlePeripheral) {
+      if (!_blePeripheralReady) return;
       try {
-        if (p.state != BluetoothLowEnergyState.poweredOn) return;
-        await p.stopAdvertising();
-        await p.startAdvertising(Advertisement(manufacturerSpecificData: [
-          ManufacturerSpecificData(id: kBleCompanyId, data: payload),
-        ]));
+        await bp.BlePeripheral.stopAdvertising();
+        await bp.BlePeripheral.startAdvertising(
+          services: const [],
+          manufacturerData: bp.ManufacturerData(
+            manufacturerId: kBleCompanyId,
+            data: payload,
+          ),
+        );
       } catch (e) {
         _warnThrottled('advertise failed: $e');
       }
       return;
     }
-
-    // BlueZ backend: this controller can't scan + advertise at once, so when
-    // we also want to scan we alternate advertise/scan windows each tick.
-    if (!await _bluezReady()) return;
-    if (_scanRefs == 0) {
-      await _bzRegister(payload); // advertise continuously, nothing to receive
-      return;
-    }
-    if (_bzAdv) {
-      await _bzUnadvertise(); // → scan window
-      _bzAdv = false;
-      try {
-        if (!_scanning) { await _central!.startDiscovery(); _scanning = true; }
-      } catch (_) {}
-    } else {
-      try {
-        if (_scanning) { await _central!.stopDiscovery(); _scanning = false; }
-      } catch (_) {}
-      await _bzRegister(payload); // → advertise window
-      _bzAdv = true;
-    }
+    if (await _bluezReady()) await _bzRegister(payload);
   }
 
-  bool _bzAdv = false; // current BlueZ duty phase (true = advertising)
+  Future<void> _startScanWindow() async {
+    final c = _central;
+    if (c == null || _scanning) return;
+    try {
+      if (c.state == BluetoothLowEnergyState.poweredOn) {
+        await c.startDiscovery();
+        _scanning = true;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _stopScanWindow() async {
+    final c = _central;
+    if (c == null || !_scanning) return;
+    try {
+      await c.stopDiscovery();
+    } catch (_) {}
+    _scanning = false;
+  }
 
   Future<void> _bzRegister(Uint8List payload) async {
     final hex = _hex(payload);
@@ -342,9 +388,11 @@ class BleService {
   }
 
   Future<void> _stopAdvertise() async {
-    try {
-      await _peripheral?.stopAdvertising();
-    } catch (_) {}
+    if (_useBlePeripheral) {
+      try {
+        await bp.BlePeripheral.stopAdvertising();
+      } catch (_) {}
+    }
     await _bzUnadvertise();
   }
 

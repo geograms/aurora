@@ -48,10 +48,11 @@ static const char *TAG = "ble_hello";
 #define CHR_NOTIFY_UUID     0xFFF2
 
 /* Time-sharing: NimBLE legacy can't advertise + scan simultaneously.
- * Advertise most of the time (phones discover us), brief scan windows
- * to count nearby Geogram devices. */
-#define ADV_DURATION_SEC    10          /* advertise for 10s */
-#define SCAN_DURATION_MS    3000        /* scan for 3s */
+ * Scan-heavy duty cycle so we reliably catch APRS frames from phones/desktops
+ * (whose adverts rotate/refresh and are only briefly on air), with short
+ * advertise windows in between for presence. */
+#define ADV_DURATION_SEC    6           /* advertise window between scans */
+#define SCAN_DURATION_MS    5000        /* scan for 5s (~80% of the cycle) */
 
 /* ---- state -------------------------------------------------------------- */
 

@@ -10,15 +10,23 @@ class PreferencesService {
 
   PreferencesService._();
 
-  static Future<PreferencesService> instance() async {
-    if (_instance != null) return _instance!;
-    _instance = PreferencesService._();
-    _instance!._prefs = await SharedPreferences.getInstance();
-    return _instance!;
+  static Future<PreferencesService>? _pending;
+
+  static Future<PreferencesService> instance() {
+    if (_instance != null) return Future<PreferencesService>.value(_instance!);
+    // Race-safe: concurrent callers share one in-flight future, and the
+    // singleton is published only AFTER its SharedPreferences is ready — so
+    // no caller can observe a half-initialized instance (LateInitError).
+    return _pending ??= () async {
+      final service = PreferencesService._();
+      service._prefs = await SharedPreferences.getInstance();
+      _instance = service;
+      return service;
+    }();
   }
 
-  /// Sync accessor — safe to use after the first `instance()` call
-  /// has completed (which happens during app startup in main.dart).
+  /// Sync accessor — null until the first `instance()` call has fully
+  /// completed (it returns the instance only after _prefs is ready).
   static PreferencesService? get instanceSync => _instance;
 
   // Terminal settings
@@ -75,6 +83,10 @@ class PreferencesService {
 
   int get remoteApiPort => _prefs.getInt('remoteApi.port') ?? 3456;
   set remoteApiPort(int v) => _prefs.setInt('remoteApi.port', v);
+
+  // First-run Android onboarding (permissions intro panel) shown + handled.
+  bool get onboardingComplete => _prefs.getBool('onboarding.complete') ?? false;
+  set onboardingComplete(bool v) => _prefs.setBool('onboarding.complete', v);
 
   // Wapp data directory — root folder for per-wapp user data
   String? get wappDataDir => _prefs.getString('wapp.dataDir');

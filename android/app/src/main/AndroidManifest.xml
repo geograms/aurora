@@ -4,6 +4,20 @@
          API server, APRS-IS sockets, and all http(s) traffic. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+    <!-- Bluetooth LE for APRS-over-BLE (scan + advertise). On Android 12+
+         the *_SCAN/CONNECT/ADVERTISE runtime permissions are used; on <=30 the
+         legacy BLUETOOTH/ADMIN + fine location are required for scanning. We
+         don't derive location from BLE, hence neverForLocation. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+                     android:usesPermissionFlags="neverForLocation"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
+
     <application
         android:label="Aurora"
         android:name="${applicationName}"

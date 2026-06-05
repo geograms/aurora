@@ -30,6 +30,7 @@ import '../services/event_bus.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
 import '../services/remote_api_service.dart';
+import '../services/android_permissions_service.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
 import '../profile/profile_storage_factory.dart';
@@ -45,6 +46,7 @@ import '../wapp/wapp_page.dart';
 
 part 'wapp_manifest.dart';
 part 'seeding.dart';
+part 'permissions_intro_page.dart';
 part 'launcher_app.dart';
 part 'launcher_page.dart';
 part 'settings_page.dart';

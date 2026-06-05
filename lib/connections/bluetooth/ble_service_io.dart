@@ -93,7 +93,11 @@ class BleService {
     try {
       _central = CentralManager();
       try {
-        await _central!.authorize();
+        // Bounded: on Android authorize() can stall (it routes through
+        // ActivityCompat.requestPermissions); the perms are requested up front
+        // in the onboarding panel, so don't let a stalled call block scanning.
+        await _central!.authorize().timeout(const Duration(seconds: 3),
+            onTimeout: () => true);
       } catch (_) {}
       // Permanent discovered subscription; frames only flow while scanning.
       _central!.discovered.listen(_onDiscovered);
@@ -105,7 +109,9 @@ class BleService {
     try {
       _peripheral = PeripheralManager();
       try {
-        await _peripheral!.authorize();
+        // Bounded like the central authorize above — on Android this can stall.
+        await _peripheral!.authorize().timeout(const Duration(seconds: 3),
+            onTimeout: () => true);
       } catch (_) {}
     } catch (e) {
       _peripheral = null;
@@ -152,8 +158,20 @@ class BleService {
     await _ensure();
     if (_central == null) return false;
     _scanRefs++;
+    // The adapter may not report poweredOn immediately after init (Android
+    // reads state asynchronously); wait briefly so the first scan isn't lost.
+    await _awaitPoweredOn();
     await _applyScan();
     return true;
+  }
+
+  Future<void> _awaitPoweredOn() async {
+    final c = _central;
+    if (c == null) return;
+    for (var i = 0; i < 20; i++) {
+      if (c.state == BluetoothLowEnergyState.poweredOn) return;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
   }
 
   Future<void> stopScan() async {

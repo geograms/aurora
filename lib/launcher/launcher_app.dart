@@ -9,6 +9,8 @@ class IwiApp extends StatefulWidget {
 }
 
 class _IwiAppState extends State<IwiApp> {
+  PreferencesService? _prefs;
+
   @override
   void initState() {
     super.initState();
@@ -18,6 +20,10 @@ class _IwiAppState extends State<IwiApp> {
     // (b) profile switches re-route storage paths and trigger a
     //     launcher rescan on the fresh apps/ folder.
     ProfileService.instance.activeProfileNotifier.addListener(_onProfileChanged);
+    // Load prefs so the first-run Android permissions intro can be gated.
+    PreferencesService.instance().then((p) {
+      if (mounted) setState(() => _prefs = p);
+    });
   }
 
   @override
@@ -65,17 +71,26 @@ class _IwiAppState extends State<IwiApp> {
       builder: (context, child) {
         return NotificationLayer(child: child ?? const SizedBox.shrink());
       },
-      home: hasProfile
-          ? const LauncherPage()
-          : WelcomePage(
-              // saveAndActivate already flips activeProfileNotifier,
-              // so the _onProfileChanged setState above will rebuild
-              // this widget with hasProfile==true and swap to the
-              // launcher. onComplete is a no-op hook for any future
-              // analytics / telemetry.
-              onComplete: () {},
-            ),
+      home: _home(hasProfile),
     );
+  }
+
+  Widget _home(bool hasProfile) {
+    final prefs = _prefs;
+    // First-run Android permissions intro — request the runtime permissions
+    // (BLE/location/notifications) up front so transports work afterwards.
+    if (prefs != null &&
+        platform.platformName() == 'android' &&
+        !prefs.onboardingComplete) {
+      return PermissionsIntroPage(onComplete: () async {
+        prefs.onboardingComplete = true;
+        if (mounted) setState(() {});
+      });
+    }
+    if (hasProfile) return const LauncherPage();
+    // saveAndActivate flips activeProfileNotifier, so _onProfileChanged
+    // rebuilds with hasProfile==true and swaps to the launcher.
+    return WelcomePage(onComplete: () {});
   }
 }
 

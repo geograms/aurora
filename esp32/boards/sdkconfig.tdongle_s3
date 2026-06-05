@@ -118,3 +118,9 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 
 # LVGL fonts for ST7735 display (160x80 needs small fonts)
 CONFIG_LV_FONT_MONTSERRAT_10=y
+
+# Light-sleep MSPI pull-up: disabled. On ESP32-S3 this defaults on and pulls in
+# octal-flash-only code in esp_hw_support/sleep_gpio.c (ESP_MSPI_IO_DQS/D4..D7),
+# which does not compile for this quad-flash board under ESP-IDF 5.2.1. The
+# T-Dongle is bus-powered and never light-sleeps, so this has no runtime effect.
+# CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU is not set

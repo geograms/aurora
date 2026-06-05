@@ -917,7 +917,27 @@ static void kv4p_aprs_to_ble(const char *from, const char *to,
 #endif  /* MODEL_KV4P */
 
 #if BOARD_MODEL == MODEL_TDONGLE_S3
-/* (BLE callbacks will be re-added later) */
+/** Aurora APRS-over-BLE RX → rolling chat on the T-Dongle display.
+ *  Decoded by ble_hello (the radio owner); we only format + push a line. */
+static void tdongle_aprs_rx(const char *from, const char *to,
+                            const char *text, int rssi)
+{
+    ESP_LOGI(TAG, "Aurora APRS RX (rssi=%d): %s -> %s : %s",
+             rssi, from, (to && *to) ? to : "(geo)", text);
+
+    /* Geo-chat text carries a leading ">>" marker — not useful on screen. */
+    if (text && text[0] == '>' && text[1] == '>') text += 2;
+
+    char line[120];
+    if (to && to[0] == '!') {              // position: text = lat,lon[,comment]
+        snprintf(line, sizeof(line), "@ %s", text);
+    } else if (to && to[0] == '#') {       // group / bulletin
+        snprintf(line, sizeof(line), "%s %s", to, text);
+    } else {                               // 1:1 message / geo-chat
+        snprintf(line, sizeof(line), "%s", text);
+    }
+    tdongle_ui_push_message(from, line);
+}
 #endif  /* MODEL_TDONGLE_S3 */
 
 extern "C" void app_main(void)
@@ -1003,6 +1023,8 @@ extern "C" void app_main(void)
         ret = ble_hello_init(callsign);
         if (ret == ESP_OK) {
             ESP_LOGI(TAG, "BLE HELLO active — callsign: %s", callsign);
+            /* Receive Aurora APRS-over-BLE frames and show them on screen. */
+            ble_hello_set_aprs_cb(tdongle_aprs_rx);
         } else {
             ESP_LOGW(TAG, "BLE HELLO init failed: %s", esp_err_to_name(ret));
         }

@@ -33,6 +33,15 @@ static const char *TAG = "ble_hello";
 #define MAX_SEEN            16
 #define EXPIRE_SEC          60
 
+/* APRS-over-BLE mesh repeater: rebroadcast each received Aurora frame once,
+ * suppressing any frame whose content was already relayed in the last 10 min
+ * (loop/storm control). Relayed frames are advertised for RELAY_TTL_SEC so
+ * neighbours catch them within a scan window. */
+#define RELAY_MAX           8           /* concurrent frames queued for relay */
+#define RELAY_TTL_SEC       30          /* how long to keep rebroadcasting one */
+#define RDEDUP_MAX          32          /* recently-relayed content cache */
+#define RELAY_DEDUP_SEC     600         /* 10-minute suppression window */
+
 /* GATT UUIDs */
 #define SVC_UUID            0xFFE0
 #define CHR_WRITE_UUID      0xFFF1
@@ -62,6 +71,22 @@ typedef struct {
 
 static seen_entry_t s_seen[MAX_SEEN];
 static int          s_seen_count;
+
+/* Aurora APRS-over-BLE receive callback (optional, set by app) */
+static ble_hello_aprs_cb_t s_aprs_cb;
+
+/* APRS relay state */
+typedef struct {
+    uint8_t  mfg[31];                   /* full manufacturer data to rebroadcast */
+    uint8_t  len;                       /* 0 = empty slot */
+    uint32_t expire;                    /* seconds-since-boot when it lapses */
+} relay_slot_t;
+static relay_slot_t s_relay[RELAY_MAX];
+static int          s_relay_rr;         /* round-robin advertise cursor */
+
+typedef struct { uint32_t hash; uint32_t t; } rdedup_t;
+static rdedup_t s_rdedup[RDEDUP_MAX];
+static int      s_rdedup_cnt;
 
 /* GATT */
 static uint16_t s_notify_handle;
@@ -137,9 +162,74 @@ static void track_device(const uint8_t *addr)
     }
 }
 
+/* ---- APRS relay --------------------------------------------------------- */
+
+static uint32_t fnv1a(const uint8_t *d, int n)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < n; i++) { h ^= d[i]; h *= 16777619u; }
+    return h;
+}
+
+/* True if this content was relayed within the last RELAY_DEDUP_SEC. */
+static bool relay_seen(uint32_t hash)
+{
+    uint32_t t = now_sec();
+    int n = s_rdedup_cnt < RDEDUP_MAX ? s_rdedup_cnt : RDEDUP_MAX;
+    for (int i = 0; i < n; i++) {
+        if (s_rdedup[i].hash == hash && (t - s_rdedup[i].t) < RELAY_DEDUP_SEC) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void relay_remember(uint32_t hash)
+{
+    int idx = s_rdedup_cnt % RDEDUP_MAX;
+    s_rdedup[idx].hash = hash;
+    s_rdedup[idx].t = now_sec();
+    s_rdedup_cnt++;
+}
+
+/* Queue a full manufacturer-data frame for rebroadcast. */
+static void relay_enqueue(const uint8_t *mfg, int len)
+{
+    if (len <= 0) return;
+    if (len > (int)sizeof(s_relay[0].mfg)) len = sizeof(s_relay[0].mfg);
+    uint32_t t = now_sec();
+    int slot = -1;
+    for (int i = 0; i < RELAY_MAX; i++) {
+        if (s_relay[i].len == 0 || s_relay[i].expire <= t) { slot = i; break; }
+    }
+    if (slot < 0) {                     /* all busy — evict the soonest-to-lapse */
+        slot = 0;
+        for (int i = 1; i < RELAY_MAX; i++)
+            if (s_relay[i].expire < s_relay[slot].expire) slot = i;
+    }
+    memcpy(s_relay[slot].mfg, mfg, len);
+    s_relay[slot].len = (uint8_t)len;
+    s_relay[slot].expire = t + RELAY_TTL_SEC;
+}
+
+/* Pick the next live frame to rebroadcast (round-robin), reaping expired
+ * slots; returns its index, or -1 if nothing pending. */
+static int relay_pick(void)
+{
+    uint32_t t = now_sec();
+    for (int n = 0; n < RELAY_MAX; n++) {
+        s_relay_rr = (s_relay_rr + 1) % RELAY_MAX;
+        relay_slot_t *r = &s_relay[s_relay_rr];
+        if (r->len == 0) continue;
+        if (r->expire <= t) { r->len = 0; continue; }
+        return s_relay_rr;
+    }
+    return -1;
+}
+
 /* ---- advertising -------------------------------------------------------- */
 
-static void start_advertise(void)
+static void advertise_with(const uint8_t *mfg, uint8_t mfg_len)
 {
     /* Stop scanning first — can't coexist with legacy adv */
     ble_gap_disc_cancel();
@@ -159,8 +249,8 @@ static void start_advertise(void)
     fields.uuids16 = &svc_uuid;
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
-    fields.mfg_data = s_mfg_data;
-    fields.mfg_data_len = s_mfg_len;
+    fields.mfg_data = mfg;
+    fields.mfg_data_len = mfg_len;
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
@@ -184,6 +274,19 @@ static void start_advertise(void)
                            &adv_params, ble_hello_gap_event, NULL);
     if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGW(TAG, "adv_start failed: %d", rc);
+    }
+}
+
+/* Advertise a pending relay frame when one is queued (so APRS messages are
+ * rebroadcast promptly), otherwise our own presence beacon. */
+static void start_advertise(void)
+{
+    int ri = relay_pick();
+    if (ri >= 0) {
+        ESP_LOGI(TAG, "relaying APRS frame (%u bytes)", s_relay[ri].len);
+        advertise_with(s_relay[ri].mfg, s_relay[ri].len);
+    } else {
+        advertise_with(s_mfg_data, s_mfg_len);
     }
 }
 
@@ -331,6 +434,42 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
     { 0 }, /* sentinel */
 };
 
+/* ---- Aurora APRS-over-BLE decode ---------------------------------------- */
+
+void ble_hello_set_aprs_cb(ble_hello_aprs_cb_t cb)
+{
+    s_aprs_cb = cb;
+}
+
+/* Decode a compact Aurora APRS payload `<from>\x1f<to>\x1f<text>` (the bytes
+ * after the 2-byte company id) and deliver it via the registered callback.
+ * Untrusted input — everything is bounds-checked and NUL-terminated. */
+static void aprs_decode(const uint8_t *payload, int len, int rssi)
+{
+    if (!s_aprs_cb || len <= 0) return;
+
+    /* Field buffers sized for a legacy advert (payload <= ~29 bytes). */
+    char from[16] = {0}, to[16] = {0}, text[64] = {0};
+    char *fields[3] = { from, to, text };
+    size_t caps[3]  = { sizeof from - 1, sizeof to - 1, sizeof text - 1 };
+
+    int fi = 0;     /* current field */
+    size_t fp = 0;  /* write pos in current field */
+    bool saw_sep = false;
+    for (int i = 0; i < len; i++) {
+        uint8_t b = payload[i];
+        if (b == 0x1F) {            /* field separator */
+            saw_sep = true;
+            if (fi < 2) { fi++; fp = 0; }
+            continue;               /* extra separators fold into text once fi==2 */
+        }
+        if (fp < caps[fi]) fields[fi][fp++] = (char)b;
+    }
+    if (!saw_sep) return;           /* not an Aurora APRS frame */
+
+    s_aprs_cb(from, to, text, rssi);
+}
+
 /* ---- GAP event handler -------------------------------------------------- */
 
 static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
@@ -348,9 +487,23 @@ static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
         }
         if (fields.mfg_data && fields.mfg_data_len >= 3 &&
             fields.mfg_data[0] == COMPANY_ID_LO &&
-            fields.mfg_data[1] == COMPANY_ID_HI &&
-            fields.mfg_data[2] == GEOGRAM_MARKER) {
-            track_device(event->disc.addr.val);
+            fields.mfg_data[1] == COMPANY_ID_HI) {
+            if (fields.mfg_data[2] == GEOGRAM_MARKER) {
+                /* Geogram presence beacon */
+                track_device(event->disc.addr.val);
+            } else if (fields.mfg_data_len >= 4) {
+                /* No 0x3E marker — treat as an Aurora APRS frame. */
+                track_device(event->disc.addr.val);
+                aprs_decode(&fields.mfg_data[2], fields.mfg_data_len - 2,
+                            event->disc.rssi);
+                /* Mesh repeater: rebroadcast new content once per 10 min. */
+                uint32_t ch = fnv1a(&fields.mfg_data[2],
+                                    fields.mfg_data_len - 2);
+                if (!relay_seen(ch)) {
+                    relay_remember(ch);
+                    relay_enqueue(fields.mfg_data, fields.mfg_data_len);
+                }
+            }
         }
         break;
     }

@@ -43,6 +43,24 @@ int ble_hello_device_count(void);
  */
 bool ble_hello_is_active(void);
 
+/**
+ * @brief Callback for a received Aurora APRS-over-BLE frame.
+ *
+ * Aurora desktops/peers advertise compact APRS frames in manufacturer data
+ * (company 0xFFFF, NO 0x3E marker) with the payload `<from>\x1f<to>\x1f<text>`.
+ * `to` may be a callsign (1:1), "#GRP" (group), "!" (position; text=lat,lon),
+ * or empty (geo-chat). All strings are NUL-terminated and only valid during the
+ * call — copy if retained.
+ */
+typedef void (*ble_hello_aprs_cb_t)(const char *from, const char *to,
+                                    const char *text, int rssi);
+
+/**
+ * @brief Register a callback for received Aurora APRS-over-BLE frames.
+ *        Pass NULL to disable. Keeps this component UI-agnostic.
+ */
+void ble_hello_set_aprs_cb(ble_hello_aprs_cb_t cb);
+
 #ifdef __cplusplus
 }
 #endif

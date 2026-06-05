@@ -68,6 +68,25 @@ class BleService {
   Timer? _rotateTimer;
   int _rotateIdx = 0;
 
+  // Noise control: skip re-registering an unchanged advert, and rate-limit
+  // the repetitive BlueZ failure / oversized-frame messages so they don't
+  // flood the console.
+  String? _bzRegisteredHex; // payload currently registered with BlueZ
+  String _lastWarn = '';
+  int _lastWarnMs = 0;
+  int _dropLogMs = 0;
+
+  static String _hex(Uint8List b) =>
+      b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+  void _warnThrottled(String msg) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (msg == _lastWarn && now - _lastWarnMs < 10000) return;
+    _lastWarn = msg;
+    _lastWarnMs = now;
+    debugPrint('BleService: $msg');
+  }
+
   Future<void> _ensure() async {
     if (_inited) return;
     _inited = true;
@@ -203,14 +222,19 @@ class BleService {
     // On the legacy BlueZ backend, drop anything that won't fit a 31-byte
     // advert (once), rather than retrying it forever.
     if (_peripheral == null && _useBluez) {
+      int dropped = 0;
       _adverts.removeWhere((a) {
-        if (a.payload.length > 27) {
-          debugPrint('BleService: BLE frame too long for legacy advertising '
-              '(${a.payload.length}B); dropped');
-          return true;
-        }
+        if (a.payload.length > 27) { dropped++; return true; }
         return false;
       });
+      if (dropped > 0) {
+        final t = DateTime.now().millisecondsSinceEpoch;
+        if (t - _dropLogMs > 10000) {
+          _dropLogMs = t;
+          debugPrint('BleService: dropped $dropped BLE frame(s) too long for '
+              'legacy advertising (>27B)');
+        }
+      }
     }
     if (_adverts.isEmpty) {
       _stopRotation();
@@ -232,7 +256,7 @@ class BleService {
           ManufacturerSpecificData(id: kBleCompanyId, data: payload),
         ]));
       } catch (e) {
-        debugPrint('BleService: advertise failed: $e');
+        _warnThrottled('advertise failed: $e');
       }
       return;
     }
@@ -262,6 +286,11 @@ class BleService {
   bool _bzAdv = false; // current BlueZ duty phase (true = advertising)
 
   Future<void> _bzRegister(Uint8List payload) async {
+    final hex = _hex(payload);
+    // Already advertising exactly this payload — don't churn the controller
+    // (re-registering the same advert every tick is what triggers BlueZ
+    // "Failed to register advertisement").
+    if (_bzAdvert != null && _bzRegisteredHex == hex) return;
     try {
       await _bzUnadvertise();
       _bzAdvert = await _bzAdapter!.advertisingManager.registerAdvertisement(
@@ -270,8 +299,17 @@ class BleService {
           BlueZManufacturerId(kBleCompanyId): DBusArray.byte(payload),
         },
       );
+      _bzRegisteredHex = hex;
     } catch (e) {
-      debugPrint('BleService: advertise failed: $e');
+      _warnThrottled('advertise failed: $e');
+      final s = e.toString();
+      if (s.contains('UnknownObject') || s.contains("doesn't exist")) {
+        // The adapter/advertising object went away — drop refs so the next
+        // tick reconnects via _bluezReady() instead of failing forever.
+        _bzAdapter = null;
+        _bzAdvert = null;
+        _bzRegisteredHex = null;
+      }
     }
   }
 
@@ -282,6 +320,7 @@ class BleService {
       } catch (_) {}
       _bzAdvert = null;
     }
+    _bzRegisteredHex = null;
   }
 
   Future<void> _stopAdvertise() async {

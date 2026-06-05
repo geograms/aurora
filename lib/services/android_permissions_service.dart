@@ -34,6 +34,28 @@ class AndroidPermissionsService {
 
   bool get _isAndroid => platform.platformName() == 'android';
 
+  /// The BLE runtime permissions we actually request.
+  static const List<Permission> _required = [
+    Permission.bluetoothScan,
+    Permission.bluetoothConnect,
+    Permission.bluetoothAdvertise,
+  ];
+
+  /// True when every required runtime permission is already granted (no prompt
+  /// shown). Off Android there are no runtime permissions, so always true.
+  /// Used to decide whether the intro panel is needed at all.
+  Future<bool> allGranted() async {
+    if (!_isAndroid) return true;
+    try {
+      for (final p in _required) {
+        if (!(await p.status).isGranted) return false;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Request the runtime permissions Aurora needs (Android 12+ BLE: scan,
   /// connect, advertise). Safe to call repeatedly — already-granted ones
   /// resolve immediately. No-op off Android. (No device-location request:
@@ -42,11 +64,7 @@ class AndroidPermissionsService {
   Future<void> requestAll() async {
     if (!_isAndroid) return;
     try {
-      final result = await [
-        Permission.bluetoothScan,
-        Permission.bluetoothConnect,
-        Permission.bluetoothAdvertise,
-      ].request();
+      final result = await _required.request();
       result.forEach((perm, status) =>
           LogService.instance.add('Permission $perm: ${status.name}'));
     } catch (e) {

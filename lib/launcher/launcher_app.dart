@@ -10,6 +10,8 @@ class IwiApp extends StatefulWidget {
 
 class _IwiAppState extends State<IwiApp> {
   PreferencesService? _prefs;
+  bool _gateReady = false;   // prefs + permission status both loaded
+  bool _permsGranted = false;
 
   @override
   void initState() {
@@ -20,9 +22,19 @@ class _IwiAppState extends State<IwiApp> {
     // (b) profile switches re-route storage paths and trigger a
     //     launcher rescan on the fresh apps/ folder.
     ProfileService.instance.activeProfileNotifier.addListener(_onProfileChanged);
-    // Load prefs so the first-run Android permissions intro can be gated.
-    PreferencesService.instance().then((p) {
-      if (mounted) setState(() => _prefs = p);
+    _loadGate();
+  }
+
+  // Load prefs + current permission status, both needed to decide whether the
+  // first-run permissions intro is shown.
+  Future<void> _loadGate() async {
+    final prefs = await PreferencesService.instance();
+    final granted = await AndroidPermissionsService.instance.allGranted();
+    if (!mounted) return;
+    setState(() {
+      _prefs = prefs;
+      _permsGranted = granted;
+      _gateReady = true;
     });
   }
 
@@ -77,14 +89,24 @@ class _IwiAppState extends State<IwiApp> {
 
   Widget _home(bool hasProfile) {
     final prefs = _prefs;
-    // First-run Android permissions intro — request the runtime permissions
-    // (BLE/location/notifications) up front so transports work afterwards.
-    if (prefs != null &&
-        platform.platformName() == 'android' &&
-        !prefs.onboardingComplete) {
+    if (!_gateReady || prefs == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    // First-run Android permissions intro: ONLY when the BLE permissions are
+    // not yet granted AND we haven't completed onboarding. If the perms are
+    // already granted (e.g. re-install, or granted out-of-band) there is
+    // nothing to request, so skip the intro entirely — this is why it must
+    // gate on the live permission status, not just a stored flag.
+    final needIntro = platform.platformName() == 'android' &&
+        !prefs.onboardingComplete &&
+        !_permsGranted;
+    if (needIntro) {
       return PermissionsIntroPage(onComplete: () async {
-        prefs.onboardingComplete = true;
-        if (mounted) setState(() {});
+        // Persist the flag (awaited so it survives an immediate restart) and
+        // re-read the live permission status after the request.
+        await prefs.setOnboardingComplete(true);
+        final granted = await AndroidPermissionsService.instance.allGranted();
+        if (mounted) setState(() => _permsGranted = granted);
       });
     }
     if (hasProfile) return const LauncherPage();

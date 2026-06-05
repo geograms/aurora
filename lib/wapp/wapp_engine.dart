@@ -13,6 +13,7 @@ import 'i18n_context.dart';
 import '../profile/profile_storage.dart';
 import '../connections/hal/connection_hal_imports.dart';
 import '../connections/bluetooth/ble_service.dart';
+import '../profile/profile_service.dart';
 import 'wapp_event_broker.dart';
 
 /// State for a single hal_process_exec subprocess. Lives in
@@ -216,6 +217,13 @@ class WappEngine {
 
     final halPlatform = WasmFunction(
       (int ptr, int len) => _writeStr(ptr, len, 'flutter-desktop'),
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Device identity (the active profile's callsign) — so a wapp uses THIS
+    // device's callsign instead of a hardcoded default. Empty if no profile.
+    final halIdentity = WasmFunction(
+      (int ptr, int len) => _writeStr(
+          ptr, len, ProfileService.instance.activeProfile?.callsign ?? ''),
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
     final halHeapFree = WasmFunction(() => 1024 * 1024,
@@ -825,6 +833,7 @@ class WappEngine {
     final allImports = [
       // System
       WasmImport('hal', 'platform', halPlatform),
+      WasmImport('hal', 'identity', halIdentity),
       WasmImport('hal', 'heap_free', halHeapFree),
       WasmImport('hal', 'time_ms', halTimeMs),
       WasmImport('hal', 'time_epoch', halTimeEpoch),

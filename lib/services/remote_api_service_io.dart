@@ -124,6 +124,7 @@ class RemoteApiService {
     final wapps = await _listWapps();
     return {
       'app': 'aurora',
+      'build': kAuroraBuildTag,
       'platform': platform.platformName(),
       'apiPort': _port,
       'profile': p?.nickname,

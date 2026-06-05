@@ -86,7 +86,9 @@ class PreferencesService {
 
   // First-run Android onboarding (permissions intro panel) shown + handled.
   bool get onboardingComplete => _prefs.getBool('onboarding.complete') ?? false;
-  set onboardingComplete(bool v) => _prefs.setBool('onboarding.complete', v);
+  // Awaited so the flag is flushed before the app may be killed/restarted.
+  Future<void> setOnboardingComplete(bool v) =>
+      _prefs.setBool('onboarding.complete', v);
 
   // Wapp data directory — root folder for per-wapp user data
   String? get wappDataDir => _prefs.getString('wapp.dataDir');

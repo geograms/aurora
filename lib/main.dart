@@ -28,6 +28,8 @@ Future<void> main() async {
     if (message != null) LogService.instance.add(message);
     flutterDebugPrint(message, wrapWidth: wrapWidth);
   };
+  // Proof-of-binary marker — verify via /api/status "build" or /api/log.
+  LogService.instance.add('Aurora started — build $kAuroraBuildTag');
 
   // Resolve the writable storage root for this platform before any boot
   // task touches disk (Android/iOS have no $HOME — use the app sandbox).

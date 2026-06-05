@@ -6,6 +6,12 @@
  * Pure Dart (no dart:io) — safe to import on web.
  */
 
+/// Build marker — BUMP THIS EVERY BUILD so we can prove from /api/status or
+/// /api/log which binary is actually running on the device (a stale reinstall
+/// would still report the old tag). Surfaced in RemoteApiService /api/status
+/// and logged at startup in main().
+const String kAuroraBuildTag = 'bletx-20260605d';
+
 /// Process-wide recent-log buffer.
 class LogService {
   LogService._();

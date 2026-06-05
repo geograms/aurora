@@ -23,6 +23,12 @@ import 'package:flutter/foundation.dart';
 /// Must match peer firmware (e.g. ESP32). 0xFFFF is the reserved test id.
 const int kBleCompanyId = 0xFFFF;
 
+/// Service UUID advertised alongside the manufacturer data (the 16-bit 0xFFE0
+/// the ESP32 uses, in 128-bit form). Some Android controllers won't actually
+/// emit an advertisement that carries ONLY manufacturer data, so a service
+/// UUID must be present; peers still match on the manufacturer data, not this.
+const String kBleServiceUuid = '0000ffe0-0000-1000-8000-00805f9b34fb';
+
 class BleInboundFrame {
   final String from; // peer uuid
   final int rssi;
@@ -80,6 +86,7 @@ class BleService {
   // the repetitive BlueZ failure / oversized-frame messages so they don't
   // flood the console.
   String? _bzRegisteredHex; // payload currently registered with BlueZ
+  String? _pkgAdvertHex;    // payload currently latched via ble_peripheral
   String _lastWarn = '';
   int _lastWarnMs = 0;
   int _dropLogMs = 0;
@@ -204,17 +211,22 @@ class BleService {
     }
   }
 
-  // True whenever we both want to scan AND have something to advertise — then
-  // the rotation owns the radio and time-slices it (scan-primary), so
-  // _applyScan must not also drive discovery. This holds for BOTH backends:
-  // BlueZ literally can't scan+advertise at once, and on Android doing both
-  // concurrently makes the outbound advert unreliable on some chipsets. We
-  // are a receiver first — advertise only in brief bursts between scans.
-  bool get _dutyCycling => _adverts.isNotEmpty && _scanRefs > 0;
+  // True only on the BlueZ backend when we both want to scan AND have something
+  // to advertise: a single controller can't scan and advertise at once, so the
+  // rotation time-slices it and _applyScan must not also drive discovery.
+  // Android/iOS (ble_peripheral) support concurrent scan+advertise, so they do
+  // NOT duty-cycle — they scan continuously AND keep the advert latched on air
+  // (a duty-cycled, bursty advert is missed by a peer that is also duty-cycling).
+  bool get _dutyCycling =>
+      !_useBlePeripheral && _adverts.isNotEmpty && _scanRefs > 0;
 
   // ── Outbound advertising ──────────────────────────────────────────
+  // BLE here is receive-first: a node listens (scans) continuously and only
+  // transmits a frame as a brief burst when it actually has something to send.
+  // Peers are listening, so a short burst is enough; we don't hold the radio
+  // advertising indefinitely.
   void enqueueAdvert(Object owner, Uint8List payload,
-      {Duration ttl = const Duration(seconds: 30)}) {
+      {Duration ttl = const Duration(seconds: 10)}) {
     if (!_advertiseSupported) {
       // Try to (lazily) discover support; if none, drop quietly.
       _ensure();
@@ -261,7 +273,9 @@ class BleService {
     // BlueZ because Android prepends a 3-byte flags AD to connectable adverts
     // (max manufacturer payload ~24B vs ~27B on BlueZ).
     {
-      final maxLen = _useBlePeripheral ? 24 : 27;
+      // ble_peripheral advert also carries flags (3B) + the 0xFFE0 service
+      // UUID (4B), leaving ~20B of manufacturer payload in a legacy advert.
+      final maxLen = _useBlePeripheral ? 20 : 27;
       int dropped = 0;
       _adverts.removeWhere((a) {
         if (a.payload.length > maxLen) { dropped++; return true; }
@@ -285,17 +299,17 @@ class BleService {
     if (_rotateIdx >= _adverts.length) _rotateIdx = 0;
     final payload = _adverts[_rotateIdx++].payload;
 
-    // Nothing to receive → advertise continuously.
-    if (_scanRefs == 0) {
+    // Android/iOS (ble_peripheral) — or when nothing is being received —
+    // advertise continuously and concurrently with scanning. Keeping the frame
+    // latched on air (see the skip in _advertiseFrame) is what lets a peer that
+    // is itself duty-cycling actually catch it. _applyScan keeps scanning.
+    if (_useBlePeripheral || _scanRefs == 0) {
       await _advertiseFrame(payload);
       return;
     }
 
-    // Scan-primary duty cycle: we are a receiver first. Spend most ticks
-    // scanning and only one tick in three on a brief advertise burst, so the
-    // outbound frame radiates cleanly (never concurrent with scanning, which
-    // is unreliable on BlueZ and on some Android chipsets) while a peer that
-    // is also scanning still catches the burst.
+    // BlueZ + scanning: a single controller can't do both at once, so
+    // time-slice — mostly scan, one tick in three a brief advertise burst.
     _dutyTick = (_dutyTick + 1) % 3;
     if (_dutyTick == 0) {
       await _stopScanWindow();
@@ -306,22 +320,29 @@ class BleService {
     }
   }
 
-  /// Advertise one frame via whichever backend is available (package
-  /// PeripheralManager, else BlueZ). The caller owns the scan/advertise
-  /// time-slicing.
+  /// Advertise one frame via whichever backend is available (ble_peripheral on
+  /// Android/iOS, else BlueZ). On the ble_peripheral path the frame is latched
+  /// (timeout: 0) and kept on air — re-registering only when the payload
+  /// changes — so a single message stays continuously broadcast for its TTL
+  /// rather than churning start/stop each tick (which a duty-cycling peer
+  /// would miss).
   Future<void> _advertiseFrame(Uint8List payload) async {
     if (_useBlePeripheral) {
       if (!_blePeripheralReady) return;
+      final hex = _hex(payload);
+      if (_pkgAdvertHex == hex) return; // already on air with this frame
       try {
         await bp.BlePeripheral.stopAdvertising();
         await bp.BlePeripheral.startAdvertising(
-          services: const [],
+          services: const [kBleServiceUuid],
           manufacturerData: bp.ManufacturerData(
             manufacturerId: kBleCompanyId,
             data: payload,
           ),
         );
+        _pkgAdvertHex = hex;
       } catch (e) {
+        _pkgAdvertHex = null;
         _warnThrottled('advertise failed: $e');
       }
       return;
@@ -392,6 +413,7 @@ class BleService {
       try {
         await bp.BlePeripheral.stopAdvertising();
       } catch (_) {}
+      _pkgAdvertHex = null;
     }
     await _bzUnadvertise();
   }

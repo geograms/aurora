@@ -50,10 +50,11 @@ dependencies:
   web: ^0.5.1                            # window.localStorage for web profile persistence
   sqlite3: ^2.4.0                        # SQLite for wapp social store (reactions, comments)
   sqlite3_flutter_libs: ^0.5.24          # Native SQLite libs for Flutter builds
-  media_kit: ^1.1.10                     # Video/audio engine for the movies wapp video group
-  media_kit_video: ^1.2.4                # Flutter video render surface for media_kit
-  media_kit_libs_video: ^1.0.4           # Bundled native libs (libmpv) — no system install needed
-  media_kit_native_event_loop: ^1.0.9
+  # Video playback (media_kit / libmpv) is NOT bundled — it bloats the app
+  # (tens of MB of native libs per ABI). The media.video capability is a
+  # pluggable backend (see lib/wapp/native/media_capability.dart); a media
+  # backend is added as an optional feature rather than shipped in the base app.
+  path_provider: ^2.1.4                   # Writable app data dir on Android/iOS (no $HOME there)
   bluetooth_low_energy: ^6.0.0            # BLE central (scan) + peripheral (advertise) for APRS-over-BLE
   bluez: ^0.8.2                           # BlueZ D-Bus client — Linux BLE advertising (peripheral)
   dbus: ^0.7.10                           # D-Bus values for the BlueZ advertising payload
@@ -83,6 +84,10 @@ flutter:
   assets:
     - assets/hello_world.wasm
     - assets/terminal_settings.ui.json
+    # First-run default wapps, bundled as flat .wapp (zip) files so they can
+    # be seeded on devices where the in-repo ../wapps library isn't present
+    # (Android/iOS, packaged desktop). See lib/launcher/seeding.dart.
+    - assets/wapps/
     # Built-in wapp editor, installed to storage on boot (see
     # lib/editor/editor_install.dart). Each subdir is listed explicitly —
     # Flutter does not recurse into nested asset folders.

@@ -1,15 +1,16 @@
 import 'package:flutter/material.dart';
 
-import 'platform/platform.dart' as platform;
-
 import 'models/monitored_task.dart';
 import 'connections/builtin_connections.dart';
+import 'editor/editor_install.dart';
 import 'wapp/host_event_bridge.dart';
 import 'services/notification_service.dart';
+import 'services/preferences_service.dart';
+import 'services/log_service.dart';
+import 'services/remote_api_service.dart';
 import 'profile/profile_service.dart';
 import 'profile/storage_paths.dart';
 import 'services/task_monitor_service.dart';
-import 'wapp/native/media_kit_video_backend.dart';
 
 import 'launcher/launcher.dart';
 
@@ -20,11 +21,21 @@ Future<void> main() async {
   // Required before any async work that touches platform channels.
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Register the platform media backend behind the `media.video`
-  // capability (the mediapack library wapp). No-op on unsupported
-  // platforms. media_kit lives entirely inside this backend module —
-  // the launcher and wapp runtime never import it directly.
-  registerMediaKitBackend(platform.platformName());
+  // Mirror everything the app prints into the in-memory log buffer so the
+  // remote-control API can serve it over /api/log.
+  final flutterDebugPrint = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) {
+    if (message != null) LogService.instance.add(message);
+    flutterDebugPrint(message, wrapWidth: wrapWidth);
+  };
+
+  // Resolve the writable storage root for this platform before any boot
+  // task touches disk (Android/iOS have no $HOME — use the app sandbox).
+  await initStorageRoot();
+
+  // Video playback is an optional add-on: no media backend is bundled in
+  // the base app, so the media.video capability stays unbacked here. A
+  // backend can register itself via MediaCapabilities.registerBackend.
 
   // Register core host services as parallel boot tasks so they run
   // through the orchestrator (and show up in the tasks wapp with the
@@ -100,6 +111,17 @@ Future<void> main() async {
     },
   );
   BootOrchestrator.instance.register(
+    id: 'install-editor',
+    name: 'Install wapp editor',
+    description:
+        'Installs the built-in wapp editor (App Creator) from bundled '
+        'assets into its own root storage location, outside the grid-'
+        'scanned wapps/ dir. Idempotent (version-guarded). Reachable only '
+        'via the per-wapp Edit action, never as a grid tile.',
+    mode: BootStart.sequential,
+    init: ensureEditorInstalled,
+  );
+  BootOrchestrator.instance.register(
     id: 'seed-default-wapps',
     name: 'Seed default wapps',
     description:
@@ -116,4 +138,14 @@ Future<void> main() async {
   await BootOrchestrator.instance.runAll();
 
   runApp(IwiApp(messengerKey: rootMessengerKey));
+
+  // Remote-control API: start after runApp so the root navigator is live
+  // (it backs /api/launch). Gated by a setting (default on); see Settings.
+  final prefs = await PreferencesService.instance();
+  if (prefs.remoteApiEnabled) {
+    await RemoteApiService.instance.start(
+      port: prefs.remoteApiPort,
+      navigatorKey: rootNavigatorKey,
+    );
+  }
 }

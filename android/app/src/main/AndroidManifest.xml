@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Networking: required in RELEASE builds (the debug/profile manifests
+         add INTERNET automatically, but main does not). Needed by the remote
+         API server, APRS-IS sockets, and all http(s) traffic. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
-        android:label="iwi"
+        android:label="Aurora"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

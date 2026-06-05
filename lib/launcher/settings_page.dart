@@ -85,6 +85,19 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
     EventBus().fire(LocaleChangedEvent(locale: p.activeLocale()));
   }
 
+  Future<void> _onRemoteApiChanged(bool enabled) async {
+    final p = _prefs;
+    if (p == null) return;
+    p.remoteApiEnabled = enabled;
+    if (enabled) {
+      await RemoteApiService.instance
+          .start(port: p.remoteApiPort, navigatorKey: rootNavigatorKey);
+    } else {
+      await RemoteApiService.instance.stop();
+    }
+    if (mounted) setState(() {});
+  }
+
   Future<void> _pickDirectory() async {
     final defaultPath =
         _prefs == null ? '' : wappsDataStorage(_prefs!).basePath;
@@ -220,6 +233,44 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                       ],
                       onChanged: _onLocaleChanged,
                     ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // ── Remote control API ──
+                Text('Remote control',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                        )),
+                const SizedBox(height: 4),
+                Text(
+                  'Exposes a JSON HTTP API (status, logs, launch a wapp) on '
+                  'port ${_prefs?.remoteApiPort ?? 3456}. Reachable over the '
+                  'network — turn off on untrusted networks.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: SwitchListTile(
+                    secondary: const Icon(Icons.cable),
+                    title: const Text('Remote control API'),
+                    subtitle: Text(
+                      RemoteApiService.instance.running
+                          ? 'Listening on 0.0.0.0:${_prefs?.remoteApiPort ?? 3456}'
+                          : 'Off',
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                    value: _prefs?.remoteApiEnabled ?? false,
+                    onChanged: _onRemoteApiChanged,
                   ),
                 ),
                 const SizedBox(height: 24),

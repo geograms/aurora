@@ -40,6 +40,42 @@ class PreferencesService {
   int get terminalMaxLines => _prefs.getInt('terminal.maxLines') ?? 5000;
   set terminalMaxLines(int v) => _prefs.setInt('terminal.maxLines', v);
 
+  // ── AI / Robot editor settings ───────────────────────────────────
+  //
+  // Backs the wapp editor's Robot tab. `aiProviderId` selects an entry
+  // from lib/ai/ (e.g. 'ollama', 'openai', 'anthropic', 'builtin');
+  // baseUrl/model fall back to that provider's defaults when blank.
+  // NOTE: apiKey is stored in plaintext here — fine for a local dev
+  // tool, but it is not encrypted.
+  String get aiProviderId => _prefs.getString('ai.providerId') ?? 'ollama';
+  set aiProviderId(String v) => _prefs.setString('ai.providerId', v);
+
+  String get aiBaseUrl => _prefs.getString('ai.baseUrl') ?? '';
+  set aiBaseUrl(String v) => _prefs.setString('ai.baseUrl', v);
+
+  String get aiModel => _prefs.getString('ai.model') ?? '';
+  set aiModel(String v) => _prefs.setString('ai.model', v);
+
+  String get aiApiKey => _prefs.getString('ai.apiKey') ?? '';
+  set aiApiKey(String v) => _prefs.setString('ai.apiKey', v);
+
+  /// Optional override for the editor's default system prompt. Empty = use
+  /// the built-in wapp-editing prompt assembled by the Robot controller.
+  String get aiSystemPrompt => _prefs.getString('ai.systemPrompt') ?? '';
+  set aiSystemPrompt(String v) => _prefs.setString('ai.systemPrompt', v);
+
+  // ── Remote-control API ───────────────────────────────────────────
+  //
+  // Opens a JSON HTTP server (RemoteApiService) on [remoteApiPort] so the
+  // app can be driven/inspected remotely (status, logs, launch a wapp).
+  // Binds 0.0.0.0, so it is reachable from the network — turn it off on
+  // untrusted networks. Default on for development convenience.
+  bool get remoteApiEnabled => _prefs.getBool('remoteApi.enabled') ?? true;
+  set remoteApiEnabled(bool v) => _prefs.setBool('remoteApi.enabled', v);
+
+  int get remoteApiPort => _prefs.getInt('remoteApi.port') ?? 3456;
+  set remoteApiPort(int v) => _prefs.setInt('remoteApi.port', v);
+
   // Wapp data directory — root folder for per-wapp user data
   String? get wappDataDir => _prefs.getString('wapp.dataDir');
   set wappDataDir(String? v) {

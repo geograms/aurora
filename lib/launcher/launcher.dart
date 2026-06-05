@@ -29,6 +29,7 @@ import '../profile/welcome_page.dart';
 import '../services/event_bus.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
+import '../services/remote_api_service.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
 import '../profile/profile_storage_factory.dart';
@@ -54,3 +55,7 @@ part 'wapp_runner_page.dart';
 /// BuildContext from inside an event handler.
 final GlobalKey<ScaffoldMessengerState> rootMessengerKey =
     GlobalKey<ScaffoldMessengerState>();
+
+/// Global root navigator key. Lets services without a BuildContext (e.g. the
+/// remote-control API) push routes — used to open a wapp on /api/launch.
+final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();

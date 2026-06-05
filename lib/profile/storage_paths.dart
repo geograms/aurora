@@ -23,13 +23,40 @@
  * geogram's dir; that is fixed.)
  */
 
+import 'package:path_provider/path_provider.dart';
+
 import '../platform/platform.dart' as platform;
 import '../services/preferences_service.dart';
 import 'profile_service.dart';
 import 'profile_storage.dart';
 import 'profile_storage_factory.dart';
 
+// Resolved once at boot by [initStorageRoot]. On desktop this is
+// ~/.local/share/aurora; on Android/iOS there is no $HOME and only the app
+// sandbox is writable, so it is the application support directory.
+String? _resolvedBase;
+
+/// Resolve the writable storage root for this platform. MUST be awaited at
+/// boot before any storage access (migrate-storage-layout / profile-service
+/// both touch disk). Idempotent.
+Future<void> initStorageRoot() async {
+  final os = platform.platformName();
+  if (os == 'android' || os == 'ios') {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      _resolvedBase = '${dir.path}/aurora';
+      return;
+    } catch (_) {
+      // Fall through to the home-relative default.
+    }
+  }
+  final home = platform.homeDir() ?? '/tmp';
+  _resolvedBase = '$home/.local/share/aurora';
+}
+
 String _geogramBaseDir() {
+  if (_resolvedBase != null) return _resolvedBase!;
+  // Fallback if initStorageRoot() hasn't run yet (desktop layout).
   final home = platform.homeDir() ?? '/tmp';
   return '$home/.local/share/aurora';
 }
@@ -82,6 +109,19 @@ ProfileStorage wappDataStorageFor(PreferencesService prefs, String wappId) =>
 /// source dir under `wapps/<name>/` or an installed-apps entry.
 ProfileStorage wappPackageStorage(String wappDir) =>
     makeFilesystemStorage(wappDir);
+
+/// Storage for the built-in wapp editor (App Creator) package. Lives at the
+/// aurora root under `editor/app-creator/` — NOT under a profile's installed
+/// `wapps/`, so it is never scanned for the launcher grid. It is the same for
+/// every profile, so it sits at the root rather than per-device. Installed
+/// from bundled assets on boot (see lib/editor/editor_install.dart) and opened
+/// only via the per-wapp Edit action. The folder name stays `app-creator` so
+/// WappPage's `_isAppCreator` (folder-name based) keeps working.
+ProfileStorage editorWappStorage() =>
+    ScopedProfileStorage(geogramRootStorage(), 'editor/app-creator');
+
+/// Absolute path to the editor package dir — handed to WappPage.wappDir.
+String editorWappDirPath() => editorWappStorage().basePath;
 
 /// One-time layout migration: the per-profile data folder was renamed
 /// from `profiles/<id>/` to `devices/<id>/`. This renames the single

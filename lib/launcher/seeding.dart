@@ -37,6 +37,40 @@ Future<void> ensureProfileSeeded() async {
 /// Everything else (forum, movies, terminal, mediapack) is left for the
 /// user to install via the store. Returns the count installed.
 Future<int> _seedDefaults() async {
+  final fromFs = await _seedDefaultsFromFilesystem();
+  if (fromFs > 0) return fromFs;
+  return _seedDefaultsFromAssets();
+}
+
+/// Install every default wapp bundled under `assets/wapps/*.wapp` — the
+/// curated seed set packaged as flat .wapp zips so it survives into a real
+/// APK / app bundle (Android/iOS, packaged desktop). Returns the count.
+Future<int> _seedDefaultsFromAssets() async {
+  var count = 0;
+  const prefix = 'assets/wapps/';
+  try {
+    final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+    final bundles = manifest
+        .listAssets()
+        .where((a) => a.startsWith(prefix) && a.endsWith('.wapp'));
+    for (final asset in bundles) {
+      final name =
+          asset.substring(prefix.length, asset.length - '.wapp'.length);
+      final data = await rootBundle.load(asset);
+      final res = await WappInstallerService.instance.installFromBytes(
+          wappId: name, zipBytes: data.buffer.asUint8List());
+      if (res.ok) count++;
+    }
+  } catch (_) {
+    // No bundled wapps / asset manifest unavailable — nothing to seed.
+  }
+  return count;
+}
+
+/// Copy the default set from the in-repo ../wapps library (desktop run from
+/// source). Returns the count installed (0 when the library isn't present,
+/// e.g. on a device — the caller then falls back to the bundled assets).
+Future<int> _seedDefaultsFromFilesystem() async {
   var count = 0;
   final cwd = platform.currentDirectory();
   for (final libPath in ['$cwd/../wapps', '$cwd/../../wapps']) {
@@ -49,6 +83,10 @@ Future<int> _seedDefaults() async {
       final pkg = wappPackageStorage(dir);
       final manifest = await pkg.readJson('manifest.json');
       if (manifest == null) continue;
+      // The wapp editor is no longer a grid wapp — it's bundled and
+      // installed to its own location (see editor_install.dart) and reached
+      // only via the per-wapp Edit action. Never seed it into the grid.
+      if (entry.name == 'app-creator') continue;
       final kind = manifest['kind'] as String? ?? 'app';
       if (!_kDefaultSeedNames.contains(entry.name) && kind != 'system') {
         continue;

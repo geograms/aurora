@@ -37,6 +37,9 @@ class _IwiAppState extends State<IwiApp> {
         ProfileService.instance.activeProfile != null;
     return MaterialApp(
       title: 'geogram',
+      // Root navigator key — lets context-free services (the remote-control
+      // API) push routes, e.g. open a wapp on /api/launch.
+      navigatorKey: rootNavigatorKey,
       // Kept for ad-hoc Flutter snackbars (e.g. settings delete errors).
       // The unified NotificationService does NOT use this — it pipes
       // everything through the NotificationLayer overlay below.

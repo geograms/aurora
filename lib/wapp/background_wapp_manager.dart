@@ -6,10 +6,14 @@
  * keeps doing work (e.g. APRS staying on BLE/APRS-IS to receive + relay
  * messages) after its page is closed and from app boot.
  *
+ * Each background wapp runs through the shared [BackgroundService] template, so
+ * it shows up in the TaskMonitor (the "tasks" wapp) with a priority, is
+ * CPU-measured per tick, and is auto-paused by the governor if it ever runs
+ * away — it can't starve the UI or other wapps.
+ *
  * Only ONE engine per wapp runs at a time. When a wapp's UI page opens it
  * calls [suspend] (the page takes over its own engine); when the page closes
  * it calls [resume] (we restart the background engine if autostart is on).
- * This avoids two engines double-scanning BLE.
  *
  * On Android, true always-on (screen off / app backgrounded) additionally
  * needs the native foreground service — see AndroidForegroundService, started
@@ -21,7 +25,9 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../models/monitored_task.dart';
 import '../profile/storage_paths.dart';
+import '../services/background_service.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
 import 'android_foreground_service.dart';
@@ -32,7 +38,7 @@ class BackgroundWappManager {
   static final BackgroundWappManager instance = BackgroundWappManager._();
 
   // Keyed by wapp folder name (the same id WappPage uses for KV + task ids).
-  final Map<String, _BackgroundWapp> _running = {};
+  final Map<String, _WappBackgroundService> _running = {};
 
   bool isRunning(String wappName) => _running.containsKey(wappName);
   List<String> get runningNames => _running.keys.toList(growable: false);
@@ -61,13 +67,10 @@ class BackgroundWappManager {
       final engine = WappEngine();
       engine.setStorage(wappDataStorageFor(prefs, name));
       await engine.load(wasm);
-      final bg = _BackgroundWapp(name, wappDir, engine, prefs);
-      _running[name] = bg;
-      engine.init();
-      bg.drain(); // handle the init outbox (e.g. APRS host.run_command:connect)
-      final interval = engine.tickIntervalMs;
-      bg.timer = Timer.periodic(Duration(milliseconds: interval), (_) => bg.tick());
-      debugPrint('BackgroundWapp: started $name (tick ${interval}ms)');
+      final svc = _WappBackgroundService(name, wappDir, engine, prefs);
+      _running[name] = svc;
+      await svc.start(); // registers the monitor task, runs init, starts ticking
+      debugPrint('BackgroundWapp: started $name (tick ${svc.interval.inMilliseconds}ms)');
       _onRunningChanged();
     } catch (e) {
       debugPrint('BackgroundWapp: failed to start $name: $e');
@@ -77,9 +80,9 @@ class BackgroundWappManager {
 
   /// Stop and dispose a background wapp (releases its BLE scan ref, sockets…).
   void stop(String wappName) {
-    final bg = _running.remove(wappName);
-    if (bg == null) return;
-    bg.dispose();
+    final svc = _running.remove(wappName);
+    if (svc == null) return;
+    unawaited(svc.stop());
     debugPrint('BackgroundWapp: stopped $wappName');
     _onRunningChanged();
   }
@@ -121,36 +124,54 @@ class BackgroundWappManager {
   /// Dart Timers are throttled with the screen off, so the native service
   /// drives this on its own cadence.
   void tickAllFromNative() {
-    for (final bg in _running.values) {
-      bg.tick();
+    for (final svc in _running.values) {
+      unawaited(svc.tickNow());
     }
   }
 }
 
-class _BackgroundWapp {
-  _BackgroundWapp(this.name, this.wappDir, this.engine, this.prefs);
+/// One background wapp engine, run through the shared [BackgroundService]
+/// template (TaskMonitor visibility + priority + per-tick CPU + governor).
+/// Runs on the main isolate because the wapp HAL touches the shared BLE
+/// service (a main-isolate plugin); the governor auto-pauses a runaway tick.
+class _WappBackgroundService extends BackgroundService {
+  _WappBackgroundService(String name, this.wappDir, this.engine, this.prefs)
+      : super(
+          id: 'wapp.bg.$name',
+          name: name,
+          serviceName: 'wapps',
+          priority: TaskPriority.normal,
+          interval: Duration(milliseconds: engine.tickIntervalMs),
+          description: 'Background wapp: $name',
+        );
 
-  final String name;
   final String wappDir;
   final WappEngine engine;
   final PreferencesService prefs;
-  Timer? timer;
-  bool _disposed = false;
 
-  void tick() {
-    if (_disposed) return;
+  @override
+  Future<void> onStart() async {
+    engine.init();
+    _drain(); // handle the init outbox (e.g. APRS host.run_command:connect)
+  }
+
+  @override
+  Future<void> onTick() async {
+    engine.tick();
+    _drain();
+  }
+
+  @override
+  Future<void> onStop() async {
     try {
-      engine.tick();
-      drain();
-    } catch (e) {
-      debugPrint('BackgroundWapp: $name tick error: $e');
-    }
+      engine.dispose();
+    } catch (_) {}
   }
 
   /// Process the engine outbox the way the headless context cares about:
   /// re-run self-issued commands (with the user's saved settings), surface
   /// notifications, and ignore all UI-only messages.
-  void drain() {
+  void _drain() {
     for (final raw in engine.drainOutbox()) {
       Map<String, dynamic> data;
       try {
@@ -196,14 +217,5 @@ class _BackgroundWapp {
       if (m is Map) return m.map((k, v) => MapEntry(k.toString(), v));
     } catch (_) {}
     return const {};
-  }
-
-  void dispose() {
-    _disposed = true;
-    timer?.cancel();
-    timer = null;
-    try {
-      engine.dispose();
-    } catch (_) {}
   }
 }

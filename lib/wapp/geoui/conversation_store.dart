@@ -28,6 +28,43 @@ class ConversationItem {
     this.icon = 'chat',
     this.unread = 0,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'subtitle': subtitle,
+        'badge': badge,
+        'icon': icon,
+        'unread': unread,
+        'messages': messages,
+        'pinned': pinned,
+      };
+
+  factory ConversationItem.fromJson(Map<String, dynamic> j) {
+    final it = ConversationItem(
+      (j['id'] ?? '').toString(),
+      title: (j['title'] ?? '').toString(),
+      subtitle: (j['subtitle'] ?? '').toString(),
+      badge: (j['badge'] ?? '').toString(),
+      icon: (j['icon'] ?? 'chat').toString(),
+      unread: (j['unread'] as num?)?.toInt() ?? 0,
+    );
+    final msgs = j['messages'];
+    if (msgs is List) {
+      for (final m in msgs) {
+        if (m is Map) it.messages.add(m.map((k, v) => MapEntry(k.toString(), v)));
+      }
+    }
+    final pins = j['pinned'];
+    if (pins is Map) {
+      pins.forEach((k, v) {
+        if (v is Map) {
+          it.pinned[k.toString()] = v.map((kk, vv) => MapEntry(kk.toString(), vv));
+        }
+      });
+    }
+    return it;
+  }
 }
 
 class ConversationStore {
@@ -132,4 +169,36 @@ class ConversationStore {
 
   List<ConversationItem> ordered() =>
       [for (final id in order) if (items.containsKey(id)) items[id]!];
+
+  /// Serialize the whole store for on-disk persistence.
+  Map<String, dynamic> toJson() => {
+        'order': order,
+        'items': {for (final e in items.entries) e.key: e.value.toJson()},
+      };
+
+  /// Replace the store's contents from a previously [toJson]-ed map.
+  void loadJson(Map<String, dynamic> j) {
+    items.clear();
+    order.clear();
+    final its = j['items'];
+    if (its is Map) {
+      its.forEach((k, v) {
+        if (v is Map) {
+          items[k.toString()] =
+              ConversationItem.fromJson(v.map((kk, vv) => MapEntry(kk.toString(), vv)));
+        }
+      });
+    }
+    final ord = j['order'];
+    if (ord is List) {
+      for (final id in ord) {
+        final s = id.toString();
+        if (items.containsKey(s) && !order.contains(s)) order.add(s);
+      }
+    }
+    // Defensive: any item missing from the saved order still gets shown.
+    for (final k in items.keys) {
+      if (!order.contains(k)) order.add(k);
+    }
+  }
 }

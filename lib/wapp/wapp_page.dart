@@ -324,6 +324,58 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   ConversationStore _convStore(String field) =>
       _convStores.putIfAbsent(field, () => ConversationStore());
 
+  // Conversation persistence: stores are saved under the wapp data dir as
+  // `messages/<field>.json` and reloaded on open, so the Messenger survives a
+  // restart. Writes are debounced and coalesced across fields.
+  static const String _convDir = 'messages';
+  Timer? _convSaveTimer;
+  final Set<String> _convDirty = {};
+
+  /// Restore persisted conversation stores from `messages/*.json` (called from
+  /// _loadWapp once _wappData is set, before the first build).
+  Future<void> _loadConversations() async {
+    final data = _wappData;
+    if (data == null) return;
+    try {
+      if (!await data.directoryExists(_convDir)) return;
+      for (final entry in await data.listDirectory(_convDir)) {
+        if (entry.isDirectory || !entry.path.endsWith('.json')) continue;
+        final field = entry.name.substring(0, entry.name.length - 5); // strip .json
+        final json = await data.readJson(entry.path);
+        if (json != null) {
+          _convStores[field] = ConversationStore()..loadJson(json);
+        }
+      }
+    } catch (_) {
+      // Corrupt/partial file — start empty rather than blocking the wapp.
+    }
+  }
+
+  /// Mark a conversation field dirty and schedule a debounced save.
+  void _scheduleConvoSave(String field) {
+    _convDirty.add(field);
+    _convSaveTimer?.cancel();
+    _convSaveTimer = Timer(const Duration(milliseconds: 800), _flushConvoSaves);
+  }
+
+  Future<void> _flushConvoSaves() async {
+    final data = _wappData;
+    if (data == null) return;
+    final fields = _convDirty.toList();
+    _convDirty.clear();
+    try {
+      await data.createDirectory(_convDir);
+      for (final field in fields) {
+        final store = _convStores[field];
+        if (store == null) continue;
+        await data.writeJson('$_convDir/$field.json', store.toJson());
+      }
+    } catch (_) {
+      // Best-effort: re-mark so the next change retries.
+      _convDirty.addAll(fields);
+    }
+  }
+
   // Cached MonitoredTask snapshot (refreshed when the wapp polls
   // system.tasks.list — see _refreshTaskSnapshot).
   List<MonitoredTask> _taskSnapshot = const [];
@@ -529,6 +581,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     await wappData.createDirectory('');
     _wappData = wappData;
     _engine.setStorage(wappData);
+    // Restore persisted Messenger conversations before the first build so the
+    // history shows immediately when the tab opens.
+    await _loadConversations();
 
     // Auto-configure the install wapp's `source` KV to point at the
     // in-repo wapps/binaries/ catalog when running from a source
@@ -782,20 +837,29 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             }
           }
         } else if (type == 'ui.convo.upsert') {
-          _convStore(data['field'] as String? ?? 'conversations').upsert(data);
+          final field = data['field'] as String? ?? 'conversations';
+          _convStore(field).upsert(data);
+          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.msg') {
-          _convStore(data['field'] as String? ?? 'conversations').addMessage(data);
+          final field = data['field'] as String? ?? 'conversations';
+          _convStore(field).addMessage(data);
+          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.pin') {
-          _convStore(data['field'] as String? ?? 'conversations').pin(data);
+          final field = data['field'] as String? ?? 'conversations';
+          _convStore(field).pin(data);
+          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.unpin') {
-          _convStore(data['field'] as String? ?? 'conversations').unpin(data);
+          final field = data['field'] as String? ?? 'conversations';
+          _convStore(field).unpin(data);
+          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.clear') {
-          _convStore(data['field'] as String? ?? 'conversations')
-              .clear(data['id'] as String?);
+          final field = data['field'] as String? ?? 'conversations';
+          _convStore(field).clear(data['id'] as String?);
+          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.prompt') {
           // Generic prompt: the wapp asks the host to show a dialog (title +
@@ -1551,6 +1615,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   @override
   void dispose() {
     _tickTimer?.cancel();
+    // Flush any pending conversation writes so the latest messages aren't lost.
+    _convSaveTimer?.cancel();
+    if (_convDirty.isNotEmpty) unawaited(_flushConvoSaves());
     TaskMonitorService.instance.unregister(_tickTaskId);
     EventBus().fire(WappUnloadedEvent(wappId: _wappName, wappName: _wappName));
     _localeSub?.cancel();

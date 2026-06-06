@@ -42,6 +42,13 @@ static const char *TAG = "ble_hello";
 #define RDEDUP_MAX          32          /* recently-relayed content cache */
 #define RELAY_DEDUP_SEC     600         /* 10-minute suppression window */
 
+/* Display dedup: a received message is delivered to the chat only once per
+ * SHOWN_DEDUP_SEC. A single broadcast is received dozens of times across an
+ * advert window, and the mesh relays it too, so without this the same line
+ * repeats on the rolling chat. */
+#define SHOWN_MAX           48          /* recently-shown message cache */
+#define SHOWN_DEDUP_SEC     3600        /* 60-minute display suppression */
+
 /* GATT UUIDs */
 #define SVC_UUID            0xFFE0
 #define CHR_WRITE_UUID      0xFFF1
@@ -88,6 +95,10 @@ static int          s_relay_rr;         /* round-robin advertise cursor */
 typedef struct { uint32_t hash; uint32_t t; } rdedup_t;
 static rdedup_t s_rdedup[RDEDUP_MAX];
 static int      s_rdedup_cnt;
+
+/* Display dedup state (same shape as relay dedup, longer window) */
+static rdedup_t s_shown[SHOWN_MAX];
+static int      s_shown_cnt;
 
 /* GATT */
 static uint16_t s_notify_handle;
@@ -191,6 +202,27 @@ static void relay_remember(uint32_t hash)
     s_rdedup[idx].hash = hash;
     s_rdedup[idx].t = now_sec();
     s_rdedup_cnt++;
+}
+
+/* True if this message content was shown on the chat within SHOWN_DEDUP_SEC. */
+static bool shown_recent(uint32_t hash)
+{
+    uint32_t t = now_sec();
+    int n = s_shown_cnt < SHOWN_MAX ? s_shown_cnt : SHOWN_MAX;
+    for (int i = 0; i < n; i++) {
+        if (s_shown[i].hash == hash && (t - s_shown[i].t) < SHOWN_DEDUP_SEC) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void shown_mark(uint32_t hash)
+{
+    int idx = s_shown_cnt % SHOWN_MAX;
+    s_shown[idx].hash = hash;
+    s_shown[idx].t = now_sec();
+    s_shown_cnt++;
 }
 
 /* Queue a full manufacturer-data frame for rebroadcast. */
@@ -467,6 +499,13 @@ static void aprs_decode(const uint8_t *payload, int len, int rssi)
         if (fp < caps[fi]) fields[fi][fp++] = (char)b;
     }
     if (!saw_sep) return;           /* not an Aurora APRS frame */
+
+    /* Display dedup: deliver the same message content to the chat only once per
+     * SHOWN_DEDUP_SEC (60 min). One broadcast is received dozens of times and
+     * is also relayed by the mesh, so without this the line repeats. */
+    uint32_t ch = fnv1a(payload, len);
+    if (shown_recent(ch)) return;
+    shown_mark(ch);
 
     s_aprs_cb(from, to, text, rssi);
 }

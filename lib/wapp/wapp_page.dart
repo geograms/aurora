@@ -270,6 +270,23 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   final List<Map<String, dynamic>> _geoLive = [];
   final List<Map<String, dynamic>> _geoBeacons = [];
 
+  // Transport/status indicators shown on the map, pushed by the wapp via
+  // `ui.map.status` (e.g. APRS-IS connected, BLE active). Each {id,label,on}.
+  final List<Map<String, dynamic>> _mapStatus = [];
+
+  // Geo-chat panel open/closed (owned here so the unread badge survives tab
+  // switches) and the count of Live messages received while it was closed.
+  bool _geoChatOpen = true;
+  int _geoUnread = 0;
+
+  void _setGeoChatOpen(bool open) {
+    if (!mounted) return;
+    setState(() {
+      _geoChatOpen = open;
+      if (open) _geoUnread = 0; // opening clears the Map-tab notification
+    });
+  }
+
   void _geoChatAdd(Map raw) {
     final msg = raw.map((k, v) => MapEntry(k.toString(), v));
     final text = (msg['text'] ?? '').toString().trimLeft();
@@ -278,6 +295,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       msg['text'] = text.substring(2).trimLeft();
       _geoLive.add(msg);
       if (_geoLive.length > 300) _geoLive.removeRange(0, _geoLive.length - 300);
+      // Notify on the Map tab when a received message lands while the chat box
+      // is closed (own outgoing echoes don't count).
+      if (msg['dir'] == 'in' && !_geoChatOpen) _geoUnread++;
     } else {
       _geoBeacons.add(msg);
       if (_geoBeacons.length > 300) {
@@ -681,6 +701,23 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             _mapMarkers.clear();
             changed = true;
           }
+        } else if (type == 'ui.map.status') {
+          // Replace the transport/status indicators shown on the map. Generic:
+          // the wapp supplies labelled on/off items (no app knowledge here).
+          final items = data['items'];
+          _mapStatus.clear();
+          if (items is List) {
+            for (final it in items) {
+              if (it is Map) {
+                _mapStatus.add({
+                  'id': (it['id'] ?? '').toString(),
+                  'label': (it['label'] ?? '').toString(),
+                  'on': it['on'] == true,
+                });
+              }
+            }
+          }
+          changed = true;
         } else if (type == 'ui.map.radius') {
           // Coverage circle: centre (my station) + filter radius (km).
           _mapCenterLat = (data['lat'] as num?)?.toDouble() ?? _mapCenterLat;
@@ -1515,6 +1552,40 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     super.dispose();
   }
 
+  /// A tab label, with an unread-count badge on the map screen's tab when
+  /// geo-chat messages have arrived while the chat box was closed.
+  Widget _buildScreenTab(String name, GeoUiBlock screen) {
+    final label = _i18n.resolve(name);
+    final isMap =
+        screen.children.any((c) => c.keyword == 'group' && c.type == 'map');
+    if (!isMap || _geoUnread <= 0) return Tab(text: label);
+    return Tab(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(label),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            constraints: const BoxConstraints(minWidth: 18),
+            decoration: BoxDecoration(
+              color: const Color(0xFFda3633),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Text(
+              _geoUnread > 99 ? '99+' : '$_geoUnread',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_tabController == null) {
@@ -1542,9 +1613,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         bottom: _screenNames.length > 1
             ? TabBar(
                 controller: _tabController,
-                tabs: _screenNames
-                    .map((n) => Tab(text: _i18n.resolve(n)))
-                    .toList(),
+                tabs: [
+                  for (var i = 0; i < _screenNames.length; i++)
+                    _buildScreenTab(_screenNames[i], _screens[i]),
+                ],
                 isScrollable: true,
               )
             : null,

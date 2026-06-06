@@ -83,6 +83,15 @@ class _SlippyMap extends StatefulWidget {
   /// A highlighted point (the last "locate" target) drawn as a reticle.
   final double? highlightLat, highlightLon;
 
+  /// Transport/status indicators pushed by the wapp via `ui.map.status`.
+  /// Each {id, label, on:bool} renders as a labelled dot (green on / grey off).
+  final List<Map<String, dynamic>> status;
+
+  /// Geo-chat panel open/closed — owned by the parent so the unread badge on
+  /// the Map tab survives tab switches. Null falls back to internal state.
+  final bool? chatOpen;
+  final void Function(bool open)? onChatOpenChanged;
+
   const _SlippyMap({
     required this.lat,
     required this.lon,
@@ -106,6 +115,9 @@ class _SlippyMap extends StatefulWidget {
     this.onLocate,
     this.highlightLat,
     this.highlightLon,
+    this.status = const [],
+    this.chatOpen,
+    this.onChatOpenChanged,
   });
 
   @override
@@ -140,6 +152,17 @@ class _SlippyMapState extends State<_SlippyMap>
   // Floating geo-chat visibility + active tab (0 = Live, 1 = Beacons).
   bool _showChat = true;
   int _geoTab = 0;
+
+  // Chat open/closed: parent-owned when provided (so the Map-tab unread badge
+  // can react), else internal.
+  bool get _chatVisible => widget.chatOpen ?? _showChat;
+  void _setChatVisible(bool v) {
+    if (widget.onChatOpenChanged != null) {
+      widget.onChatOpenChanged!(v);
+    } else {
+      setState(() => _showChat = v);
+    }
+  }
 
   /// Current circle centre in screen pixels (honouring an in-progress
   /// move drag), or null when there's no circle.
@@ -183,14 +206,17 @@ class _SlippyMapState extends State<_SlippyMap>
     // Portrait / phone: the panel can't sit full-height on the right or it
     // covers the map — show a bottom sheet (map visible above) instead.
     final narrow = w < 600;
-    if (!_showChat) {
+    if (!_chatVisible) {
+      // Minimised: a FAB to reopen, plus the transport indicators stay visible
+      // (just under the search bar) so connection/BLE state is always readable.
       return [
+        Positioned(top: 64, left: 12, child: _statusPills()),
         Positioned(
           right: 12,
           bottom: narrow ? 16 : 70,
           child: FloatingActionButton.small(
             heroTag: 'geochat-toggle',
-            onPressed: () => setState(() => _showChat = true),
+            onPressed: () => _setChatVisible(true),
             child: const Icon(Icons.chat_bubble_outline),
           ),
         ),
@@ -198,19 +224,58 @@ class _SlippyMapState extends State<_SlippyMap>
     }
     final panel = _chatPanel();
     if (narrow) {
+      // Portrait/phone: the panel fills the whole tab so the chat is usable;
+      // the header's minimise button collapses it back to the FAB so the map
+      // can be panned.
       return [
-        Positioned(
-          left: 8,
-          right: 8,
-          bottom: 8,
-          height: (h * 0.46).clamp(180.0, 440.0),
-          child: panel,
-        ),
+        Positioned(left: 8, right: 8, top: 8, bottom: 8, child: panel),
       ];
     }
     return [
       Positioned(right: 12, top: 64, bottom: 60, width: 320, child: panel),
     ];
+  }
+
+  /// Compact transport/status indicators (e.g. APRS-IS, BLE) — a coloured dot
+  /// (green = on, grey = off) with a label. Driven by `ui.map.status`; empty
+  /// for map wapps that push no status.
+  Widget _statusPills() {
+    final items = widget.status;
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final s in items)
+          Container(
+            margin: const EdgeInsets.only(right: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.black.withAlpha(140),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFF30363d)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: (s['on'] == true)
+                        ? const Color(0xFF3FB950)
+                        : const Color(0xFF6E7681),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text((s['label'] ?? '').toString(),
+                    style:
+                        const TextStyle(color: Colors.white70, fontSize: 10.5)),
+              ],
+            ),
+          ),
+      ],
+    );
   }
 
   Widget _chatPanel() {
@@ -238,6 +303,7 @@ class _SlippyMapState extends State<_SlippyMap>
                         fontWeight: FontWeight.bold,
                         fontSize: 14)),
                 const Spacer(),
+                _statusPills(),
                 IconButton(
                   icon: const Icon(Icons.delete_sweep,
                       size: 18, color: Colors.white60),
@@ -251,7 +317,7 @@ class _SlippyMapState extends State<_SlippyMap>
                   icon: const Icon(Icons.close,
                       size: 16, color: Colors.white54),
                   visualDensity: VisualDensity.compact,
-                  onPressed: () => setState(() => _showChat = false),
+                  onPressed: () => _setChatVisible(false),
                 ),
               ],
             ),
@@ -1101,24 +1167,24 @@ class _SlippyMapState extends State<_SlippyMap>
                   ],
                 ),
               ),
-              // Zoom controls \u2014 left, vertically centred so they stay clear
-              // of the right-side chat panel (landscape) and the bottom-sheet
-              // chat (portrait/phone). Nudged up in portrait so the lower
-              // button clears the bottom sheet.
+              // Zoom controls. Portrait/phone: bottom-right, above the chat
+              // FAB \u2014 where phone-map users expect them. Landscape: left,
+              // vertically centred so they stay clear of the right-side chat
+              // panel.
+              if (w < 600)
+                Positioned(right: 12, bottom: 84, child: _buildZoomControl())
+              else
+                Positioned(
+                  left: 12,
+                  top: h / 2 - 44,
+                  child: _buildZoomControl(),
+                ),
+              // Coordinates. Portrait: bottom-left, clear of the zoom + chat
+              // FAB stacked on the right. Landscape: bottom-right.
               Positioned(
-                left: 12,
-                top: h / 2 - (w < 600 ? 64 : 44),
-                child: _buildZoomControl(),
-              ),
-              // Coordinates \u2014 lower-right corner; in portrait they sit just
-              // above the geo-chat bottom sheet's right corner.
-              Positioned(
-                right: 12,
-                bottom: w < 600
-                    ? (_showChat
-                        ? (h * 0.46).clamp(180.0, 440.0) + 12
-                        : 64)
-                    : 12,
+                left: w < 600 ? 12 : null,
+                right: w < 600 ? null : 12,
+                bottom: 12,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
@@ -1262,6 +1328,9 @@ extension _WappMaps on _WappPageState {
       },
       chatLive: _geoLive,
       chatBeacons: _geoBeacons,
+      status: _mapStatus,
+      chatOpen: _geoChatOpen,
+      onChatOpenChanged: _setGeoChatOpen,
       onClearChat: (tab) {
         // Clear the chosen tab's list (keeps the seen/beacon keys so
         // future repeats still classify correctly).

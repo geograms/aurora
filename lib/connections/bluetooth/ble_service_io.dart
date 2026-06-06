@@ -275,7 +275,12 @@ class BleService {
     {
       // ble_peripheral advert also carries flags (3B) + the 0xFFE0 service
       // UUID (4B), leaving ~20B of manufacturer payload in a legacy advert.
-      final maxLen = _useBlePeripheral ? 20 : 27;
+      // BlueZ prepends only flags (3B) to a peripheral advert, so the usable
+      // manufacturer payload is 31 - 3(flags) - 2(AD len+type) - 2(company id)
+      // = 24B. A larger frame is rejected by the controller with
+      // "Invalid Parameters" and, left queued, forces BlueZ into a scan/advertise
+      // duty cycle that drops incoming frames — so drop it here instead.
+      final maxLen = _useBlePeripheral ? 20 : 24;
       int dropped = 0;
       _adverts.removeWhere((a) {
         if (a.payload.length > maxLen) { dropped++; return true; }

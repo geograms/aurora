@@ -300,7 +300,16 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       // is closed (own outgoing echoes don't count).
       if (msg['dir'] == 'in' && !_geoChatOpen) _geoUnread++;
     } else {
+      // Stamp arrival so stale presence/position beacons can be aged out.
+      msg['_rxMs'] = DateTime.now().millisecondsSinceEpoch;
       _geoBeacons.add(msg);
+      // Drop beacons older than 24h — presence spam shouldn't pile up forever.
+      final cutoff =
+          DateTime.now().millisecondsSinceEpoch - 24 * 60 * 60 * 1000;
+      _geoBeacons.removeWhere((m) {
+        final t = m['_rxMs'];
+        return t is int && t < cutoff;
+      });
       if (_geoBeacons.length > 300) {
         _geoBeacons.removeRange(0, _geoBeacons.length - 300);
       }

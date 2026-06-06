@@ -84,6 +84,32 @@ class PreferencesService {
   int get remoteApiPort => _prefs.getInt('remoteApi.port') ?? 3456;
   set remoteApiPort(int v) => _prefs.setInt('remoteApi.port', v);
 
+  // Per-wapp autostart: when on, the wapp runs as a background service
+  // (started at boot) and keeps its engine ticking even while its UI page is
+  // closed — e.g. APRS staying connected to BLE/APRS-IS to receive messages.
+  bool getWappAutostart(String wappId) =>
+      _prefs.getBool('wapp.autostart.$wappId') ?? false;
+  Future<void> setWappAutostart(String wappId, bool v) =>
+      _prefs.setBool('wapp.autostart.$wappId', v);
+
+  /// Ids of all wapps the user enabled for autostart.
+  List<String> autostartWappIds() {
+    const prefix = 'wapp.autostart.';
+    return _prefs
+        .getKeys()
+        .where((k) => k.startsWith(prefix) && (_prefs.getBool(k) ?? false))
+        .map((k) => k.substring(prefix.length))
+        .toList();
+  }
+
+  // Last-known scalar field values (settings) for a wapp, as a JSON string, so
+  // a background/headless engine can run with the user's configured settings
+  // (callsign, server, radius, …) instead of bare defaults.
+  String? getWappFields(String wappId) =>
+      _prefs.getString('wapp.fields.$wappId');
+  void setWappFields(String wappId, String json) =>
+      _prefs.setString('wapp.fields.$wappId', json);
+
   // First-run Android onboarding (permissions intro panel) shown + handled.
   bool get onboardingComplete => _prefs.getBool('onboarding.complete') ?? false;
   // Awaited so the flag is flushed before the app may be killed/restarted.

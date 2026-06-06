@@ -30,6 +30,7 @@ import 'geoui/widgets/chat_view_field.dart';
 import 'geoui/conversation_store.dart';
 import 'geoui/widgets/conversations_field.dart';
 import 'geoui/tile_cache.dart';
+import 'background_wapp_manager.dart';
 import '../profile/iwi_profile.dart';
 import '../models/monitored_task.dart';
 import '../services/event_bus.dart';
@@ -429,6 +430,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    // If this wapp is running as a background service, hand it over to this
+    // page so only one engine (and one BLE scan) is live while it's open.
+    BackgroundWappManager.instance.suspend(_wappName);
     _loadWapp();
   }
 
@@ -1311,6 +1315,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         scalarFields[entry.key] = v;
       }
     }
+    // Persist settings so a background/headless run of this wapp (autostart)
+    // uses the user's configuration rather than bare defaults.
+    PreferencesService.instanceSync
+        ?.setWappFields(_wappName, jsonEncode(scalarFields));
     _engine.sendMessage(jsonEncode({
       'command': cmd,
       'fields': scalarFields,
@@ -1542,6 +1550,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     _mediaSession = null;
     _videoCurrentPath = null;
     _engine.dispose();
+    // Page closed: restart the background service if the user enabled autostart
+    // for this wapp (so it keeps receiving once its engine ref is released).
+    unawaited(BackgroundWappManager.instance.resume(widget.wappDir));
     _cmdController.dispose();
     _scrollController.dispose();
     _sourcesInputController.dispose();

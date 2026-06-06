@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'models/monitored_task.dart';
 import 'connections/builtin_connections.dart';
 import 'editor/editor_install.dart';
 import 'wapp/host_event_bridge.dart';
+import 'wapp/background_wapp_manager.dart';
 import 'services/notification_service.dart';
 import 'services/preferences_service.dart';
 import 'services/log_service.dart';
@@ -150,4 +153,9 @@ Future<void> main() async {
       navigatorKey: rootNavigatorKey,
     );
   }
+
+  // Background wapp services the user enabled (autostart) — keep e.g. APRS
+  // receiving over BLE/APRS-IS without its page open. Fire-and-forget so a
+  // slow/failed engine never blocks startup.
+  unawaited(BackgroundWappManager.instance.startAutostart());
 }

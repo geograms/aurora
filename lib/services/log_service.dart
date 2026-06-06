@@ -10,7 +10,7 @@
 /// /api/log which binary is actually running on the device (a stale reinstall
 /// would still report the old tag). Surfaced in RemoteApiService /api/status
 /// and logged at startup in main().
-const String kAuroraBuildTag = 'bletx-20260605i';
+const String kAuroraBuildTag = 'autostart-20260606a';
 
 /// Process-wide recent-log buffer.
 class LogService {

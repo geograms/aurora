@@ -115,6 +115,8 @@ class BleService {
       ..start();
     _gattServer = BleGattServer(onData: (from, data) {
       _queue.onDataReceived(from, data);
+    }, onClientsChanged: () {
+      _applyScan(); // pause scanning while we're serving a client (contention)
     });
     _queue.setSendCallback((deviceId, data) async {
       if (_gattServer?.clientIds.contains(deviceId) ?? false) {
@@ -304,9 +306,12 @@ class BleService {
     // While the BlueZ backend is duty-cycling (it can't scan and advertise at
     // once), the rotation owns discovery — don't fight it here.
     if (_dutyCycling) return;
-    // Pause scanning while a GATT client link is up — scan and connection
-    // contend on a single radio and the link drops on some stacks (BlueZ).
-    final want = _scanRefs > 0 && !_gattLinkUp;
+    // Pause scanning while any GATT link is up (we are a client of a peer, OR a
+    // peer is connected to our server) — scan and connection contend on a single
+    // radio and the link drops otherwise. This is what kept the phone<->desktop
+    // link from holding (the serving side kept scanning).
+    final serverBusy = _gattServer?.clientIds.isNotEmpty ?? false;
+    final want = _scanRefs > 0 && !_gattLinkUp && !serverBusy;
     try {
       if (want && !_scanning && c.state == BluetoothLowEnergyState.poweredOn) {
         await c.startDiscovery();

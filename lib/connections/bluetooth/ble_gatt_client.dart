@@ -25,6 +25,8 @@ class BleGattClient {
   GATTCharacteristic? _writeChar; // FFF1
   bool _connecting = false;
   bool _started = false;
+  DateTime? _lastDrop; // cooldown after a disconnect, to avoid rapid flapping
+  static const Duration _reconnectCooldown = Duration(seconds: 4);
 
   bool get isConnected => _peer != null && _writeChar != null;
   String? get peerId => _peer?.uuid.toString();
@@ -44,6 +46,7 @@ class BleGattClient {
         debugPrint('BleGatt(client): peer disconnected');
         _peer = null;
         _writeChar = null;
+        _lastDrop = DateTime.now();
         onLinkChange?.call(false);
       }
     });
@@ -52,6 +55,10 @@ class BleGattClient {
   /// Offer a discovered peer; connect to the first geogram server seen.
   void considerPeer(Peripheral peripheral) {
     if (_peer != null || _connecting) return;
+    final last = _lastDrop;
+    if (last != null && DateTime.now().difference(last) < _reconnectCooldown) {
+      return; // brief cooldown after a drop to avoid flapping
+    }
     _connect(peripheral);
   }
 

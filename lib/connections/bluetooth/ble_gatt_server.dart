@@ -18,10 +18,15 @@ const String _writeUuid = '0000fff1-0000-1000-8000-00805f9b34fb';
 const String _notifyUuid = '0000fff2-0000-1000-8000-00805f9b34fb';
 
 class BleGattServer {
-  BleGattServer({required this.onData});
+  BleGattServer({required this.onData, this.onClientsChanged});
 
   /// Raw bytes a peer wrote to FFF1 (client deviceId, bytes).
   final void Function(String from, Uint8List data) onData;
+
+  /// Notifies when the set of connected clients changes, so the service can
+  /// pause scanning while serving a client (scan vs connection contend on one
+  /// radio and the link drops otherwise).
+  final void Function()? onClientsChanged;
 
   bool _inited = false;
   bool _running = false;
@@ -56,15 +61,19 @@ class BleGattServer {
           if (!connected && _clients.isEmpty) {
             _advertise();
           }
+          onClientsChanged?.call();
         });
         BlePeripheral.setCharacteristicSubscriptionChangeCallback(
             (deviceId, charId, subscribed, name) {
-          if (subscribed) _clients.add(deviceId);
+          if (subscribed) {
+            _clients.add(deviceId);
+            onClientsChanged?.call();
+          }
         });
         BlePeripheral.setWriteRequestCallback((deviceId, charId, offset, value) {
           if (value != null && value.isNotEmpty &&
               charId.toLowerCase().contains('fff1')) {
-            _clients.add(deviceId);
+            if (_clients.add(deviceId)) onClientsChanged?.call();
             onData(deviceId, value);
           }
           return WriteRequestResult(status: 0);

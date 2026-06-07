@@ -110,25 +110,42 @@ class BleGattServer {
     }
   }
 
-  // Presence beacon: company 0xFFFF, [0x3E marker, callsign] — peers connect on
-  // seeing the 0x3E marker (same shape the ESP32 advertises). No pairing.
+  // Presence beacon: company 0xFFFF, [0x3E marker, deviceId, callsign] — the
+  // geogram standard the ESP32 expects (it reads the callsign from offset 4,
+  // i.e. after a 1-byte device id). No pairing; peers connect on the 0x3E marker.
+  // NOTE: advertise manufacturer data ONLY — no service UUID. The service UUID
+  // here is a 128-bit string; including it (18B) + flags (3B) + this data
+  // overflows the 31-byte legacy advert and makes Android switch to EXTENDED
+  // advertising, which the ESP32's legacy scanner can't see (so the iGate never
+  // hears us). The device stays connectable without it, and the central scan is
+  // unfiltered, so discovery still works.
   Future<void> _advertise() async {
     if (!_running) return;
     final cs = _callsign;
-    final data = Uint8List.fromList(
-        [0x3E, ...utf8.encode(cs.length > 8 ? cs.substring(0, 8) : cs)]);
+    final csBytes = utf8.encode(cs.length > 6 ? cs.substring(0, 6) : cs);
+    final data = Uint8List.fromList([0x3E, _deviceId(cs), ...csBytes]);
     try {
       await BlePeripheral.stopAdvertising();
     } catch (_) {}
     try {
       await BlePeripheral.startAdvertising(
-        services: [_svcUuid],
+        services: const [],
         manufacturerData: ManufacturerData(manufacturerId: 0xFFFF, data: data),
       );
       debugPrint('BleGatt(server): advertising as $cs (parcel server up)');
     } catch (e) {
       debugPrint('BleGatt(server): advertise failed: $e');
     }
+  }
+
+  // Small non-zero device id (1..15) derived from the callsign — mirrors the
+  // ESP32's MAC-hash scheme; the value only needs to be stable, not unique.
+  static int _deviceId(String cs) {
+    var h = 2166136261;
+    for (final b in utf8.encode(cs)) {
+      h = (h ^ b) * 16777619 & 0xffffffff;
+    }
+    return (h % 15) + 1;
   }
 
   Future<void> stop() async {

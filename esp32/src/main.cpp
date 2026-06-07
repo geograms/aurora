@@ -85,6 +85,7 @@
     #include "nostr_keys.h"
     #include "wifi_bsp.h"
     #include "http_server.h"
+    #include "esp_coexist.h"
 #elif BOARD_MODEL == MODEL_HELTEC_V3
     #include "model_config.h"
     #include "model_init.h"
@@ -1060,6 +1061,18 @@ extern "C" void app_main(void)
             if (ret == ESP_OK) {
                 ESP_LOGI(TAG, "WiFi AP started: geogram (open)");
                 tdongle_ui_set_ip("192.168.4.1");
+
+                // WiFi + BLE share one 2.4 GHz radio. The default coexistence
+                // policy (BALANCE) splits airtime evenly, which starves the BLE
+                // scan and makes the iGate miss phones' adverts (so it never
+                // hears their callsigns to gate APRS-IS traffic to them). This
+                // node is BLE-first (its job is to hear/relay over BLE; APRS-IS
+                // is low-bandwidth), so bias arbitration toward Bluetooth.
+                {
+                    esp_err_t cret = esp_coex_preference_set(ESP_COEX_PREFER_BT);
+                    ESP_LOGI(TAG, "coex preference -> BT: %s",
+                             cret == ESP_OK ? "ok" : esp_err_to_name(cret));
+                }
 
                 // Auto-connect STA: prefer captive-portal/console-saved
                 // credentials; otherwise fall back to the operator's

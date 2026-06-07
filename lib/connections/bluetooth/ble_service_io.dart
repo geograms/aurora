@@ -511,8 +511,15 @@ class BleService {
       if (_pkgAdvertHex == hex) return; // already on air with this frame
       try {
         await bp.BlePeripheral.stopAdvertising();
+        // Advertise ONLY the manufacturer data — no service UUID, no name. The
+        // ffe0 UUID is a 128-bit string here; including it (18B) plus flags (3B)
+        // plus our manufacturer data (~24B) overflows the 31-byte legacy advert,
+        // which makes Android silently switch to EXTENDED advertising — invisible
+        // to the ESP32's legacy scanner, so the iGate never hears the phone.
+        // Receivers don't need it: the central scan is unfiltered and matches on
+        // company id 0xFFFF, not the service UUID.
         await bp.BlePeripheral.startAdvertising(
-          services: const [kBleServiceUuid],
+          services: const [],
           manufacturerData: bp.ManufacturerData(
             manufacturerId: kBleCompanyId,
             data: payload,

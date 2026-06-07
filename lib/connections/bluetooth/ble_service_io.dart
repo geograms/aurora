@@ -19,6 +19,7 @@ import 'package:bluez/bluez.dart';
 import 'package:dbus/dbus.dart' show DBusArray;
 import 'package:flutter/foundation.dart';
 
+import 'ble_gatt_client.dart';
 import 'ble_reassembler.dart';
 
 /// APRS-over-BLE manufacturer id carried in advertisement manufacturer data.
@@ -85,6 +86,9 @@ class BleService {
   final BleReassembler _reasm = BleReassembler();
   final Map<String, Timer> _holdTimers = {};
 
+  // Generic GATT parcel transport (connects to peers' GATT servers).
+  BleGattClient? _gatt;
+
   // Scanning (ref-counted).
   int _scanRefs = 0;
   bool _scanning = false;
@@ -131,6 +135,13 @@ class BleService {
       // Permanent discovered subscription; frames only flow while scanning.
       _central!.discovered.listen(_onDiscovered);
       _central!.stateChanged.listen((_) => _applyScan());
+      // Generic parcel transport over GATT (the standard text exchange).
+      // Reassembled inbound frames are fanned out on the same inbound stream
+      // wapps already read, so APRS (and others) need no change.
+      _gatt = BleGattClient(_central!, onInbound: (from, rssi, data) {
+        if (!_inbound.isClosed) _inbound.add(BleInboundFrame(from, rssi, data));
+      })
+        ..start();
     } catch (e) {
       _central = null;
       debugPrint('BleService: central unavailable: $e');
@@ -179,6 +190,16 @@ class BleService {
         if (m.id == kBleCompanyId && m.data.isNotEmpty) m.data,
     ];
     if (entries.isEmpty) return;
+
+    // A geogram presence beacon (manufacturer data starting with the 0x3E
+    // marker) means this peer runs a GATT server — connect for the parcel
+    // transport (the standard reliable text exchange).
+    for (final d in entries) {
+      if (d[0] == kBleMarker) {
+        _gatt?.considerPeer(e.peripheral, e.rssi);
+        break;
+      }
+    }
 
     for (final f in _reasm.ingest(from, entries)) {
       if (f.length > 24) {
@@ -263,6 +284,12 @@ class BleService {
   // advertising indefinitely.
   void enqueueAdvert(Object owner, Uint8List payload,
       {Duration ttl = const Duration(seconds: 10)}) {
+    // Preferred path: if connected to a peer's GATT server, send the full frame
+    // reliably as parcel(s). The advertising queue below still serves peers we
+    // are not connected to.
+    if (_gatt?.isConnected ?? false) {
+      _gatt!.sendText(payload);
+    }
     if (!_advertiseSupported) {
       // Try to (lazily) discover support; if none, drop quietly.
       _ensure();

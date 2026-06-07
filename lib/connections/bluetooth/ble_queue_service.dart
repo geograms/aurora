@@ -232,6 +232,11 @@ class BLEQueueService {
     while (parcelsToSend.isNotEmpty && attempts < BLEParcelConstants.maxRetries) {
       attempts++;
 
+      // Register the receipt waiter BEFORE sending — a fast peer (the ESP32)
+      // can answer before the post-send delays finish, and the receipt would
+      // otherwise be dropped, forcing a needless retry.
+      final receiptFuture = _awaitReceipt(message.msgId);
+
       // Send parcels
       int parcelsSent = 0;
       for (final parcelIdx in parcelsToSend) {
@@ -257,8 +262,8 @@ class BLEQueueService {
         }
       }
 
-      // Wait for receipt
-      final receipt = await _waitForReceipt(message.msgId);
+      // Wait for the receipt registered above.
+      final receipt = await receiptFuture;
 
       if (receipt == null) {
         _log('BLEQueue: No receipt received for ${message.msgId}');
@@ -294,22 +299,20 @@ class BLEQueueService {
     );
   }
 
-  /// Wait for receipt from receiver
-  Future<BLEReceipt?> _waitForReceipt(String msgId) async {
+  /// Register a receipt waiter immediately (synchronously) and return a future
+  /// that resolves with the receipt or null on timeout. Registering before the
+  /// parcels are sent avoids losing a receipt from a fast peer.
+  Future<BLEReceipt?> _awaitReceipt(String msgId) {
     final completer = Completer<BLEReceipt>();
     _pendingReceipts[msgId] = completer;
-
-    try {
-      final receipt = await completer.future.timeout(
-        Duration(milliseconds: BLEParcelConstants.receiptTimeoutMs),
-      );
-      return receipt;
-    } on TimeoutException {
-      _log('BLEQueue: Receipt timeout for $msgId');
-      return null;
-    } finally {
-      _pendingReceipts.remove(msgId);
-    }
+    return completer.future
+        .timeout(Duration(milliseconds: BLEParcelConstants.receiptTimeoutMs))
+        .then<BLEReceipt?>((r) => r)
+        .catchError((_) {
+          _log('BLEQueue: Receipt timeout for $msgId');
+          return null;
+        })
+        .whenComplete(() => _pendingReceipts.remove(msgId));
   }
 
   /// Handle incoming data from BLE

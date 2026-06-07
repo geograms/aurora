@@ -4,6 +4,7 @@
  */
 
 #include "ble_hello.h"
+#include "ble_parcel.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -19,6 +20,7 @@
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
+#include "host/ble_att.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -149,8 +151,9 @@ static bool     s_scanning;             /* true = scan phase, false = adv phase 
 
 /* ---- helpers ------------------------------------------------------------ */
 
-/* Forward declaration */
+/* Forward declarations */
 static int ble_hello_gap_event(struct ble_gap_event *event, void *arg);
+static void aprs_decode(const uint8_t *payload, int len, int rssi);
 
 static uint32_t now_sec(void)
 {
@@ -492,6 +495,35 @@ static void send_hello_ack(uint16_t conn)
     free(json);
 }
 
+/* ---- BLE parcel transport over GATT (FFF1 write in, FFF2 notify out) ----- */
+
+/* Notify a "complete" receipt for [msg_id] to the connected client. */
+static void gatt_send_receipt(uint16_t conn, const char *msg_id)
+{
+    uint8_t r[48];
+    int n = ble_parcel_build_receipt(msg_id, r, sizeof r);
+    if (n <= 0) return;
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(r, n);
+    if (om) ble_gatts_notify_custom(conn, s_notify_handle, om);
+}
+
+/* Send [payload] (a compact `<from>\x1f<to>\x1f<text>` frame) as a single
+ * parcel to the connected GATT client (the desktop). */
+static void gatt_send_parcel(uint16_t conn, const uint8_t *payload, int len)
+{
+    if (len <= 0 || len > BLE_PARCEL_HDR_CAP) return;
+    uint8_t buf[BLE_PARCEL_HDR_OVH + BLE_PARCEL_HDR_CAP];
+    char id[3];
+    ble_parcel_gen_id(id, (uint32_t)esp_timer_get_time());
+    int n = ble_parcel_build_header(id, payload, len, buf, sizeof buf);
+    if (n <= 0) return;
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(buf, n);
+    if (om) ble_gatts_notify_custom(conn, s_notify_handle, om);
+}
+
+/* True when a central (the desktop) is connected to our GATT server. */
+static bool gatt_client_connected(void) { return s_conn_active; }
+
 /* ---- GATT callbacks ----------------------------------------------------- */
 
 static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
@@ -505,20 +537,45 @@ static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (len == 0 || len > 512) return 0;
 
-    char buf[513];
+    uint8_t buf[513];
     uint16_t copied = 0;
     ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf) - 1, &copied);
     buf[copied] = '\0';
 
-    cJSON *root = cJSON_Parse(buf);
-    if (!root) return 0;
-
-    cJSON *type = cJSON_GetObjectItem(root, "type");
-    if (type && cJSON_IsString(type) && strcmp(type->valuestring, "hello") == 0) {
-        ESP_LOGI(TAG, "HELLO received on conn %d", conn_handle);
-        send_hello_ack(conn_handle);
+    /* JSON ('{') is either a HELLO handshake or a parcel receipt; anything else
+     * is a BLE parcel carrying a text frame. */
+    if (buf[0] == '{') {
+        if (ble_parcel_is_receipt(buf, copied)) {
+            return 0;   /* ack of one of our notifies — nothing to do */
+        }
+        cJSON *root = cJSON_Parse((char *)buf);
+        if (root) {
+            cJSON *type = cJSON_GetObjectItem(root, "type");
+            if (type && cJSON_IsString(type) &&
+                strcmp(type->valuestring, "hello") == 0) {
+                ESP_LOGI(TAG, "HELLO received on conn %d", conn_handle);
+                send_hello_ack(conn_handle);
+            }
+            cJSON_Delete(root);
+        }
+        return 0;
     }
-    cJSON_Delete(root);
+
+    /* BLE parcel (geogram parcel protocol). Chat frames are a single parcel. */
+    ble_parcel_hdr_t p;
+    if (ble_parcel_parse_header(buf, copied, &p)) {
+        if (p.total == 1) {
+            if (ble_parcel_crc32(p.data, p.data_len) == p.crc) {
+                ESP_LOGI(TAG, "GATT parcel rx: msg %s (%d B)", p.msg_id, p.data_len);
+                aprs_decode(p.data, p.data_len, 0);     /* deliver as a received frame */
+                gatt_send_receipt(conn_handle, p.msg_id);
+            } else {
+                ESP_LOGW(TAG, "GATT parcel CRC mismatch (msg %s)", p.msg_id);
+            }
+        } else {
+            ESP_LOGW(TAG, "GATT multi-parcel not supported yet (total=%d)", p.total);
+        }
+    }
     return 0;
 }
 
@@ -582,6 +639,20 @@ bool ble_hello_relay_aprs(const char *from, const char *to, const char *text)
 {
     if (!s_active || !from || !to || !text) return false;
 
+    /* Connected desktop? Send the FULL frame reliably over GATT as a parcel
+     * (no advert size limit). The advertising path below still serves
+     * ESP32<->ESP32 peers (and is truncated to fit a legacy advert). */
+    if (gatt_client_connected()) {
+        uint8_t full[BLE_PARCEL_HDR_CAP];
+        int fn = 0;
+        for (const char *p = from; *p && fn < (int)sizeof(full); p++) full[fn++] = (uint8_t)*p;
+        if (fn < (int)sizeof(full)) full[fn++] = 0x1F;
+        for (const char *p = to; *p && fn < (int)sizeof(full); p++) full[fn++] = (uint8_t)*p;
+        if (fn < (int)sizeof(full)) full[fn++] = 0x1F;
+        for (const char *p = text; *p && fn < (int)sizeof(full); p++) full[fn++] = (uint8_t)*p;
+        gatt_send_parcel(s_conn_handle, full, fn);
+    }
+
     /* Build compact manufacturer data: [0xFF,0xFF,<from>\x1f<to>\x1f<text>].
      * Up to APRS_MFG_MAX bytes: the primary legacy advert holds the first
      * ADV_MFG_CAP and the rest rides the SCAN_RSP continuation (see
@@ -622,8 +693,9 @@ static void aprs_decode(const uint8_t *payload, int len, int rssi)
 {
     if (!s_aprs_cb || len <= 0) return;
 
-    /* Field buffers sized for a legacy advert (payload <= ~29 bytes). */
-    char from[16] = {0}, to[16] = {0}, text[64] = {0};
+    /* Field buffers: text is large enough for a full GATT parcel frame, not
+     * just a legacy advert. */
+    char from[16] = {0}, to[16] = {0}, text[240] = {0};
     char *fields[3] = { from, to, text };
     size_t caps[3]  = { sizeof from - 1, sizeof to - 1, sizeof text - 1 };
 
@@ -788,6 +860,9 @@ static void on_sync(void)
         ESP_LOGE(TAG, "ensure_addr failed: %d", rc);
         return;
     }
+
+    /* Prefer a large ATT MTU so a whole parcel rides one write/notify. */
+    ble_att_set_preferred_mtu(512);
 
     ESP_LOGI(TAG, "BLE host synced — starting advertising");
     start_advertise();

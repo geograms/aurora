@@ -81,6 +81,7 @@
     #include "model_init.h"
     #include "tdongle_ui.h"
     #include "ble_hello.h"
+    #include "aprsis.h"
     #include "nostr_keys.h"
     #include "wifi_bsp.h"
     #include "http_server.h"
@@ -336,6 +337,16 @@ static void start_mesh_mode(void)
 // ============================================================================
 
 #if BOARD_MODEL == MODEL_TDONGLE_S3
+
+/* Operator's home WiFi — used only when no captive-portal/console credentials
+ * are saved in NVS. Lets the iGate reach APRS-IS out of the box. Override at
+ * runtime via the captive portal or the `wifi_connect` console command. */
+#ifndef TDONGLE_DEFAULT_WIFI_SSID
+#define TDONGLE_DEFAULT_WIFI_SSID "---___---"
+#endif
+#ifndef TDONGLE_DEFAULT_WIFI_PASS
+#define TDONGLE_DEFAULT_WIFI_PASS "vodafone"
+#endif
 
 /**
  * @brief WiFi event callback for T-Dongle-S3
@@ -925,6 +936,10 @@ static void tdongle_aprs_rx(const char *from, const char *to,
     ESP_LOGI(TAG, "Aurora APRS RX (rssi=%d): %s -> %s : %s",
              rssi, from, (to && *to) ? to : "(geo)", text);
 
+    /* iGate RF→Internet: gate this locally-heard frame up to APRS-IS (the
+     * iGate decides what is gateable: direct messages + positions). */
+    aprsis_uplink(from, to ? to : "", text ? text : "");
+
     /* Geo-chat text carries a leading ">>" marker — not useful on screen. */
     if (text && text[0] == '>' && text[1] == '>') text += 2;
 
@@ -1046,16 +1061,24 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "WiFi AP started: geogram (open)");
                 tdongle_ui_set_ip("192.168.4.1");
 
-                // Auto-connect STA if saved credentials exist (5s delay)
+                // Auto-connect STA: prefer captive-portal/console-saved
+                // credentials; otherwise fall back to the operator's
+                // configured home network so the iGate has internet out of
+                // the box. (Captive portal / `wifi_connect` still override.)
                 {
                     char saved_ssid[33] = {0};
                     char saved_pass[65] = {0};
-                    if (geogram_wifi_load_credentials(saved_ssid, saved_pass) == ESP_OK
-                        && strlen(saved_ssid) > 0) {
-                        ESP_LOGI(TAG, "Will auto-connect to saved WiFi in 5 s: %s", saved_ssid);
+                    bool have_saved =
+                        geogram_wifi_load_credentials(saved_ssid, saved_pass) == ESP_OK
+                        && strlen(saved_ssid) > 0;
+                    const char *sta_ssid = have_saved ? saved_ssid : TDONGLE_DEFAULT_WIFI_SSID;
+                    const char *sta_pass = have_saved ? saved_pass : TDONGLE_DEFAULT_WIFI_PASS;
+                    if (sta_ssid[0]) {
+                        ESP_LOGI(TAG, "Will connect to WiFi in 5 s: %s (%s)",
+                                 sta_ssid, have_saved ? "saved" : "default");
                         vTaskDelay(pdMS_TO_TICKS(5000));
-                        ESP_LOGI(TAG, "Auto-connecting to saved WiFi: %s", saved_ssid);
-                        geogram_wifi_connect_sta(saved_ssid, saved_pass);
+                        ESP_LOGI(TAG, "Connecting to WiFi: %s", sta_ssid);
+                        geogram_wifi_connect_sta(sta_ssid, sta_pass);
                     }
                 }
 
@@ -1069,6 +1092,20 @@ extern "C" void app_main(void)
                 station_init();
                 http_server_start_ex(tdongle_wifi_config_received, true);
                 ESP_LOGI(TAG, "HTTP server + captive portal started");
+
+                // APRS-IS iGate: bridges APRS-IS <-> BLE once WiFi is up.
+                // Coordinates default undefined (no GPS) so only messages to
+                // BLE-heard callsigns are gated; set TDONGLE_DEFAULT_LAT/LON
+                // or call aprsis_set_position() to also gate nearby traffic.
+                ret = aprsis_init(callsign);
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "APRS-IS iGate started for %s", callsign);
+#if defined(TDONGLE_DEFAULT_LAT) && defined(TDONGLE_DEFAULT_LON)
+                    aprsis_set_position(TDONGLE_DEFAULT_LAT, TDONGLE_DEFAULT_LON);
+#endif
+                } else {
+                    ESP_LOGW(TAG, "APRS-IS iGate init failed: %s", esp_err_to_name(ret));
+                }
             } else {
                 ESP_LOGE(TAG, "Failed to start WiFi AP: %s", esp_err_to_name(ret));
             }

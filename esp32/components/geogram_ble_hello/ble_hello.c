@@ -49,6 +49,11 @@ static const char *TAG = "ble_hello";
 #define SHOWN_MAX           48          /* recently-shown message cache */
 #define SHOWN_DEDUP_SEC     3600        /* 60-minute display suppression */
 
+/* Heard-callsign registry: every station whose callsign we saw over BLE
+ * (presence beacon or APRS frame `from`). The APRS-IS iGate reads this to
+ * build its message filter (only pull traffic addressed to local stations). */
+#define HEARD_MAX           24          /* distinct callsigns remembered */
+
 /* GATT UUIDs */
 #define SVC_UUID            0xFFE0
 #define CHR_WRITE_UUID      0xFFF1
@@ -99,6 +104,11 @@ static int      s_rdedup_cnt;
 /* Display dedup state (same shape as relay dedup, longer window) */
 static rdedup_t s_shown[SHOWN_MAX];
 static int      s_shown_cnt;
+
+/* Heard-callsign registry (uppercased, NUL-terminated, SSID stripped). */
+typedef struct { char call[8]; uint32_t t; } heard_t;
+static heard_t s_heard[HEARD_MAX];
+static int     s_heard_cnt;
 
 /* GATT */
 static uint16_t s_notify_handle;
@@ -223,6 +233,39 @@ static void shown_mark(uint32_t hash)
     s_shown[idx].hash = hash;
     s_shown[idx].t = now_sec();
     s_shown_cnt++;
+}
+
+/* Remember a callsign heard over BLE (uppercase, strip any "-SSID"). Updates
+ * the timestamp if already known; evicts the oldest entry when full. */
+static void heard_add(const char *raw, int rawlen)
+{
+    char call[8];
+    int n = 0;
+    for (int i = 0; i < rawlen && raw[i] && raw[i] != '-' && n < 7; i++) {
+        char c = raw[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        /* APRS callsign charset only — guards against junk in manufacturer data */
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) call[n++] = c;
+        else break;
+    }
+    call[n] = 0;
+    if (n < 3) return;                 /* too short to be a real callsign */
+
+    uint32_t t = now_sec();
+    for (int i = 0; i < s_heard_cnt; i++) {
+        if (strcmp(s_heard[i].call, call) == 0) { s_heard[i].t = t; return; }
+    }
+    int slot;
+    if (s_heard_cnt < HEARD_MAX) {
+        slot = s_heard_cnt++;
+    } else {                           /* full — evict the oldest */
+        slot = 0;
+        for (int i = 1; i < HEARD_MAX; i++)
+            if (s_heard[i].t < s_heard[slot].t) slot = i;
+    }
+    strcpy(s_heard[slot].call, call);
+    s_heard[slot].t = t;
+    ESP_LOGI(TAG, "heard callsign over BLE: %s (%d known)", call, s_heard_cnt);
 }
 
 /* Queue a full manufacturer-data frame for rebroadcast. */
@@ -474,6 +517,58 @@ void ble_hello_set_aprs_cb(ble_hello_aprs_cb_t cb)
     s_aprs_cb = cb;
 }
 
+int ble_hello_get_heard(char calls[][8], int max, uint32_t max_age_sec)
+{
+    uint32_t t = now_sec();
+    int n = 0;
+    for (int i = 0; i < s_heard_cnt && n < max; i++) {
+        if (max_age_sec == 0 || (t - s_heard[i].t) <= max_age_sec) {
+            strncpy(calls[n], s_heard[i].call, 7);
+            calls[n][7] = 0;
+            n++;
+        }
+    }
+    return n;
+}
+
+bool ble_hello_relay_aprs(const char *from, const char *to, const char *text)
+{
+    if (!s_active || !from || !to || !text) return false;
+
+    /* Build compact manufacturer data: [0xFF,0xFF,<from>\x1f<to>\x1f<text>].
+     * The 31-byte legacy advert already carries flags(3) + FFE0 uuid AD(4) +
+     * the mfg AD header(2), leaving 22 bytes for the manufacturer data itself
+     * (company id + payload). Anything longer makes ble_gap_adv_set_fields
+     * fail with BLE_HS_EINVAL, so cap here (text is truncated to fit). */
+    uint8_t mfg[22];
+    int n = 0;
+    mfg[n++] = COMPANY_ID_LO;
+    mfg[n++] = COMPANY_ID_HI;
+    for (const char *p = from; *p && n < (int)sizeof(mfg); p++) mfg[n++] = (uint8_t)*p;
+    if (n < (int)sizeof(mfg)) mfg[n++] = 0x1F;
+    for (const char *p = to; *p && n < (int)sizeof(mfg); p++) mfg[n++] = (uint8_t)*p;
+    if (n < (int)sizeof(mfg)) mfg[n++] = 0x1F;
+    bool truncated = false;
+    for (const char *p = text; *p; p++) {
+        if (n >= (int)sizeof(mfg)) { truncated = true; break; }
+        mfg[n++] = (uint8_t)*p;
+    }
+    if (n <= 4) return false;          /* nothing but headers fit */
+
+    /* Content dedup against the shared mesh/display caches so a message gated
+     * repeatedly by APRS-IS is only put on air once, and our own re-scan of it
+     * neither re-relays nor re-displays it. */
+    uint32_t ch = fnv1a(&mfg[2], n - 2);
+    if (relay_seen(ch)) return false;
+    relay_remember(ch);
+    shown_mark(ch);
+
+    relay_enqueue(mfg, n);
+    ESP_LOGI(TAG, "iGate relay -> BLE: %s -> %s (%d B%s)",
+             from, to[0] ? to : "(geo)", n, truncated ? ", truncated" : "");
+    return true;
+}
+
 /* Decode a compact Aurora APRS payload `<from>\x1f<to>\x1f<text>` (the bytes
  * after the 2-byte company id) and deliver it via the registered callback.
  * Untrusted input — everything is bounds-checked and NUL-terminated. */
@@ -499,6 +594,9 @@ static void aprs_decode(const uint8_t *payload, int len, int rssi)
         if (fp < caps[fi]) fields[fi][fp++] = (char)b;
     }
     if (!saw_sep) return;           /* not an Aurora APRS frame */
+
+    /* Remember the sender so the iGate can filter APRS-IS for traffic to it. */
+    heard_add(from, (int)strlen(from));
 
     /* Display dedup: deliver the same message content to the chat only once per
      * SHOWN_DEDUP_SEC (60 min). One broadcast is received dozens of times and
@@ -529,8 +627,12 @@ static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
             fields.mfg_data[0] == COMPANY_ID_LO &&
             fields.mfg_data[1] == COMPANY_ID_HI) {
             if (fields.mfg_data[2] == GEOGRAM_MARKER) {
-                /* Geogram presence beacon */
+                /* Geogram presence beacon: [company,marker,device_id,callsign…] */
                 track_device(event->disc.addr.val);
+                if (fields.mfg_data_len > 4) {
+                    heard_add((const char *)&fields.mfg_data[4],
+                              fields.mfg_data_len - 4);
+                }
             } else if (fields.mfg_data_len >= 4) {
                 /* No 0x3E marker — treat as an Aurora APRS frame. */
                 track_device(event->disc.addr.val);

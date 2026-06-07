@@ -10,6 +10,11 @@ if(CONFIG_GEOGRAM_BOARD_EPAPER_1IN54)
     list(APPEND APP_REQUIRES geogram_ftp)
 endif()
 
+# APRS-IS iGate only on the T-Dongle-S3 (bridges APRS-IS <-> BLE)
+if(CONFIG_GEOGRAM_BOARD_TDONGLE_S3)
+    list(APPEND APP_REQUIRES geogram_aprsis)
+endif()
+
 idf_component_register(
     SRCS ${app_sources}
     REQUIRES ${APP_REQUIRES}

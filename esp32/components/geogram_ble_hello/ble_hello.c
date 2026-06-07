@@ -15,6 +15,7 @@
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "nimble/hci_common.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
@@ -54,6 +55,21 @@ static const char *TAG = "ble_hello";
  * build its message filter (only pull traffic addressed to local stations). */
 #define HEARD_MAX           24          /* distinct callsigns remembered */
 
+/* Longer APRS messages over BLE — same technique as geogram_ble_aprs
+ * (BlueAPRS): a compact frame that overflows the primary legacy advert carries
+ * the remainder in the active-scan SCAN_RSP, so any active scanner reassembles
+ * it (works on all devices). The primary advert stays the bare compact form
+ * (company id + payload) so the Aurora app still reads the first part; the
+ * SCAN_RSP continuation is marked so it isn't mis-parsed:
+ *   ADV mfg:      [0xFF,0xFF, <payload[0 .. ADV_PAYLOAD_CAP)>]
+ *   SCAN_RSP mfg: [0xFF,0xFF, 0x3E, 'B', <payload[ADV_PAYLOAD_CAP ..])>] */
+#define APRS_CONT_SUBTYPE   0x42        /* 'B' — SCAN_RSP continuation marker */
+#define ADV_MFG_CAP         20          /* company(2)+payload(18) — safe in a legacy advert beside flags+FFE0 */
+#define ADV_PAYLOAD_CAP     (ADV_MFG_CAP - 2)
+#define CONT_HDR_LEN        4           /* company(2)+marker(1)+subtype(1) */
+#define CONT_PAYLOAD_CAP    24          /* overflow bytes carried in SCAN_RSP */
+#define APRS_MFG_MAX        (2 + ADV_PAYLOAD_CAP + CONT_PAYLOAD_CAP)  /* 44 */
+
 /* GATT UUIDs */
 #define SVC_UUID            0xFFE0
 #define CHR_WRITE_UUID      0xFFF1
@@ -90,12 +106,24 @@ static ble_hello_aprs_cb_t s_aprs_cb;
 
 /* APRS relay state */
 typedef struct {
-    uint8_t  mfg[31];                   /* full manufacturer data to rebroadcast */
+    uint8_t  mfg[APRS_MFG_MAX];         /* full manufacturer data to rebroadcast
+                                           (split across ADV + SCAN_RSP if long) */
     uint8_t  len;                       /* 0 = empty slot */
     uint32_t expire;                    /* seconds-since-boot when it lapses */
 } relay_slot_t;
 static relay_slot_t s_relay[RELAY_MAX];
 static int          s_relay_rr;         /* round-robin advertise cursor */
+
+/* Reassembly: a compact APRS primary advert (no marker) is held until the next
+ * scan event tells us whether a SCAN_RSP continuation follows. Pairing is by
+ * advertiser address; everything runs in the NimBLE host task (no locking). */
+static struct {
+    bool     active;
+    uint8_t  addr[6];
+    uint8_t  mfg[APRS_MFG_MAX];
+    int      len;
+    int      rssi;
+} s_pending;
 
 typedef struct { uint32_t hash; uint32_t t; } rdedup_t;
 static rdedup_t s_rdedup[RDEDUP_MAX];
@@ -320,13 +348,19 @@ static void advertise_with(const uint8_t *mfg, uint8_t mfg_len)
      * withServices:[FFE0] filter and won't see us without it. */
     ble_uuid16_t svc_uuid = BLE_UUID16_INIT(SVC_UUID);
 
+    /* Long frame? Carry the first ADV_MFG_CAP bytes here and the overflow in
+     * the SCAN_RSP continuation (active scanners reassemble it). */
+    bool split = mfg_len > ADV_MFG_CAP;
+    uint8_t adv_cont[CONT_HDR_LEN + CONT_PAYLOAD_CAP];
+    int adv_cont_len = 0;
+
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids16 = &svc_uuid;
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
     fields.mfg_data = mfg;
-    fields.mfg_data_len = mfg_len;
+    fields.mfg_data_len = split ? ADV_MFG_CAP : mfg_len;
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
@@ -335,11 +369,24 @@ static void advertise_with(const uint8_t *mfg, uint8_t mfg_len)
     }
 
     /* --- Scan response data ---
-     * Put the device name here to save primary adv space. */
+     * For a split frame: the marked continuation. Otherwise: the device name. */
     struct ble_hs_adv_fields rsp_fields = {0};
-    rsp_fields.name = (uint8_t *)s_callsign;
-    rsp_fields.name_len = strlen(s_callsign);
-    rsp_fields.name_is_complete = 1;
+    if (split) {
+        int overflow = mfg_len - ADV_MFG_CAP;
+        if (overflow > CONT_PAYLOAD_CAP) overflow = CONT_PAYLOAD_CAP;
+        adv_cont[0] = COMPANY_ID_LO;
+        adv_cont[1] = COMPANY_ID_HI;
+        adv_cont[2] = GEOGRAM_MARKER;
+        adv_cont[3] = APRS_CONT_SUBTYPE;
+        memcpy(&adv_cont[CONT_HDR_LEN], &mfg[ADV_MFG_CAP], overflow);
+        adv_cont_len = CONT_HDR_LEN + overflow;
+        rsp_fields.mfg_data = adv_cont;
+        rsp_fields.mfg_data_len = adv_cont_len;
+    } else {
+        rsp_fields.name = (uint8_t *)s_callsign;
+        rsp_fields.name_len = strlen(s_callsign);
+        rsp_fields.name_is_complete = 1;
+    }
 
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
     if (rc != 0) {
@@ -366,7 +413,7 @@ static void start_advertise(void)
     }
 }
 
-/* ---- passive scanning --------------------------------------------------- */
+/* ---- active scanning ---------------------------------------------------- */
 
 static void start_scan(void)
 {
@@ -375,7 +422,7 @@ static void start_scan(void)
     s_scanning = true;
 
     struct ble_gap_disc_params params = {0};
-    params.passive = 1;
+    params.passive = 0;            /* active — request SCAN_RSP continuations */
     params.itvl = 0x0050;          /* 50 ms */
     params.window = 0x0030;        /* 30 ms */
     params.filter_duplicates = 0;  /* we do our own dedup */
@@ -536,11 +583,10 @@ bool ble_hello_relay_aprs(const char *from, const char *to, const char *text)
     if (!s_active || !from || !to || !text) return false;
 
     /* Build compact manufacturer data: [0xFF,0xFF,<from>\x1f<to>\x1f<text>].
-     * The 31-byte legacy advert already carries flags(3) + FFE0 uuid AD(4) +
-     * the mfg AD header(2), leaving 22 bytes for the manufacturer data itself
-     * (company id + payload). Anything longer makes ble_gap_adv_set_fields
-     * fail with BLE_HS_EINVAL, so cap here (text is truncated to fit). */
-    uint8_t mfg[22];
+     * Up to APRS_MFG_MAX bytes: the primary legacy advert holds the first
+     * ADV_MFG_CAP and the rest rides the SCAN_RSP continuation (see
+     * advertise_with). Longer-than-that text is truncated to fit. */
+    uint8_t mfg[APRS_MFG_MAX];
     int n = 0;
     mfg[n++] = COMPANY_ID_LO;
     mfg[n++] = COMPANY_ID_HI;
@@ -608,6 +654,28 @@ static void aprs_decode(const uint8_t *payload, int len, int rssi)
     s_aprs_cb(from, to, text, rssi);
 }
 
+/* Deliver one fully-assembled compact APRS frame: show it (deduped) and
+ * rebroadcast it once for the mesh repeater. [mfg] = [0xFF,0xFF,payload…]. */
+static void process_aprs_frame(const uint8_t *mfg, int len, int rssi)
+{
+    if (len < 4) return;
+    aprs_decode(&mfg[2], len - 2, rssi);
+    uint32_t ch = fnv1a(&mfg[2], len - 2);
+    if (!relay_seen(ch)) {
+        relay_remember(ch);
+        relay_enqueue(mfg, len);
+    }
+}
+
+/* A held primary advert turned out to have no SCAN_RSP continuation — deliver
+ * it as a (short) frame. */
+static void flush_pending(void)
+{
+    if (!s_pending.active) return;
+    s_pending.active = false;
+    process_aprs_frame(s_pending.mfg, s_pending.len, s_pending.rssi);
+}
+
 /* ---- GAP event handler -------------------------------------------------- */
 
 static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
@@ -617,35 +685,54 @@ static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
 
     case BLE_GAP_EVENT_DISC: {
-        /* Check manufacturer data for Geogram marker */
         struct ble_hs_adv_fields fields;
         if (ble_hs_adv_parse_fields(&fields, event->disc.data,
                                      event->disc.length_data) != 0) {
             break;
         }
-        if (fields.mfg_data && fields.mfg_data_len >= 3 &&
-            fields.mfg_data[0] == COMPANY_ID_LO &&
-            fields.mfg_data[1] == COMPANY_ID_HI) {
-            if (fields.mfg_data[2] == GEOGRAM_MARKER) {
-                /* Geogram presence beacon: [company,marker,device_id,callsign…] */
-                track_device(event->disc.addr.val);
-                if (fields.mfg_data_len > 4) {
-                    heard_add((const char *)&fields.mfg_data[4],
-                              fields.mfg_data_len - 4);
+        const uint8_t *mfg = fields.mfg_data;
+        int mlen = fields.mfg_data_len;
+        if (!mfg || mlen < 3 || mfg[0] != COMPANY_ID_LO || mfg[1] != COMPANY_ID_HI) {
+            break;
+        }
+        const uint8_t *addr = event->disc.addr.val;
+        bool is_rsp = (event->disc.event_type == BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP);
+
+        /* SCAN_RSP continuation of a long compact frame: reassemble it onto the
+         * pending primary from the same advertiser. */
+        if (mlen >= CONT_HDR_LEN && mfg[2] == GEOGRAM_MARKER &&
+            mfg[3] == APRS_CONT_SUBTYPE && is_rsp) {
+            if (s_pending.active && memcmp(s_pending.addr, addr, 6) == 0) {
+                int overflow = mlen - CONT_HDR_LEN;
+                if (overflow > APRS_MFG_MAX - s_pending.len)
+                    overflow = APRS_MFG_MAX - s_pending.len;
+                if (overflow > 0) {
+                    memcpy(&s_pending.mfg[s_pending.len], &mfg[CONT_HDR_LEN], overflow);
+                    s_pending.len += overflow;
                 }
-            } else if (fields.mfg_data_len >= 4) {
-                /* No 0x3E marker — treat as an Aurora APRS frame. */
-                track_device(event->disc.addr.val);
-                aprs_decode(&fields.mfg_data[2], fields.mfg_data_len - 2,
-                            event->disc.rssi);
-                /* Mesh repeater: rebroadcast new content once per 10 min. */
-                uint32_t ch = fnv1a(&fields.mfg_data[2],
-                                    fields.mfg_data_len - 2);
-                if (!relay_seen(ch)) {
-                    relay_remember(ch);
-                    relay_enqueue(fields.mfg_data, fields.mfg_data_len);
-                }
+                s_pending.active = false;
+                process_aprs_frame(s_pending.mfg, s_pending.len, event->disc.rssi);
             }
+            break;
+        }
+
+        /* Any other event means the held primary (if any) had no continuation. */
+        flush_pending();
+
+        if (mfg[2] == GEOGRAM_MARKER) {
+            /* Geogram presence beacon: [company,marker,device_id,callsign…] */
+            track_device(addr);
+            if (mlen > 4) heard_add((const char *)&mfg[4], mlen - 4);
+        } else if (mlen >= 4) {
+            /* Compact Aurora APRS frame (no marker). Hold it until the next
+             * scan event reveals whether a SCAN_RSP continuation follows. */
+            track_device(addr);
+            int n = mlen > APRS_MFG_MAX ? APRS_MFG_MAX : mlen;
+            memcpy(s_pending.addr, addr, 6);
+            memcpy(s_pending.mfg, mfg, n);
+            s_pending.len = n;
+            s_pending.rssi = event->disc.rssi;
+            s_pending.active = true;
         }
         break;
     }
@@ -675,7 +762,9 @@ static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_DISC_COMPLETE:
-        /* Scan window finished — resume advertising if not connected */
+        /* Scan window finished — deliver any held primary (no continuation
+         * arrived) and resume advertising if not connected. */
+        flush_pending();
         s_scanning = false;
         if (s_active && !s_conn_active) {
             start_advertise();

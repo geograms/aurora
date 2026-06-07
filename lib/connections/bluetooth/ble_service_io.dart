@@ -19,6 +19,8 @@ import 'package:bluez/bluez.dart';
 import 'package:dbus/dbus.dart' show DBusArray;
 import 'package:flutter/foundation.dart';
 
+import 'ble_reassembler.dart';
+
 /// APRS-over-BLE manufacturer id carried in advertisement manufacturer data.
 /// Must match peer firmware (e.g. ESP32). 0xFFFF is the reserved test id.
 const int kBleCompanyId = 0xFFFF;
@@ -29,12 +31,18 @@ const int kBleCompanyId = 0xFFFF;
 /// UUID must be present; peers still match on the manufacturer data, not this.
 const String kBleServiceUuid = '0000ffe0-0000-1000-8000-00805f9b34fb';
 
+/// How long to hold a primary advert waiting for its continuation when the two
+/// arrive as separate scan events (BlueZ collapses duplicate company ids, so
+/// the advert and its scan response surface one after another, not together).
+const Duration kBleContWindow = Duration(milliseconds: 450);
+
 class BleInboundFrame {
   final String from; // peer uuid
   final int rssi;
   final Uint8List data; // the manufacturer payload (e.g. an APRS TNC2 frame)
   BleInboundFrame(this.from, this.rssi, this.data);
 }
+
 
 class _Advert {
   final Object owner;
@@ -70,6 +78,12 @@ class BleService {
 
   final _inbound = StreamController<BleInboundFrame>.broadcast();
   Stream<BleInboundFrame> get inbound => _inbound.stream;
+
+  // Long-frame reassembly (ADV + scan-response continuation). The reassembler
+  // holds logic; these per-peer timers bound how long a primary waits for its
+  // continuation when the two arrive as separate scan events.
+  final BleReassembler _reasm = BleReassembler();
+  final Map<String, Timer> _holdTimers = {};
 
   // Scanning (ref-counted).
   int _scanRefs = 0;
@@ -159,10 +173,32 @@ class BleService {
   }
 
   void _onDiscovered(DiscoveredEventArgs e) {
-    for (final m in e.advertisement.manufacturerSpecificData) {
-      if (m.id == kBleCompanyId && m.data.isNotEmpty) {
-        _inbound.add(BleInboundFrame(e.peripheral.uuid.toString(), e.rssi, m.data));
+    final from = e.peripheral.uuid.toString();
+    final entries = <Uint8List>[
+      for (final m in e.advertisement.manufacturerSpecificData)
+        if (m.id == kBleCompanyId && m.data.isNotEmpty) m.data,
+    ];
+    if (entries.isEmpty) return;
+
+    for (final f in _reasm.ingest(from, entries)) {
+      if (f.length > 24) {
+        debugPrint('BleService: long BLE frame (${f.length}B) from $from');
       }
+      _inbound.add(BleInboundFrame(from, e.rssi, f));
+    }
+
+    // If a compact primary is now held waiting for its continuation, (re)arm a
+    // short timer to deliver it as a short frame should none arrive.
+    _holdTimers.remove(from)?.cancel();
+    if (_reasm.held(from)) {
+      final rssi = e.rssi;
+      _holdTimers[from] = Timer(kBleContWindow, () {
+        _holdTimers.remove(from);
+        final p = _reasm.expire(from);
+        if (p != null && !_inbound.isClosed) {
+          _inbound.add(BleInboundFrame(from, rssi, p));
+        }
+      });
     }
   }
 

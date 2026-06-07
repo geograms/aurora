@@ -19,7 +19,11 @@ import 'package:bluez/bluez.dart';
 import 'package:dbus/dbus.dart' show DBusArray;
 import 'package:flutter/foundation.dart';
 
+import '../../profile/profile_service.dart';
 import 'ble_gatt_client.dart';
+import 'ble_gatt_server.dart';
+import 'ble_parcel.dart';
+import 'ble_queue_service.dart';
 import 'ble_reassembler.dart';
 
 /// APRS-over-BLE manufacturer id carried in advertisement manufacturer data.
@@ -86,8 +90,54 @@ class BleService {
   final BleReassembler _reasm = BleReassembler();
   final Map<String, Timer> _holdTimers = {};
 
-  // Generic GATT parcel transport (connects to peers' GATT servers).
+  // Generic GATT parcel transport: this device is both a client (connects out
+  // to peers' servers) and a server (peers connect in), bridged by one queue.
   BleGattClient? _gatt;
+  BleGattServer? _gattServer;
+  final BLEQueueService _queue = BLEQueueService();
+  bool _parcelWired = false;
+  bool _gattLinkUp = false; // a GATT client link is active → pause scanning
+
+  // Wire the parcel queue to both GATT endpoints. The single send callback
+  // routes by deviceId: a peer that connected to our server is notified on
+  // FFF2; a peer we connected to is written on FFF1. Reassembled inbound
+  // messages are fanned out on the same stream wapps already read, so APRS (and
+  // any wapp) needs no change.
+  void _setupParcelTransport() {
+    if (_parcelWired || _central == null) return;
+    _parcelWired = true;
+    _gatt = BleGattClient(_central!, onData: (from, data) {
+      _queue.onDataReceived(from, data);
+    }, onLinkChange: (connected) {
+      _gattLinkUp = connected;
+      _applyScan(); // pause scanning while a GATT link is up (radio contention)
+    })
+      ..start();
+    _gattServer = BleGattServer(onData: (from, data) {
+      _queue.onDataReceived(from, data);
+    });
+    _queue.setSendCallback((deviceId, data) async {
+      if (_gattServer?.clientIds.contains(deviceId) ?? false) {
+        await _gattServer!.notify(deviceId, data);
+      } else {
+        await _gatt?.writeRaw(data);
+      }
+    });
+    _queue.incomingMessages.listen((m) {
+      if (!_inbound.isClosed) {
+        _inbound.add(BleInboundFrame(m.sourceDeviceId, 0, m.payload));
+      }
+    });
+  }
+
+  /// All peers currently reachable over the parcel transport (server clients +
+  /// the peer we are a client of).
+  List<String> _connectedPeers() {
+    final ids = <String>{...?_gattServer?.clientIds};
+    final p = _gatt?.peerId;
+    if (p != null) ids.add(p);
+    return ids.toList();
+  }
 
   // Scanning (ref-counted).
   int _scanRefs = 0;
@@ -135,13 +185,7 @@ class BleService {
       // Permanent discovered subscription; frames only flow while scanning.
       _central!.discovered.listen(_onDiscovered);
       _central!.stateChanged.listen((_) => _applyScan());
-      // Generic parcel transport over GATT (the standard text exchange).
-      // Reassembled inbound frames are fanned out on the same inbound stream
-      // wapps already read, so APRS (and others) need no change.
-      _gatt = BleGattClient(_central!, onInbound: (from, rssi, data) {
-        if (!_inbound.isClosed) _inbound.add(BleInboundFrame(from, rssi, data));
-      })
-        ..start();
+      _setupParcelTransport();
     } catch (e) {
       _central = null;
       debugPrint('BleService: central unavailable: $e');
@@ -196,7 +240,7 @@ class BleService {
     // transport (the standard reliable text exchange).
     for (final d in entries) {
       if (d[0] == kBleMarker) {
-        _gatt?.considerPeer(e.peripheral, e.rssi);
+        _gatt?.considerPeer(e.peripheral);
         break;
       }
     }
@@ -231,6 +275,12 @@ class BleService {
     // reads state asynchronously); wait briefly so the first scan isn't lost.
     await _awaitPoweredOn();
     await _applyScan();
+    // Also become a connectable peer (GATT server) so others can reach us
+    // directly. No-op where ble_peripheral is unsupported (e.g. Linux/BlueZ).
+    if (_gattServer?.isRunning != true) {
+      final cs = ProfileService.instance.activeProfile?.callsign ?? '';
+      unawaited(_gattServer?.start(cs) ?? Future<void>.value());
+    }
     return true;
   }
 
@@ -254,7 +304,9 @@ class BleService {
     // While the BlueZ backend is duty-cycling (it can't scan and advertise at
     // once), the rotation owns discovery — don't fight it here.
     if (_dutyCycling) return;
-    final want = _scanRefs > 0;
+    // Pause scanning while a GATT client link is up — scan and connection
+    // contend on a single radio and the link drops on some stacks (BlueZ).
+    final want = _scanRefs > 0 && !_gattLinkUp;
     try {
       if (want && !_scanning && c.state == BluetoothLowEnergyState.poweredOn) {
         await c.startDiscovery();
@@ -284,22 +336,16 @@ class BleService {
   // advertising indefinitely.
   void enqueueAdvert(Object owner, Uint8List payload,
       {Duration ttl = const Duration(seconds: 10)}) {
-    // Preferred path: if connected to a peer's GATT server, send the full frame
-    // reliably as parcel(s). The advertising queue below still serves peers we
-    // are not connected to.
-    if (_gatt?.isConnected ?? false) {
-      _gatt!.sendText(payload);
+    // Parcel transport is the standard now: deliver the full frame reliably as
+    // parcel(s) to every connected peer (over GATT, either direction). We no
+    // longer broadcast data frames as legacy adverts — presence is advertised by
+    // the GATT server, and a host that's busy advertising can't scan/connect
+    // reliably (BlueZ duty-cycle). So this is GATT-only.
+    _ensure();
+    final peers = _connectedPeers();
+    for (final id in peers) {
+      _queue.enqueue(BLEOutgoingMessage(payload: payload, targetDeviceId: id));
     }
-    if (!_advertiseSupported) {
-      // Try to (lazily) discover support; if none, drop quietly.
-      _ensure();
-      if (!_advertiseSupported) return;
-    }
-    final exp = DateTime.now().millisecondsSinceEpoch + ttl.inMilliseconds;
-    _adverts.add(_Advert(owner, payload, exp));
-    _rotateTimer ??=
-        Timer.periodic(const Duration(milliseconds: 1500), (_) => _rotate());
-    _rotate();
   }
 
   void clearAdverts(Object owner) {
@@ -311,6 +357,9 @@ class BleService {
     }
   }
 
+  // Legacy broadcast-advert rotation — deprecated by the GATT parcel transport
+  // and no longer driven (kept for reference / possible non-Linux fallback).
+  // ignore: unused_element
   Future<void> _rotate() async {
     if (_rotating) return; // don't let slow ticks overlap
     _rotating = true;

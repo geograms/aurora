@@ -110,6 +110,17 @@ class BleGattServer {
     }
   }
 
+  /// Re-air the presence beacon. Needed because Android has a single
+  /// BluetoothLeAdvertiser: the broadcast-parcel rotation and this presence
+  /// advert clobber each other, so when the rotation goes idle the caller calls
+  /// this to make presence the steady-state advert again (so peers — and the
+  /// ESP32 iGate — keep hearing our callsign). No-op if not running / no clients
+  /// rule needed (presence is fine while connected too).
+  Future<void> readvertise() async {
+    if (!_running) return;
+    await _advertise();
+  }
+
   // Presence beacon: company 0xFFFF, [0x3E marker, deviceId, callsign] — the
   // geogram standard the ESP32 expects (it reads the callsign from offset 4,
   // i.e. after a 1-byte device id). No pairing; peers connect on the 0x3E marker.

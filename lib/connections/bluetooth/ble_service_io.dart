@@ -599,6 +599,13 @@ class BleService {
         await bp.BlePeripheral.stopAdvertising();
       } catch (_) {}
       _pkgAdvertHex = null;
+      // Android has one advertiser: airing broadcast chunks clobbered the GATT
+      // server's presence beacon. Now the rotation is idle, restore presence as
+      // the steady-state advert so peers (and the ESP32 iGate) keep hearing our
+      // callsign rather than going silent until the next reconnect.
+      if (_gattServer?.isRunning == true) {
+        unawaited(_gattServer!.readvertise());
+      }
     }
     await _bzUnadvertise();
   }

@@ -90,6 +90,11 @@ class BleService {
   final BleReassembler _reasm = BleReassembler();
   final Map<String, Timer> _holdTimers = {};
 
+  // Broadcast-parcel (<=300B connectionless) reassembly + dedup, with a periodic
+  // sweep to drop stale partials.
+  final BleBroadcastReassembler _bcast = BleBroadcastReassembler();
+  Timer? _bcastSweep;
+
   // Generic GATT parcel transport: this device is both a client (connects out
   // to peers' servers) and a server (peers connect in), bridged by one queue.
   BleGattClient? _gatt;
@@ -106,6 +111,8 @@ class BleService {
   void _setupParcelTransport() {
     if (_parcelWired || _central == null) return;
     _parcelWired = true;
+    _bcastSweep ??=
+        Timer.periodic(const Duration(seconds: 2), (_) => _bcast.sweep());
     _gatt = BleGattClient(_central!, onData: (from, data) {
       _queue.onDataReceived(from, data);
     }, onLinkChange: (connected) {
@@ -231,26 +238,28 @@ class BleService {
 
   void _onDiscovered(DiscoveredEventArgs e) {
     final from = e.peripheral.uuid.toString();
-    final entries = <Uint8List>[
-      for (final m in e.advertisement.manufacturerSpecificData)
-        if (m.id == kBleCompanyId && m.data.isNotEmpty) m.data,
-    ];
-    if (entries.isEmpty) return;
-
-    // A geogram presence beacon (manufacturer data starting with the 0x3E
-    // marker) means this peer runs a GATT server — connect for the parcel
-    // transport (the standard reliable text exchange).
-    for (final d in entries) {
-      if (d[0] == kBleMarker) {
-        _gatt?.considerPeer(e.peripheral);
-        break;
+    // Split our company-id manufacturer entries: broadcast-parcel chunks
+    // (0x3E,0x50/0x51) go to the chunk reassembler; everything else (legacy
+    // single-frame compact + its 0x42 continuation, presence beacons) goes to
+    // the single-frame reassembler. Scanning is the default; we do NOT auto-
+    // connect over GATT (that pauses scanning and breaks broadcast reception).
+    final legacy = <Uint8List>[];
+    for (final m in e.advertisement.manufacturerSpecificData) {
+      if (m.id != kBleCompanyId || m.data.isEmpty) continue;
+      final d = m.data;
+      if (BleBroadcastReassembler.isChunk(d)) {
+        final full = _bcast.ingest(from, d);
+        if (full != null && !_inbound.isClosed) {
+          debugPrint('BleService: broadcast-parcel reassembled (${full.length}B) from $from');
+          _inbound.add(BleInboundFrame(from, e.rssi, full));
+        }
+      } else {
+        legacy.add(d);
       }
     }
+    if (legacy.isEmpty) return;
 
-    for (final f in _reasm.ingest(from, entries)) {
-      if (f.length > 24) {
-        debugPrint('BleService: long BLE frame (${f.length}B) from $from');
-      }
+    for (final f in _reasm.ingest(from, legacy)) {
       _inbound.add(BleInboundFrame(from, e.rssi, f));
     }
 
@@ -341,17 +350,64 @@ class BleService {
   // advertising indefinitely.
   void enqueueAdvert(Object owner, Uint8List payload,
       {Duration ttl = const Duration(seconds: 10)}) {
-    // Parcel transport is the standard now: deliver the full frame reliably as
-    // parcel(s) to every connected peer (over GATT, either direction). We no
-    // longer broadcast data frames as legacy adverts — presence is advertised by
-    // the GATT server, and a host that's busy advertising can't scan/connect
-    // reliably (BlueZ duty-cycle). So this is GATT-only.
     _ensure();
-    final peers = _connectedPeers();
-    for (final id in peers) {
-      _queue.enqueue(BLEOutgoingMessage(payload: payload, targetDeviceId: id));
+    // Size router: small text (APRS and the like) goes out connectionless as a
+    // broadcast-parcel — chunked adverts every device in range reassembles, no
+    // pairing, no per-peer link. Larger payloads (files, long text) use GATT
+    // point-to-point to whatever peers are connected (an explicit, on-demand
+    // transfer — we no longer auto-connect on every presence beacon).
+    if (payload.length <= kBleBcastMax) {
+      _enqueueBroadcast(owner, payload, ttl);
+    } else {
+      final peers = _connectedPeers();
+      for (final id in peers) {
+        _queue.enqueue(BLEOutgoingMessage(payload: payload, targetDeviceId: id));
+      }
     }
   }
+
+  // Rolling per-message id (1 byte) grouping a broadcast's chunks; paired with
+  // the source address on the receiver to dedup across many advertisers.
+  int _bcastTxMsgId = 0;
+
+  /// Split [payload] (<= [kBleBcastMax]) into broadcast-parcel chunks and queue
+  /// them into the advert rotation. Each chunk is one ADV-only manufacturer
+  /// field `[3E 50 msgId idx total flags data]` — neither ble_peripheral nor the
+  /// BlueZ backend exposes scan-response data, so flags bit0 (continuation) is
+  /// always 0 and the per-chunk payload is bounded by the legacy advert size.
+  void _enqueueBroadcast(Object owner, Uint8List payload, Duration ttl) {
+    final cap = (_useBlePeripheral ? 20 : 24) - kBleBcastPrimaryHdr;
+    final msgId = _bcastTxMsgId = (_bcastTxMsgId + 1) & 0xFF;
+    final total = payload.isEmpty ? 1 : ((payload.length + cap - 1) ~/ cap);
+    // Keep the whole chunk set on air long enough for at least two full rotation
+    // cycles so a scanner that joins mid-cycle still collects every chunk.
+    final cycleMs = total * _rotateIntervalMs;
+    final effectiveMs =
+        ttl.inMilliseconds > cycleMs * 2 ? ttl.inMilliseconds : cycleMs * 2 + 2000;
+    final expiresMs = DateTime.now().millisecondsSinceEpoch + effectiveMs;
+    for (var idx = 0; idx < total; idx++) {
+      final off = idx * cap;
+      final end = (off + cap < payload.length) ? off + cap : payload.length;
+      final chunk = payload.sublist(off, end);
+      final adv = Uint8List(kBleBcastPrimaryHdr + chunk.length)
+        ..[0] = kBleMarker
+        ..[1] = kBleBcastPrimary
+        ..[2] = msgId
+        ..[3] = idx
+        ..[4] = total
+        ..[5] = 0 // flags: ADV-only, no scan-response continuation
+        ..setRange(kBleBcastPrimaryHdr, kBleBcastPrimaryHdr + chunk.length, chunk);
+      _adverts.add(_Advert(owner, adv, expiresMs));
+    }
+    _rotateTimer ??= Timer.periodic(
+        const Duration(milliseconds: _rotateIntervalMs), (_) => _rotate());
+    _rotate();
+  }
+
+  // Advert rotation tick. Must stay below kBleBcastWindow so a receiver's
+  // partial survives across one full chunk cycle (a new chunk each tick resets
+  // its drop timer).
+  static const int _rotateIntervalMs = 900;
 
   void clearAdverts(Object owner) {
     _adverts.removeWhere((a) => a.owner == owner);

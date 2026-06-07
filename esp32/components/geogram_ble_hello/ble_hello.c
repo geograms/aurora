@@ -72,6 +72,25 @@ static const char *TAG = "ble_hello";
 #define CONT_PAYLOAD_CAP    24          /* overflow bytes carried in SCAN_RSP */
 #define APRS_MFG_MAX        (2 + ADV_PAYLOAD_CAP + CONT_PAYLOAD_CAP)  /* 44 */
 
+/* Broadcast-parcel chunking (the <=300B connectionless transport). A message is
+ * split into chunks; each chunk = a primary advert (subtype 0x50) + an optional
+ * scan-response continuation (subtype 0x51), grouped by a 1-byte msg id with a
+ * chunk index/total so every scanner in range reassembles it. See
+ * lib/connections/bluetooth/ble_reassembler.dart (BleBroadcastReassembler) for
+ * the matching receiver. */
+#define BCAST_PRIMARY       0x50        /* 'P' — chunk primary (ADV) */
+#define BCAST_CONT          0x51        /* 'Q' — chunk continuation (SCAN_RSP) */
+#define BCH_PRI_HDR         6           /* marker,subtype,msgid,idx,total,flags (after company id) */
+#define BCH_ADV_PAYLOAD     (ADV_MFG_CAP - 2 - BCH_PRI_HDR)  /* 12 */
+#define BCH_CONT_HDR        4           /* marker,subtype,msgid,idx (after company id) */
+#define BCH_CONT_PAYLOAD    22          /* continuation payload bytes per chunk */
+#define BCH_CHUNK_PAYLOAD   (BCH_ADV_PAYLOAD + BCH_CONT_PAYLOAD)  /* 34 */
+#define BCAST_MAX           300         /* size router threshold: <= here = broadcast */
+#define BCH_RING            16          /* chunks queued for broadcast at once */
+#define BRX_SLOTS           4           /* concurrent (addr,msgid) reassemblies */
+#define BRX_MAX_CHUNKS      16          /* max chunks per reassembled message */
+#define BRX_WINDOW_SEC      4           /* drop a partial with no new chunk this long */
+
 /* GATT UUIDs */
 #define SVC_UUID            0xFFE0
 #define CHR_WRITE_UUID      0xFFF1
@@ -319,6 +338,87 @@ static void relay_enqueue(const uint8_t *mfg, int len)
     s_relay[slot].expire = t + RELAY_TTL_SEC;
 }
 
+/* ---- broadcast-parcel chunk ring ---------------------------------------- */
+
+typedef struct {
+    uint8_t  adv[2 + BCH_PRI_HDR + BCH_ADV_PAYLOAD];   /* primary mfg (0x50) */
+    uint8_t  adv_len;
+    uint8_t  rsp[2 + BCH_CONT_HDR + BCH_CONT_PAYLOAD]; /* continuation mfg (0x51), 0 = none */
+    uint8_t  rsp_len;
+    uint32_t expire;                                   /* 0 = empty slot */
+} bch_slot_t;
+static bch_slot_t s_bch[BCH_RING];
+static int        s_bch_rr;
+static uint8_t    s_tx_msgid;
+
+/* Split [payload] (<=BCAST_MAX) into broadcast-parcel chunks and queue them for
+ * rebroadcast. One msg id groups the chunks; each chunk carries idx/total so
+ * any scanner reassembles. Chunks air via the rotation for BCH TTL. */
+static void relay_enqueue_broadcast(const uint8_t *payload, int len)
+{
+    if (len <= 0) return;
+    if (len > BCAST_MAX) len = BCAST_MAX;
+    uint8_t msgid = ++s_tx_msgid;
+    int total = (len + BCH_CHUNK_PAYLOAD - 1) / BCH_CHUNK_PAYLOAD;
+    if (total < 1) total = 1;
+    if (total > 255) total = 255;
+    uint32_t t = now_sec();
+    int off = 0;
+    for (int idx = 0; idx < total; idx++) {
+        int chunk = len - off; if (chunk > BCH_CHUNK_PAYLOAD) chunk = BCH_CHUNK_PAYLOAD;
+        int padv = chunk > BCH_ADV_PAYLOAD ? BCH_ADV_PAYLOAD : chunk;
+        int pcont = chunk - padv;   /* >0 → this chunk has a continuation */
+
+        /* find a free/expired slot (evict soonest-to-lapse if all busy) */
+        int slot = -1;
+        for (int i = 0; i < BCH_RING; i++)
+            if (s_bch[i].expire == 0 || s_bch[i].expire <= t) { slot = i; break; }
+        if (slot < 0) {
+            slot = 0;
+            for (int i = 1; i < BCH_RING; i++)
+                if (s_bch[i].expire < s_bch[slot].expire) slot = i;
+        }
+        bch_slot_t *s = &s_bch[slot];
+
+        int a = 0;
+        s->adv[a++] = COMPANY_ID_LO; s->adv[a++] = COMPANY_ID_HI;
+        s->adv[a++] = GEOGRAM_MARKER; s->adv[a++] = BCAST_PRIMARY;
+        s->adv[a++] = msgid; s->adv[a++] = (uint8_t)idx; s->adv[a++] = (uint8_t)total;
+        s->adv[a++] = pcont > 0 ? 0x01 : 0x00;   /* flags: bit0 = has continuation */
+        memcpy(&s->adv[a], &payload[off], padv); a += padv;
+        s->adv_len = (uint8_t)a;
+
+        if (pcont > 0) {
+            int c = 0;
+            s->rsp[c++] = COMPANY_ID_LO; s->rsp[c++] = COMPANY_ID_HI;
+            s->rsp[c++] = GEOGRAM_MARKER; s->rsp[c++] = BCAST_CONT;
+            s->rsp[c++] = msgid; s->rsp[c++] = (uint8_t)idx;
+            memcpy(&s->rsp[c], &payload[off + padv], pcont); c += pcont;
+            s->rsp_len = (uint8_t)c;
+        } else {
+            s->rsp_len = 0;
+        }
+        s->expire = t + RELAY_TTL_SEC;
+        off += chunk;
+    }
+    ESP_LOGI(TAG, "broadcast msg %u: %d bytes in %d chunk(s)", msgid, len, total);
+}
+
+/* Pick the next live broadcast chunk (round-robin), reaping expired slots;
+ * returns its index, or -1 if none pending. */
+static int bch_pick(void)
+{
+    uint32_t t = now_sec();
+    for (int n = 0; n < BCH_RING; n++) {
+        s_bch_rr = (s_bch_rr + 1) % BCH_RING;
+        bch_slot_t *s = &s_bch[s_bch_rr];
+        if (s->expire == 0) continue;
+        if (s->expire <= t) { s->expire = 0; continue; }
+        return s_bch_rr;
+    }
+    return -1;
+}
+
 /* Pick the next live frame to rebroadcast (round-robin), reaping expired
  * slots; returns its index, or -1 if nothing pending. */
 static int relay_pick(void)
@@ -336,34 +436,28 @@ static int relay_pick(void)
 
 /* ---- advertising -------------------------------------------------------- */
 
-static void advertise_with(const uint8_t *mfg, uint8_t mfg_len)
+/* Core: advertise [adv_mfg] as the primary manufacturer data and either a
+ * scan-response manufacturer data [rsp_mfg] (when rsp_len>0) or the device name.
+ * Always includes the FFE0 service UUID so the Flutter app's filtered scan
+ * (withServices:[FFE0]) sees us. */
+static void do_advertise(const uint8_t *adv_mfg, int adv_len,
+                         const uint8_t *rsp_mfg, int rsp_len)
 {
-    /* Stop scanning first — can't coexist with legacy adv */
-    ble_gap_disc_cancel();
+    ble_gap_disc_cancel();   /* can't scan + advertise on legacy */
     s_scanning = false;
 
     struct ble_gap_adv_params adv_params = {0};
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;  /* connectable for GATT */
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    /* --- Primary advertising data ---
-     * Must include the FFE0 service UUID — Flutter app scans with
-     * withServices:[FFE0] filter and won't see us without it. */
     ble_uuid16_t svc_uuid = BLE_UUID16_INIT(SVC_UUID);
-
-    /* Long frame? Carry the first ADV_MFG_CAP bytes here and the overflow in
-     * the SCAN_RSP continuation (active scanners reassemble it). */
-    bool split = mfg_len > ADV_MFG_CAP;
-    uint8_t adv_cont[CONT_HDR_LEN + CONT_PAYLOAD_CAP];
-    int adv_cont_len = 0;
-
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids16 = &svc_uuid;
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
-    fields.mfg_data = mfg;
-    fields.mfg_data_len = split ? ADV_MFG_CAP : mfg_len;
+    fields.mfg_data = adv_mfg;
+    fields.mfg_data_len = adv_len;
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
@@ -371,26 +465,15 @@ static void advertise_with(const uint8_t *mfg, uint8_t mfg_len)
         return;
     }
 
-    /* --- Scan response data ---
-     * For a split frame: the marked continuation. Otherwise: the device name. */
     struct ble_hs_adv_fields rsp_fields = {0};
-    if (split) {
-        int overflow = mfg_len - ADV_MFG_CAP;
-        if (overflow > CONT_PAYLOAD_CAP) overflow = CONT_PAYLOAD_CAP;
-        adv_cont[0] = COMPANY_ID_LO;
-        adv_cont[1] = COMPANY_ID_HI;
-        adv_cont[2] = GEOGRAM_MARKER;
-        adv_cont[3] = APRS_CONT_SUBTYPE;
-        memcpy(&adv_cont[CONT_HDR_LEN], &mfg[ADV_MFG_CAP], overflow);
-        adv_cont_len = CONT_HDR_LEN + overflow;
-        rsp_fields.mfg_data = adv_cont;
-        rsp_fields.mfg_data_len = adv_cont_len;
+    if (rsp_mfg && rsp_len > 0) {
+        rsp_fields.mfg_data = rsp_mfg;
+        rsp_fields.mfg_data_len = rsp_len;
     } else {
         rsp_fields.name = (uint8_t *)s_callsign;
         rsp_fields.name_len = strlen(s_callsign);
         rsp_fields.name_is_complete = 1;
     }
-
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
     if (rc != 0) {
         ESP_LOGW(TAG, "adv_rsp_set_fields failed: %d", rc);
@@ -403,10 +486,38 @@ static void advertise_with(const uint8_t *mfg, uint8_t mfg_len)
     }
 }
 
+/* Legacy single-frame advertise (compact frame, optional 0x42 SCAN_RSP split). */
+static void advertise_with(const uint8_t *mfg, uint8_t mfg_len)
+{
+    bool split = mfg_len > ADV_MFG_CAP;
+    if (!split) { do_advertise(mfg, mfg_len, NULL, 0); return; }
+    uint8_t cont[CONT_HDR_LEN + CONT_PAYLOAD_CAP];
+    int overflow = mfg_len - ADV_MFG_CAP;
+    if (overflow > CONT_PAYLOAD_CAP) overflow = CONT_PAYLOAD_CAP;
+    cont[0] = COMPANY_ID_LO; cont[1] = COMPANY_ID_HI;
+    cont[2] = GEOGRAM_MARKER; cont[3] = APRS_CONT_SUBTYPE;
+    memcpy(&cont[CONT_HDR_LEN], &mfg[ADV_MFG_CAP], overflow);
+    do_advertise(mfg, ADV_MFG_CAP, cont, CONT_HDR_LEN + overflow);
+}
+
+/* Advertise one broadcast-parcel chunk: primary (0x50) in ADV + optional
+ * continuation (0x51) in SCAN_RSP. */
+static void advertise_chunk(const uint8_t *adv, int adv_len,
+                            const uint8_t *rsp, int rsp_len)
+{
+    do_advertise(adv, adv_len, rsp_len > 0 ? rsp : NULL, rsp_len);
+}
+
 /* Advertise a pending relay frame when one is queued (so APRS messages are
  * rebroadcast promptly), otherwise our own presence beacon. */
 static void start_advertise(void)
 {
+    int bi = bch_pick();
+    if (bi >= 0) {
+        advertise_chunk(s_bch[bi].adv, s_bch[bi].adv_len,
+                        s_bch[bi].rsp, s_bch[bi].rsp_len);
+        return;
+    }
     int ri = relay_pick();
     if (ri >= 0) {
         ESP_LOGI(TAG, "relaying APRS frame (%u bytes)", s_relay[ri].len);
@@ -639,50 +750,37 @@ bool ble_hello_relay_aprs(const char *from, const char *to, const char *text)
 {
     if (!s_active || !from || !to || !text) return false;
 
-    /* Connected desktop? Send the FULL frame reliably over GATT as a parcel
-     * (no advert size limit). The advertising path below still serves
-     * ESP32<->ESP32 peers (and is truncated to fit a legacy advert). */
-    if (gatt_client_connected()) {
-        uint8_t full[BLE_PARCEL_HDR_CAP];
-        int fn = 0;
-        for (const char *p = from; *p && fn < (int)sizeof(full); p++) full[fn++] = (uint8_t)*p;
-        if (fn < (int)sizeof(full)) full[fn++] = 0x1F;
-        for (const char *p = to; *p && fn < (int)sizeof(full); p++) full[fn++] = (uint8_t)*p;
-        if (fn < (int)sizeof(full)) full[fn++] = 0x1F;
-        for (const char *p = text; *p && fn < (int)sizeof(full); p++) full[fn++] = (uint8_t)*p;
-        gatt_send_parcel(s_conn_handle, full, fn);
-    }
-
-    /* Build compact manufacturer data: [0xFF,0xFF,<from>\x1f<to>\x1f<text>].
-     * Up to APRS_MFG_MAX bytes: the primary legacy advert holds the first
-     * ADV_MFG_CAP and the rest rides the SCAN_RSP continuation (see
-     * advertise_with). Longer-than-that text is truncated to fit. */
-    uint8_t mfg[APRS_MFG_MAX];
+    /* Build the bare compact payload `<from>\x1f<to>\x1f<text>` (no company id;
+     * this is exactly what receivers' wapps parse). */
+    uint8_t buf[BCAST_MAX];
     int n = 0;
-    mfg[n++] = COMPANY_ID_LO;
-    mfg[n++] = COMPANY_ID_HI;
-    for (const char *p = from; *p && n < (int)sizeof(mfg); p++) mfg[n++] = (uint8_t)*p;
-    if (n < (int)sizeof(mfg)) mfg[n++] = 0x1F;
-    for (const char *p = to; *p && n < (int)sizeof(mfg); p++) mfg[n++] = (uint8_t)*p;
-    if (n < (int)sizeof(mfg)) mfg[n++] = 0x1F;
-    bool truncated = false;
-    for (const char *p = text; *p; p++) {
-        if (n >= (int)sizeof(mfg)) { truncated = true; break; }
-        mfg[n++] = (uint8_t)*p;
-    }
-    if (n <= 4) return false;          /* nothing but headers fit */
+    for (const char *p = from; *p && n < (int)sizeof(buf); p++) buf[n++] = (uint8_t)*p;
+    if (n < (int)sizeof(buf)) buf[n++] = 0x1F;
+    for (const char *p = to; *p && n < (int)sizeof(buf); p++) buf[n++] = (uint8_t)*p;
+    if (n < (int)sizeof(buf)) buf[n++] = 0x1F;
+    for (const char *p = text; *p && n < (int)sizeof(buf); p++) buf[n++] = (uint8_t)*p;
+    if (n <= 2) return false;
 
-    /* Content dedup against the shared mesh/display caches so a message gated
-     * repeatedly by APRS-IS is only put on air once, and our own re-scan of it
-     * neither re-relays nor re-displays it. */
-    uint32_t ch = fnv1a(&mfg[2], n - 2);
+    /* Content dedup so a message gated repeatedly by APRS-IS is only put on air
+     * once, and our own re-scan of it neither re-broadcasts nor re-displays. */
+    uint32_t ch = fnv1a(buf, n);
     if (relay_seen(ch)) return false;
     relay_remember(ch);
     shown_mark(ch);
 
-    relay_enqueue(mfg, n);
-    ESP_LOGI(TAG, "iGate relay -> BLE: %s -> %s (%d B%s)",
-             from, to[0] ? to : "(geo)", n, truncated ? ", truncated" : "");
+    /* Size router: small text broadcasts to everyone in range (chunked adverts);
+     * large payloads use GATT point-to-point (only if a peer is connected). */
+    if (n <= BCAST_MAX) {
+        relay_enqueue_broadcast(buf, n);
+        ESP_LOGI(TAG, "iGate broadcast -> BLE: %s -> %s (%d B)",
+                 from, to[0] ? to : "(geo)", n);
+    } else if (gatt_client_connected()) {
+        gatt_send_parcel(s_conn_handle, buf, n);
+        ESP_LOGI(TAG, "iGate p2p (GATT) -> BLE: %s -> %s (%d B)",
+                 from, to[0] ? to : "(geo)", n);
+    } else {
+        return false;
+    }
     return true;
 }
 
@@ -748,6 +846,128 @@ static void flush_pending(void)
     process_aprs_frame(s_pending.mfg, s_pending.len, s_pending.rssi);
 }
 
+/* ---- broadcast-parcel reassembly (receiver) ---------------------------- */
+/* Groups incoming 0x50/0x51 chunks by (advertiser addr, msgid); when every
+ * chunk (and its expected continuation) has arrived the full payload is
+ * reassembled, displayed (deduped), and re-broadcast once for the mesh.
+ * Mirrors BleBroadcastReassembler in ble_reassembler.dart. */
+typedef struct {
+    bool     used;
+    uint8_t  addr[6];
+    uint8_t  msgid;
+    uint8_t  total;
+    uint32_t updated;
+    bool     have_pri[BRX_MAX_CHUNKS];
+    bool     expects_cont[BRX_MAX_CHUNKS];
+    bool     have_cont[BRX_MAX_CHUNKS];
+    uint8_t  pri_len[BRX_MAX_CHUNKS];
+    uint8_t  cont_len[BRX_MAX_CHUNKS];
+    uint8_t  pri[BRX_MAX_CHUNKS][BCH_ADV_PAYLOAD];
+    uint8_t  cont[BRX_MAX_CHUNKS][BCH_CONT_PAYLOAD];
+} brx_slot_t;
+static brx_slot_t s_brx[BRX_SLOTS];
+
+static brx_slot_t *brx_find(const uint8_t *addr, uint8_t msgid)
+{
+    uint32_t t = now_sec();
+    for (int i = 0; i < BRX_SLOTS; i++) {
+        if (!s_brx[i].used) continue;
+        if (t - s_brx[i].updated > BRX_WINDOW_SEC) { s_brx[i].used = false; continue; }
+        if (s_brx[i].msgid == msgid && memcmp(s_brx[i].addr, addr, 6) == 0)
+            return &s_brx[i];
+    }
+    return NULL;
+}
+
+static brx_slot_t *brx_alloc(const uint8_t *addr, uint8_t msgid, uint8_t total)
+{
+    uint32_t t = now_sec();
+    int slot = -1;
+    for (int i = 0; i < BRX_SLOTS; i++) {
+        if (!s_brx[i].used || t - s_brx[i].updated > BRX_WINDOW_SEC) { slot = i; break; }
+    }
+    if (slot < 0) {                     /* all busy — evict the oldest */
+        slot = 0;
+        for (int i = 1; i < BRX_SLOTS; i++)
+            if (s_brx[i].updated < s_brx[slot].updated) slot = i;
+    }
+    brx_slot_t *s = &s_brx[slot];
+    memset(s, 0, sizeof(*s));
+    s->used = true;
+    memcpy(s->addr, addr, 6);
+    s->msgid = msgid;
+    s->total = total;
+    s->updated = t;
+    return s;
+}
+
+/* Deliver a fully-reassembled broadcast payload `<from>\x1f<to>\x1f<text>`
+ * (no company id): re-broadcast once for the mesh (content-deduped) and show
+ * it on the chat (aprs_decode dedups display + records the heard callsign). */
+static void deliver_broadcast(const uint8_t *payload, int len, int rssi)
+{
+    if (len <= 0) return;
+    uint32_t ch = fnv1a(payload, len);
+    if (!relay_seen(ch)) {              /* flood: rebroadcast the whole message once */
+        relay_remember(ch);
+        relay_enqueue_broadcast(payload, len);
+    }
+    aprs_decode(payload, len, rssi);
+}
+
+/* Ingest one broadcast chunk [d] = [marker,subtype,msgid,idx,…] (company id
+ * already stripped). On the last missing piece, reassemble and deliver. */
+static void brx_ingest(const uint8_t *addr, const uint8_t *d, int dlen, int rssi)
+{
+    if (dlen < 4) return;
+    uint8_t sub = d[1], msgid = d[2], idx = d[3];
+
+    brx_slot_t *s = brx_find(addr, msgid);
+    if (sub == BCAST_PRIMARY) {
+        if (dlen < BCH_PRI_HDR) return;
+        uint8_t total = d[4], flags = d[5];
+        if (total == 0 || total > BRX_MAX_CHUNKS || idx >= total) return;
+        if (!s) s = brx_alloc(addr, msgid, total);
+        if (!s || s->total != total) return;
+        int plen = dlen - BCH_PRI_HDR;
+        if (plen > BCH_ADV_PAYLOAD) plen = BCH_ADV_PAYLOAD;
+        if (plen < 0) plen = 0;
+        memcpy(s->pri[idx], &d[BCH_PRI_HDR], plen);
+        s->pri_len[idx] = (uint8_t)plen;
+        s->have_pri[idx] = true;
+        s->expects_cont[idx] = (flags & 0x01) != 0;
+        s->updated = now_sec();
+    } else {                            /* BCAST_CONT */
+        if (!s || idx >= s->total) return;   /* continuation before primary — drop */
+        int clen = dlen - BCH_CONT_HDR;
+        if (clen > BCH_CONT_PAYLOAD) clen = BCH_CONT_PAYLOAD;
+        if (clen < 0) clen = 0;
+        memcpy(s->cont[idx], &d[BCH_CONT_HDR], clen);
+        s->cont_len[idx] = (uint8_t)clen;
+        s->have_cont[idx] = true;
+        s->updated = now_sec();
+    }
+
+    if (!s) return;
+    for (int i = 0; i < s->total; i++) {     /* complete? */
+        if (!s->have_pri[i]) return;
+        if (s->expects_cont[i] && !s->have_cont[i]) return;
+    }
+
+    uint8_t buf[BCAST_MAX];
+    int n = 0;
+    for (int i = 0; i < s->total; i++) {
+        if (n + s->pri_len[i] <= (int)sizeof(buf)) {
+            memcpy(&buf[n], s->pri[i], s->pri_len[i]); n += s->pri_len[i];
+        }
+        if (s->have_cont[i] && n + s->cont_len[i] <= (int)sizeof(buf)) {
+            memcpy(&buf[n], s->cont[i], s->cont_len[i]); n += s->cont_len[i];
+        }
+    }
+    s->used = false;
+    deliver_broadcast(buf, n, rssi);
+}
+
 /* ---- GAP event handler -------------------------------------------------- */
 
 static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
@@ -790,6 +1010,16 @@ static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
 
         /* Any other event means the held primary (if any) had no continuation. */
         flush_pending();
+
+        /* Broadcast-parcel chunk (0x50 primary in ADV / 0x51 continuation in
+         * SCAN_RSP): route to the reassembler, not the presence/compact paths
+         * (its header bytes are not a callsign). */
+        if (mlen >= 4 && mfg[2] == GEOGRAM_MARKER &&
+            (mfg[3] == BCAST_PRIMARY || mfg[3] == BCAST_CONT)) {
+            track_device(addr);
+            brx_ingest(addr, &mfg[2], mlen - 2, event->disc.rssi);
+            break;
+        }
 
         if (mfg[2] == GEOGRAM_MARKER) {
             /* Geogram presence beacon: [company,marker,device_id,callsign…] */

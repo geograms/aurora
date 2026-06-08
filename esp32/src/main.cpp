@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
 #include <time.h>
 #include <sys/time.h>
 #include "freertos/FreeRTOS.h"
@@ -32,6 +34,8 @@
 
 // Plain log helper (no ANSI)
 #include "geogram_log_plain.h"
+
+#include "nvs.h"
 
 // Mesh networking (optional, enabled via CONFIG_GEOGRAM_MESH_ENABLED)
 #ifdef CONFIG_GEOGRAM_MESH_ENABLED
@@ -359,6 +363,40 @@ static void start_mesh_mode(void)
 #ifndef TDONGLE_DEFAULT_WIFI_PASS
 #define TDONGLE_DEFAULT_WIFI_PASS "vodafone"
 #endif
+
+/* Two independent SD archives: text messages and automated position beacons. */
+static msgstore_t *s_msg_store    = NULL;
+static msgstore_t *s_beacon_store = NULL;
+
+/* iGate position/radius persisted in NVS so it survives reboots. */
+#define TDONGLE_IGATE_NVS_NS  "igate"
+
+static void tdongle_load_igate_position(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(TDONGLE_IGATE_NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    int32_t lat_e6 = 0, lon_e6 = 0, radius = 0;
+    bool any = (nvs_get_i32(h, "lat_e6", &lat_e6) == ESP_OK);
+    nvs_get_i32(h, "lon_e6", &lon_e6);
+    nvs_get_i32(h, "radius_km", &radius);
+    nvs_close(h);
+    if (any && (lat_e6 || lon_e6)) {
+        aprsis_set_position(lat_e6 / 1e6, lon_e6 / 1e6, radius);
+        ESP_LOGI(TAG, "iGate position from NVS: %.5f,%.5f r=%dkm",
+                 lat_e6 / 1e6, lon_e6 / 1e6, (int)radius);
+    }
+}
+
+static void tdongle_save_igate_position(double lat, double lon, int radius_km)
+{
+    nvs_handle_t h;
+    if (nvs_open(TDONGLE_IGATE_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_i32(h, "lat_e6", (int32_t)(lat * 1e6));
+    nvs_set_i32(h, "lon_e6", (int32_t)(lon * 1e6));
+    if (radius_km > 0) nvs_set_i32(h, "radius_km", (int32_t)radius_km);
+    nvs_commit(h);
+    nvs_close(h);
+}
 
 /**
  * @brief WiFi event callback for T-Dongle-S3
@@ -949,9 +987,11 @@ static void tdongle_aprs_rx(const char *from, const char *to,
              rssi, from, (to && *to) ? to : "(geo)", text);
 
     /* Persist to the SD-backed log (deduped) so other devices can query it by
-     * index over HTTP/BLE. No-op if there is no usable SD card. */
-    msgstore_add(from, to ? to : "", text ? text : "",
-                 msgstore_kind_from_to(to), rssi, false);
+     * index over HTTP/BLE. Positions go to the beacons archive, everything else
+     * (messages, group, geo-chat) to the messages archive. No-op without SD. */
+    msgstore_kind_t k = msgstore_kind_from_to(to);
+    msgstore_add(k == MSGSTORE_KIND_POSITION ? s_beacon_store : s_msg_store,
+                 from, to ? to : "", text ? text : "", k, rssi, false);
 
     /* iGate RF→Internet: gate this locally-heard frame up to APRS-IS (the
      * iGate decides what is gateable: direct messages + positions). */
@@ -971,25 +1011,152 @@ static void tdongle_aprs_rx(const char *from, const char *to,
     tdongle_ui_push_message(from, line);
 }
 
-/* GET /api/igate — APRS-IS iGate + message-store status (operational visibility:
- * the device is headless, so expose whether the iGate is connected upstream and
- * how many frames it has archived). */
+/* GET /api/igate — APRS-IS iGate + archive status (operational visibility: the
+ * device is headless, so expose whether the iGate is connected upstream, the
+ * configured position/radius, and how much each archive holds). */
 static esp_err_t tdongle_igate_status_handler(httpd_req_t *req)
 {
     uint32_t rx_lines = 0, rx_msgs = 0, rx_gated = 0;
     aprsis_get_rx_stats(&rx_lines, &rx_msgs, &rx_gated);
-    char buf[256];
+    double lat = 0, lon = 0; int radius = 0; bool have_pos = false;
+    aprsis_get_position(&lat, &lon, &radius, &have_pos);
+    char buf[420];
     int n = snprintf(buf, sizeof buf,
-        "{\"aprsis_connected\":%s,\"store_ready\":%s,\"count\":%u,"
-        "\"latest_index\":\"%c%u\",\"rx_lines\":%u,\"rx_msgs\":%u,\"rx_gated\":%u,"
-        "\"store_diag\":\"%s\"}",
+        "{\"aprsis_connected\":%s,\"have_position\":%s,\"lat\":%.5f,\"lon\":%.5f,"
+        "\"radius_km\":%d,\"rx_lines\":%u,\"rx_msgs\":%u,\"rx_gated\":%u,"
+        "\"messages\":{\"ready\":%s,\"count\":%u,\"latest_index\":\"%c%u\",\"diag\":\"%s\"},"
+        "\"beacons\":{\"ready\":%s,\"count\":%u,\"latest_index\":\"%c%u\",\"diag\":\"%s\"}}",
         aprsis_is_connected() ? "true" : "false",
-        msgstore_ready() ? "true" : "false",
-        (unsigned)(msgstore_ready() ? msgstore_get_count() : 0),
-        msgstore_ready() ? msgstore_get_epoch() : '?',
-        (unsigned)(msgstore_ready() ? msgstore_get_latest_index() : 0),
+        have_pos ? "true" : "false", lat, lon, radius,
         (unsigned)rx_lines, (unsigned)rx_msgs, (unsigned)rx_gated,
-        msgstore_diag());
+        msgstore_ready(s_msg_store) ? "true" : "false",
+        (unsigned)msgstore_get_count(s_msg_store),
+        msgstore_get_epoch(s_msg_store),
+        (unsigned)msgstore_get_latest_index(s_msg_store),
+        msgstore_diag(s_msg_store),
+        msgstore_ready(s_beacon_store) ? "true" : "false",
+        (unsigned)msgstore_get_count(s_beacon_store),
+        msgstore_get_epoch(s_beacon_store),
+        (unsigned)msgstore_get_latest_index(s_beacon_store),
+        msgstore_diag(s_beacon_store));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+/* Map a ?kind= string to a msgstore kind (-1 = any). */
+static int tdongle_kind_from_str(const char *s)
+{
+    if (!strcmp(s, "message"))  return MSGSTORE_KIND_MESSAGE;
+    if (!strcmp(s, "position")) return MSGSTORE_KIND_POSITION;
+    if (!strcmp(s, "group"))    return MSGSTORE_KIND_GROUP;
+    if (!strcmp(s, "geochat"))  return MSGSTORE_KIND_GEOCHAT;
+    if (!strcmp(s, "other"))    return MSGSTORE_KIND_OTHER;
+    return -1;
+}
+
+/* Parse an epoch-prefixed id ("Q42" -> epoch 'Q', index 42; "42" -> index 42). */
+static void tdongle_parse_id(const char *s, char *epoch, uint32_t *idx)
+{
+    *epoch = 0; *idx = 0;
+    if (!s || !s[0]) return;
+    const char *p = s;
+    if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) { *epoch = (char)toupper((unsigned char)*p); p++; }
+    *idx = (uint32_t)strtoul(p, NULL, 10);
+}
+
+/* Shared query handler for both archives. */
+static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
+{
+    char query[192] = {0};
+    char param[40];
+    uint32_t since_id = 0, limit = 0, tail = 0;
+    char want_epoch = 0;
+    char call[16] = {0};
+    int kind = -1;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "since", param, sizeof(param)) == ESP_OK)
+            tdongle_parse_id(param, &want_epoch, &since_id);
+        if (httpd_query_key_value(query, "call", param, sizeof(param)) == ESP_OK)
+            strlcpy(call, param, sizeof call);
+        if (httpd_query_key_value(query, "kind", param, sizeof(param)) == ESP_OK)
+            kind = tdongle_kind_from_str(param);
+        if (httpd_query_key_value(query, "limit", param, sizeof(param)) == ESP_OK)
+            limit = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "tail", param, sizeof(param)) == ESP_OK)
+            tail = (uint32_t)strtoul(param, NULL, 10);
+    }
+
+    if (tail > 0 && msgstore_ready(store)) {
+        // since_index is inclusive; the last `tail` records are indices
+        // [latest-tail+1 .. latest], i.e. since = latest+1-tail (clamped to 0).
+        uint32_t latest = msgstore_get_latest_index(store);
+        since_id = (latest + 1 > tail) ? (latest + 1 - tail) : 0;
+        want_epoch = 0;
+        if (limit == 0 || limit < tail) limit = tail;
+    }
+
+    const size_t buffer_size = 3072;
+    char *buffer = (char *)malloc(buffer_size);
+    if (!buffer) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    size_t len;
+    if (msgstore_ready(store)) {
+        if (want_epoch && want_epoch != msgstore_get_epoch(store)) since_id = 0;
+        msgstore_query_t q = {
+            .since_index = since_id,
+            .call_filter = call[0] ? call : NULL,
+            .kind_filter = kind,
+            .limit = limit,
+        };
+        len = msgstore_build_json(store, buffer, buffer_size, &q);
+    } else {
+        len = (size_t)snprintf(buffer, buffer_size,
+            "{\"epoch\":\"?\",\"latest_index\":\"?0\",\"next\":\"?0\","
+            "\"more\":false,\"count\":0,\"messages\":[]}");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, buffer, len);
+    free(buffer);
+    return ESP_OK;
+}
+
+static esp_err_t tdongle_api_messages_handler(httpd_req_t *req) { return tdongle_archive_query(req, s_msg_store); }
+static esp_err_t tdongle_api_beacons_handler(httpd_req_t *req)  { return tdongle_archive_query(req, s_beacon_store); }
+
+/* POST /api/igate/position?lat=&lon=&radius_km= — set + persist the iGate
+ * coordinates and nearby radius (lat=0&lon=0 clears the position filter). */
+static esp_err_t tdongle_igate_position_handler(httpd_req_t *req)
+{
+    char query[128] = {0};
+    char param[32];
+    double lat = 0, lon = 0; int radius = 0;
+    bool have_lat = false, have_lon = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "lat", param, sizeof(param)) == ESP_OK) { lat = atof(param); have_lat = true; }
+        if (httpd_query_key_value(query, "lon", param, sizeof(param)) == ESP_OK) { lon = atof(param); have_lon = true; }
+        if (httpd_query_key_value(query, "radius_km", param, sizeof(param)) == ESP_OK) radius = atoi(param);
+    }
+    if (!have_lat || !have_lon) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "lat and lon required");
+        return ESP_FAIL;
+    }
+    aprsis_set_position(lat, lon, radius);
+    tdongle_save_igate_position(lat, lon, radius);
+    double rlat = 0, rlon = 0; int rrad = 0; bool hp = false;
+    aprsis_get_position(&rlat, &rlon, &rrad, &hp);
+    char buf[160];
+    int n = snprintf(buf, sizeof buf,
+        "{\"ok\":true,\"have_position\":%s,\"lat\":%.5f,\"lon\":%.5f,\"radius_km\":%d}",
+        hp ? "true" : "false", rlat, rlon, rrad);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send(req, buf, n);
@@ -999,13 +1166,20 @@ static esp_err_t tdongle_igate_status_handler(httpd_req_t *req)
 static void tdongle_register_igate_status(void)
 {
     httpd_handle_t srv = http_server_get_handle();
-    if (!srv) { ESP_LOGW(TAG, "igate status: no httpd handle"); return; }
-    static const httpd_uri_t u = {
-        .uri = "/api/igate", .method = HTTP_GET,
-        .handler = tdongle_igate_status_handler, .user_ctx = NULL
-    };
-    if (httpd_register_uri_handler(srv, &u) == ESP_OK)
-        ESP_LOGI(TAG, "iGate status endpoint registered (/api/igate)");
+    if (!srv) { ESP_LOGW(TAG, "igate endpoints: no httpd handle"); return; }
+    static const httpd_uri_t u_status = { .uri = "/api/igate", .method = HTTP_GET,
+        .handler = tdongle_igate_status_handler, .user_ctx = NULL };
+    static const httpd_uri_t u_pos = { .uri = "/api/igate/position", .method = HTTP_POST,
+        .handler = tdongle_igate_position_handler, .user_ctx = NULL };
+    static const httpd_uri_t u_msgs = { .uri = "/api/aprs", .method = HTTP_GET,
+        .handler = tdongle_api_messages_handler, .user_ctx = NULL };
+    static const httpd_uri_t u_beacons = { .uri = "/api/beacons", .method = HTTP_GET,
+        .handler = tdongle_api_beacons_handler, .user_ctx = NULL };
+    httpd_register_uri_handler(srv, &u_status);
+    httpd_register_uri_handler(srv, &u_pos);
+    httpd_register_uri_handler(srv, &u_msgs);
+    httpd_register_uri_handler(srv, &u_beacons);
+    ESP_LOGI(TAG, "iGate endpoints registered (/api/igate[/position], /api/aprs, /api/beacons)");
 }
 #endif  /* MODEL_TDONGLE_S3 */
 
@@ -1183,7 +1357,12 @@ extern "C" void app_main(void)
                         if (sdcard_init() == ESP_OK) {
                             ESP_LOGI(TAG, "SD card mounted (%.2f GB) — APRS log enabled",
                                      sdcard_get_capacity_gb());
-                            msgstore_init();
+                            // Two independent archives: live/addressed text messages
+                            // and automated position beacons.
+                            s_msg_store    = msgstore_open("/sdcard/aprs/msg");
+                            s_beacon_store = msgstore_open("/sdcard/aprs/beacon");
+                            aprsis_set_stores(s_msg_store, s_beacon_store);
+                            ble_hello_set_msgstore(s_msg_store);
                         } else {
                             ESP_LOGW(TAG, "No usable SD card — APRS persistence disabled");
                         }
@@ -1219,8 +1398,15 @@ extern "C" void app_main(void)
                 if (ret == ESP_OK) {
                     ESP_LOGI(TAG, "APRS-IS iGate started for %s", callsign);
 #if defined(TDONGLE_DEFAULT_LAT) && defined(TDONGLE_DEFAULT_LON)
-                    aprsis_set_position(TDONGLE_DEFAULT_LAT, TDONGLE_DEFAULT_LON);
+#ifndef TDONGLE_DEFAULT_RADIUS_KM
+#define TDONGLE_DEFAULT_RADIUS_KM 50
 #endif
+                    aprsis_set_position(TDONGLE_DEFAULT_LAT, TDONGLE_DEFAULT_LON,
+                                        TDONGLE_DEFAULT_RADIUS_KM);
+#endif
+                    // Runtime position/radius (POST /api/igate/position) overrides
+                    // the build-time default and persists across reboots.
+                    tdongle_load_igate_position();
                 } else {
                     ESP_LOGW(TAG, "APRS-IS iGate init failed: %s", esp_err_to_name(ret));
                 }

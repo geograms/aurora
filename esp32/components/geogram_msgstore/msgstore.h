@@ -75,20 +75,27 @@ typedef struct {
  */
 typedef bool (*msgstore_emit_cb_t)(const msgstore_query_rec_t *rec, void *ctx);
 
-/**
- * @brief Initialise the store. The SD card must already be mounted
- *        (sdcard_init()); this scans /sdcard/aprs, recovers the next index and
- *        epoch, and computes the capacity from free space. Safe to call once.
- * @return ESP_OK if ready; ESP_ERR_INVALID_STATE if no SD card.
- */
-esp_err_t msgstore_init(void);
+/** Opaque store instance. Multiple independent stores can coexist on one card
+ *  (e.g. one for messages, one for position beacons), each in its own directory
+ *  with its own monotonic index, epoch and eviction. */
+typedef struct msgstore_s msgstore_t;
 
-/** @brief True if the store is initialised and backed by a mounted card. */
-bool msgstore_ready(void);
+/**
+ * @brief Open (create + scan) a store rooted at @p dir on the mounted SD card.
+ *        The SD card must already be mounted (sdcard_init()). Scans @p dir,
+ *        recovers the next index and epoch, and computes capacity from free
+ *        space. Each distinct @p dir is an independent store.
+ * @return store handle, or NULL if no SD card / out of memory.
+ */
+msgstore_t *msgstore_open(const char *dir);
+
+/** @brief True if @p st is a valid, ready store. */
+bool msgstore_ready(const msgstore_t *st);
 
 /**
  * @brief Append one observed message (deduped by content hash within a short
- *        window). Assigns the next monotonic index. No-op if not ready.
+ *        window). Assigns the next monotonic index. No-op if @p st is NULL.
+ * @param st       store handle
  * @param from     sender callsign
  * @param to       APRS `to` field ("", callsign, "#grp", or "!")
  * @param text     message body (or "lat,lon[,comment]" for positions)
@@ -96,37 +103,40 @@ bool msgstore_ready(void);
  * @param rssi     dBm or 0 if unknown
  * @param outgoing true if this device originated/relayed it
  */
-esp_err_t msgstore_add(const char *from, const char *to, const char *text,
-                       msgstore_kind_t kind, int rssi, bool outgoing);
+esp_err_t msgstore_add(msgstore_t *st, const char *from, const char *to,
+                       const char *text, msgstore_kind_t kind, int rssi,
+                       bool outgoing);
 
 /**
  * @brief Stream matching records to @p cb in ascending index order.
+ * @param st       store handle
  * @param q        query parameters
  * @param cb       per-record callback (NULL just counts)
  * @param ctx      opaque pointer passed to cb
- * @param out_next [out] resume cursor: index of the last emitted record (or
- *                 since_index if none). Pass to the next query as since_index.
+ * @param out_next [out] resume cursor: last emitted index + 1 (or since_index if
+ *                 none). Pass to the next query as since_index.
  * @param out_more [out] true if more matches exist beyond @p limit
  * @return number of records emitted
  */
-size_t msgstore_query(const msgstore_query_t *q, msgstore_emit_cb_t cb, void *ctx,
+size_t msgstore_query(msgstore_t *st, const msgstore_query_t *q,
+                      msgstore_emit_cb_t cb, void *ctx,
                       uint32_t *out_next, bool *out_more);
 
 /** @brief Highest stored index (0 if empty). */
-uint32_t msgstore_get_latest_index(void);
+uint32_t msgstore_get_latest_index(const msgstore_t *st);
 
 /** @brief Current epoch letter (A-Z), or '?' if not ready. */
-char msgstore_get_epoch(void);
+char msgstore_get_epoch(const msgstore_t *st);
 
 /** @brief Number of records currently stored. */
-uint32_t msgstore_get_count(void);
+uint32_t msgstore_get_count(const msgstore_t *st);
 
 /** @brief Last msgstore_add() outcome marker (diagnostic): "ok", "dup",
  *  "fopen_new", "fopen_re", "write", "notready", or "none". */
-const char *msgstore_diag(void);
+const char *msgstore_diag(const msgstore_t *st);
 
 /** @brief Fill @p out with store/card statistics. */
-void msgstore_get_stats(msgstore_stats_t *out);
+void msgstore_get_stats(const msgstore_t *st, msgstore_stats_t *out);
 
 /**
  * @brief Map an APRS `to` field to a message kind.
@@ -138,7 +148,8 @@ msgstore_kind_t msgstore_kind_from_to(const char *to);
  *        {"epoch","latest_index","count","next","more","messages":[...]}.
  * @return number of bytes written (excluding NUL), 0 on error.
  */
-size_t msgstore_build_json(char *buf, size_t size, const msgstore_query_t *q);
+size_t msgstore_build_json(msgstore_t *st, char *buf, size_t size,
+                           const msgstore_query_t *q);
 
 #ifdef __cplusplus
 }

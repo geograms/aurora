@@ -15,6 +15,7 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include "msgstore.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +61,12 @@ typedef void (*ble_hello_aprs_cb_t)(const char *from, const char *to,
  *        Pass NULL to disable. Keeps this component UI-agnostic.
  */
 void ble_hello_set_aprs_cb(ble_hello_aprs_cb_t cb);
+
+/**
+ * @brief Attach the messages archive served over the BLE aprs_query GATT path.
+ *        NULL disables on-device query results (queries return empty).
+ */
+void ble_hello_set_msgstore(msgstore_t *st);
 
 /**
  * @brief Copy the callsigns heard over BLE in the last [max_age_sec] seconds

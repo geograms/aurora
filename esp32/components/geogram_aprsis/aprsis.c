@@ -78,9 +78,14 @@ static char            s_call[10];
 static int             s_pass;
 static volatile double s_lat = APRSIS_DEFAULT_LAT;
 static volatile double s_lon = APRSIS_DEFAULT_LON;
+static volatile int    s_radius_km = APRSIS_RADIUS_KM;
 static volatile bool   s_have_pos;
 static volatile bool   s_connected;
 static volatile bool   s_running;
+/* Separate archives: text messages vs automated position beacons. Set by the
+ * owner via aprsis_set_stores(); NULL until then (add is a safe no-op). */
+static msgstore_t     *s_msg_store;
+static msgstore_t     *s_beacon_store;
 /* RX diagnostics (exposed via aprsis_get_rx_stats). */
 static volatile uint32_t s_rx_lines;   /* info lines received from APRS-IS      */
 static volatile uint32_t s_rx_msgs;    /* of those, parsed as APRS messages     */
@@ -283,7 +288,7 @@ static void build_filter(char *out, size_t max)
     for (int i = 0; i < hn && o < (int)max - 12; i++)
         o += snprintf(out + o, max - o, "/%s", heard[i]);
     if (s_have_pos && o < (int)max - 32)
-        snprintf(out + o, max - o, " r/%.4f/%.4f/%d", s_lat, s_lon, APRSIS_RADIUS_KM);
+        snprintf(out + o, max - o, " r/%.4f/%.4f/%d", s_lat, s_lon, s_radius_km);
 }
 
 /* ---- uplink dedup ------------------------------------------------------- */
@@ -342,21 +347,28 @@ static void handle_info_line(const char *line)
     if (call_eq(p.from, s_call)) return;          /* never relay our own */
 
     if (p.type == APRS_MESSAGE) {
+        if (!p.addressee[0] || !p.text[0]) return;
         s_rx_msgs++;
-        if (p.addressee[0] && is_local_call(p.addressee) && p.text[0]) {
-            s_rx_gated++;
-            /* Persist FIRST (index-based queries must not depend on the BLE relay
-             * succeeding), then relay to BLE. */
-            msgstore_add(p.from, p.addressee, p.text, MSGSTORE_KIND_MESSAGE, 0, false);
-            ble_hello_relay_aprs(p.from, p.addressee, p.text);
-        }
-    } else if (p.type == APRS_POSITION && s_have_pos && p.has_pos) {
-        /* Nearby position -> compact BLE position frame (to="!", "lat,lon").
-         * 3 decimals (~110 m) keeps it inside the tiny legacy advert. */
+        bool local = is_local_call(p.addressee);
+        /* MESSAGES archive: every text message we receive. The server-side filter
+         * already scoped these to our callsigns (g/) plus, when a position is set,
+         * everything within radius (r/) — so an arriving message is either for us
+         * or live area chatter; both belong in the messages archive. Persist FIRST
+         * (queries must not depend on the BLE relay), then relay. */
+        if (local) s_rx_gated++;
+        msgstore_add(s_msg_store, p.from, p.addressee, p.text,
+                     MSGSTORE_KIND_MESSAGE, 0, false);
+        /* Relay over BLE only what is addressed to a locally-heard callsign (the
+         * phone user) — third-party area chatter is archived but not pushed. */
+        if (local) ble_hello_relay_aprs(p.from, p.addressee, p.text);
+    } else if (p.type == APRS_POSITION && p.has_pos) {
+        /* BEACONS archive: automated position reports. Only arrive when a position
+         * is set (the r/ filter is added then), so they are already within radius.
+         * Compact "lat,lon" (3 decimals ~110 m) also fits the tiny BLE advert. */
         char pos[40];
         snprintf(pos, sizeof pos, "%.3f,%.3f", p.lat, p.lon);
-        msgstore_add(p.from, "!", pos, MSGSTORE_KIND_POSITION, 0, false);
-        ble_hello_relay_aprs(p.from, "!", pos);
+        msgstore_add(s_beacon_store, p.from, "!", pos, MSGSTORE_KIND_POSITION, 0, false);
+        if (s_have_pos) ble_hello_relay_aprs(p.from, "!", pos);
     }
 }
 
@@ -506,13 +518,31 @@ esp_err_t aprsis_init(const char *callsign)
     return ESP_OK;
 }
 
-void aprsis_set_position(double lat, double lon)
+void aprsis_set_position(double lat, double lon, int radius_km)
 {
     s_lat = lat;
     s_lon = lon;
+    if (radius_km > 0) s_radius_km = radius_km;
     s_have_pos = (lat != 0.0 || lon != 0.0);
-    ESP_LOGI(TAG, "position %s: %.4f, %.4f",
-             s_have_pos ? "set" : "cleared", lat, lon);
+    ESP_LOGI(TAG, "position %s: %.4f, %.4f r=%dkm",
+             s_have_pos ? "set" : "cleared", lat, lon, s_radius_km);
+    /* The APRS-IS filter is rebuilt on the next FILTER_CHECK_SEC tick; force a
+     * reconnect-on-change by clearing nothing here — the task notices via
+     * build_filter compare. */
+}
+
+void aprsis_get_position(double *lat, double *lon, int *radius_km, bool *have_pos)
+{
+    if (lat) *lat = s_lat;
+    if (lon) *lon = s_lon;
+    if (radius_km) *radius_km = s_radius_km;
+    if (have_pos) *have_pos = s_have_pos;
+}
+
+void aprsis_set_stores(msgstore_t *messages, msgstore_t *beacons)
+{
+    s_msg_store = messages;
+    s_beacon_store = beacons;
 }
 
 void aprsis_uplink(const char *from, const char *to, const char *text)

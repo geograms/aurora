@@ -2,13 +2,17 @@
  * @file msgstore.c
  * @brief SD-backed, index-addressed APRS message log. See msgstore.h.
  *
- * On-disk: fixed 192-byte records in segment files /sdcard/aprs/seg_<first>.bin,
- * each holding MSGSTORE_RECS_PER_SEGMENT records. The filename number is the
- * index of the segment's first record (a multiple of the segment size), so
- * lexical filename order == index order and evicting the oldest messages is just
- * deleting the lowest-numbered segment file(s). An in-RAM table maps segments to
- * their first index + valid count; it is rebuilt by scanning the directory on
- * boot. The next monotonic index is (max index on disk) + 1.
+ * On-disk: fixed 192-byte records in segment files <dir>/seg_<first>.bin, each
+ * holding MS_RECS_PER_SEG records. The filename number is the index of the
+ * segment's first record (a multiple of the segment size), so lexical filename
+ * order == index order and evicting the oldest messages is just deleting the
+ * lowest-numbered segment file(s). An in-RAM table maps segments to their first
+ * index + valid count; it is rebuilt by scanning the directory on open. The next
+ * monotonic index is (max index on disk) + 1.
+ *
+ * The store is INSTANCE-BASED: each msgstore_open(dir) is an independent log with
+ * its own index, epoch and eviction, so e.g. messages and position beacons can be
+ * kept in separate archives on the same card.
  */
 
 #include <stdio.h>
@@ -30,8 +34,6 @@
 static const char *TAG = "msgstore";
 
 #define MS_MOUNT            "/sdcard"
-#define MS_DIR              "/sdcard/aprs"
-#define MS_EPOCH_PATH       "/sdcard/aprs/epoch"
 #define MS_MAGIC            0x47
 #define MS_FLAG_OUTGOING    0x01
 #define MS_RECS_PER_SEG     4096u
@@ -41,6 +43,7 @@ static const char *TAG = "msgstore";
 #define MS_DEDUP_RING       64
 #define MS_DEFAULT_LIMIT    50u
 #define MS_MAX_LIMIT        500u
+#define MS_DIR_LEN          40
 
 /* Packed 192-byte on-disk record. */
 typedef struct __attribute__((packed)) {
@@ -62,21 +65,26 @@ typedef struct {
     uint16_t count;        /* valid records in this segment */
 } ms_seg_t;
 
-static SemaphoreHandle_t s_mtx;
-static bool      s_ready;
-static ms_seg_t  s_segs[MS_MAX_SEGMENTS];
-static int       s_nseg;
-static uint32_t  s_next_index;     /* index to assign to the next record */
-static uint32_t  s_oldest_index;   /* index of the oldest stored record */
-static uint32_t  s_count;          /* total live records */
-static uint32_t  s_cap;            /* capacity in records */
-static char      s_epoch = '?';
-static FILE     *s_active_fp;
-static uint32_t  s_active_first = UINT32_MAX;
-static int       s_active_seg = -1;
-static int       s_since_sync;
-static uint32_t  s_dedup[MS_DEDUP_RING];
-static int       s_dedup_pos;
+/* One store instance. */
+struct msgstore_s {
+    char             dir[MS_DIR_LEN];
+    SemaphoreHandle_t mtx;
+    bool             ready;
+    ms_seg_t         segs[MS_MAX_SEGMENTS];
+    int              nseg;
+    uint32_t         next_index;    /* index to assign to the next record */
+    uint32_t         oldest_index;  /* index of the oldest stored record */
+    uint32_t         count;         /* total live records */
+    uint32_t         cap;           /* capacity in records */
+    char             epoch;
+    FILE            *active_fp;
+    uint32_t         active_first;
+    int              active_seg;
+    int              since_sync;
+    uint32_t         dedup[MS_DEDUP_RING];
+    int              dedup_pos;
+    char             diag[24];
+};
 
 /* ---- small helpers ----------------------------------------------------- */
 
@@ -101,54 +109,74 @@ static void norm_call(char *dst, size_t cap, const char *src)
     dst[n] = 0;
 }
 
-static void seg_path(char *out, size_t cap, uint32_t first_index)
+static void seg_path(const msgstore_t *st, char *out, size_t cap, uint32_t first_index)
 {
-    snprintf(out, cap, "%s/seg_%010u.bin", MS_DIR, (unsigned)first_index);
+    snprintf(out, cap, "%s/seg_%010u.bin", st->dir, (unsigned)first_index);
 }
 
-static int find_seg(uint32_t first_index)
+static void epoch_path(const msgstore_t *st, char *out, size_t cap)
 {
-    for (int i = 0; i < s_nseg; i++)
-        if (s_segs[i].first_index == first_index) return i;
+    snprintf(out, cap, "%s/epoch", st->dir);
+}
+
+static int find_seg(const msgstore_t *st, uint32_t first_index)
+{
+    for (int i = 0; i < st->nseg; i++)
+        if (st->segs[i].first_index == first_index) return i;
     return -1;
+}
+
+/* Create @p path and any missing parent directories (best effort). */
+static void mkdir_p(const char *path)
+{
+    char tmp[MS_DIR_LEN];
+    size_t n = strlcpy(tmp, path, sizeof tmp);
+    if (n >= sizeof tmp) return;
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        mkdir(tmp, 0755);
+        *p = '/';
+    }
+    mkdir(tmp, 0755);
 }
 
 /* ---- capacity ---------------------------------------------------------- */
 
-static void recompute_cap(void)
+static void recompute_cap(msgstore_t *st)
 {
     uint64_t total = 0, freeb = 0;
     if (esp_vfs_fat_info(MS_MOUNT, &total, &freeb) != ESP_OK) {
-        s_cap = MS_HARD_CAP;
+        st->cap = MS_HARD_CAP;
         return;
     }
     /* Usable = current free + what the store already occupies, at 90% margin. */
-    uint64_t usable = freeb + (uint64_t)s_count * sizeof(ms_rec_t);
+    uint64_t usable = freeb + (uint64_t)st->count * sizeof(ms_rec_t);
     uint64_t by_space = (usable * 9 / 10) / sizeof(ms_rec_t);
     uint64_t cap = by_space < MS_HARD_CAP ? by_space : MS_HARD_CAP;
     if (cap < MS_RECS_PER_SEG) cap = MS_RECS_PER_SEG;
-    s_cap = (uint32_t)cap;
+    st->cap = (uint32_t)cap;
 }
 
 /* ---- boot scan --------------------------------------------------------- */
 
-static void sort_segs(void)
+static void sort_segs(msgstore_t *st)
 {
-    for (int i = 1; i < s_nseg; i++) {           /* insertion sort, n is small */
-        ms_seg_t key = s_segs[i];
+    for (int i = 1; i < st->nseg; i++) {         /* insertion sort, n is small */
+        ms_seg_t key = st->segs[i];
         int j = i - 1;
-        while (j >= 0 && s_segs[j].first_index > key.first_index) {
-            s_segs[j + 1] = s_segs[j]; j--;
+        while (j >= 0 && st->segs[j].first_index > key.first_index) {
+            st->segs[j + 1] = st->segs[j]; j--;
         }
-        s_segs[j + 1] = key;
+        st->segs[j + 1] = key;
     }
 }
 
 /* Count leading valid records in a segment file (used only for the tail seg). */
-static uint16_t scan_seg_count(uint32_t first_index)
+static uint16_t scan_seg_count(const msgstore_t *st, uint32_t first_index)
 {
     char path[64];
-    seg_path(path, sizeof path, first_index);
+    seg_path(st, path, sizeof path, first_index);
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
     uint16_t count = 0;
@@ -162,118 +190,119 @@ static uint16_t scan_seg_count(uint32_t first_index)
     return count;
 }
 
-static void load_epoch(bool store_empty)
+static void load_epoch(msgstore_t *st, bool store_empty)
 {
+    char ep[64];
+    epoch_path(st, ep, sizeof ep);
     char e = 0;
     if (!store_empty) {
-        FILE *f = fopen(MS_EPOCH_PATH, "rb");
+        FILE *f = fopen(ep, "rb");
         if (f) { if (fread(&e, 1, 1, f) != 1) e = 0; fclose(f); }
     }
     if (e < 'A' || e > 'Z') {                 /* empty store, or missing/bad */
         e = (char)('A' + (esp_random() % 26));
-        FILE *f = fopen(MS_EPOCH_PATH, "wb");
+        FILE *f = fopen(ep, "wb");
         if (f) { fwrite(&e, 1, 1, f); fclose(f); }
     }
-    s_epoch = e;
+    st->epoch = e;
 }
 
-esp_err_t msgstore_init(void)
+msgstore_t *msgstore_open(const char *dir)
 {
-    if (s_ready) return ESP_OK;
+    if (!dir || !dir[0]) return NULL;
     if (!sdcard_is_mounted()) {
-        ESP_LOGW(TAG, "no SD card mounted — persistence disabled");
-        return ESP_ERR_INVALID_STATE;
+        ESP_LOGW(TAG, "no SD card mounted — persistence disabled (%s)", dir);
+        return NULL;
     }
-    if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
-    if (!s_mtx) return ESP_ERR_NO_MEM;
+    msgstore_t *st = calloc(1, sizeof *st);
+    if (!st) return NULL;
+    if (strlcpy(st->dir, dir, sizeof st->dir) >= sizeof st->dir) {
+        ESP_LOGE(TAG, "dir too long: %s", dir);
+        free(st);
+        return NULL;
+    }
+    st->mtx = xSemaphoreCreateMutex();
+    if (!st->mtx) { free(st); return NULL; }
+    st->active_first = UINT32_MAX;
+    st->active_seg = -1;
+    strcpy(st->diag, "none");
 
-    sdcard_mkdir(MS_DIR);
+    mkdir_p(st->dir);
 
     /* Scan segment files. */
-    s_nseg = 0;
-    DIR *d = opendir(MS_DIR);
+    DIR *d = opendir(st->dir);
     if (d) {
         struct dirent *de;
-        while ((de = readdir(d)) != NULL && s_nseg < MS_MAX_SEGMENTS) {
+        while ((de = readdir(d)) != NULL && st->nseg < MS_MAX_SEGMENTS) {
             if (strncmp(de->d_name, "seg_", 4) != 0) continue;
-            const char *dot = strstr(de->d_name, ".bin");
-            if (!dot) continue;
+            if (!strstr(de->d_name, ".bin")) continue;
             uint32_t first = (uint32_t)strtoul(de->d_name + 4, NULL, 10);
             if (first % MS_RECS_PER_SEG != 0) continue;
-            s_segs[s_nseg].first_index = first;
-            s_segs[s_nseg].count = MS_RECS_PER_SEG;  /* refined below */
-            s_nseg++;
+            st->segs[st->nseg].first_index = first;
+            st->segs[st->nseg].count = MS_RECS_PER_SEG;  /* refined below */
+            st->nseg++;
         }
         closedir(d);
     }
-    sort_segs();
+    sort_segs(st);
 
-    s_count = 0;
-    if (s_nseg == 0) {
-        s_oldest_index = 0;
-        s_next_index = 0;
+    st->count = 0;
+    if (st->nseg == 0) {
+        st->oldest_index = 0;
+        st->next_index = 0;
     } else {
-        /* Middle segments are full by construction; only the tail is partial. */
-        for (int i = 0; i < s_nseg - 1; i++) s_count += s_segs[i].count;
-        uint16_t tail = scan_seg_count(s_segs[s_nseg - 1].first_index);
-        s_segs[s_nseg - 1].count = tail;
-        s_count += tail;
-        s_oldest_index = s_segs[0].first_index;
-        s_next_index = s_segs[s_nseg - 1].first_index + tail;
-        /* A fully-empty tail file (tail==0) is harmless: we resume writing into it. */
+        for (int i = 0; i < st->nseg - 1; i++) st->count += st->segs[i].count;
+        uint16_t tail = scan_seg_count(st, st->segs[st->nseg - 1].first_index);
+        st->segs[st->nseg - 1].count = tail;
+        st->count += tail;
+        st->oldest_index = st->segs[0].first_index;
+        st->next_index = st->segs[st->nseg - 1].first_index + tail;
     }
 
-    recompute_cap();
-    load_epoch(s_count == 0);
+    recompute_cap(st);
+    load_epoch(st, st->count == 0);
+    st->ready = true;
 
-    s_active_fp = NULL;
-    s_active_first = UINT32_MAX;
-    s_active_seg = -1;
-    s_since_sync = 0;
-    memset(s_dedup, 0, sizeof s_dedup);
-    s_dedup_pos = 0;
-    s_ready = true;
-
-    ESP_LOGI(TAG, "ready: epoch=%c count=%u next=%u oldest=%u cap=%u segs=%d",
-             s_epoch, (unsigned)s_count, (unsigned)s_next_index,
-             (unsigned)s_oldest_index, (unsigned)s_cap, s_nseg);
-    return ESP_OK;
+    ESP_LOGI(TAG, "%s ready: epoch=%c count=%u next=%u oldest=%u cap=%u segs=%d",
+             st->dir, st->epoch, (unsigned)st->count, (unsigned)st->next_index,
+             (unsigned)st->oldest_index, (unsigned)st->cap, st->nseg);
+    return st;
 }
 
-bool msgstore_ready(void) { return s_ready; }
+bool msgstore_ready(const msgstore_t *st) { return st && st->ready; }
 
 /* ---- eviction ---------------------------------------------------------- */
 
 /* Delete oldest whole segments until ~10% of cap is freed. Caller holds mutex
- * and must NOT have the to-be-created segment in s_segs yet. */
-static void evict_oldest(void)
+ * and must NOT have the to-be-created segment in st->segs yet. */
+static void evict_oldest(msgstore_t *st)
 {
-    uint32_t target = s_cap / 10;
+    uint32_t target = st->cap / 10;
     if (target < MS_RECS_PER_SEG) target = MS_RECS_PER_SEG;
     uint32_t freed = 0;
-    while (freed < target && s_nseg > 1) {
+    while (freed < target && st->nseg > 1) {
         char path[64];
-        seg_path(path, sizeof path, s_segs[0].first_index);
+        seg_path(st, path, sizeof path, st->segs[0].first_index);
         sdcard_delete_file(path);
-        freed += s_segs[0].count;
-        if (s_count >= s_segs[0].count) s_count -= s_segs[0].count; else s_count = 0;
-        memmove(&s_segs[0], &s_segs[1], (size_t)(s_nseg - 1) * sizeof(ms_seg_t));
-        s_nseg--;
-        s_oldest_index = s_segs[0].first_index;
+        freed += st->segs[0].count;
+        if (st->count >= st->segs[0].count) st->count -= st->segs[0].count; else st->count = 0;
+        memmove(&st->segs[0], &st->segs[1], (size_t)(st->nseg - 1) * sizeof(ms_seg_t));
+        st->nseg--;
+        st->oldest_index = st->segs[0].first_index;
     }
-    ESP_LOGI(TAG, "evicted ~%u old records (oldest now %u)",
-             (unsigned)freed, (unsigned)s_oldest_index);
+    ESP_LOGI(TAG, "%s evicted ~%u old records (oldest now %u)",
+             st->dir, (unsigned)freed, (unsigned)st->oldest_index);
 }
 
 /* ---- add --------------------------------------------------------------- */
 
-static char s_diag[24] = "none";
-const char *msgstore_diag(void) { return s_diag; }
+const char *msgstore_diag(const msgstore_t *st) { return st ? st->diag : "null"; }
 
-esp_err_t msgstore_add(const char *from, const char *to, const char *text,
-                       msgstore_kind_t kind, int rssi, bool outgoing)
+esp_err_t msgstore_add(msgstore_t *st, const char *from, const char *to,
+                       const char *text, msgstore_kind_t kind, int rssi,
+                       bool outgoing)
 {
-    if (!s_ready) { strcpy(s_diag, "notready"); return ESP_ERR_INVALID_STATE; }
+    if (!st || !st->ready) { return ESP_ERR_INVALID_STATE; }
     if (!from) from = "";
     if (!to) to = "";
     if (!text) text = "";
@@ -283,37 +312,37 @@ esp_err_t msgstore_add(const char *from, const char *to, const char *text,
     snprintf(hbuf, sizeof hbuf, "%s\x1f%s\x1f%s", from, to, text);
     uint32_t hash = fnv1a(hbuf);
 
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    xSemaphoreTake(st->mtx, portMAX_DELAY);
 
     for (int i = 0; i < MS_DEDUP_RING; i++) {
-        if (s_dedup[i] == hash) { strcpy(s_diag, "dup"); xSemaphoreGive(s_mtx); return ESP_OK; }
+        if (st->dedup[i] == hash) { strcpy(st->diag, "dup"); xSemaphoreGive(st->mtx); return ESP_OK; }
     }
 
-    uint32_t idx = s_next_index;
+    uint32_t idx = st->next_index;
     uint32_t seg_first = (idx / MS_RECS_PER_SEG) * MS_RECS_PER_SEG;
 
-    if (s_active_fp == NULL || s_active_first != seg_first) {
-        if (s_active_fp) { fflush(s_active_fp); fclose(s_active_fp); s_active_fp = NULL; }
+    if (st->active_fp == NULL || st->active_first != seg_first) {
+        if (st->active_fp) { fflush(st->active_fp); fclose(st->active_fp); st->active_fp = NULL; }
         char path[64];
-        seg_path(path, sizeof path, seg_first);
-        int si = find_seg(seg_first);
+        seg_path(st, path, sizeof path, seg_first);
+        int si = find_seg(st, seg_first);
         if (si < 0) {
             /* Brand-new segment: enforce cap, refresh free-space estimate. */
-            recompute_cap();
-            if (s_count >= s_cap) evict_oldest();
-            s_active_fp = fopen(path, "wb+");
-            if (!s_active_fp) { strcpy(s_diag, "fopen_new"); xSemaphoreGive(s_mtx); ESP_LOGW(TAG, "open new seg failed"); return ESP_FAIL; }
-            s_segs[s_nseg].first_index = seg_first;
-            s_segs[s_nseg].count = 0;
-            s_active_seg = s_nseg;
-            s_nseg++;
-            if (s_count == 0) s_oldest_index = seg_first;
+            recompute_cap(st);
+            if (st->count >= st->cap) evict_oldest(st);
+            st->active_fp = fopen(path, "wb+");
+            if (!st->active_fp) { strcpy(st->diag, "fopen_new"); xSemaphoreGive(st->mtx); ESP_LOGW(TAG, "open new seg failed"); return ESP_FAIL; }
+            st->segs[st->nseg].first_index = seg_first;
+            st->segs[st->nseg].count = 0;
+            st->active_seg = st->nseg;
+            st->nseg++;
+            if (st->count == 0) st->oldest_index = seg_first;
         } else {
-            s_active_fp = fopen(path, "rb+");
-            if (!s_active_fp) { strcpy(s_diag, "fopen_re"); xSemaphoreGive(s_mtx); ESP_LOGW(TAG, "reopen seg failed"); return ESP_FAIL; }
-            s_active_seg = si;
+            st->active_fp = fopen(path, "rb+");
+            if (!st->active_fp) { strcpy(st->diag, "fopen_re"); xSemaphoreGive(st->mtx); ESP_LOGW(TAG, "reopen seg failed"); return ESP_FAIL; }
+            st->active_seg = si;
         }
-        s_active_first = seg_first;
+        st->active_first = seg_first;
     }
 
     ms_rec_t r;
@@ -329,27 +358,28 @@ esp_err_t msgstore_add(const char *from, const char *to, const char *text,
     strlcpy(r.text, text, sizeof r.text);
 
     long off = (long)(idx % MS_RECS_PER_SEG) * (long)sizeof(ms_rec_t);
-    if (fseek(s_active_fp, off, SEEK_SET) != 0 ||
-        fwrite(&r, sizeof r, 1, s_active_fp) != 1) {
-        xSemaphoreGive(s_mtx);
-        strcpy(s_diag, "write"); ESP_LOGW(TAG, "write failed at index %u", (unsigned)idx);
+    if (fseek(st->active_fp, off, SEEK_SET) != 0 ||
+        fwrite(&r, sizeof r, 1, st->active_fp) != 1) {
+        strcpy(st->diag, "write");
+        xSemaphoreGive(st->mtx);
+        ESP_LOGW(TAG, "write failed at index %u", (unsigned)idx);
         return ESP_FAIL;
     }
 
-    s_segs[s_active_seg].count = (uint16_t)((idx % MS_RECS_PER_SEG) + 1);
-    s_next_index = idx + 1;
-    s_count++;
-    s_dedup[s_dedup_pos] = hash;
-    s_dedup_pos = (s_dedup_pos + 1) % MS_DEDUP_RING;
+    st->segs[st->active_seg].count = (uint16_t)((idx % MS_RECS_PER_SEG) + 1);
+    st->next_index = idx + 1;
+    st->count++;
+    st->dedup[st->dedup_pos] = hash;
+    st->dedup_pos = (st->dedup_pos + 1) % MS_DEDUP_RING;
 
-    if (++s_since_sync >= MS_FSYNC_EVERY) {
-        fflush(s_active_fp);
-        fsync(fileno(s_active_fp));
-        s_since_sync = 0;
+    if (++st->since_sync >= MS_FSYNC_EVERY) {
+        fflush(st->active_fp);
+        fsync(fileno(st->active_fp));
+        st->since_sync = 0;
     }
 
-    strcpy(s_diag, "ok");
-    xSemaphoreGive(s_mtx);
+    strcpy(st->diag, "ok");
+    xSemaphoreGive(st->mtx);
     return ESP_OK;
 }
 
@@ -364,13 +394,14 @@ static bool call_matches(const ms_rec_t *r, const char *norm_filter)
     return strcmp(tmp, norm_filter) == 0;
 }
 
-size_t msgstore_query(const msgstore_query_t *q, msgstore_emit_cb_t cb, void *ctx,
+size_t msgstore_query(msgstore_t *st, const msgstore_query_t *q,
+                      msgstore_emit_cb_t cb, void *ctx,
                       uint32_t *out_next, bool *out_more)
 {
     uint32_t next = q ? q->since_index : 0;
     bool more = false;
     size_t matched = 0;
-    if (!s_ready || !q) { if (out_next) *out_next = next; if (out_more) *out_more = false; return 0; }
+    if (!st || !st->ready || !q) { if (out_next) *out_next = next; if (out_more) *out_more = false; return 0; }
 
     uint32_t limit = q->limit ? q->limit : MS_DEFAULT_LIMIT;
     if (limit > MS_MAX_LIMIT) limit = MS_MAX_LIMIT;
@@ -379,30 +410,30 @@ size_t msgstore_query(const msgstore_query_t *q, msgstore_emit_cb_t cb, void *ct
     bool use_call = q->call_filter && q->call_filter[0];
     if (use_call) norm_call(nfilter, sizeof nfilter, q->call_filter);
 
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    xSemaphoreTake(st->mtx, portMAX_DELAY);
     /* Make the latest writes visible to the separate read handles below. fflush
      * pushes the stdio buffer into FATFS; fsync commits the dirty sectors AND the
      * directory-entry size — without it a freshly fopen("rb") read sees the old
      * (often zero) file size and hits EOF before the newest records. */
-    if (s_active_fp) { fflush(s_active_fp); fsync(fileno(s_active_fp)); }
+    if (st->active_fp) { fflush(st->active_fp); fsync(fileno(st->active_fp)); }
 
-    if (s_count == 0) { xSemaphoreGive(s_mtx); if (out_next) *out_next = next; if (out_more) *out_more = false; return 0; }
+    if (st->count == 0) { xSemaphoreGive(st->mtx); if (out_next) *out_next = next; if (out_more) *out_more = false; return 0; }
 
     /* `since_index` is INCLUSIVE: return records with index >= since_index. The
      * cursor handed back (out_next) is last_emitted+1, so a follow-up poll with
      * since=that returns strictly newer records. Inclusive semantics are required
      * so index 0 (the very first record) is reachable via since=0. */
     uint32_t start = q->since_index;
-    if (start < s_oldest_index) start = s_oldest_index;
+    if (start < st->oldest_index) start = st->oldest_index;
 
-    for (int si = 0; si < s_nseg && !more; si++) {
-        uint32_t sf = s_segs[si].first_index;
-        uint32_t sc = s_segs[si].count;
+    for (int si = 0; si < st->nseg && !more; si++) {
+        uint32_t sf = st->segs[si].first_index;
+        uint32_t sc = st->segs[si].count;
         if (sc == 0) continue;
         if (sf + sc - 1 < start) continue;       /* whole segment below start */
 
         char path[64];
-        seg_path(path, sizeof path, sf);
+        seg_path(st, path, sizeof path, sf);
         FILE *f = fopen(path, "rb");
         if (!f) continue;
 
@@ -439,7 +470,7 @@ size_t msgstore_query(const msgstore_query_t *q, msgstore_emit_cb_t cb, void *ct
         fclose(f);
     }
 done:
-    xSemaphoreGive(s_mtx);
+    xSemaphoreGive(st->mtx);
     if (out_next) *out_next = next;
     if (out_more) *out_more = more;
     return matched;
@@ -447,30 +478,31 @@ done:
 
 /* ---- accessors --------------------------------------------------------- */
 
-uint32_t msgstore_get_latest_index(void)
+uint32_t msgstore_get_latest_index(const msgstore_t *st)
 {
-    return s_next_index ? s_next_index - 1 : 0;
+    if (!st) return 0;
+    return st->next_index ? st->next_index - 1 : 0;
 }
 
-char msgstore_get_epoch(void) { return s_ready ? s_epoch : '?'; }
+char msgstore_get_epoch(const msgstore_t *st) { return (st && st->ready) ? st->epoch : '?'; }
 
-uint32_t msgstore_get_count(void) { return s_count; }
+uint32_t msgstore_get_count(const msgstore_t *st) { return st ? st->count : 0; }
 
-void msgstore_get_stats(msgstore_stats_t *out)
+void msgstore_get_stats(const msgstore_t *st, msgstore_stats_t *out)
 {
     if (!out) return;
     memset(out, 0, sizeof *out);
-    if (!s_ready) { out->epoch = '?'; return; }
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
-    out->count = s_count;
-    out->cap = s_cap;
-    out->latest_index = s_next_index ? s_next_index - 1 : 0;
-    out->epoch = s_epoch;
+    if (!st || !st->ready) { out->epoch = '?'; return; }
+    xSemaphoreTake(st->mtx, portMAX_DELAY);
+    out->count = st->count;
+    out->cap = st->cap;
+    out->latest_index = st->next_index ? st->next_index - 1 : 0;
+    out->epoch = st->epoch;
     uint64_t total = 0, freeb = 0;
     if (esp_vfs_fat_info(MS_MOUNT, &total, &freeb) == ESP_OK) {
         out->total_bytes = total; out->free_bytes = freeb;
     }
-    xSemaphoreGive(s_mtx);
+    xSemaphoreGive(st->mtx);
 }
 
 msgstore_kind_t msgstore_kind_from_to(const char *to)
@@ -494,7 +526,6 @@ static const char *kind_name(uint8_t k)
     }
 }
 
-/* Append a JSON-escaped string. Returns false if it would overflow. */
 static bool json_append_escaped(char *buf, size_t size, size_t *len, const char *s)
 {
     size_t n = *len;
@@ -522,7 +553,7 @@ typedef struct {
     char     epoch;
     bool     first;
     bool     full;        /* a record didn't fit */
-    uint32_t last_fit;    /* index of last record that fit */
+    uint32_t last_fit;    /* cursor: one past last record that fit */
     size_t   tail_reserve;
 } json_ctx_t;
 
@@ -573,11 +604,12 @@ static bool json_emit_cb(const msgstore_query_rec_t *r, void *vctx)
     return true;
 }
 
-size_t msgstore_build_json(char *buf, size_t size, const msgstore_query_t *q)
+size_t msgstore_build_json(msgstore_t *st, char *buf, size_t size,
+                           const msgstore_query_t *q)
 {
     if (!buf || size < 128 || !q) return 0;
-    char epoch = msgstore_get_epoch();
-    uint32_t latest = msgstore_get_latest_index();
+    char epoch = msgstore_get_epoch(st);
+    uint32_t latest = msgstore_get_latest_index(st);
 
     json_ctx_t c = {
         .buf = buf, .size = size, .len = 0, .epoch = epoch,
@@ -590,7 +622,7 @@ size_t msgstore_build_json(char *buf, size_t size, const msgstore_query_t *q)
 
     uint32_t qnext = q->since_index;
     bool qmore = false;
-    size_t matched = msgstore_query(q, json_emit_cb, &c, &qnext, &qmore);
+    size_t matched = msgstore_query(st, q, json_emit_cb, &c, &qnext, &qmore);
 
     uint32_t next = c.full ? c.last_fit : qnext;
     bool more = qmore || c.full;

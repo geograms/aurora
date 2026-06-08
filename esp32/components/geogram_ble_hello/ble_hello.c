@@ -127,6 +127,11 @@ static int          s_seen_count;
 /* Aurora APRS-over-BLE receive callback (optional, set by app) */
 static ble_hello_aprs_cb_t s_aprs_cb;
 
+/* Messages archive queried over the BLE aprs_query GATT path (set by the owner;
+ * NULL = no SD store, queries return empty). */
+static msgstore_t *s_msgstore;
+void ble_hello_set_msgstore(msgstore_t *st) { s_msgstore = st; }
+
 /* APRS relay state */
 typedef struct {
     uint8_t  mfg[APRS_MFG_MAX];         /* full manufacturer data to rebroadcast
@@ -760,9 +765,9 @@ static void handle_aprs_query(uint16_t conn, cJSON *root)
     if ((j = cJSON_GetObjectItem(root, "limit")) && cJSON_IsNumber(j))
         limit = (uint32_t)j->valuedouble;
 
-    char epoch = msgstore_get_epoch();
+    char epoch = msgstore_get_epoch(s_msgstore);
     if (want_epoch && want_epoch != epoch) since = 0;   /* index reset → from start */
-    uint32_t latest = msgstore_get_latest_index();
+    uint32_t latest = msgstore_get_latest_index(s_msgstore);
 
     /* Size the page to the negotiated ATT MTU so it fits one notification. */
     uint16_t mtu = ble_att_mtu(conn);
@@ -781,7 +786,7 @@ static void handle_aprs_query(uint16_t conn, cJSON *root)
                            .kind_filter = kind, .limit = limit };
     uint32_t qnext = since;
     bool qmore = false;
-    msgstore_query(&q, ms_page_emit, &ctx, &qnext, &qmore);
+    msgstore_query(s_msgstore, &q, ms_page_emit, &ctx, &qnext, &qmore);
     uint32_t next = ctx.full ? ctx.last : qnext;
     bool more = qmore || ctx.full;
 

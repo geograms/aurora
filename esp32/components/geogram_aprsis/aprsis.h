@@ -20,6 +20,8 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include <stdint.h>
+#include "msgstore.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,13 +35,26 @@ extern "C" {
 esp_err_t aprsis_init(const char *callsign);
 
 /**
- * @brief Set (or clear) the station's fixed coordinates.
+ * @brief Attach the two archives the iGate writes received traffic to.
+ *
+ * @param messages store for APRS text messages (live + addressed).
+ * @param beacons  store for automated position beacons (in-radius).
+ * Either may be NULL to disable that archive.
+ */
+void aprsis_set_stores(msgstore_t *messages, msgstore_t *beacons);
+
+/**
+ * @brief Set (or clear) the station's fixed coordinates and "nearby" radius.
  *
  * The T-Dongle has no GPS, so "nearby" traffic is only gated once coordinates
  * are provided. Pass (0,0) to mark them undefined — message gating to heard
  * callsigns still works, but no area/position filter is applied.
+ * @param radius_km nearby radius in km; <=0 keeps the current value.
  */
-void aprsis_set_position(double lat, double lon);
+void aprsis_set_position(double lat, double lon, int radius_km);
+
+/** @brief Read the current coordinates/radius. Any pointer may be NULL. */
+void aprsis_get_position(double *lat, double *lon, int *radius_km, bool *have_pos);
 
 /**
  * @brief Gate one frame heard over BLE up to APRS-IS (RF -> Internet).

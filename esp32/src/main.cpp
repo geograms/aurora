@@ -1041,9 +1041,10 @@ extern "C" void app_main(void)
         }
 
 #if HAS_SDCARD
-        // Persistent APRS message log on microSD. sdcard_init() mounts the card
-        // and auto-formats a blank/unformatted one (FAT32); msgstore_init then
-        // scans /sdcard/aprs and recovers the index/epoch/capacity.
+        // Persistent APRS message log on microSD, mounted early while heap is
+        // free (the SDMMC/FATFS mount needs contiguous DMA-capable memory).
+        // sdcard_init() auto-formats a blank card (FAT32); msgstore_init scans
+        // /sdcard/aprs and recovers the index/epoch/capacity.
         if (sdcard_init() == ESP_OK) {
             ESP_LOGI(TAG, "SD card mounted (%.2f GB) — APRS log enabled",
                      sdcard_get_capacity_gb());

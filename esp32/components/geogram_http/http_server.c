@@ -1627,6 +1627,7 @@ static esp_err_t api_aprs_get_handler(httpd_req_t *req)
     char call[16] = {0};
     int kind = -1;
     uint32_t limit = 0;
+    uint32_t tail = 0;
 
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         if (httpd_query_key_value(query, "since", param, sizeof(param)) == ESP_OK)
@@ -1637,6 +1638,17 @@ static esp_err_t api_aprs_get_handler(httpd_req_t *req)
             kind = msgstore_kind_from_str(param);
         if (httpd_query_key_value(query, "limit", param, sizeof(param)) == ESP_OK)
             limit = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "tail", param, sizeof(param)) == ESP_OK)
+            tail = (uint32_t)strtoul(param, NULL, 10);
+    }
+
+    // tail=N: return the most recent N messages (start just below latest_index).
+    // Convenience for "show me what was archived recently".
+    if (tail > 0 && msgstore_ready()) {
+        uint32_t latest = msgstore_get_latest_index();
+        since_id = (latest > tail) ? (latest - tail) : 0;
+        want_epoch = 0;               // tail is relative to this store's epoch
+        if (limit == 0 || limit < tail) limit = tail;
     }
 
     const size_t buffer_size = 8192;
@@ -1776,9 +1788,18 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
+#if BOARD_MODEL == MODEL_TDONGLE_S3
+    // The T-Dongle also runs BLE + the SD/FATFS message store; trim the httpd
+    // task stack and socket pool so it fits the remaining heap after the SD
+    // mount (otherwise httpd_start returns ESP_ERR_HTTPD_TASK).
+    config.stack_size = 5120;
+    config.max_uri_handlers = 24;
+    config.max_open_sockets = 4;
+#else
     config.stack_size = 8192;
     config.max_uri_handlers = 30;
     config.max_open_sockets = 7;
+#endif
     config.recv_wait_timeout = 2;
     config.send_wait_timeout = 2;
 

@@ -81,6 +81,10 @@ static volatile double s_lon = APRSIS_DEFAULT_LON;
 static volatile bool   s_have_pos;
 static volatile bool   s_connected;
 static volatile bool   s_running;
+/* RX diagnostics (exposed via aprsis_get_rx_stats). */
+static volatile uint32_t s_rx_lines;   /* info lines received from APRS-IS      */
+static volatile uint32_t s_rx_msgs;    /* of those, parsed as APRS messages     */
+static volatile uint32_t s_rx_gated;   /* messages whose addressee is local     */
 static QueueHandle_t   s_uplink_q;
 static int             s_seq = 1;
 
@@ -332,23 +336,27 @@ static bool send_line(int fd, const char *s)
 
 static void handle_info_line(const char *line)
 {
+    s_rx_lines++;
     aprs_packet_t p;
     if (!aprs_parse(line, &p)) return;
     if (call_eq(p.from, s_call)) return;          /* never relay our own */
 
     if (p.type == APRS_MESSAGE) {
+        s_rx_msgs++;
         if (p.addressee[0] && is_local_call(p.addressee) && p.text[0]) {
-            ble_hello_relay_aprs(p.from, p.addressee, p.text);
-            /* Persist for index-based queries (no-op if no SD card). */
+            s_rx_gated++;
+            /* Persist FIRST (index-based queries must not depend on the BLE relay
+             * succeeding), then relay to BLE. */
             msgstore_add(p.from, p.addressee, p.text, MSGSTORE_KIND_MESSAGE, 0, false);
+            ble_hello_relay_aprs(p.from, p.addressee, p.text);
         }
     } else if (p.type == APRS_POSITION && s_have_pos && p.has_pos) {
         /* Nearby position -> compact BLE position frame (to="!", "lat,lon").
          * 3 decimals (~110 m) keeps it inside the tiny legacy advert. */
         char pos[40];
         snprintf(pos, sizeof pos, "%.3f,%.3f", p.lat, p.lon);
-        ble_hello_relay_aprs(p.from, "!", pos);
         msgstore_add(p.from, "!", pos, MSGSTORE_KIND_POSITION, 0, false);
+        ble_hello_relay_aprs(p.from, "!", pos);
     }
 }
 
@@ -518,3 +526,10 @@ void aprsis_uplink(const char *from, const char *to, const char *text)
 }
 
 bool aprsis_is_connected(void) { return s_connected; }
+
+void aprsis_get_rx_stats(uint32_t *lines, uint32_t *msgs, uint32_t *gated)
+{
+    if (lines) *lines = s_rx_lines;
+    if (msgs)  *msgs  = s_rx_msgs;
+    if (gated) *gated = s_rx_gated;
+}

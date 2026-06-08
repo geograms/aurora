@@ -970,6 +970,43 @@ static void tdongle_aprs_rx(const char *from, const char *to,
     }
     tdongle_ui_push_message(from, line);
 }
+
+/* GET /api/igate — APRS-IS iGate + message-store status (operational visibility:
+ * the device is headless, so expose whether the iGate is connected upstream and
+ * how many frames it has archived). */
+static esp_err_t tdongle_igate_status_handler(httpd_req_t *req)
+{
+    uint32_t rx_lines = 0, rx_msgs = 0, rx_gated = 0;
+    aprsis_get_rx_stats(&rx_lines, &rx_msgs, &rx_gated);
+    char buf[256];
+    int n = snprintf(buf, sizeof buf,
+        "{\"aprsis_connected\":%s,\"store_ready\":%s,\"count\":%u,"
+        "\"latest_index\":\"%c%u\",\"rx_lines\":%u,\"rx_msgs\":%u,\"rx_gated\":%u,"
+        "\"store_diag\":\"%s\"}",
+        aprsis_is_connected() ? "true" : "false",
+        msgstore_ready() ? "true" : "false",
+        (unsigned)(msgstore_ready() ? msgstore_get_count() : 0),
+        msgstore_ready() ? msgstore_get_epoch() : '?',
+        (unsigned)(msgstore_ready() ? msgstore_get_latest_index() : 0),
+        (unsigned)rx_lines, (unsigned)rx_msgs, (unsigned)rx_gated,
+        msgstore_diag());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, n);
+    return ESP_OK;
+}
+
+static void tdongle_register_igate_status(void)
+{
+    httpd_handle_t srv = http_server_get_handle();
+    if (!srv) { ESP_LOGW(TAG, "igate status: no httpd handle"); return; }
+    static const httpd_uri_t u = {
+        .uri = "/api/igate", .method = HTTP_GET,
+        .handler = tdongle_igate_status_handler, .user_ctx = NULL
+    };
+    if (httpd_register_uri_handler(srv, &u) == ESP_OK)
+        ESP_LOGI(TAG, "iGate status endpoint registered (/api/igate)");
+}
 #endif  /* MODEL_TDONGLE_S3 */
 
 extern "C" void app_main(void)
@@ -1012,17 +1049,15 @@ extern "C" void app_main(void)
     }
 #endif
 
-    // Initialize serial console
-#if !defined(FEATURE_CONSOLE) || FEATURE_CONSOLE
+    // Initialize console: registers esp_console + commands (used by the telnet
+    // network console) and, unless FEATURE_CONSOLE==0, starts the local serial
+    // REPL. The REPL is gated off on the headless T-Dongle iGate (see console.c).
     ret = console_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize console: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "Serial console initialized");
     }
-#else
-    ESP_LOGW(TAG, "[FEATURE_CONSOLE=0] serial console REPL disabled");
-#endif
 
 #if BOARD_MODEL == MODEL_ESP32C3_MINI
     // Ensure station identity is available for BLE handshakes.
@@ -1192,6 +1227,7 @@ extern "C" void app_main(void)
 #else
                 ESP_LOGW(TAG, "[FEATURE_APRSIS=0] APRS-IS iGate disabled for diagnostics");
 #endif
+                tdongle_register_igate_status();
             } else {
                 ESP_LOGE(TAG, "Failed to start WiFi AP: %s", esp_err_to_name(ret));
             }

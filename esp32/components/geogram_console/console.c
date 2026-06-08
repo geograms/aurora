@@ -307,7 +307,15 @@ esp_err_t console_init(void)
     register_mesh_commands();
 #endif
 
-    // Start console task
+    // Start the interactive REPL task — unless FEATURE_CONSOLE==0. On a headless
+    // device with no terminal on the primary console, linenoise() spin/blocks on
+    // a floating input while holding the stdio lock, which deadlocks the next
+    // ESP_LOG and hangs the app. The esp_console infrastructure and the command
+    // set are still registered above, so the telnet network console keeps working.
+#if defined(FEATURE_CONSOLE) && !FEATURE_CONSOLE
+    ESP_LOGW(TAG, "Console commands registered; local REPL disabled (FEATURE_CONSOLE=0)");
+    return ESP_OK;
+#else
     s_running = true;
     BaseType_t task_ret = xTaskCreate(
         console_task,
@@ -327,6 +335,7 @@ esp_err_t console_init(void)
 
     ESP_LOGI(TAG, "Console initialized");
     return ESP_OK;
+#endif
 }
 
 esp_err_t console_deinit(void)

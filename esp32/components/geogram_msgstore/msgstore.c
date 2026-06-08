@@ -267,10 +267,13 @@ static void evict_oldest(void)
 
 /* ---- add --------------------------------------------------------------- */
 
+static char s_diag[24] = "none";
+const char *msgstore_diag(void) { return s_diag; }
+
 esp_err_t msgstore_add(const char *from, const char *to, const char *text,
                        msgstore_kind_t kind, int rssi, bool outgoing)
 {
-    if (!s_ready) return ESP_ERR_INVALID_STATE;
+    if (!s_ready) { strcpy(s_diag, "notready"); return ESP_ERR_INVALID_STATE; }
     if (!from) from = "";
     if (!to) to = "";
     if (!text) text = "";
@@ -283,7 +286,7 @@ esp_err_t msgstore_add(const char *from, const char *to, const char *text,
     xSemaphoreTake(s_mtx, portMAX_DELAY);
 
     for (int i = 0; i < MS_DEDUP_RING; i++) {
-        if (s_dedup[i] == hash) { xSemaphoreGive(s_mtx); return ESP_OK; }
+        if (s_dedup[i] == hash) { strcpy(s_diag, "dup"); xSemaphoreGive(s_mtx); return ESP_OK; }
     }
 
     uint32_t idx = s_next_index;
@@ -299,7 +302,7 @@ esp_err_t msgstore_add(const char *from, const char *to, const char *text,
             recompute_cap();
             if (s_count >= s_cap) evict_oldest();
             s_active_fp = fopen(path, "wb+");
-            if (!s_active_fp) { xSemaphoreGive(s_mtx); ESP_LOGW(TAG, "open new seg failed"); return ESP_FAIL; }
+            if (!s_active_fp) { strcpy(s_diag, "fopen_new"); xSemaphoreGive(s_mtx); ESP_LOGW(TAG, "open new seg failed"); return ESP_FAIL; }
             s_segs[s_nseg].first_index = seg_first;
             s_segs[s_nseg].count = 0;
             s_active_seg = s_nseg;
@@ -307,7 +310,7 @@ esp_err_t msgstore_add(const char *from, const char *to, const char *text,
             if (s_count == 0) s_oldest_index = seg_first;
         } else {
             s_active_fp = fopen(path, "rb+");
-            if (!s_active_fp) { xSemaphoreGive(s_mtx); ESP_LOGW(TAG, "reopen seg failed"); return ESP_FAIL; }
+            if (!s_active_fp) { strcpy(s_diag, "fopen_re"); xSemaphoreGive(s_mtx); ESP_LOGW(TAG, "reopen seg failed"); return ESP_FAIL; }
             s_active_seg = si;
         }
         s_active_first = seg_first;
@@ -329,7 +332,7 @@ esp_err_t msgstore_add(const char *from, const char *to, const char *text,
     if (fseek(s_active_fp, off, SEEK_SET) != 0 ||
         fwrite(&r, sizeof r, 1, s_active_fp) != 1) {
         xSemaphoreGive(s_mtx);
-        ESP_LOGW(TAG, "write failed at index %u", (unsigned)idx);
+        strcpy(s_diag, "write"); ESP_LOGW(TAG, "write failed at index %u", (unsigned)idx);
         return ESP_FAIL;
     }
 
@@ -345,6 +348,7 @@ esp_err_t msgstore_add(const char *from, const char *to, const char *text,
         s_since_sync = 0;
     }
 
+    strcpy(s_diag, "ok");
     xSemaphoreGive(s_mtx);
     return ESP_OK;
 }
@@ -376,11 +380,19 @@ size_t msgstore_query(const msgstore_query_t *q, msgstore_emit_cb_t cb, void *ct
     if (use_call) norm_call(nfilter, sizeof nfilter, q->call_filter);
 
     xSemaphoreTake(s_mtx, portMAX_DELAY);
-    if (s_active_fp) fflush(s_active_fp);   /* make latest records visible to reads */
+    /* Make the latest writes visible to the separate read handles below. fflush
+     * pushes the stdio buffer into FATFS; fsync commits the dirty sectors AND the
+     * directory-entry size — without it a freshly fopen("rb") read sees the old
+     * (often zero) file size and hits EOF before the newest records. */
+    if (s_active_fp) { fflush(s_active_fp); fsync(fileno(s_active_fp)); }
 
     if (s_count == 0) { xSemaphoreGive(s_mtx); if (out_next) *out_next = next; if (out_more) *out_more = false; return 0; }
 
-    uint32_t start = q->since_index + 1;
+    /* `since_index` is INCLUSIVE: return records with index >= since_index. The
+     * cursor handed back (out_next) is last_emitted+1, so a follow-up poll with
+     * since=that returns strictly newer records. Inclusive semantics are required
+     * so index 0 (the very first record) is reachable via since=0. */
+    uint32_t start = q->since_index;
     if (start < s_oldest_index) start = s_oldest_index;
 
     for (int si = 0; si < s_nseg && !more; si++) {
@@ -401,7 +413,7 @@ size_t msgstore_query(const msgstore_query_t *q, msgstore_emit_cb_t cb, void *ct
         for (uint32_t i = i0; i < sc; i++) {
             if (fread(&r, sizeof r, 1, f) != 1) break;
             if (r.magic != MS_MAGIC) continue;
-            if (r.index <= q->since_index) continue;
+            if (r.index < q->since_index) continue;
             if (q->kind_filter >= 0 && r.kind != (uint8_t)q->kind_filter) continue;
             if (use_call && !call_matches(&r, nfilter)) continue;
 
@@ -422,7 +434,7 @@ size_t msgstore_query(const msgstore_query_t *q, msgstore_emit_cb_t cb, void *ct
                 if (!cb(&out, ctx)) { more = true; fclose(f); goto done; }
             }
             matched++;
-            next = r.index;
+            next = r.index + 1;        /* cursor = one past last emitted */
         }
         fclose(f);
     }
@@ -557,7 +569,7 @@ static bool json_emit_cb(const msgstore_query_rec_t *r, void *vctx)
     memcpy(c->buf + c->len, obj, ol);
     c->len += ol; c->buf[c->len] = 0;
     c->first = false;
-    c->last_fit = r->index;
+    c->last_fit = r->index + 1;     /* cursor = one past last record that fit */
     return true;
 }
 

@@ -53,6 +53,11 @@ void aprsis_uplink(const char *from, const char *to, const char *text);
 /** @brief Whether the iGate is currently connected and logged in. */
 bool aprsis_is_connected(void);
 
+/** @brief RX diagnostics: total info lines received, of those parsed as APRS
+ *  messages, and of those addressed to a local (own/heard) callsign. Any pointer
+ *  may be NULL. */
+void aprsis_get_rx_stats(uint32_t *lines, uint32_t *msgs, uint32_t *gated);
+
 #ifdef __cplusplus
 }
 #endif

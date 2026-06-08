@@ -45,6 +45,15 @@ CONFIG_LOG_DEFAULT_LEVEL=3
 # Disable ANSI color escapes in logs
 # CONFIG_LOG_COLORS is not set
 
+# FATFS long filenames — the SD message store writes segment files named
+# seg_<10-digit>.bin (e.g. seg_0000000000.bin), whose 14-char base exceeds the
+# FAT 8.3 limit. Without LFN, fopen() of those files fails and nothing is
+# archived. Heap-allocated LFN buffer keeps the static RAM cost off this
+# no-PSRAM board.
+# CONFIG_FATFS_LFN_NONE is not set
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=128
+
 # Task stacks
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=3072
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

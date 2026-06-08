@@ -121,6 +121,10 @@ char msgstore_get_epoch(void);
 /** @brief Number of records currently stored. */
 uint32_t msgstore_get_count(void);
 
+/** @brief Last msgstore_add() outcome marker (diagnostic): "ok", "dup",
+ *  "fopen_new", "fopen_re", "write", "notready", or "none". */
+const char *msgstore_diag(void);
+
 /** @brief Fill @p out with store/card statistics. */
 void msgstore_get_stats(msgstore_stats_t *out);
 

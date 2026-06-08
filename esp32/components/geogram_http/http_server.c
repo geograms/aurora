@@ -1645,8 +1645,10 @@ static esp_err_t api_aprs_get_handler(httpd_req_t *req)
     // tail=N: return the most recent N messages (start just below latest_index).
     // Convenience for "show me what was archived recently".
     if (tail > 0 && msgstore_ready()) {
+        // since_index is inclusive: the last `tail` records are indices
+        // [latest-tail+1 .. latest], i.e. since = latest+1-tail (clamped to 0).
         uint32_t latest = msgstore_get_latest_index();
-        since_id = (latest > tail) ? (latest - tail) : 0;
+        since_id = (latest + 1 > tail) ? (latest + 1 - tail) : 0;
         want_epoch = 0;               // tail is relative to this store's epoch
         if (limit == 0 || limit < tail) limit = tail;
     }

@@ -86,6 +86,7 @@
     #include "wifi_bsp.h"
     #include "http_server.h"
     #include "esp_coexist.h"
+    #include "esp_wifi.h"
     #include "sdcard.h"
     #include "msgstore.h"
     #include "esp_heap_caps.h"
@@ -1072,6 +1073,9 @@ extern "C" void app_main(void)
             if (ret == ESP_OK) {
                 ESP_LOGI(TAG, "WiFi AP started: geogram (open)");
                 tdongle_ui_set_ip("192.168.4.1");
+                // No WiFi power-save: with BLE sharing the radio, modem sleep made
+                // the STA miss beacons (bcn_timeout) and drop. Keep WiFi awake.
+                esp_wifi_set_ps(WIFI_PS_NONE);
                 TDONGLE_LOG_HEAP("after WiFi AP/STA setup");
 
                 // Auto-connect STA: prefer captive-portal/console-saved
@@ -1138,11 +1142,16 @@ extern "C" void app_main(void)
                         vTaskDelay(pdMS_TO_TICKS(500));
                         waited += 500;
                     }
-                    if (geogram_wifi_get_status() == GEOGRAM_WIFI_STATUS_GOT_IP)
-                        ESP_LOGI(TAG, "WiFi connected — starting BLE now");
-                    else
-                        ESP_LOGW(TAG, "WiFi not up after %d ms — starting BLE anyway",
-                                 waited);
+                    if (geogram_wifi_get_status() == GEOGRAM_WIFI_STATUS_GOT_IP) {
+                        ESP_LOGI(TAG, "WiFi connected — dropping SoftAP, starting BLE");
+                        // On the LAN now: drop the SoftAP (keep STA) so only STA +
+                        // BLE share the radio — far more stable than AP+STA+BLE.
+                        // The captive portal is only needed before connecting.
+                        geogram_wifi_disable_ap_keep_sta();
+                    } else {
+                        ESP_LOGW(TAG, "WiFi not up after %d ms — keeping AP (portal), "
+                                      "starting BLE anyway", waited);
+                    }
                 }
 
                 // BLE HELLO — started only now (after WiFi). Radio is shared, so

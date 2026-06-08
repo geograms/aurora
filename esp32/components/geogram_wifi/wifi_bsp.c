@@ -380,6 +380,22 @@ esp_err_t geogram_wifi_stop_ap(void)
     return ESP_OK;
 }
 
+esp_err_t geogram_wifi_disable_ap_keep_sta(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // Stop the AP's DHCP server, then switch APSTA -> STA-only. The STA stays
+    // associated (mode switch preserves it); only the SoftAP is torn down.
+    if (s_ap_netif) {
+        esp_netif_dhcps_stop(s_ap_netif);
+    }
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    s_ap_active = false;
+    ESP_LOGI(TAG, "SoftAP disabled — STA-only (%s)", esp_err_to_name(err));
+    return err;
+}
+
 bool geogram_wifi_is_ap_active(void)
 {
     return s_ap_active;

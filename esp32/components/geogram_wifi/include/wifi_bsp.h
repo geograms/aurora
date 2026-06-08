@@ -92,6 +92,18 @@ esp_err_t geogram_wifi_start_ap(const geogram_wifi_ap_config_t *config);
 esp_err_t geogram_wifi_stop_ap(void);
 
 /**
+ * @brief Drop the SoftAP but KEEP the STA connection (APSTA -> STA-only).
+ *
+ * Unlike geogram_wifi_stop_ap() (which esp_wifi_stop()s everything), this only
+ * switches to STA-only mode and stops the AP DHCP server, leaving the STA
+ * associated. Used once the iGate is on the LAN to free the radio (the SoftAP is
+ * a third radio user that destabilises WiFi/BLE coexistence).
+ *
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t geogram_wifi_disable_ap_keep_sta(void);
+
+/**
  * @brief Check if AP mode is active
  *
  * @return true if AP is running

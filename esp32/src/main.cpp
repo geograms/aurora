@@ -1111,24 +1111,6 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "HTTP server + captive portal started");
                 TDONGLE_LOG_HEAP("after httpd start");
 
-#if HAS_SDCARD
-                // Mount the SD-backed message store LAST — after the WiFi
-                // netif/DHCP client and the HTTP server have claimed their
-                // memory. On this no-PSRAM S3 the SDMMC/FATFS mount is heap-
-                // hungry; mounting it earlier starved the STA DHCP client so the
-                // device associated but never got an IP. Mounting it last means a
-                // heap shortage degrades to "no archive", not "no network".
-                TDONGLE_LOG_HEAP("before SD mount");
-                if (sdcard_init() == ESP_OK) {
-                    ESP_LOGI(TAG, "SD card mounted (%.2f GB) — APRS log enabled",
-                             sdcard_get_capacity_gb());
-                    msgstore_init();
-                } else {
-                    ESP_LOGW(TAG, "No usable SD card — APRS persistence disabled");
-                }
-                TDONGLE_LOG_HEAP("after SD mount");
-#endif
-
                 // Give WiFi the radio to itself to finish connecting (auth +
                 // DHCP) before starting BLE — the two share one 2.4 GHz radio and
                 // an active BLE scan/advertise starves the handshake/DHCP. Wait up
@@ -1149,14 +1131,27 @@ extern "C" void app_main(void)
                         waited += 500;
                     }
                     if (geogram_wifi_get_status() == GEOGRAM_WIFI_STATUS_GOT_IP) {
-                        ESP_LOGI(TAG, "WiFi connected — dropping SoftAP, starting BLE");
+                        ESP_LOGI(TAG, "WiFi connected — dropping SoftAP, mounting SD");
                         // On the LAN now: drop the SoftAP (keep STA) so only STA +
                         // BLE share the radio — far more stable than AP+STA+BLE.
                         // The captive portal is only needed before connecting.
                         geogram_wifi_disable_ap_keep_sta();
+#if HAS_SDCARD
+                        // Mount the SD store ONLY NOW — the SDMMC bus desensitises
+                        // the 2.4 GHz radio, so keeping it idle until the WiFi
+                        // handshake/DHCP are done lets the STA connect reliably.
+                        // (Confirmed: with SD init skipped, WiFi connects instantly.)
+                        if (sdcard_init() == ESP_OK) {
+                            ESP_LOGI(TAG, "SD card mounted (%.2f GB) — APRS log enabled",
+                                     sdcard_get_capacity_gb());
+                            msgstore_init();
+                        } else {
+                            ESP_LOGW(TAG, "No usable SD card — APRS persistence disabled");
+                        }
+#endif
                     } else {
                         ESP_LOGW(TAG, "WiFi not up after %d ms — keeping AP (portal), "
-                                      "starting BLE anyway", waited);
+                                      "starting BLE anyway (SD left unmounted)", waited);
                     }
                 }
 

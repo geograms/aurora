@@ -51,9 +51,12 @@ esp_err_t sdcard_init(void)
         .allocation_unit_size = 16 * 1024   // 16KB allocation unit
     };
 
-    // SDMMC host configuration
+    // SDMMC host configuration. Use the lower default clock (20 MHz) instead of
+    // high-speed (40 MHz): on compact boards like the T-Dongle-S3 the SD slot is
+    // beside the PCB antenna and the 40 MHz clock's harmonics fall in the 2.4 GHz
+    // band, desensitising WiFi/BLE. 20 MHz is plenty for the small APRS records.
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
 
     // Slot configuration for 1-bit mode
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();

@@ -26,17 +26,21 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 
-# Log level = WARN. The USB port is a SECONDARY console (USB-Serial-JTAG); when
-# no host is draining /dev/ttyACM0 the on-chip FIFO fills and console writes
-# BLOCK, which stalls the boot through the WiFi handshake/DHCP (the wifi driver
-# logs a flood of INFO lines) — so headless the STA never gets an IP, but with a
-# serial monitor attached it connects fine. WARN cuts that volume so the FIFO
-# never fills and the device connects without a host attached.
-# Log level = WARN: quieter boot (the wifi driver logs a lot at INFO). Keeps the
-# USB-Serial-JTAG secondary console usable for debugging. (Console blocking was
-# investigated and ruled out as the connect-failure cause.)
-CONFIG_LOG_DEFAULT_LEVEL_WARN=y
-CONFIG_LOG_DEFAULT_LEVEL=2
+# Console: USB-Serial-JTAG as the PRIMARY (and only) console. On the T-Dongle the
+# UART0 pins are not exposed; /dev/ttyACM0 (USB-Serial-JTAG) is the only port, so
+# make it primary — logs AND panic backtraces then land there (with UART0 primary
+# they go to the unexposed pin and are invisible). No secondary console.
+# The headless "STA never gets an IP" bug was NOT console-FIFO blocking (that was a
+# wrong earlier theory): it was the interactive serial REPL (geogram_console
+# linenoise) blocking on a floating console at boot while holding the stdio lock,
+# which deadlocked the main task's next ESP_LOG and hung init right after BLE. The
+# real fix is FEATURE_CONSOLE=0 (platformio.ini) — no local REPL on this headless
+# iGate (telnet provides a network console). INFO logging headless is fine.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
 
 # Disable ANSI color escapes in logs
 # CONFIG_LOG_COLORS is not set

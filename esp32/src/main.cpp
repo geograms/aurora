@@ -1013,12 +1013,16 @@ extern "C" void app_main(void)
 #endif
 
     // Initialize serial console
+#if !defined(FEATURE_CONSOLE) || FEATURE_CONSOLE
     ret = console_init();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize console: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "Serial console initialized");
     }
+#else
+    ESP_LOGW(TAG, "[FEATURE_CONSOLE=0] serial console REPL disabled");
+#endif
 
 #if BOARD_MODEL == MODEL_ESP32C3_MINI
     // Ensure station identity is available for BLE handshakes.
@@ -1157,6 +1161,7 @@ extern "C" void app_main(void)
 
                 // BLE HELLO — started only now (after WiFi). Radio is shared, so
                 // bias coex BALANCED so a later WiFi reconnect can still handshake.
+#if FEATURE_BLE
                 ret = ble_hello_init(callsign);
                 if (ret == ESP_OK) {
                     ESP_LOGI(TAG, "BLE HELLO active — callsign: %s", callsign);
@@ -1166,11 +1171,15 @@ extern "C" void app_main(void)
                     ESP_LOGW(TAG, "BLE HELLO init failed: %s", esp_err_to_name(ret));
                 }
                 TDONGLE_LOG_HEAP("after BLE init");
+#else
+                ESP_LOGW(TAG, "[FEATURE_BLE=0] BLE HELLO disabled for diagnostics");
+#endif
 
                 // APRS-IS iGate: bridges APRS-IS <-> BLE once WiFi is up.
                 // Coordinates default undefined (no GPS) so only messages to
                 // BLE-heard callsigns are gated; set TDONGLE_DEFAULT_LAT/LON
                 // or call aprsis_set_position() to also gate nearby traffic.
+#if FEATURE_APRSIS
                 ret = aprsis_init(callsign);
                 if (ret == ESP_OK) {
                     ESP_LOGI(TAG, "APRS-IS iGate started for %s", callsign);
@@ -1180,6 +1189,9 @@ extern "C" void app_main(void)
                 } else {
                     ESP_LOGW(TAG, "APRS-IS iGate init failed: %s", esp_err_to_name(ret));
                 }
+#else
+                ESP_LOGW(TAG, "[FEATURE_APRSIS=0] APRS-IS iGate disabled for diagnostics");
+#endif
             } else {
                 ESP_LOGE(TAG, "Failed to start WiFi AP: %s", esp_err_to_name(ret));
             }
@@ -1203,8 +1215,12 @@ extern "C" void app_main(void)
 #endif
 
 #if defined(CONFIG_GEOGRAM_MESH_ENABLED) && (BOARD_MODEL == MODEL_TDONGLE_S3)
+#if FEATURE_MESH
     geogram_log_plain(TAG, "Starting mesh mode on T-Dongle-S3");
     start_mesh_mode();
+#else
+    geogram_log_plain(TAG, "[FEATURE_MESH=0] mesh mode disabled for diagnostics");
+#endif
 #endif
 
 #if BOARD_MODEL == MODEL_ESP32S3_EPAPER_1IN54

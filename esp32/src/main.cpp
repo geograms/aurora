@@ -86,6 +86,8 @@
     #include "wifi_bsp.h"
     #include "http_server.h"
     #include "esp_coexist.h"
+    #include "sdcard.h"
+    #include "msgstore.h"
 #elif BOARD_MODEL == MODEL_HELTEC_V3
     #include "model_config.h"
     #include "model_init.h"
@@ -937,6 +939,11 @@ static void tdongle_aprs_rx(const char *from, const char *to,
     ESP_LOGI(TAG, "Aurora APRS RX (rssi=%d): %s -> %s : %s",
              rssi, from, (to && *to) ? to : "(geo)", text);
 
+    /* Persist to the SD-backed log (deduped) so other devices can query it by
+     * index over HTTP/BLE. No-op if there is no usable SD card. */
+    msgstore_add(from, to ? to : "", text ? text : "",
+                 msgstore_kind_from_to(to), rssi, false);
+
     /* iGate RF→Internet: gate this locally-heard frame up to APRS-IS (the
      * iGate decides what is gateable: direct messages + positions). */
     aprsis_uplink(from, to ? to : "", text ? text : "");
@@ -1032,6 +1039,19 @@ extern "C" void app_main(void)
                 ESP_LOGW(TAG, "T-Dongle UI init failed: %s", esp_err_to_name(ret));
             }
         }
+
+#if HAS_SDCARD
+        // Persistent APRS message log on microSD. sdcard_init() mounts the card
+        // and auto-formats a blank/unformatted one (FAT32); msgstore_init then
+        // scans /sdcard/aprs and recovers the index/epoch/capacity.
+        if (sdcard_init() == ESP_OK) {
+            ESP_LOGI(TAG, "SD card mounted (%.2f GB) — APRS log enabled",
+                     sdcard_get_capacity_gb());
+            msgstore_init();
+        } else {
+            ESP_LOGW(TAG, "No usable SD card — APRS persistence disabled");
+        }
+#endif
 
         // Init nostr keys (for callsign) and BLE HELLO
         nostr_keys_init();

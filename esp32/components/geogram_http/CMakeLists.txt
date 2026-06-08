@@ -1,7 +1,10 @@
 # Geogram HTTP server component for WiFi configuration and Station API
 
-# Base requirements for all boards
-set(HTTP_REQUIRES esp_http_server esp_https_server nvs_flash log geogram_station geogram_ws geogram_common)
+# Base requirements for all boards. geogram_msgstore is listed unconditionally
+# (it registers as an empty component on boards without an SD slot); component
+# REQUIRES are resolved before CONFIG_* is applied, so a CONFIG-guarded require
+# is unreliable. http_server.c only includes/uses it under MODEL_TDONGLE_S3.
+set(HTTP_REQUIRES esp_http_server esp_https_server nvs_flash log geogram_station geogram_ws geogram_common geogram_msgstore)
 
 # Add tiles and updates for boards with SD card support
 if(CONFIG_GEOGRAM_BOARD_EPAPER_1IN54)

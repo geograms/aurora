@@ -25,6 +25,7 @@
 
 #include "wifi_bsp.h"
 #include "ble_hello.h"
+#include "msgstore.h"
 
 static const char *TAG = "aprsis";
 
@@ -338,6 +339,8 @@ static void handle_info_line(const char *line)
     if (p.type == APRS_MESSAGE) {
         if (p.addressee[0] && is_local_call(p.addressee) && p.text[0]) {
             ble_hello_relay_aprs(p.from, p.addressee, p.text);
+            /* Persist for index-based queries (no-op if no SD card). */
+            msgstore_add(p.from, p.addressee, p.text, MSGSTORE_KIND_MESSAGE, 0, false);
         }
     } else if (p.type == APRS_POSITION && s_have_pos && p.has_pos) {
         /* Nearby position -> compact BLE position frame (to="!", "lat,lon").
@@ -345,6 +348,7 @@ static void handle_info_line(const char *line)
         char pos[40];
         snprintf(pos, sizeof pos, "%.3f,%.3f", p.lat, p.lon);
         ble_hello_relay_aprs(p.from, "!", pos);
+        msgstore_add(p.from, "!", pos, MSGSTORE_KIND_POSITION, 0, false);
     }
 }
 

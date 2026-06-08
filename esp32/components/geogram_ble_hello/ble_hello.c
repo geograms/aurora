@@ -5,9 +5,11 @@
 
 #include "ble_hello.h"
 #include "ble_parcel.h"
+#include "msgstore.h"
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -639,6 +641,160 @@ static bool gatt_client_connected(void) { return s_conn_active; }
 
 /* ---- GATT callbacks ----------------------------------------------------- */
 
+/* ---- APRS message-store query over GATT (cursor-paged) ----------------- */
+
+static const char *ms_kind_name(uint8_t k)
+{
+    switch (k) {
+    case MSGSTORE_KIND_POSITION: return "position";
+    case MSGSTORE_KIND_MESSAGE:  return "message";
+    case MSGSTORE_KIND_GROUP:    return "group";
+    case MSGSTORE_KIND_GEOCHAT:  return "geochat";
+    default:                     return "other";
+    }
+}
+
+/* Append a JSON-escaped string; false if it would overflow [buf]. */
+static bool ms_json_esc(char *buf, size_t size, size_t *len, const char *s)
+{
+    size_t n = *len;
+    for (; s && *s; s++) {
+        char e[8]; int el;
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { e[0] = '\\'; e[1] = (char)c; el = 2; }
+        else if (c == '\n') { e[0] = '\\'; e[1] = 'n'; el = 2; }
+        else if (c == '\r') { e[0] = '\\'; e[1] = 'r'; el = 2; }
+        else if (c == '\t') { e[0] = '\\'; e[1] = 't'; el = 2; }
+        else if (c < 0x20) { el = snprintf(e, sizeof e, "\\u%04x", c); }
+        else { e[0] = (char)c; el = 1; }
+        if (n + (size_t)el + 1 >= size) return false;
+        memcpy(buf + n, e, el); n += el;
+    }
+    buf[n] = 0; *len = n;
+    return true;
+}
+
+typedef struct {
+    char *buf; size_t size; size_t len;
+    bool first; bool full; uint32_t last; char epoch;
+} ms_page_ctx_t;
+
+/* Emit one record as a compact object {"i","f","t","x","k"}; stop if it would
+ * overflow the page (leaving room for the trailer). */
+static bool ms_page_emit(const msgstore_query_rec_t *r, void *vctx)
+{
+    ms_page_ctx_t *c = (ms_page_ctx_t *)vctx;
+    char obj[256];
+    size_t ol = 0;
+    int n;
+
+    n = snprintf(obj, sizeof obj, "%s{\"i\":\"%c%u\",\"f\":\"",
+                 c->first ? "" : ",", c->epoch, (unsigned)r->index);
+    if (n < 0 || n >= (int)sizeof obj) return false;
+    ol = (size_t)n;
+    if (!ms_json_esc(obj, sizeof obj, &ol, r->from)) return false;
+
+    n = snprintf(obj + ol, sizeof obj - ol, "\",\"t\":\"");
+    if (n < 0) return false;
+    ol += (size_t)n;
+    if (!ms_json_esc(obj, sizeof obj, &ol, r->to)) return false;
+
+    n = snprintf(obj + ol, sizeof obj - ol, "\",\"x\":\"");
+    if (n < 0) return false;
+    ol += (size_t)n;
+    if (!ms_json_esc(obj, sizeof obj, &ol, r->text)) return false;
+
+    n = snprintf(obj + ol, sizeof obj - ol, "\",\"k\":\"%s\"}", ms_kind_name(r->kind));
+    if (n < 0 || ol + (size_t)n >= sizeof obj) return false;
+    ol += (size_t)n;
+
+    if (c->len + ol + 48 >= c->size) { c->full = true; return false; }  /* keep trailer room */
+    memcpy(c->buf + c->len, obj, ol);
+    c->len += ol;
+    c->buf[c->len] = 0;
+    c->first = false;
+    c->last = r->index;
+    return true;
+}
+
+/* Parse an "epoch+index" id like "K1042" (or plain "1042"). */
+static uint32_t ms_parse_since(const char *s, char *out_epoch)
+{
+    *out_epoch = 0;
+    if (!s || !s[0]) return 0;
+    if ((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) {
+        char e = s[0]; if (e >= 'a') e = (char)(e - 32);
+        *out_epoch = e; s++;
+    }
+    return (uint32_t)strtoul(s, NULL, 10);
+}
+
+static int ms_kind_from_str(const char *s)
+{
+    if (!s) return -1;
+    if (!strcmp(s, "message"))  return MSGSTORE_KIND_MESSAGE;
+    if (!strcmp(s, "position")) return MSGSTORE_KIND_POSITION;
+    if (!strcmp(s, "group"))    return MSGSTORE_KIND_GROUP;
+    if (!strcmp(s, "geochat"))  return MSGSTORE_KIND_GEOCHAT;
+    if (!strcmp(s, "other"))    return MSGSTORE_KIND_OTHER;
+    return -1;
+}
+
+/* Handle {"type":"aprs_query","since":..,"call":..,"kind":..,"limit":..} by
+ * notifying one cursor-paged {"type":"aprs_page",...} on FFF2. The client
+ * re-queries with since=next until more==false. */
+static void handle_aprs_query(uint16_t conn, cJSON *root)
+{
+    uint32_t since = 0; char want_epoch = 0;
+    char call[16] = {0}; int kind = -1; uint32_t limit = 0;
+    cJSON *j;
+    if ((j = cJSON_GetObjectItem(root, "since"))) {
+        if (cJSON_IsString(j)) since = ms_parse_since(j->valuestring, &want_epoch);
+        else if (cJSON_IsNumber(j)) since = (uint32_t)j->valuedouble;
+    }
+    if ((j = cJSON_GetObjectItem(root, "call")) && cJSON_IsString(j))
+        strlcpy(call, j->valuestring, sizeof call);
+    if ((j = cJSON_GetObjectItem(root, "kind")) && cJSON_IsString(j))
+        kind = ms_kind_from_str(j->valuestring);
+    if ((j = cJSON_GetObjectItem(root, "limit")) && cJSON_IsNumber(j))
+        limit = (uint32_t)j->valuedouble;
+
+    char epoch = msgstore_get_epoch();
+    if (want_epoch && want_epoch != epoch) since = 0;   /* index reset → from start */
+    uint32_t latest = msgstore_get_latest_index();
+
+    /* Size the page to the negotiated ATT MTU so it fits one notification. */
+    uint16_t mtu = ble_att_mtu(conn);
+    size_t cap = (mtu > 23) ? (size_t)(mtu - 3) : 20;
+    static char page[512];                 /* NimBLE host task is single-threaded */
+    if (cap > sizeof page) cap = sizeof page;
+
+    ms_page_ctx_t ctx = { .buf = page, .size = cap, .len = 0,
+                          .first = true, .full = false, .last = since, .epoch = epoch };
+    ctx.len = (size_t)snprintf(page, cap,
+        "{\"type\":\"aprs_page\",\"epoch\":\"%c\",\"latest\":\"%c%u\",\"msgs\":[",
+        epoch, epoch, (unsigned)latest);
+
+    msgstore_query_t q = { .since_index = since,
+                           .call_filter = call[0] ? call : NULL,
+                           .kind_filter = kind, .limit = limit };
+    uint32_t qnext = since;
+    bool qmore = false;
+    msgstore_query(&q, ms_page_emit, &ctx, &qnext, &qmore);
+    uint32_t next = ctx.full ? ctx.last : qnext;
+    bool more = qmore || ctx.full;
+
+    int n = snprintf(page + ctx.len, cap - ctx.len,
+        "],\"next\":\"%c%u\",\"more\":%s}", epoch, (unsigned)next, more ? "true" : "false");
+    if (n > 0) ctx.len += (size_t)n;
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(page, ctx.len);
+    if (om) {
+        int rc = ble_gatts_notify_custom(conn, s_notify_handle, om);
+        if (rc != 0) ESP_LOGW(TAG, "aprs_page notify failed: %d", rc);
+    }
+}
+
 static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -668,6 +824,9 @@ static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                 strcmp(type->valuestring, "hello") == 0) {
                 ESP_LOGI(TAG, "HELLO received on conn %d", conn_handle);
                 send_hello_ack(conn_handle);
+            } else if (type && cJSON_IsString(type) &&
+                       strcmp(type->valuestring, "aprs_query") == 0) {
+                handle_aprs_query(conn_handle, root);
             }
             cJSON_Delete(root);
         }

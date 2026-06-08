@@ -44,6 +44,12 @@
 #include "radio_tx.h"
 #endif
 
+#if BOARD_MODEL == MODEL_TDONGLE_S3
+#include <stdlib.h>
+#include "msgstore.h"
+#include "aprs_store.h"   /* aprs_store_parse_id: shared "epoch+number" ID parser */
+#endif
+
 static const char *TAG = "http_server";
 
 static httpd_handle_t s_server = NULL;
@@ -1593,6 +1599,86 @@ static const httpd_uri_t uri_aprs_page = {
 
 #endif // BOARD_MODEL == MODEL_KV4P
 
+#if BOARD_MODEL == MODEL_TDONGLE_S3
+// GET /api/aprs — query the SD-backed APRS message log by index.
+//   ?since=<epoch+index>   only messages after this index (e.g. "K1042"; the
+//                          epoch letter detects an index reset → returns all)
+//   ?call=<callsign>       filter to messages from/to this callsign
+//   ?kind=message|group|position|geochat|other   filter by message kind
+//   ?limit=<n>             max messages (also bounded by the response buffer)
+// Response is a cursor-paged JSON page: {epoch,latest_index,next,more,count,messages[]}.
+static int msgstore_kind_from_str(const char *s)
+{
+    if (!s || !s[0]) return -1;
+    if (!strcmp(s, "message"))  return MSGSTORE_KIND_MESSAGE;
+    if (!strcmp(s, "position")) return MSGSTORE_KIND_POSITION;
+    if (!strcmp(s, "group"))    return MSGSTORE_KIND_GROUP;
+    if (!strcmp(s, "geochat"))  return MSGSTORE_KIND_GEOCHAT;
+    if (!strcmp(s, "other"))    return MSGSTORE_KIND_OTHER;
+    return -1;
+}
+
+static esp_err_t api_aprs_get_handler(httpd_req_t *req)
+{
+    char query[192] = {0};
+    char param[40];
+    uint32_t since_id = 0;
+    char want_epoch = 0;
+    char call[16] = {0};
+    int kind = -1;
+    uint32_t limit = 0;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "since", param, sizeof(param)) == ESP_OK)
+            aprs_store_parse_id(param, &want_epoch, &since_id);
+        if (httpd_query_key_value(query, "call", param, sizeof(param)) == ESP_OK)
+            strlcpy(call, param, sizeof call);
+        if (httpd_query_key_value(query, "kind", param, sizeof(param)) == ESP_OK)
+            kind = msgstore_kind_from_str(param);
+        if (httpd_query_key_value(query, "limit", param, sizeof(param)) == ESP_OK)
+            limit = (uint32_t)strtoul(param, NULL, 10);
+    }
+
+    const size_t buffer_size = 8192;
+    char *buffer = malloc(buffer_size);
+    if (!buffer) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    size_t len;
+    if (msgstore_ready()) {
+        // A changed epoch means the on-disk index reset — return from the start.
+        if (want_epoch && want_epoch != msgstore_get_epoch()) since_id = 0;
+        msgstore_query_t q = {
+            .since_index = since_id,
+            .call_filter = call[0] ? call : NULL,
+            .kind_filter = kind,
+            .limit = limit,
+        };
+        len = msgstore_build_json(buffer, buffer_size, &q);
+    } else {
+        len = (size_t)snprintf(buffer, buffer_size,
+            "{\"epoch\":\"?\",\"latest_index\":\"?0\",\"next\":\"?0\","
+            "\"more\":false,\"count\":0,\"messages\":[]}");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, buffer, len);
+    free(buffer);
+    return ESP_OK;
+}
+
+static const httpd_uri_t uri_api_aprs = {
+    .uri = "/api/aprs",
+    .method = HTTP_GET,
+    .handler = api_aprs_get_handler,
+    .user_ctx = NULL
+};
+#endif // BOARD_MODEL == MODEL_TDONGLE_S3
+
 // ============================================================================
 // URI definitions
 // ============================================================================
@@ -1749,6 +1835,12 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
         httpd_register_uri_handler(s_server, &uri_api_ota_status);
         httpd_register_uri_handler(s_server, &uri_api_ota_upload);
         ESP_LOGI(TAG, "OTA update endpoints registered");
+#endif
+
+#if BOARD_MODEL == MODEL_TDONGLE_S3
+        // SD-backed APRS message log query API
+        httpd_register_uri_handler(s_server, &uri_api_aprs);
+        ESP_LOGI(TAG, "APRS message-store query endpoint registered (/api/aprs)");
 #endif
 
 #if BOARD_MODEL == MODEL_KV4P || BOARD_MODEL == MODEL_TDONGLE_S3

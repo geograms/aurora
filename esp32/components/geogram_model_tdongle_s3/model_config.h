@@ -13,6 +13,14 @@
 #define TDONGLE_LCD_RST_PIN    1
 #define TDONGLE_LCD_BL_PIN     38
 
+// MicroSD / TF card (SDMMC 1-bit). LilyGo T-Dongle-S3 TF slot — clear of the
+// LCD pins above. NOTE: sdcard.c gets these via target_compile_definitions in
+// geogram_sdcard/CMakeLists.txt (it does not include this header); kept here for
+// documentation. Verify against the board schematic.
+#define TDONGLE_SD_CLK_PIN     12
+#define TDONGLE_SD_CMD_PIN     16
+#define TDONGLE_SD_D0_PIN      14
+
 // Feature flags
 #ifndef HAS_DISPLAY
 #define HAS_DISPLAY           1
@@ -33,7 +41,7 @@
 #define HAS_PSRAM             0
 #endif
 #ifndef HAS_SDCARD
-#define HAS_SDCARD            0
+#define HAS_SDCARD            1
 #endif
 #ifndef HAS_LED
 #define HAS_LED               0

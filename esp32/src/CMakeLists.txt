@@ -10,9 +10,9 @@ if(CONFIG_GEOGRAM_BOARD_EPAPER_1IN54)
     list(APPEND APP_REQUIRES geogram_ftp)
 endif()
 
-# APRS-IS iGate only on the T-Dongle-S3 (bridges APRS-IS <-> BLE)
+# APRS-IS iGate + SD-backed message store only on the T-Dongle-S3
 if(CONFIG_GEOGRAM_BOARD_TDONGLE_S3)
-    list(APPEND APP_REQUIRES geogram_aprsis)
+    list(APPEND APP_REQUIRES geogram_aprsis geogram_sdcard geogram_msgstore)
 endif()
 
 idf_component_register(

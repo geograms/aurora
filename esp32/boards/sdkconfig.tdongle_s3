@@ -26,9 +26,17 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 
-# Log level
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-CONFIG_LOG_DEFAULT_LEVEL=3
+# Log level = WARN. The USB port is a SECONDARY console (USB-Serial-JTAG); when
+# no host is draining /dev/ttyACM0 the on-chip FIFO fills and console writes
+# BLOCK, which stalls the boot through the WiFi handshake/DHCP (the wifi driver
+# logs a flood of INFO lines) — so headless the STA never gets an IP, but with a
+# serial monitor attached it connects fine. WARN cuts that volume so the FIFO
+# never fills and the device connects without a host attached.
+# Log level = WARN: quieter boot (the wifi driver logs a lot at INFO). Keeps the
+# USB-Serial-JTAG secondary console usable for debugging. (Console blocking was
+# investigated and ruled out as the connect-failure cause.)
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL=2
 
 # Disable ANSI color escapes in logs
 # CONFIG_LOG_COLORS is not set

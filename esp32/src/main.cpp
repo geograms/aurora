@@ -1136,9 +1136,15 @@ extern "C" void app_main(void)
                 // range), start BLE anyway so the device stays useful over BLE and
                 // the captive portal remains reachable.
                 {
+                    // Keep BLE OFF and the AP UP until the STA actually gets an
+                    // IP, so the (RF-marginal, multi-retry) connect happens with
+                    // the radio to itself, and the AP is dropped the instant it
+                    // succeeds — the device then runs STA+BLE, which is stable.
+                    // Long cap so a slow connect still lands inside this window;
+                    // if WiFi truly can't connect, start BLE anyway (keep AP).
                     int waited = 0;
                     while (geogram_wifi_get_status() != GEOGRAM_WIFI_STATUS_GOT_IP
-                           && waited < 60000) {   // give WiFi a long BLE-free window
+                           && waited < 180000) {
                         vTaskDelay(pdMS_TO_TICKS(500));
                         waited += 500;
                     }

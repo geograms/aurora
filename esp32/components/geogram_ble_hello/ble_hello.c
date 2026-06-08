@@ -540,9 +540,10 @@ static void start_scan(void)
     struct ble_gap_disc_params params = {0};
     params.passive = 0;            /* active — request SCAN_RSP continuations */
     params.itvl = 0x0050;          /* 50 ms */
-    params.window = 0x0050;        /* == itvl: continuous scan (no gaps) so we
-                                    * catch a phone's briefly-aired adverts even
-                                    * while WiFi coexistence steals radio slots */
+    params.window = 0x0030;        /* 30 ms (60% duty): leave radio gaps so the
+                                    * WiFi STA can complete its WPA2 handshake and
+                                    * DHCP. A continuous (window==itvl) scan choked
+                                    * WiFi (reason 15/202 handshake/DHCP timeouts). */
     params.filter_duplicates = 0;  /* we do our own dedup */
 
     /* Scan for a limited duration, then cycle timer switches back to adv */

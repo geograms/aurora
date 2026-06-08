@@ -7,6 +7,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -49,6 +50,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 ESP_LOGI(TAG, "WiFi connected to AP");
                 s_wifi_status = GEOGRAM_WIFI_STATUS_CONNECTED;
                 s_retry_count = 0;  // Reset retry count on successful connection
+                // Explicitly (re)start the STA DHCP client. In APSTA + esp-bridge
+                // builds the default auto-start can be suppressed, leaving the STA
+                // associated but with no IP forever. The return code is a probe:
+                // ESP_OK => the client was NOT running (this was the bug);
+                // ALREADY_STARTED => it was running (then the issue is airtime/coex).
+                if (s_sta_netif) {
+                    esp_err_t de = esp_netif_dhcpc_start(s_sta_netif);
+                    ESP_LOGI(TAG, "STA dhcpc_start: %s", esp_err_to_name(de));
+                }
                 if (s_sta_callback) {
                     s_sta_callback(GEOGRAM_WIFI_STATUS_CONNECTED, event_data);
                 }
@@ -60,30 +70,35 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 s_wifi_status = GEOGRAM_WIFI_STATUS_DISCONNECTED;
                 s_current_ip = 0;
 
-                // Auto-reconnect if we were in STA mode and haven't exceeded retries
+                // Auto-reconnect if we were in STA mode. The link here is marginal
+                // (rssi ~-70, 2.4 GHz shared with BLE), so auth/handshake/DHCP
+                // intermittently fail (reason 15/201/202/205). An iGate must NEVER
+                // permanently give up: retry forever with backoff. Fast retries
+                // (1 s) for the first MAX_RETRY_COUNT attempts to catch a good RF
+                // moment quickly, then slow retries (15 s) so we keep trying without
+                // hammering the AP. Notify the app on each give-up-to-slow boundary
+                // only (not forever). The captive portal / connect_sta resets the
+                // counter, so reconfiguring still takes effect immediately.
                 if (s_sta_connecting) {
-                    // Reason 201 = NO_AP_FOUND — network not in range, don't retry
-                    if (event->reason == 201) {
-                        ESP_LOGW(TAG, "Network not found (reason 201), giving up STA");
-                        s_sta_connecting = false;
-                        if (s_sta_callback) {
-                            s_sta_callback(GEOGRAM_WIFI_STATUS_DISCONNECTED, event_data);
-                        }
+                    s_retry_count++;
+                    uint32_t delay_us;
+                    if (s_retry_count <= MAX_RETRY_COUNT) {
+                        delay_us = 1000000;        // 1 s fast retry
+                        ESP_LOGI(TAG, "Reconnecting... (attempt %d/%d, reason %d)",
+                                 s_retry_count, MAX_RETRY_COUNT, event->reason);
                     } else {
-                        s_retry_count++;
-                        if (s_retry_count <= MAX_RETRY_COUNT) {
-                            ESP_LOGI(TAG, "Reconnecting... (attempt %d/%d)", s_retry_count, MAX_RETRY_COUNT);
-                            // Schedule reconnect via timer — never block the event handler
-                            if (s_reconnect_timer) {
-                                esp_timer_start_once(s_reconnect_timer, 1000000); // 1s
-                            }
-                        } else {
-                            ESP_LOGE(TAG, "Max retry attempts reached, giving up");
-                            s_sta_connecting = false;
+                        delay_us = 15000000;       // 15 s slow retry, keep trying forever
+                        if (s_retry_count == MAX_RETRY_COUNT + 1) {
+                            ESP_LOGW(TAG, "STA still not connected after %d tries "
+                                          "(reason %d) — slow-retrying every 15 s",
+                                     MAX_RETRY_COUNT, event->reason);
                             if (s_sta_callback) {
                                 s_sta_callback(GEOGRAM_WIFI_STATUS_DISCONNECTED, event_data);
                             }
                         }
+                    }
+                    if (s_reconnect_timer) {
+                        esp_timer_start_once(s_reconnect_timer, delay_us);
                     }
                 } else {
                     // Not in STA mode or AP is active, just notify
@@ -170,10 +185,18 @@ esp_err_t geogram_wifi_init(void)
         return ret;
     }
 
-    // Create default WiFi station (or reuse if already created by mesh)
+    // Create default WiFi station (or reuse if already created by mesh).
+    // If this allocation fails (low heap), the STA has no netif and thus no DHCP
+    // client — the device associates but never gets an IP. Surface it loudly.
     s_sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (!s_sta_netif) {
         s_sta_netif = esp_netif_create_default_wifi_sta();
+        if (!s_sta_netif) {
+            ESP_LOGE(TAG, "esp_netif_create_default_wifi_sta() FAILED (out of heap) "
+                          "— STA will associate but get NO IP (free heap=%u)",
+                     (unsigned)esp_get_free_heap_size());
+            return ESP_ERR_NO_MEM;
+        }
     } else {
         ESP_LOGI(TAG, "Reusing existing WIFI_STA_DEF netif");
     }
@@ -309,6 +332,11 @@ esp_err_t geogram_wifi_start_ap(const geogram_wifi_ap_config_t *config)
             ESP_LOGI(TAG, "Reusing existing WIFI_AP_DEF netif");
         } else {
             s_ap_netif = esp_netif_create_default_wifi_ap();
+            if (!s_ap_netif) {
+                ESP_LOGE(TAG, "esp_netif_create_default_wifi_ap() FAILED (out of heap, "
+                              "free=%u)", (unsigned)esp_get_free_heap_size());
+                return ESP_ERR_NO_MEM;
+            }
             ESP_LOGI(TAG, "Created new WIFI_AP_DEF netif");
         }
     }

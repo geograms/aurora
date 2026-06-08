@@ -39,7 +39,9 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=6144
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=4096
 
-# WiFi (minimal — this board is BLE-focused)
+# WiFi. NOTE: do NOT trim these — reducing the RX buffers drops the WPA2 EAPOL /
+# DHCP packets and the STA fails to authenticate (reason 15 4-way-handshake
+# timeout) or never gets an IP. Heap for the SD store is freed elsewhere instead.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
 CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1

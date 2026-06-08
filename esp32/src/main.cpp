@@ -88,6 +88,14 @@
     #include "esp_coexist.h"
     #include "sdcard.h"
     #include "msgstore.h"
+    #include "esp_heap_caps.h"
+    // Log free heap + largest contiguous block at a boot stage. WiFi STA netif /
+    // DHCP, httpd, and the SD/FATFS mount all allocate here on a no-PSRAM S3;
+    // this makes a heap shortage (which silently breaks the STA DHCP) visible.
+    #define TDONGLE_LOG_HEAP(stage) \
+        ESP_LOGI(TAG, "heap %s: free=%u largest=%u", (stage), \
+                 (unsigned)esp_get_free_heap_size(), \
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT))
 #elif BOARD_MODEL == MODEL_HELTEC_V3
     #include "model_config.h"
     #include "model_init.h"
@@ -1040,20 +1048,6 @@ extern "C" void app_main(void)
             }
         }
 
-#if HAS_SDCARD
-        // Persistent APRS message log on microSD, mounted early while heap is
-        // free (the SDMMC/FATFS mount needs contiguous DMA-capable memory).
-        // sdcard_init() auto-formats a blank card (FAT32); msgstore_init scans
-        // /sdcard/aprs and recovers the index/epoch/capacity.
-        if (sdcard_init() == ESP_OK) {
-            ESP_LOGI(TAG, "SD card mounted (%.2f GB) — APRS log enabled",
-                     sdcard_get_capacity_gb());
-            msgstore_init();
-        } else {
-            ESP_LOGW(TAG, "No usable SD card — APRS persistence disabled");
-        }
-#endif
-
         // Init nostr keys (for callsign) and BLE HELLO
         nostr_keys_init();
         const char *callsign = nostr_keys_get_callsign();
@@ -1065,6 +1059,7 @@ extern "C" void app_main(void)
         } else {
             ESP_LOGW(TAG, "BLE HELLO init failed: %s", esp_err_to_name(ret));
         }
+        TDONGLE_LOG_HEAP("after BLE init");
 
         // Start WiFi AP (same pattern as KV4P standalone mode)
         ret = geogram_wifi_init();
@@ -1083,17 +1078,19 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "WiFi AP started: geogram (open)");
                 tdongle_ui_set_ip("192.168.4.1");
 
-                // WiFi + BLE share one 2.4 GHz radio. The default coexistence
-                // policy (BALANCE) splits airtime evenly, which starves the BLE
-                // scan and makes the iGate miss phones' adverts (so it never
-                // hears their callsigns to gate APRS-IS traffic to them). This
-                // node is BLE-first (its job is to hear/relay over BLE; APRS-IS
-                // is low-bandwidth), so bias arbitration toward Bluetooth.
+                // WiFi + BLE share one 2.4 GHz radio. Biasing coex to PREFER_BT
+                // (with a continuous BLE scan) starved WiFi so badly that the
+                // WPA2 4-way handshake and DHCP timed out (reason 15/202) — the
+                // STA associated intermittently and never got an IP. Keep coex
+                // BALANCED so WiFi reliably authenticates + leases; BLE hearing
+                // still works (the legacy-advert fix is what actually fixed it,
+                // not this bias).
                 {
-                    esp_err_t cret = esp_coex_preference_set(ESP_COEX_PREFER_BT);
-                    ESP_LOGI(TAG, "coex preference -> BT: %s",
+                    esp_err_t cret = esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+                    ESP_LOGI(TAG, "coex preference -> BALANCE: %s",
                              cret == ESP_OK ? "ok" : esp_err_to_name(cret));
                 }
+                TDONGLE_LOG_HEAP("after WiFi AP/STA setup");
 
                 // Auto-connect STA: prefer captive-portal/console-saved
                 // credentials; otherwise fall back to the operator's
@@ -1126,6 +1123,25 @@ extern "C" void app_main(void)
                 station_init();
                 http_server_start_ex(tdongle_wifi_config_received, true);
                 ESP_LOGI(TAG, "HTTP server + captive portal started");
+                TDONGLE_LOG_HEAP("after httpd start");
+
+#if HAS_SDCARD
+                // Mount the SD-backed message store LAST — after the WiFi
+                // netif/DHCP client and the HTTP server have claimed their
+                // memory. On this no-PSRAM S3 the SDMMC/FATFS mount is heap-
+                // hungry; mounting it earlier starved the STA DHCP client so the
+                // device associated but never got an IP. Mounting it last means a
+                // heap shortage degrades to "no archive", not "no network".
+                TDONGLE_LOG_HEAP("before SD mount");
+                if (sdcard_init() == ESP_OK) {
+                    ESP_LOGI(TAG, "SD card mounted (%.2f GB) — APRS log enabled",
+                             sdcard_get_capacity_gb());
+                    msgstore_init();
+                } else {
+                    ESP_LOGW(TAG, "No usable SD card — APRS persistence disabled");
+                }
+                TDONGLE_LOG_HEAP("after SD mount");
+#endif
 
                 // APRS-IS iGate: bridges APRS-IS <-> BLE once WiFi is up.
                 // Coordinates default undefined (no GPS) so only messages to

@@ -1651,7 +1651,10 @@ static esp_err_t api_aprs_get_handler(httpd_req_t *req)
         if (limit == 0 || limit < tail) limit = tail;
     }
 
-    const size_t buffer_size = 8192;
+    // Keep this modest: BLE + SD + httpd leave little heap, and msgstore_build_json
+    // pages to fit (sets "more"/"next" when the buffer fills), so a small buffer
+    // just means more pages, not lost data.
+    const size_t buffer_size = 3072;
     char *buffer = malloc(buffer_size);
     if (!buffer) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");

@@ -1048,18 +1048,13 @@ extern "C" void app_main(void)
             }
         }
 
-        // Init nostr keys (for callsign) and BLE HELLO
+        // Init nostr keys (for callsign). BLE HELLO is started LATER — only after
+        // WiFi has finished connecting — because WiFi and BLE share one 2.4 GHz
+        // radio and an active BLE scan/advertise starves the WPA2 4-way handshake
+        // and DHCP (the STA then fails to authenticate / never gets an IP).
         nostr_keys_init();
         const char *callsign = nostr_keys_get_callsign();
-        ret = ble_hello_init(callsign);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "BLE HELLO active — callsign: %s", callsign);
-            /* Receive Aurora APRS-over-BLE frames and show them on screen. */
-            ble_hello_set_aprs_cb(tdongle_aprs_rx);
-        } else {
-            ESP_LOGW(TAG, "BLE HELLO init failed: %s", esp_err_to_name(ret));
-        }
-        TDONGLE_LOG_HEAP("after BLE init");
+        TDONGLE_LOG_HEAP("after nostr init");
 
         // Start WiFi AP (same pattern as KV4P standalone mode)
         ret = geogram_wifi_init();
@@ -1077,19 +1072,6 @@ extern "C" void app_main(void)
             if (ret == ESP_OK) {
                 ESP_LOGI(TAG, "WiFi AP started: geogram (open)");
                 tdongle_ui_set_ip("192.168.4.1");
-
-                // WiFi + BLE share one 2.4 GHz radio. Biasing coex to PREFER_BT
-                // (with a continuous BLE scan) starved WiFi so badly that the
-                // WPA2 4-way handshake and DHCP timed out (reason 15/202) — the
-                // STA associated intermittently and never got an IP. Keep coex
-                // BALANCED so WiFi reliably authenticates + leases; BLE hearing
-                // still works (the legacy-advert fix is what actually fixed it,
-                // not this bias).
-                {
-                    esp_err_t cret = esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
-                    ESP_LOGI(TAG, "coex preference -> BALANCE: %s",
-                             cret == ESP_OK ? "ok" : esp_err_to_name(cret));
-                }
                 TDONGLE_LOG_HEAP("after WiFi AP/STA setup");
 
                 // Auto-connect STA: prefer captive-portal/console-saved
@@ -1142,6 +1124,38 @@ extern "C" void app_main(void)
                 }
                 TDONGLE_LOG_HEAP("after SD mount");
 #endif
+
+                // Give WiFi the radio to itself to finish connecting (auth +
+                // DHCP) before starting BLE — the two share one 2.4 GHz radio and
+                // an active BLE scan/advertise starves the handshake/DHCP. Wait up
+                // to 30 s for an IP; if WiFi can't connect (wrong creds / out of
+                // range), start BLE anyway so the device stays useful over BLE and
+                // the captive portal remains reachable.
+                {
+                    int waited = 0;
+                    while (geogram_wifi_get_status() != GEOGRAM_WIFI_STATUS_GOT_IP
+                           && waited < 60000) {   // give WiFi a long BLE-free window
+                        vTaskDelay(pdMS_TO_TICKS(500));
+                        waited += 500;
+                    }
+                    if (geogram_wifi_get_status() == GEOGRAM_WIFI_STATUS_GOT_IP)
+                        ESP_LOGI(TAG, "WiFi connected — starting BLE now");
+                    else
+                        ESP_LOGW(TAG, "WiFi not up after %d ms — starting BLE anyway",
+                                 waited);
+                }
+
+                // BLE HELLO — started only now (after WiFi). Radio is shared, so
+                // bias coex BALANCED so a later WiFi reconnect can still handshake.
+                ret = ble_hello_init(callsign);
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "BLE HELLO active — callsign: %s", callsign);
+                    ble_hello_set_aprs_cb(tdongle_aprs_rx);
+                    esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+                } else {
+                    ESP_LOGW(TAG, "BLE HELLO init failed: %s", esp_err_to_name(ret));
+                }
+                TDONGLE_LOG_HEAP("after BLE init");
 
                 // APRS-IS iGate: bridges APRS-IS <-> BLE once WiFi is up.
                 // Coordinates default undefined (no GPS) so only messages to

@@ -36,6 +36,18 @@ class IwiProfile {
   /// is a single file copy.
   final String nsec;
 
+  /// Free-text bio / status the user can edit. Optional.
+  final String description;
+
+  /// Preferred avatar colour name (one of [kProfileColors]). Empty falls
+  /// back to a deterministic colour derived from the callsign.
+  final String color;
+
+  /// Relative filename of the avatar image inside this profile's folder
+  /// (`devices/<id>/<avatar>`), or empty when none is set (then the avatar
+  /// renders as a coloured circle with the callsign initials).
+  final String avatar;
+
   /// Unix epoch ms of creation. Used to sort profiles in the switcher.
   final int createdAt;
 
@@ -46,6 +58,9 @@ class IwiProfile {
     required this.npub,
     required this.nsec,
     required this.createdAt,
+    this.description = '',
+    this.color = '',
+    this.avatar = '',
   });
 
   String get displayName => nickname.isNotEmpty ? nickname : callsign;
@@ -57,6 +72,9 @@ class IwiProfile {
     String? npub,
     String? nsec,
     int? createdAt,
+    String? description,
+    String? color,
+    String? avatar,
   }) {
     return IwiProfile(
       id: id ?? this.id,
@@ -65,6 +83,9 @@ class IwiProfile {
       npub: npub ?? this.npub,
       nsec: nsec ?? this.nsec,
       createdAt: createdAt ?? this.createdAt,
+      description: description ?? this.description,
+      color: color ?? this.color,
+      avatar: avatar ?? this.avatar,
     );
   }
 
@@ -75,6 +96,9 @@ class IwiProfile {
         'npub': npub,
         'nsec': nsec,
         'createdAt': createdAt,
+        'description': description,
+        'color': color,
+        'avatar': avatar,
       };
 
   factory IwiProfile.fromJson(Map<String, dynamic> json) {
@@ -86,6 +110,14 @@ class IwiProfile {
       nsec: json['nsec'] as String,
       createdAt: (json['createdAt'] as int?) ??
           DateTime.now().millisecondsSinceEpoch,
+      description: (json['description'] as String?) ?? '',
+      color: (json['color'] as String?) ?? '',
+      avatar: (json['avatar'] as String?) ?? '',
     );
   }
 }
+
+/// The eight avatar colour choices, matching the original geogram palette.
+const List<String> kProfileColors = [
+  'red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan',
+];

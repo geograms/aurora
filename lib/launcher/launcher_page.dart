@@ -471,12 +471,21 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
   void initState() {
     super.initState();
     ProfileService.instance.activeProfileNotifier.addListener(_refresh);
+    // revision fires on in-place edits (nickname/avatar/colour) too.
+    ProfileService.instance.revision.addListener(_refresh);
   }
 
   @override
   void dispose() {
     ProfileService.instance.activeProfileNotifier.removeListener(_refresh);
+    ProfileService.instance.revision.removeListener(_refresh);
     super.dispose();
+  }
+
+  Future<void> _editProfileFlow(IwiProfile p) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => ProfileEditPage(profile: p)),
+    );
   }
 
   void _refresh() {
@@ -513,6 +522,8 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
       onSelected: (value) async {
         if (value == '__add__') {
           await _addProfileFlow();
+        } else if (value == '__edit__') {
+          if (active != null) await _editProfileFlow(active);
         } else {
           await service.switchTo(value);
         }
@@ -523,14 +534,8 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
             value: p.id,
             child: Row(
               children: [
-                Icon(
-                  p.id == active?.id
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
-                  size: 18,
-                  color: cs.primary,
-                ),
-                const SizedBox(width: 8),
+                ProfileAvatar(profile: p, size: 28),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -546,10 +551,23 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
                     ],
                   ),
                 ),
+                if (p.id == active?.id)
+                  Icon(Icons.check, size: 18, color: cs.primary),
               ],
             ),
           ),
         const PopupMenuDivider(),
+        if (active != null)
+          const PopupMenuItem<String>(
+            value: '__edit__',
+            child: Row(
+              children: [
+                Icon(Icons.edit, size: 18),
+                SizedBox(width: 8),
+                Text('Edit profile…'),
+              ],
+            ),
+          ),
         const PopupMenuItem<String>(
           value: '__add__',
           child: Row(
@@ -564,7 +582,10 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.badge, size: 20, color: cs.primary),
+          if (active != null)
+            ProfileAvatar(profile: active, size: 26)
+          else
+            Icon(Icons.badge, size: 20, color: cs.primary),
           const SizedBox(width: 8),
           Text(
             label,

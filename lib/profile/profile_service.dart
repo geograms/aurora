@@ -44,6 +44,12 @@ class ProfileService {
   final ValueNotifier<String?> activeProfileNotifier =
       ValueNotifier<String?>(null);
 
+  /// Bumped on ANY profile-data change (switch, edit, add, delete). Widgets
+  /// that render profile fields (AppBar label, avatar) listen here so an
+  /// in-place edit of the active profile — which doesn't change the active id —
+  /// still triggers a rebuild.
+  final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
   /// True once [load] has completed at least once. Used by `main.dart`
   /// to decide whether to show WelcomePage or the launcher on boot.
   bool get isLoaded => _loaded;
@@ -144,7 +150,29 @@ class ProfileService {
     _activeId = profile.id;
     await _persist();
     activeProfileNotifier.value = _activeId;
+    revision.value++;
   }
+
+  /// Replace an existing profile in place (same [id]) without changing
+  /// which profile is active — used by the profile editor to persist
+  /// nickname/description/colour/avatar edits. Fires the notifier so the
+  /// AppBar label, avatar and any other listeners rebuild immediately.
+  Future<void> update(IwiProfile profile) async {
+    if (_profiles.every((p) => p.id != profile.id)) {
+      throw StateError('Unknown profile id: ${profile.id}');
+    }
+    _profiles = _profiles
+        .map((p) => p.id == profile.id ? profile : p)
+        .toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    await _persist();
+    revision.value++;
+  }
+
+  /// Per-profile storage root (`devices/<id>/`) for any profile id — used
+  /// to read/write that profile's avatar image. (cf. [activeProfileStorage].)
+  ProfileStorage storageForProfile(String id) =>
+      ScopedProfileStorage(geogramRootStorage(), 'devices/$id');
 
   /// Switch the active profile to [id]. Fires the notifier so the
   /// launcher rescans. Throws [StateError] if the id is unknown.
@@ -156,6 +184,7 @@ class ProfileService {
     _activeId = id;
     await _persist();
     activeProfileNotifier.value = id;
+    revision.value++;
   }
 
   /// Remove [id] from the on-disk list. If it was the active profile,
@@ -169,6 +198,7 @@ class ProfileService {
     }
     await _persist();
     activeProfileNotifier.value = _activeId;
+    revision.value++;
   }
 
   Future<void> _persist() async {

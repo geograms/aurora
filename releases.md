@@ -16,14 +16,16 @@ users only ever talk to geogram.radio.
         │                                          │
         │ release.yml on tag vX.Y.Z                │ build-archive.sh commits binaries/
         │  • build android/linux/windows           │
-        │  • publish_release.dart writes           │
-        │    updates/ INTO ITS OWN repo            │
+        │  • attach binaries as GitHub             │
+        │    RELEASE ASSETS (not committed —        │
+        │    keeps the source repo lean)           │
         ▼                                          ▼
-   geograms/aurora/updates/              geograms/wapps/binaries/
+  geograms/aurora Releases (assets)      geograms/wapps/binaries/
         │                                          │
         └──────────────┬───────────────────────────┘
                        │  geograms/geogram-html  ·  sync.yml (cron + manual)
-                       │   copies updates/ -> updates/  and  binaries/ -> wapps/
+                       │   • download aurora release assets -> build feed JSON
+                       │   • copy wapps binaries/ -> wapps/
                        ▼   (commits to itself with the default GITHUB_TOKEN)
               geograms/geogram-html  ──GitHub Pages──►  https://geogram.radio
                        │                                   /updates  (app updates)
@@ -31,6 +33,11 @@ users only ever talk to geogram.radio.
                        ▼
                   the app reads ONLY geogram.radio
 ```
+
+The app binaries live in **two** places only: as GitHub Release *assets* on
+aurora (the build output / transfer mechanism) and as the served files in the
+geogram-html Pages repo (the CDN). They are **never committed to the aurora
+source repo**, which stays lean.
 
 Three repos, one website:
 
@@ -131,14 +138,19 @@ tag is what triggers the pipeline.
 ### What happens next (automatic)
 1. **`.github/workflows/release.yml`** fires on the `v*` tag:
    - jobs `android` / `linux` / `windows` build and `upload-artifact`;
-   - job `publish` (needs all three, `permissions: contents: write`) checks out
-     `main`, downloads the artifacts, runs `tool/publish_release.dart --site .`
-     (writes `updates/v<ver>/` + `stable.json`/`beta.json`, prunes with
-     `--keep 3`), and commits + pushes the feed to **aurora's own repo** using
-     the default `GITHUB_TOKEN`.
+   - job `publish` (needs all three) downloads the artifacts and attaches them
+     to a **GitHub Release** on aurora as assets (`softprops/action-gh-release`,
+     default `GITHUB_TOKEN`, `prerelease` when the tag has a `-`). Nothing is
+     committed to git — the source repo stays lean.
 2. **`geograms/geogram-html` `.github/workflows/sync.yml`** (cron every 3h, or
-   trigger manually) copies `aurora/updates → updates/` and
-   `wapps/binaries → wapps/`, commits to itself.
+   trigger manually):
+   - resolves the latest stable + latest (beta) release tags from aurora;
+   - if the feed is already current, stops (no redundant downloads);
+   - otherwise `gh release download`s the assets, runs
+     `tool/publish_release.dart` (from the aurora checkout) to write
+     `updates/v<ver>/` + `stable.json`/`beta.json` (with `--keep 3` pruning and
+     the release's `publishedAt` as `--date` so re-runs are stable);
+   - copies `wapps/binaries → wapps/`; commits to itself.
 3. **GitHub Pages** serves it at geogram.radio (~1 min to deploy).
 4. The app's next update check sees the new version.
 
@@ -200,9 +212,9 @@ The wapp catalog has its own mirror helper:
 
 | Workflow | Repo | Trigger | Does |
 |----------|------|---------|------|
-| `release.yml` | aurora | tag `v*` | build 3 platforms → commit feed into `aurora/updates/` |
+| `release.yml` | aurora | tag `v*` | build 3 platforms → attach as GitHub Release assets (no git commit) |
 | `build-android.yml` / `build-linux.yml` / `build-windows.yml` | aurora | push to `main` | CI build verification only (`upload-artifact`, no publish) |
-| `sync.yml` | geogram-html | cron `0 */3 * * *` + manual | copy wapps catalog + aurora feed into the website, commit |
+| `sync.yml` | geogram-html | cron `0 */3 * * *` + manual | download aurora release assets → build feed; copy wapps catalog; commit |
 
 ---
 
@@ -213,12 +225,15 @@ The wapp catalog has its own mirror helper:
   website pulls/copies from the public source repos with the default token. If
   you ever make a source repo private, the sync would need a token with read
   access to it.
-- **Binaries in git history (tradeoff).** `release.yml` commits the built
-  binaries (the APK is ~100 MB) into aurora's own repo, and `sync.yml` copies
-  them into geogram-html. `--keep` bounds the *working tree*, but git *history*
-  still grows. The clean alternative — still secret-free — is to publish
-  binaries as GitHub *release assets* on aurora and have `sync.yml` download
-  those instead of committing them. Switch if repo size becomes a problem.
+- **Binaries are GitHub Release assets, not git blobs.** To keep the source repo
+  lean, `release.yml` attaches the built binaries to a GitHub Release on aurora
+  (assets aren't part of git history); `sync.yml` downloads them. The aurora repo
+  therefore never accumulates ~100 MB-per-release blobs. The geogram-html Pages
+  repo DOES hold the currently-served binaries (it is the CDN) — bounded in the
+  working tree by `--keep 3`, though its git history still grows over time; that's
+  inherent to serving files via Pages. (Manual local publishing with
+  `publish_release.dart --site <geogram-html>` still copies files directly — fine
+  for one-offs.)
 - **Not Git LFS.** GitHub Pages does not serve LFS-tracked files over the Pages
   URL (they 404), so binaries are stored as plain files, not LFS.
 - **Node 20 deprecation warnings** on `actions/checkout` / `upload-artifact` /

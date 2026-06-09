@@ -1,11 +1,11 @@
 name: release
 
-# Build the Android / Linux / Windows artifacts on a version tag and publish
-# the update feed into THIS repo's updates/ folder (binaries + stable.json /
-# beta.json). No secrets: the publish job pushes to its own repo with the
-# automatic GITHUB_TOKEN. The website repo (geograms/geogram-html) then mirrors
-# updates/ here into geogram.radio/updates via its own sync workflow — so the
-# in-app updater reads geogram.radio with NO github.com runtime dependency.
+# Build the Android / Linux / Windows artifacts on a version tag and attach them
+# to a GitHub Release on THIS repo as assets (NOT committed to git, so the source
+# repo stays lean). No secrets: uses the automatic GITHUB_TOKEN. The website repo
+# (geograms/geogram-html) sync.yml then downloads these release assets, builds
+# the feed (stable.json/beta.json), and hosts the binaries at geogram.radio/
+# updates — the only place the app fetches from (NO github.com runtime dependency).
 
 on:
   push:
@@ -107,35 +107,26 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
-      contents: write        # push the feed back to this repo (no secret)
+      contents: write        # create a GitHub Release on THIS repo (no secret)
     steps:
-      # Check out main (not the tag) so we commit the feed onto the branch.
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - uses: dart-lang/setup-dart@v1
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Publish feed into updates/
+      - name: Collect assets
         run: |
-          VER="${GITHUB_REF_NAME#v}"
-          # Run standalone (the tool imports only dart: libraries) so we don't
-          # need to resolve the Flutter package's dependencies here.
-          cp tool/publish_release.dart "${RUNNER_TEMP}/publish_release.dart"
-          dart "${RUNNER_TEMP}/publish_release.dart" \
-            --site . \
-            --version "${VER}" \
-            --name "Geogram Aurora ${VER}" \
-            --keep 3 \
-            artifacts/aurora-android/aurora.apk \
-            artifacts/aurora-linux/aurora-linux-x64.tar.gz \
-            artifacts/aurora-windows/aurora-windows-x64-setup.exe
-      - name: Commit & push feed
-        run: |
-          git config user.name 'geogram-ci'
-          git config user.email 'ci@geogram.radio'
-          git add updates
-          git commit -m "Publish update feed for ${GITHUB_REF_NAME}" || echo "nothing to commit"
-          git push origin main
+          mkdir -p dist
+          cp artifacts/aurora-android/aurora.apk dist/
+          cp artifacts/aurora-linux/aurora-linux-x64.tar.gz dist/
+          cp artifacts/aurora-windows/aurora-windows-x64-setup.exe dist/
+      # Publish the binaries as GitHub Release assets — NOT committed to git, so
+      # the source repo stays lean. The website's sync.yml downloads these and
+      # hosts them at geogram.radio/updates (the only place the app fetches from).
+      - name: Create GitHub Release with binaries as assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

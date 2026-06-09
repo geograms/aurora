@@ -3,9 +3,10 @@
 # release.sh — cut a Geogram Aurora release.
 #
 # Bumps pubspec.yaml, syncs lib/version.dart, commits, tags vX.Y.Z and pushes.
-# The GitHub Actions workflows (.github/workflows/build-*.yml) then build the
-# Android APK, Linux tar.gz and Windows installer and attach them to the
-# release, which the in-app Update Center reads (geograms/aurora).
+# The release workflow (.github/workflows/release.yml) then builds the Android
+# APK, Linux tar.gz and Windows installer and PUBLISHES them to the self-hosted
+# update feed at geogram.radio (the geograms/geogram-html repo), which the
+# in-app Update Center reads — no github.com runtime dependency.
 #
 # Usage:
 #   ./release.sh                 # auto-bump patch (or prerelease counter)
@@ -61,16 +62,12 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 git push origin "$branch"
 git push origin "v${VERSION}"
 
-# Pre-create the GitHub release so CI's softprops/action-gh-release attaches to
-# it. Pre-release flag for beta/alpha/rc so it shows only in the beta channel.
-if command -v gh >/dev/null 2>&1; then
-  PRE=""; [[ "$VERSION" == *-* ]] && PRE="--prerelease"
-  gh release create "v${VERSION}" --title "Geogram Aurora ${VERSION}" \
-    --generate-notes $PRE || \
-    echo ">> (release v${VERSION} may already exist; CI will attach artifacts)"
-else
-  echo ">> 'gh' not found — create the GitHub release for v${VERSION} manually;"
-  echo "   CI will still build + attach artifacts on the pushed tag."
-fi
-
-echo ">> done. CI is building artifacts for v${VERSION}."
+# Pushing the tag triggers .github/workflows/release.yml, which builds the
+# three platform artifacts and commits the update feed into THIS repo's
+# updates/ folder (no secrets — uses the automatic GITHUB_TOKEN). The website
+# repo's sync workflow then mirrors updates/ into geogram.radio/updates, and
+# the in-app updater sees the new release on its next check.
+echo ">> done. release.yml is building + publishing v${VERSION}'s feed to updates/."
+echo ">>   geogram.radio mirrors it on its next sync (or trigger sync manually)."
+echo ">>   (to publish manually instead, build the artifacts then run:"
+echo ">>    dart run tool/publish_release.dart --site . --version ${VERSION} <files...>)"

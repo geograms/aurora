@@ -1,15 +1,17 @@
 /*
  * UpdateService — in-app updater for Geogram Aurora.
  *
- * GitHub-only (geograms/aurora). Two channels:
- *   stable -> /releases/latest          (pre-releases excluded by GitHub)
- *   beta   -> /releases?per_page=10[0]  (newest release, pre-releases included)
+ * Self-hosted feed at geogram.radio (NO github.com runtime dependency — keeps
+ * the app within store policies). Two channels, each a static JSON file:
+ *   stable -> <feed>/stable.json
+ *   beta   -> <feed>/beta.json
  * Compares the running version (lib/version.dart kAppVersion) against the feed
  * with semver (pre-release aware), downloads the per-platform artifact, and
- * applies it natively (see update_native_io.dart). Web is a no-op.
+ * applies it natively (see update_native_io.dart). Web is a no-op. The feed
+ * base URL is overridable at runtime (Update Center) for future relocation.
  *
- * Mirrors geogram/lib/services/update_service.dart, trimmed to GitHub + the
- * three target platforms (Android/Linux/Windows).
+ * Mirrors geogram/lib/services/update_service.dart (station-feed style),
+ * trimmed to the three target platforms (Android/Linux/Windows).
  */
 
 import 'dart:async';
@@ -30,16 +32,20 @@ class UpdateService {
   UpdateService._();
   static final UpdateService instance = UpdateService._();
 
-  // Release source (chosen at setup: geograms/aurora).
-  static const String repoOwner = 'geograms';
-  static const String repoName = 'aurora';
-  static String get _api =>
-      'https://api.github.com/repos/$repoOwner/$repoName/releases';
+  // Release source — self-hosted feed at geogram.radio (NO github.com runtime
+  // dependency, so the app stays store-policy friendly). The base directory
+  // holds two channel files: <base>/stable.json and <base>/beta.json (see
+  // ReleaseInfo.fromFeed for the schema). Overridable at runtime (Update
+  // Center) so a future deployment can point elsewhere without rebuilding.
+  static const String defaultFeedUrl = 'https://geogram.radio/updates';
+  String _feedUrl = defaultFeedUrl;
+  String get feedUrl => _feedUrl;
 
   // Persisted settings keys (SharedPreferences, "flutter." prefixed on disk).
   static const _kBeta = 'update.betaEnabled';
   static const _kAutoCheck = 'update.autoCheck';
   static const _kNotified = 'update.lastNotifiedVersion';
+  static const _kFeedUrl = 'update.feedUrl';
 
   final ValueNotifier<UpdateStatus> status =
       ValueNotifier(UpdateStatus.idle);
@@ -66,11 +72,34 @@ class UpdateService {
     final p = await SharedPreferences.getInstance();
     _betaEnabled = p.getBool(_kBeta) ?? false;
     _autoCheck = p.getBool(_kAutoCheck) ?? true;
+    final url = p.getString(_kFeedUrl);
+    _feedUrl = (url != null && url.isNotEmpty) ? url : defaultFeedUrl;
   }
 
   Future<void> setBetaEnabled(bool v) async {
     _betaEnabled = v;
     await _prefs((p) => p.setBool(_kBeta, v));
+  }
+
+  /// Change the update feed base URL (the directory holding stable.json and
+  /// beta.json). Trailing slashes are trimmed; pass empty to reset to the
+  /// default (geogram.radio). Returns the normalised URL actually stored.
+  Future<String> setFeedUrl(String input) async {
+    final url = normalizeFeedUrl(input);
+    _feedUrl = url;
+    await _prefs((p) => p.setString(_kFeedUrl, url));
+    return url;
+  }
+
+  /// Normalise a feed base URL: trim whitespace and trailing slashes, and
+  /// fall back to the default when blank.
+  static String normalizeFeedUrl(String input) {
+    var s = input.trim();
+    if (s.isEmpty) return defaultFeedUrl;
+    while (s.length > 1 && s.endsWith('/')) {
+      s = s.substring(0, s.length - 1);
+    }
+    return s;
   }
 
   Future<void> setAutoCheck(bool v) async {
@@ -85,16 +114,17 @@ class UpdateService {
   bool isNewer(ReleaseInfo? r) =>
       r != null && _compareSemver(r.version, kAppVersion) > 0;
 
-  /// Fetch both channels from GitHub. Safe to call from the Update Center on
-  /// open and from a background check.
+  /// Fetch both channels from the self-hosted feed. Safe to call from the
+  /// Update Center on open and from a background check. A missing channel
+  /// file (404) is treated as "no release on that channel", not an error.
   Future<void> checkForUpdates() async {
     if (!supported) return;
     status.value = UpdateStatus.checking;
     error = null;
     try {
       final results = await Future.wait([
-        _fetch('$_api/latest'),
-        _fetch('$_api?per_page=10'),
+        _fetch('$_feedUrl/stable.json'),
+        _fetch('$_feedUrl/beta.json'),
       ]);
       stable.value = results[0];
       beta.value = results[1] ?? results[0];
@@ -128,24 +158,30 @@ class UpdateService {
     ));
   }
 
+  /// Fetch and parse one channel file from the feed. Returns null when the
+  /// channel doesn't exist yet (404) so a fresh deployment isn't an error.
+  /// The directory the file lives in becomes the base for resolving relative
+  /// asset URLs.
   Future<ReleaseInfo?> _fetch(String url) async {
     final resp = await http.get(
       Uri.parse(url),
-      headers: const {
-        'User-Agent': 'geogram-aurora-updater',
-        'Accept': 'application/vnd.github+json',
-      },
+      headers: const {'User-Agent': 'geogram-aurora-updater'},
     );
+    if (resp.statusCode == 404) return null; // channel not published yet
     if (resp.statusCode != 200) {
-      throw 'GitHub HTTP ${resp.statusCode}';
+      throw 'Update feed HTTP ${resp.statusCode}';
     }
     final decoded = jsonDecode(resp.body);
+    // Base = the directory portion of the channel file's URL.
+    final slash = url.lastIndexOf('/');
+    final base = slash > 0 ? url.substring(0, slash) : url;
     if (decoded is List) {
       if (decoded.isEmpty) return null;
-      return ReleaseInfo.fromGitHub(
-          (decoded.first as Map).cast<String, dynamic>());
+      return ReleaseInfo.fromFeed(
+          (decoded.first as Map).cast<String, dynamic>(), baseUrl: base);
     }
-    return ReleaseInfo.fromGitHub((decoded as Map).cast<String, dynamic>());
+    return ReleaseInfo.fromFeed(
+        (decoded as Map).cast<String, dynamic>(), baseUrl: base);
   }
 
   /// Download the artifact for [release] on the current platform.

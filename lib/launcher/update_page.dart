@@ -35,6 +35,50 @@ class _UpdatePageState extends State<UpdatePage> {
     if (_svc.supported) _svc.checkForUpdates();
   }
 
+  /// Prompt for a new update feed base URL, persist it, and re-check the
+  /// feed. Blank resets to the default (geogram.radio).
+  Future<void> _editFeedUrl() async {
+    final controller = TextEditingController(text: _svc.feedUrl);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Release source'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+                'Base URL of the update feed — the folder holding '
+                'stable.json and beta.json. Leave blank to reset to the '
+                'default (${UpdateService.defaultFeedUrl}).'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                hintText: 'https://geogram.radio/updates',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (v) => Navigator.pop(ctx, v),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (result == null) return; // cancelled
+    await _svc.setFeedUrl(result);
+    if (mounted) setState(() {});
+    _svc.checkForUpdates();
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -85,6 +129,23 @@ class _UpdatePageState extends State<UpdatePage> {
                       if (mounted) setState(() {});
                       _svc.checkForUpdates();
                     },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // Release source (feed URL) — editable so a future
+                // deployment can point the updater at another host.
+                Card(
+                  elevation: 0,
+                  color: cs.surfaceContainerLow,
+                  child: ListTile(
+                    leading: const Icon(Icons.cloud_outlined),
+                    title: const Text('Release source'),
+                    subtitle: Text(_svc.feedUrl),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.edit_outlined),
+                      tooltip: 'Change release source',
+                      onPressed: _editFeedUrl,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 16),

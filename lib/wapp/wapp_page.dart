@@ -585,24 +585,35 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     // history shows immediately when the tab opens.
     await _loadConversations();
 
-    // Auto-configure the install wapp's `source` KV to point at the
-    // in-repo wapps/binaries/ catalog when running from a source
-    // checkout. Resolve from the runtime cwd and probe for index.json
-    // across a few candidate layouts — deriving from widget.wappDir was
-    // off by one level after the wapps/archive -> wapps move, which
-    // left the store with no catalog ("not working").
+    // Seed the install wapp's `source` KV on first run (when the user
+    // hasn't set one via the store's own Settings tab). Priority:
+    //   1. Host-configured default (PreferencesService.wappStoreSource) so
+    //      a deployment can point the store at another catalog without
+    //      rebuilding the wasm.
+    //   2. The in-repo wapps/binaries/ catalog when running from a source
+    //      checkout — resolved from the runtime cwd by probing index.json
+    //      across a few candidate layouts (deriving from widget.wappDir was
+    //      off by one level after the wapps/archive -> wapps move).
+    //   3. Nothing — the wasm's built-in DEFAULT_SOURCE
+    //      (https://geogram.radio/wapps) takes over.
     if (_wappName == 'install' && !_engine.hasKvKey('source')) {
-      final cwd = platform.currentDirectory();
-      final candidates = [
-        '$cwd/../wapps/binaries',    // sibling repo (canonical)
-        '$cwd/../../wapps/binaries', // nested workspace fallback
-        '$cwd/wapps/binaries',       // legacy in-tree
-      ];
-      for (final candidate in candidates) {
-        final binStorage = wappPackageStorage(candidate);
-        if (await binStorage.exists('index.json')) {
-          _engine.kvSet('source', binStorage.basePath);
-          break;
+      final hostDefault =
+          PreferencesService.instanceSync?.wappStoreSource;
+      if (hostDefault != null && hostDefault.isNotEmpty) {
+        _engine.kvSet('source', hostDefault);
+      } else {
+        final cwd = platform.currentDirectory();
+        final candidates = [
+          '$cwd/../wapps/binaries',    // sibling repo (canonical)
+          '$cwd/../../wapps/binaries', // nested workspace fallback
+          '$cwd/wapps/binaries',       // legacy in-tree
+        ];
+        for (final candidate in candidates) {
+          final binStorage = wappPackageStorage(candidate);
+          if (await binStorage.exists('index.json')) {
+            _engine.kvSet('source', binStorage.basePath);
+            break;
+          }
         }
       }
     }
@@ -1103,31 +1114,52 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       if (slashIdx <= 0) return;
       baseDir = baseDir.substring(0, slashIdx);
     }
-    final srcStorage = wappPackageStorage(baseDir);
-    if (!await srcStorage.exists(filePath)) {
-      _outputLines.add(_OutputLine('File not found: $baseDir/$filePath', 'err'));
-      if (mounted) setState(() {});
-      return;
-    }
+
+    final lowered = baseDir.toLowerCase();
+    final isRemote =
+        lowered.startsWith('http://') || lowered.startsWith('https://');
 
     try {
-      // Read the .wapp (ZIP) bytes and hand them to the installer
-      // service, which extracts, validates app.wasm, records source.json
-      // for Reload, signs, and fires WappLoadedEvent so the launcher
-      // rescans. Centralising here keeps the store install and the
-      // dependency "Install…" flow on the exact same code path.
-      final archiveBytes = await srcStorage.readBytes(filePath);
-      if (archiveBytes == null || archiveBytes.isEmpty) {
-        _outputLines.add(
-            _OutputLine('Empty or missing .wapp: $filePath', 'err'));
-        if (mounted) setState(() {});
-        return;
+      // Hand the .wapp (ZIP) bytes to the installer service, which
+      // extracts, validates app.wasm, records source.json for Reload,
+      // signs, and fires WappLoadedEvent so the launcher rescans.
+      // Centralising here keeps the store install and the dependency
+      // "Install…" flow on the exact same code path.
+      final InstallResult result;
+      if (isRemote) {
+        // Remote catalog (e.g. raw.githubusercontent.com/geograms/wapps/
+        // main/binaries): download the .wapp ZIP over HTTP. The store's
+        // do_install already rewrote any github tree URL to the raw form,
+        // so concatenating dir + file gives the byte URL directly.
+        // installFromUrl records a WappSource.url so Reload re-fetches.
+        final base = baseDir.endsWith('/')
+            ? baseDir.substring(0, baseDir.length - 1)
+            : baseDir;
+        result = await WappInstallerService.instance.installFromUrl(
+          wappId: name,
+          url: '$base/$filePath',
+        );
+      } else {
+        final srcStorage = wappPackageStorage(baseDir);
+        if (!await srcStorage.exists(filePath)) {
+          _outputLines
+              .add(_OutputLine('File not found: $baseDir/$filePath', 'err'));
+          if (mounted) setState(() {});
+          return;
+        }
+        final archiveBytes = await srcStorage.readBytes(filePath);
+        if (archiveBytes == null || archiveBytes.isEmpty) {
+          _outputLines.add(
+              _OutputLine('Empty or missing .wapp: $filePath', 'err'));
+          if (mounted) setState(() {});
+          return;
+        }
+        result = await WappInstallerService.instance.installFromBytes(
+          wappId: name,
+          zipBytes: Uint8List.fromList(archiveBytes),
+          source: WappSource.file('$baseDir/$filePath'),
+        );
       }
-      final result = await WappInstallerService.instance.installFromBytes(
-        wappId: name,
-        zipBytes: Uint8List.fromList(archiveBytes),
-        source: WappSource.file('$baseDir/$filePath'),
-      );
       if (!result.ok) {
         _outputLines.add(
             _OutputLine(result.error ?? 'Install failed', 'err'));

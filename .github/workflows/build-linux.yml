@@ -1,8 +1,9 @@
 name: build-linux
 
+# CI build verification only. Tag releases are built + published to
+# geogram.radio by release.yml (no GitHub release attach here).
 on:
   push:
-    tags: ['v*']
     branches: [main]
   workflow_dispatch:
 
@@ -43,11 +44,7 @@ jobs:
             --sort=name --owner=0 --group=0 --mtime='1970-01-01' \
             -czf dist/aurora-linux-x64.tar.gz .
 
-      - name: Publish to GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: dist/aurora-linux-x64.tar.gz
-          prerelease: ${{ contains(github.ref_name, '-') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: aurora-linux
+          path: dist/aurora-linux-x64.tar.gz

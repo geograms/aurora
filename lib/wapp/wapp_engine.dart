@@ -12,6 +12,7 @@ import 'package:wasm_run/wasm_run.dart';
 import 'i18n_context.dart';
 import '../profile/profile_storage.dart';
 import '../connections/hal/connection_hal_imports.dart';
+import '../connections/internet/http_transport.dart';
 import '../connections/bluetooth/ble_service.dart';
 import '../profile/profile_service.dart';
 import 'wapp_event_broker.dart';
@@ -51,6 +52,19 @@ class _WappSocketState {
   int state = 0;
   final List<int> rxBuf = <int>[];
   StreamSubscription<List<int>>? sub;
+}
+
+/// State for a single hal_http_* request. Lives in [WappEngine._https]
+/// keyed by handle. The request runs asynchronously via [HttpTransport];
+/// [done] flips true on completion (success or failure). The wapp polls
+/// hal_http_poll until done, checks hal_http_status, then drains the body
+/// with hal_http_read_response (which advances [readOffset]) and frees.
+class _WappHttpState {
+  bool done = false;
+  bool failed = false; // transport-level failure (no HTTP response at all)
+  int status = -1; // HTTP status code once [done] && !failed
+  Uint8List body = Uint8List(0);
+  int readOffset = 0;
 }
 
 /// Log entry from a WASM module.
@@ -105,6 +119,12 @@ class WappEngine {
   // hal_socket_* state. Same handle convention as _procs.
   final Map<int, _WappSocketState> _sockets = {};
   int _nextSocketHandle = 1;
+
+  // hal_http_* state. Same handle convention as _procs. Backed by the
+  // host's one HttpTransport so the Wapp Store can fetch its catalog
+  // index.json from a remote repo (raw.githubusercontent.com/...).
+  final Map<int, _WappHttpState> _https = {};
+  int _nextHttpHandle = 1;
 
   // hal_socket_*_sync state — blocking sockets for synchronous test code
   // (the wasm test runner can't await async I/O). Keyed by handle.
@@ -508,6 +528,92 @@ class WappEngine {
       params: [ValueTy.i32],
     );
 
+    // ── HTTP HAL (host internet, backed by HttpTransport) ──
+    //
+    // Async polling, same shape as the process HAL: request spawns and
+    // returns a handle immediately; the wapp polls hal_http_poll until
+    // done (0 = pending, 1 = done, <0 = unknown handle / transport
+    // failure), reads the status with hal_http_status, drains the body
+    // with hal_http_read_response (repeatable — advances an internal
+    // offset), then frees. Used by the Wapp Store to GET its catalog
+    // index.json from a remote repo. method: 0=GET 1=POST 2=PUT 3=DELETE.
+    final halHttpRequest = WasmFunction(
+      (int method, int urlPtr, int urlLen, int bodyPtr, int bodyLen) {
+        final url = _readStr(urlPtr, urlLen);
+        if (url.isEmpty) return -1;
+        final body = bodyLen > 0 ? _readStr(bodyPtr, bodyLen) : null;
+        final Uri uri;
+        try {
+          uri = Uri.parse(url);
+        } catch (_) {
+          return -1;
+        }
+        final h = _nextHttpHandle++;
+        final s = _WappHttpState();
+        _https[h] = s;
+        const transport = HttpTransport.shared;
+        const timeout = Duration(seconds: 30);
+        Future<HttpResult> req;
+        switch (method) {
+          case 1:
+            req = transport.post(uri, body: body, timeout: timeout);
+            break;
+          case 0:
+          default:
+            // GET (and any unmapped method) — the store only needs GET.
+            req = transport.get(uri, timeout: timeout);
+            break;
+        }
+        req.then((r) {
+          s.status = r.statusCode;
+          s.body = r.bodyBytes;
+          s.done = true;
+        }).catchError((Object _) {
+          s.failed = true;
+          s.done = true;
+        });
+        return h;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halHttpPoll = WasmFunction(
+      (int h) {
+        final s = _https[h];
+        if (s == null) return -1;
+        if (!s.done) return 0; // pending
+        return s.failed ? -1 : 1; // transport failure vs. got a response
+      },
+      params: [ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halHttpStatus = WasmFunction(
+      (int h) {
+        final s = _https[h];
+        if (s == null) return -1;
+        return s.status;
+      },
+      params: [ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halHttpReadResponse = WasmFunction(
+      (int h, int bufPtr, int bufLen) {
+        final s = _https[h];
+        if (s == null || !s.done || s.failed) return 0;
+        final remaining = s.body.length - s.readOffset;
+        if (remaining <= 0 || bufLen <= 0) return 0;
+        final n = remaining < bufLen ? remaining : bufLen;
+        final mem = _memory!.view;
+        for (var i = 0; i < n; i++) mem[bufPtr + i] = s.body[s.readOffset + i];
+        s.readOffset += n;
+        return n;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halHttpFree = WasmFunction.voidReturn(
+      (int h) { _https.remove(h); },
+      params: [ValueTy.i32],
+    );
+
     // ── File HAL (host filesystem, no sandbox) ──
     //
     // Absolute paths, full filesystem access — same trust model as
@@ -876,7 +982,14 @@ class WappEngine {
       WasmImport('hal', 'ble_scan_read', halBleScanRead),
       WasmImport('hal', 'ble_advertise', halBleAdvertise),
       WasmImport('hal', 'ble_advertise_stop', halBleAdvertiseStop),
-      // Transport HAL (hal.http / hal.lora) — stubs defined in
+      // HTTP HAL — real, backed by HttpTransport (so the Wapp Store can
+      // fetch its remote catalog). Defined above; replaces the old stubs.
+      WasmImport('hal', 'http_request', halHttpRequest),
+      WasmImport('hal', 'http_poll', halHttpPoll),
+      WasmImport('hal', 'http_read_response', halHttpReadResponse),
+      WasmImport('hal', 'http_status', halHttpStatus),
+      WasmImport('hal', 'http_free', halHttpFree),
+      // Remaining transport HAL (hal.lora) — stubs defined in
       // lib/connections/hal/. (hal.ble is implemented above, not stubbed.)
       ...connectionHalImports(stubVoid: stubVoid, stubI32: stubI32),
       // Process (host subprocess, no sandbox)
@@ -992,6 +1105,9 @@ class WappEngine {
       try { s.closeSync(); } catch (_) {}
     }
     _syncSockets.clear();
+    // Drop any in-flight HTTP request state. Pending futures still hold
+    // their own state reference and resolve harmlessly into nothing.
+    _https.clear();
     // Release this wapp's share of the BLE adapter.
     _bleSub?.cancel();
     _bleSub = null;

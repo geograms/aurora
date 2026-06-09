@@ -1,10 +1,14 @@
 /*
  * Update models — release feed shapes for the in-app Update Center.
  *
- * Mirrors geogram's update system but GitHub-only and trimmed to what Aurora
- * ships: a stable channel (GitHub "latest", pre-releases excluded) and a beta
- * channel (newest release, pre-releases included). Artifacts follow the
- * `aurora-*` naming the CI workflows produce.
+ * The app pulls releases from a self-hosted feed at https://geogram.radio
+ * (no github.com runtime dependency — app-store friendly): a stable channel
+ * (updates/stable.json) and a beta channel (updates/beta.json). Each is a
+ * single JSON object with version metadata + an `assets` array. Artifacts
+ * follow the `aurora-*` naming the build pipeline produces.
+ *
+ * ReleaseInfo.fromGitHub is retained so a custom feed URL can still point at
+ * the GitHub releases API if ever needed, but it is not used by default.
  */
 
 import 'package:flutter/foundation.dart';
@@ -85,6 +89,70 @@ class ReleaseInfo {
       publishedAt: json['published_at'] as String?,
       htmlUrl: json['html_url'] as String?,
       isPrerelease: (json['prerelease'] as bool?) ?? false,
+      assets: assets,
+    );
+  }
+
+  /// Parse a self-hosted geogram.radio feed object (updates/stable.json or
+  /// updates/beta.json). Schema:
+  ///   {
+  ///     "version": "1.2.3", "tagName": "v1.2.3",
+  ///     "name": "...", "body": "...notes...",
+  ///     "publishedAt": "2026-06-09T12:00:00Z", "prerelease": false,
+  ///     "assets": [ {"name": "aurora.apk", "url": "v1.2.3/aurora.apk",
+  ///                  "size": 12345}, ... ]
+  ///   }
+  /// Asset `url`s may be relative — they are resolved against [baseUrl] (the
+  /// directory the feed JSON was fetched from, e.g.
+  /// "https://geogram.radio/updates"). Absolute http(s) urls pass through.
+  /// Accepts snake_case keys too so a GitHub-shaped object also parses.
+  factory ReleaseInfo.fromFeed(Map<String, dynamic> json, {String baseUrl = ''}) {
+    final tag = (json['tagName'] as String?) ??
+        (json['tag_name'] as String?) ??
+        (json['version'] != null ? 'v${json['version']}' : '');
+    final version = (json['version'] as String?) ?? _stripV(tag);
+
+    String resolve(String url) {
+      if (url.isEmpty) return url;
+      final lower = url.toLowerCase();
+      if (lower.startsWith('http://') || lower.startsWith('https://')) {
+        return url;
+      }
+      if (baseUrl.isEmpty) return url;
+      final b = baseUrl.endsWith('/')
+          ? baseUrl.substring(0, baseUrl.length - 1)
+          : baseUrl;
+      final rel = url.startsWith('/') ? url.substring(1) : url;
+      return '$b/$rel';
+    }
+
+    final assets = <ReleaseAsset>[];
+    final rawAssets = json['assets'];
+    if (rawAssets is List) {
+      for (final a in rawAssets) {
+        if (a is Map) {
+          final url = (a['url'] as String?) ??
+              (a['browser_download_url'] as String?) ??
+              '';
+          assets.add(ReleaseAsset(
+            name: (a['name'] as String?) ?? '',
+            url: resolve(url),
+            size: (a['size'] as num?)?.toInt() ?? 0,
+          ));
+        }
+      }
+    }
+    return ReleaseInfo(
+      version: _stripV(version),
+      tagName: tag,
+      name: json['name'] as String?,
+      body: json['body'] as String?,
+      publishedAt:
+          (json['publishedAt'] as String?) ?? (json['published_at'] as String?),
+      htmlUrl: (json['htmlUrl'] as String?) ?? (json['html_url'] as String?),
+      isPrerelease: (json['prerelease'] as bool?) ??
+          (json['isPrerelease'] as bool?) ??
+          false,
       assets: assets,
     );
   }

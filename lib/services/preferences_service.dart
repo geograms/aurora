@@ -125,6 +125,22 @@ class PreferencesService {
   Future<void> setOnboardingComplete(bool v) =>
       _prefs.setBool('onboarding.complete', v);
 
+  // Wapp Store default catalog source — the URL (or local path) the
+  // install wapp seeds into its `source` KV on first run, so a future
+  // deployment can point the store at a different catalog without
+  // rebuilding the wasm. Empty/null = fall back to the in-repo binaries
+  // dir (dev checkout) or the wapp's built-in default
+  // (https://geogram.radio/wapps).
+  // The store's own Settings tab can still override this per-install.
+  String? get wappStoreSource => _prefs.getString('wappStore.source');
+  set wappStoreSource(String? v) {
+    if (v == null || v.isEmpty) {
+      _prefs.remove('wappStore.source');
+    } else {
+      _prefs.setString('wappStore.source', v);
+    }
+  }
+
   // Wapp data directory — root folder for per-wapp user data
   String? get wappDataDir => _prefs.getString('wapp.dataDir');
   set wappDataDir(String? v) {

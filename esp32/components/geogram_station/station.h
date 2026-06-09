@@ -86,6 +86,14 @@ void station_client_activity(station_client_t *client);
 // Build status JSON into buffer
 size_t station_build_status_json(char *buffer, size_t size);
 
+// Build the device-discovery JSON (id + capabilities) into buffer. Lets other
+// devices on the LAN identify this node and what it can do.
+size_t station_build_device_json(char *buffer, size_t size);
+
+// Register a getter for the live "APRS-IS connected" capability state. Optional;
+// keeps geogram_station free of an APRS-IS dependency. Pass NULL to clear.
+void station_set_aprsis_status_cb(bool (*fn)(void));
+
 // Build hello_ack JSON into buffer
 size_t station_build_hello_ack_json(char *buffer, size_t size, bool success, const char *message);
 

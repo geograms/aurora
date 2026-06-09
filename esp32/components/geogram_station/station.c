@@ -18,9 +18,33 @@
 
 #include <esp_log.h>
 #include <esp_wifi.h>
+#include <esp_mac.h>
 #include <esp_timer.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+/* Capability presence is mostly compile-time (board features). Provide safe
+ * defaults so every board compiles regardless of which HAS_xxx / FEATURE_xxx
+ * flags its platformio env defines. */
+#ifndef HAS_LORA
+#define HAS_LORA 0
+#endif
+#ifndef HAS_SA818
+#define HAS_SA818 0
+#endif
+#ifndef HAS_SDCARD
+#define HAS_SDCARD 0
+#endif
+#ifndef HAS_DISPLAY
+#define HAS_DISPLAY 0
+#endif
+#ifndef FEATURE_BLE
+#define FEATURE_BLE 1
+#endif
+#ifndef FEATURE_APRSIS
+#define FEATURE_APRSIS 0
+#endif
 
 static const char *TAG = "Station";
 
@@ -260,6 +284,55 @@ size_t station_build_status_json(char *buffer, size_t size) {
     geo_json_object_end(&builder);
 
     return geo_json_get_length(&builder);
+}
+
+static bool (*s_aprsis_status_cb)(void) = NULL;
+void station_set_aprsis_status_cb(bool (*fn)(void)) { s_aprsis_status_cb = fn; }
+
+size_t station_build_device_json(char *buffer, size_t size) {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+    bool cap_wifi   = true;                 /* all supported boards do WiFi */
+#if defined(CONFIG_BT_ENABLED)
+    bool cap_ble    = FEATURE_BLE;
+#else
+    bool cap_ble    = false;
+#endif
+    bool cap_lora   = HAS_LORA;
+    bool cap_radio  = HAS_SA818;            /* SA818 VHF/UHF transceiver */
+    bool cap_sdcard = HAS_SDCARD;
+    bool cap_display = HAS_DISPLAY;
+    bool cap_aprsis = FEATURE_APRSIS;       /* APRS-IS iGate compiled in */
+#ifdef CONFIG_GEOGRAM_MESH_ENABLED
+    bool cap_mesh   = true;
+#else
+    bool cap_mesh   = false;
+#endif
+    bool aprsis_connected = (cap_aprsis && s_aprsis_status_cb) ? s_aprsis_status_cb() : false;
+
+    int n = snprintf(buffer, size,
+        "{\"id\":\"geogram-%02x%02x%02x%02x%02x%02x\","
+        "\"callsign\":\"%s\",\"name\":\"%s\",\"model\":\"%s\",\"firmware\":\"%s\","
+        "\"platform\":\"esp32\",\"uptime\":%u,"
+        "\"capabilities\":{"
+        "\"wifi\":%s,\"ble\":%s,\"lora\":%s,\"radio\":%s,"
+        "\"aprs_is\":%s,\"aprs_is_connected\":%s,"
+        "\"sdcard\":%s,\"display\":%s,\"mesh\":%s}}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        s_station.callsign, s_station.name, BOARD_NAME, STATION_VERSION,
+        (unsigned)station_get_uptime(),
+        cap_wifi ? "true" : "false",
+        cap_ble ? "true" : "false",
+        cap_lora ? "true" : "false",
+        cap_radio ? "true" : "false",
+        cap_aprsis ? "true" : "false",
+        aprsis_connected ? "true" : "false",
+        cap_sdcard ? "true" : "false",
+        cap_display ? "true" : "false",
+        cap_mesh ? "true" : "false");
+    if (n < 0) return 0;
+    return (size_t)n < size ? (size_t)n : size - 1;
 }
 
 size_t station_build_hello_ack_json(char *buffer, size_t size, bool success, const char *message) {

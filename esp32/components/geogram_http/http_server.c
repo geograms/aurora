@@ -688,6 +688,18 @@ static esp_err_t api_status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// GET /api/device — stable id + capability advertisement for LAN discovery.
+static esp_err_t api_device_get_handler(httpd_req_t *req)
+{
+    char response[384];
+    size_t len = station_build_device_json(response, sizeof(response));
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, response, len);
+    return ESP_OK;
+}
+
 // ============================================================================
 // WiFi Scan API Handler
 // ============================================================================
@@ -1643,6 +1655,13 @@ static const httpd_uri_t uri_api_status = {
     .user_ctx = NULL
 };
 
+static const httpd_uri_t uri_api_device = {
+    .uri = "/api/device",
+    .method = HTTP_GET,
+    .handler = api_device_get_handler,
+    .user_ctx = NULL
+};
+
 static const httpd_uri_t uri_wifi_scan = {
     .uri = "/api/wifi/scan",
     .method = HTTP_GET,
@@ -1745,6 +1764,7 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
     // Register Station API handlers if enabled
     if (enable_station_api) {
         httpd_register_uri_handler(s_server, &uri_api_status);
+        httpd_register_uri_handler(s_server, &uri_api_device);
 
 #if BOARD_MODEL == MODEL_KV4P
         httpd_register_uri_handler(s_server, &uri_api_index);

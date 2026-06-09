@@ -1407,6 +1407,8 @@ extern "C" void app_main(void)
                     // Runtime position/radius (POST /api/igate/position) overrides
                     // the build-time default and persists across reboots.
                     tdongle_load_igate_position();
+                    // Expose the live APRS-IS connection state on /api/device.
+                    station_set_aprsis_status_cb(aprsis_is_connected);
                 } else {
                     ESP_LOGW(TAG, "APRS-IS iGate init failed: %s", esp_err_to_name(ret));
                 }

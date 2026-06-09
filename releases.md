@@ -245,15 +245,20 @@ The wapp catalog has its own mirror helper:
 
 ---
 
-## 9. Verified reference run — v1.0.1 (2026-06-09)
+## 9. Verified reference run — v1.0.2 (2026-06-09, asset-based)
 
-First real end-to-end release:
-- `release.yml` built all 3 platforms and committed
-  `updates/{stable,beta}.json` + `updates/v1.0.1/` to aurora — green, no secret.
-- `sync.yml` mirrored it to geogram-html — green, no secret.
-- Live on geogram.radio:
-  - `GET /updates/stable.json` → 200, version `1.0.1`
-  - `GET /updates/v1.0.1/aurora.apk` → 200, 97,752,265 B
-  - `GET /updates/v1.0.1/aurora-linux-x64.tar.gz` → 200, 20,608,322 B
-  - `GET /updates/v1.0.1/aurora-windows-x64-setup.exe` → 200, 16,188,044 B
-  - sizes match the feed; range requests supported.
+End-to-end with the GitHub-Release-asset flow:
+- `release.yml` built all 3 platforms and attached them to the **v1.0.2 GitHub
+  Release** on aurora — no git commit; the aurora repo has **no `updates/` dir**
+  (confirmed 404). Green, no secret.
+- `sync.yml` resolved the latest stable/beta release, `gh release download`ed the
+  assets, built the feed via `publish_release.dart`, and committed to geogram-html
+  (`d9ca314`). Green, no secret.
+- Live on geogram.radio (~45 s after the sync commit):
+  - `GET /updates/stable.json` → 200, version `1.0.2`, relative asset URLs
+  - `GET /updates/v1.0.2/aurora.apk` → 200, 97,752,265 B
+  - `GET /updates/v1.0.2/aurora-linux-x64.tar.gz` → 200, 20,608,172 B
+  - `GET /updates/v1.0.2/aurora-windows-x64-setup.exe` → 200, 16,188,312 B
+  - sizes match the GitHub Release assets.
+
+(The earlier v1.0.1 used the prior commit-to-git flow and was migrated away.)

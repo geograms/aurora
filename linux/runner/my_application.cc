@@ -61,6 +61,21 @@ static void my_application_activate(GApplication* application) {
   gtk_window_unmaximize(window);
   gtk_window_set_position(window, GTK_WIN_POS_CENTER);
 
+  // Window icon (taskbar / alt-tab / app menu). Load from data/app_icon.png
+  // next to the executable (bundled by the linux CMakeLists), and also set a
+  // themed icon name for XDG hicolor lookups when the app is installed.
+  g_autoptr(GError) icon_error = nullptr;
+  g_autofree gchar* exe_path = g_file_read_link("/proc/self/exe", nullptr);
+  if (exe_path != nullptr) {
+    g_autofree gchar* exe_dir = g_path_get_dirname(exe_path);
+    g_autofree gchar* icon_path =
+        g_build_filename(exe_dir, "data", "app_icon.png", nullptr);
+    if (!gtk_window_set_icon_from_file(window, icon_path, &icon_error)) {
+      g_warning("Failed to set window icon: %s", icon_error->message);
+    }
+  }
+  gtk_window_set_icon_name(window, "geogram.radio");
+
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
       project, self->dart_entrypoint_arguments);

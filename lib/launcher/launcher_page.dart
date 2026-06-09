@@ -68,6 +68,10 @@ class _LauncherPageState extends State<LauncherPage> {
       final entries = await installed.listDirectory('');
       for (final entry in entries) {
         if (!entry.isDirectory) continue;
+        // The wapp editor is never a grid tile — it's the built-in editor
+        // reached via each wapp's Edit action. Skip it here too so legacy
+        // profiles that seeded it into wapps/ don't surface it.
+        if (entry.name == 'app-creator') continue;
         final pkg = wappPackageStorage(installed.getAbsolutePath(entry.path));
         await _scanManifest(pkg, wapps, seen);
       }
@@ -156,6 +160,23 @@ class _LauncherPageState extends State<LauncherPage> {
       ),
     );
     _scanArchive(); // Rescan after returning (new installs)
+  }
+
+  /// Open the built-in editor focused on [wapp] (the per-tile "Edit" action).
+  /// Pushes the App Creator package (installed at boot to its own location,
+  /// outside the grid) with [WappPage.editWappDir] set so it auto-loads this
+  /// wapp and skips the Projects picker.
+  Future<void> _editWapp(WappManifest wapp) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => WappPage(
+          wappDir: editorWappDirPath(),
+          title: 'App Creator',
+          editWappDir: wapp.dirPath,
+        ),
+      ),
+    );
+    _scanArchive(); // Rescan after returning (edits may change metadata)
   }
 
   /// Open the Wapp Store (the `install` wapp) so the user can install a
@@ -280,7 +301,11 @@ class _LauncherPageState extends State<LauncherPage> {
           textIcon: wapp.textIcon,
           svgIconPath: wapp.svgIconPath,
           color: wapp.color,
+          modified: wapp.userModified,
           onTap: () => _openWapp(wapp),
+          onEdit: () => _editWapp(wapp),
+          wappId: BackgroundWappManager.folderName(wapp.dirPath),
+          wappDir: wapp.dirPath,
         ),
       // Folder tiles at the end of the grid.
       if (systemWapps.isNotEmpty)
@@ -322,7 +347,11 @@ class _LauncherPageState extends State<LauncherPage> {
             textIcon: e.textIcon,
             svgIconPath: e.svgIconPath,
             color: e.color,
+            modified: e.modified,
             onTap: e.onTap,
+            onEdit: e.onEdit,
+            wappId: e.wappId,
+            wappDir: e.wappDir,
           );
         },
       ),
@@ -336,6 +365,7 @@ class _LauncherPageState extends State<LauncherPage> {
           title: title,
           wapps: wapps,
           onOpenWapp: _openWapp,
+          onEditWapp: _editWapp,
         ),
       ),
     ).then((_) => _scanArchive());
@@ -350,6 +380,18 @@ class _LauncherEntry {
   final Color color;
   final VoidCallback onTap;
 
+  /// True when this tile is a wapp the user customized via the App
+  /// Creator — the tile shows a small "edited" badge.
+  final bool modified;
+
+  /// "Edit" action for the tile's context menu; null for folder tiles.
+  final VoidCallback? onEdit;
+
+  /// Wapp identity for the "run in background" context-menu toggle; null for
+  /// folder tiles.
+  final String? wappId;
+  final String? wappDir;
+
   const _LauncherEntry({
     required this.name,
     required this.icon,
@@ -357,6 +399,10 @@ class _LauncherEntry {
     required this.onTap,
     this.textIcon,
     this.svgIconPath,
+    this.modified = false,
+    this.onEdit,
+    this.wappId,
+    this.wappDir,
   });
 }
 
@@ -366,11 +412,13 @@ class _FolderPage extends StatelessWidget {
   final String title;
   final List<WappManifest> wapps;
   final void Function(WappManifest) onOpenWapp;
+  final void Function(WappManifest) onEditWapp;
 
   const _FolderPage({
     required this.title,
     required this.wapps,
     required this.onOpenWapp,
+    required this.onEditWapp,
   });
 
   @override
@@ -394,7 +442,11 @@ class _FolderPage extends StatelessWidget {
               textIcon: wapp.textIcon,
               svgIconPath: wapp.svgIconPath,
               color: wapp.color,
+              modified: wapp.userModified,
               onTap: () => onOpenWapp(wapp),
+              onEdit: () => onEditWapp(wapp),
+              wappId: BackgroundWappManager.folderName(wapp.dirPath),
+              wappDir: wapp.dirPath,
             );
           },
         ),
@@ -532,6 +584,16 @@ class _AppIcon extends StatelessWidget {
   final String? svgIconPath;
   final Color color;
   final VoidCallback onTap;
+  final bool modified;
+
+  /// Long-press / right-click "Edit" action — opens this wapp in the
+  /// built-in editor. Null for tiles that aren't editable (folders).
+  final VoidCallback? onEdit;
+
+  /// Wapp identity for the "run in background" context-menu toggle. Folder
+  /// name (autostart key) + package dir. Null for folder tiles.
+  final String? wappId;
+  final String? wappDir;
 
   const _AppIcon({
     required this.name,
@@ -540,7 +602,71 @@ class _AppIcon extends StatelessWidget {
     required this.onTap,
     this.textIcon,
     this.svgIconPath,
+    this.modified = false,
+    this.onEdit,
+    this.wappId,
+    this.wappDir,
   });
+
+  /// Show the tile context menu (Open / Edit) at the pointer. No-op when the
+  /// tile has no [onEdit] (e.g. folder tiles), so those keep plain tap-only.
+  Future<void> _showContextMenu(BuildContext context, Offset globalPos) async {
+    if (onEdit == null) return;
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final prefs = PreferencesService.instanceSync;
+    final canAutostart = wappId != null && wappDir != null && prefs != null;
+    final autostartOn =
+        canAutostart && prefs.getWappAutostart(wappId!);
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPos & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem(
+          value: 'open',
+          child: Row(children: [
+            Icon(Icons.open_in_new, size: 18),
+            SizedBox(width: 10),
+            Text('Open'),
+          ]),
+        ),
+        const PopupMenuItem(
+          value: 'edit',
+          child: Row(children: [
+            Icon(Icons.edit, size: 18),
+            SizedBox(width: 10),
+            Text('Edit'),
+          ]),
+        ),
+        if (canAutostart)
+          PopupMenuItem(
+            value: 'autostart',
+            child: Row(children: [
+              Icon(autostartOn ? Icons.check_box : Icons.check_box_outline_blank,
+                  size: 18),
+              const SizedBox(width: 10),
+              const Text('Run in background'),
+            ]),
+          ),
+      ],
+    );
+    if (selected == 'open') onTap();
+    if (selected == 'edit') onEdit?.call();
+    if (selected == 'autostart' && canAutostart) {
+      final enable = !autostartOn;
+      await prefs.setWappAutostart(wappId!, enable);
+      // Keep the on-boot auto-start flag in sync with the autostart config.
+      await BackgroundWappManager.instance.syncBootAutostart(prefs);
+      if (enable) {
+        await BackgroundWappManager.instance.start(wappDir!);
+      } else {
+        BackgroundWappManager.instance.stop(wappId!);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -601,21 +727,52 @@ class _AppIcon extends StatelessWidget {
     } else {
       inner = Icon(icon, size: 28, color: Colors.white);
     }
-    return InkWell(
+    return GestureDetector(
+      onSecondaryTapDown: onEdit == null
+          ? null
+          : (d) => _showContextMenu(context, d.globalPosition),
+      onLongPressStart: onEdit == null
+          ? null
+          : (d) => _showContextMenu(context, d.globalPosition),
+      child: InkWell(
       borderRadius: BorderRadius.circular(16),
       onTap: onTap,
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            alignment: Alignment.center,
-            child: inner,
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                alignment: Alignment.center,
+                child: inner,
+              ),
+              // "Edited by you" badge — a small pencil chip in the
+              // top-right corner for wapps customized via App Creator.
+              if (modified)
+                Positioned(
+                  top: -4,
+                  right: -4,
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.primary,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: Theme.of(context).scaffoldBackgroundColor,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: const Icon(Icons.edit, size: 11, color: Colors.white),
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 6),
           Text(
@@ -625,6 +782,7 @@ class _AppIcon extends StatelessWidget {
             textAlign: TextAlign.center,
           ),
         ],
+      ),
       ),
     );
   }

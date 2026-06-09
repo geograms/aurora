@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -14,6 +15,7 @@ import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 
 /**
  * Foreground service that keeps the app process alive (with a persistent
@@ -29,7 +31,10 @@ class BgService : Service() {
     private val ticker = object : Runnable {
         override fun run() {
             try {
-                MainActivity.channel?.invokeMethod("onTick", null)
+                // Prefer the shared channel (set whether the engine is headless
+                // from boot or owned by the Activity); fall back to the Activity's.
+                (AuroraApplication.bgChannel ?: MainActivity.channel)
+                    ?.invokeMethod("onTick", null)
             } catch (_: Throwable) {
             }
             handler.postDelayed(this, TICK_MS)
@@ -41,6 +46,12 @@ class BgService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val text = intent?.getStringExtra("text") ?: "Running in background"
         startAsForeground(text)
+
+        // Boot start: there is no Activity, so spin up a headless Flutter engine
+        // that runs main() and brings the autostart wapps online.
+        if (intent?.action == ACTION_START_FROM_BOOT) {
+            AuroraApplication.instance?.ensureFlutterEngine()
+        }
         if (wakeLock == null) {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aurora:bg")
@@ -99,5 +110,15 @@ class BgService : Service() {
         private const val CHANNEL_ID = "aurora_bg"
         private const val NOTIF_ID = 7001
         private const val TICK_MS = 2000L
+        const val ACTION_START_FROM_BOOT = "com.geogram.aurora.START_FROM_BOOT"
+
+        /** Start the service from the boot receiver (no Activity available). */
+        fun startFromBoot(context: Context) {
+            val i = Intent(context, BgService::class.java).apply {
+                action = ACTION_START_FROM_BOOT
+                putExtra("text", "Aurora running in background")
+            }
+            ContextCompat.startForegroundService(context, i)
+        }
     }
 }

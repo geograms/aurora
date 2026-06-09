@@ -10,6 +10,8 @@
 
 import 'dart:io';
 
+import 'package:flutter/services.dart' show MethodChannel;
+
 import 'platform_stubs.dart' show PlatformProcessResult;
 
 export 'platform_stubs.dart' show PlatformProcessResult;
@@ -51,12 +53,26 @@ Future<void> showSystemNotification({
         '-e',
         'display notification "$escaped" with title "$titleEsc"',
       ]);
+    } else if (Platform.isAndroid) {
+      // Route to the native foreground-service bridge, which posts a heads-up
+      // notification (works while backgrounded / headless from boot).
+      _androidNotifId = (_androidNotifId + 1) & 0x7fffffff;
+      await _bgChannel.invokeMethod('notify', {
+        'id': _androidNotifId,
+        'title': title,
+        if (body != null && body.isNotEmpty) 'body': body,
+      });
     }
     // Windows native balloon not implemented — use winrt toast later.
   } catch (_) {
     // Ignore — the in-app overlay is the source of truth anyway.
   }
 }
+
+// Native bridge for Android system notifications (shared with the foreground
+// service). A rolling id so distinct events stack instead of replacing.
+const MethodChannel _bgChannel = MethodChannel('com.geogram.aurora/bg_service');
+int _androidNotifId = 9000;
 
 bool get supportsSubprocesses => true;
 

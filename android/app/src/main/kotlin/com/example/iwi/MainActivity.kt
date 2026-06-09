@@ -1,40 +1,39 @@
 package com.geogram.aurora
 
-import android.content.Intent
-import androidx.core.content.ContextCompat
+import android.content.Context
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     companion object {
         // Held so the foreground service can ping Dart ('onTick') even while
-        // the activity is backgrounded (the FlutterEngine/isolate stays alive
-        // because the foreground service keeps the process up).
+        // the activity is backgrounded. Mirrors AuroraApplication.bgChannel.
         var channel: MethodChannel? = null
     }
 
+    /**
+     * Reuse the headless engine created at boot (if any) so opening the UI does
+     * not spawn a second isolate that would run BLE/APRS twice. Returns null on a
+     * normal cold start, letting the framework create a fresh engine.
+     */
+    override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        return FlutterEngineCache.getInstance().get(AuroraApplication.ENGINE_ID)
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
-        val ch = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            "com.geogram.aurora/bg_service",
-        )
-        channel = ch
-        ch.setMethodCallHandler { call, result ->
-            when (call.method) {
-                "start" -> {
-                    val text = call.argument<String>("text") ?: "Running in background"
-                    val i = Intent(this, BgService::class.java).putExtra("text", text)
-                    ContextCompat.startForegroundService(this, i)
-                    result.success(true)
-                }
-                "stop" -> {
-                    stopService(Intent(this, BgService::class.java))
-                    result.success(true)
-                }
-                else -> result.notImplemented()
-            }
+        // For a pre-warmed (boot) engine, plugins were already registered when it
+        // was created — calling super again double-registers and can spawn a 2nd
+        // engine. Only register for a fresh engine.
+        val isPreWarmed =
+            FlutterEngineCache.getInstance().get(AuroraApplication.ENGINE_ID) === flutterEngine
+        if (!isPreWarmed) {
+            super.configureFlutterEngine(flutterEngine)
         }
+
+        // Bind the bg_service channel (idempotent) and mirror it for the service.
+        BgBridge.attach(this, flutterEngine)
+        channel = AuroraApplication.bgChannel
     }
 }

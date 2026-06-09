@@ -101,6 +101,7 @@ class BackgroundWappManager {
   /// Start every installed wapp the user marked autostart. Called at boot.
   Future<void> startAutostart() async {
     final prefs = await PreferencesService.instance();
+    await syncBootAutostart(prefs);
     final installed = installedAppsStorage();
     if (!await installed.directoryExists('')) return;
     for (final entry in await installed.listDirectory('')) {
@@ -108,6 +109,14 @@ class BackgroundWappManager {
       if (!prefs.getWappAutostart(entry.name)) continue;
       await start(installed.getAbsolutePath(entry.path));
     }
+  }
+
+  /// Keep the BootReceiver's autoStartOnBoot flag in sync with whether the user
+  /// has any autostart wapp configured. Written via shared_preferences (same
+  /// store the native receiver reads). Call after toggling autostart.
+  Future<void> syncBootAutostart([PreferencesService? prefs]) async {
+    final p = prefs ?? await PreferencesService.instance();
+    await p.setAutoStartOnBoot(p.autostartWappIds().isNotEmpty);
   }
 
   void _onRunningChanged() {

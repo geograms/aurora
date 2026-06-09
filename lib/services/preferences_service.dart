@@ -102,6 +102,15 @@ class PreferencesService {
         .toList();
   }
 
+  // Whether the Android BootReceiver should auto-start the background service
+  // after a reboot. Written here (via shared_preferences) so it lands in the
+  // same FlutterSharedPreferences store the native receiver reads — kept in sync
+  // with "is any wapp marked autostart". Stored on disk as
+  // "flutter.autoStartOnBoot".
+  bool get autoStartOnBoot => _prefs.getBool('autoStartOnBoot') ?? false;
+  Future<void> setAutoStartOnBoot(bool v) =>
+      _prefs.setBool('autoStartOnBoot', v);
+
   // Last-known scalar field values (settings) for a wapp, as a JSON string, so
   // a background/headless engine can run with the user's configured settings
   // (callsign, server, radius, …) instead of bare defaults.

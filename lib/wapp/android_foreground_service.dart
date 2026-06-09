@@ -61,4 +61,23 @@ class AndroidForegroundService {
     }
     _running = false;
   }
+
+  /// Post a heads-up Android notification for a message/event. No-op off Android.
+  Future<void> notify({
+    required int id,
+    required String title,
+    String? body,
+  }) async {
+    if (!_supported) return;
+    try {
+      await _channel.invokeMethod('notify', {
+        'id': id,
+        'title': title,
+        if (body != null) 'body': body,
+      });
+    } catch (e) {
+      debugPrint('AndroidForegroundService: notify failed: $e');
+    }
+  }
+
 }

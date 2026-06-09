@@ -1,0 +1,25 @@
+{
+  "version": "1.0.1",
+  "tagName": "v1.0.1",
+  "name": "Geogram Aurora 1.0.1",
+  "body": "",
+  "publishedAt": "2026-06-09T18:18:50.498512Z",
+  "prerelease": false,
+  "assets": [
+    {
+      "name": "aurora.apk",
+      "url": "v1.0.1/aurora.apk",
+      "size": 97752265
+    },
+    {
+      "name": "aurora-linux-x64.tar.gz",
+      "url": "v1.0.1/aurora-linux-x64.tar.gz",
+      "size": 20608322
+    },
+    {
+      "name": "aurora-windows-x64-setup.exe",
+      "url": "v1.0.1/aurora-windows-x64-setup.exe",
+      "size": 16188044
+    }
+  ]
+}

@@ -1,0 +1,301 @@
+[
+  {
+    "$": "screen",
+    "name": "Files",
+    "tip": "Source files for the current wapp. Pick one on the left to edit it on the right.",
+    "children": [
+      {
+        "$": "group",
+        "$type": "header-actions",
+        "children": [
+          { "$": "action", "name": "editor-settings", "icon": "settings",
+            "label": "Editor settings" }
+        ]
+      },
+      {
+        "$": "group",
+        "$type": "split",
+        "ratio": 0.28,
+        "children": [
+          {
+            "$": "group",
+            "name": "files",
+            "$type": "cards",
+            "layout": "tree",
+            "empty": "No files."
+          },
+          {
+            "$": "group",
+            "$type": "pane",
+            "children": [
+              {
+                "$": "field",
+                "name": "active_file_label",
+                "$type": "string",
+                "label": "Editing",
+                "default": "main.c",
+                "tip": "Which file the editor below is showing."
+              },
+              {
+                "$": "field",
+                "name": "source",
+                "$type": "code",
+                "label": "Editor",
+                "language": "c",
+                "font_size": 18,
+                "line_height": 1.5,
+                "tip": "Edits are kept in memory across file switches. Hit Install to persist."
+              },
+              {
+                "$": "action",
+                "name": "compile",
+                "label": "Compile",
+                "style": "primary",
+                "tip": "Run the bundled wasm-clang against the C source."
+              },
+              {
+                "$": "action",
+                "name": "install",
+                "label": "Install",
+                "style": "secondary",
+                "tip": "Write the compiled wapp to the launcher."
+              },
+              {
+                "$": "field",
+                "name": "output",
+                "$type": "log",
+                "label": "Compiler output",
+                "font_size": 15,
+                "line_height": 1.5,
+                "tip": "Compiler stdout / stderr plus host-side progress messages."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "UI",
+    "tip": "Edit this wapp's screens visually — drag blocks from the palette, click to select and tweak in the inspector, or switch to raw JSON.",
+    "children": [
+      {
+        "$": "group",
+        "name": "ui_editor",
+        "$type": "ui-editor"
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Robot",
+    "tip": "Chat with an AI (offline or online, configurable) to modify this wapp. It proposes updated files you Apply, then Compile.",
+    "children": [
+      {
+        "$": "group",
+        "name": "robot",
+        "$type": "robot"
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Translations",
+    "tip": "Manage translation keys. Select a language on the left, pick a key from the reference column, edit on the right.",
+    "children": [
+      {
+        "$": "group",
+        "$type": "split",
+        "ratio": 0.26,
+        "children": [
+          {
+            "$": "group",
+            "$type": "pane",
+            "children": [
+              {
+                "$": "field",
+                "name": "new_lang_code",
+                "$type": "string",
+                "label": "New language code",
+                "default": "",
+                "tip": "e.g. fr, de, es, pt-BR — then hit Add"
+              },
+              {
+                "$": "action",
+                "name": "add-lang",
+                "label": "Add language",
+                "style": "primary"
+              },
+              {
+                "$": "group",
+                "name": "lang_files",
+                "$type": "cards",
+                "layout": "tree",
+                "empty": "No lang files."
+              }
+            ]
+          },
+          {
+            "$": "group",
+            "$type": "split",
+            "ratio": 0.45,
+            "children": [
+              {
+                "$": "group",
+                "name": "trans_ref",
+                "$type": "cards",
+                "layout": "list",
+                "empty": "No keys yet."
+              },
+              {
+                "$": "group",
+                "$type": "pane",
+                "children": [
+                  {
+                    "$": "field",
+                    "name": "trans_key",
+                    "$type": "string",
+                    "label": "Key",
+                    "default": "",
+                    "tip": "Click a row in the reference column to pick a key."
+                  },
+                  {
+                    "$": "field",
+                    "name": "trans_value",
+                    "$type": "string",
+                    "label": "Translation",
+                    "default": ""
+                  },
+                  {
+                    "$": "action",
+                    "name": "upsert-trans",
+                    "label": "Save",
+                    "style": "primary"
+                  },
+                  {
+                    "$": "action",
+                    "name": "delete-trans",
+                    "label": "Delete key",
+                    "style": "secondary"
+                  },
+                  {
+                    "$": "group",
+                    "name": "translations",
+                    "$type": "cards",
+                    "layout": "list",
+                    "empty": "No translations yet."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Settings",
+    "tip": "Manifest fields written to manifest.json on Install.",
+    "children": [
+      {
+        "$": "group",
+        "name": "identity",
+        "label": "Identity",
+        "children": [
+          {
+            "$": "field",
+            "name": "wapp_title",
+            "$type": "string",
+            "label": "Title",
+            "default": "",
+            "tip": "Human-readable display name shown in the launcher grid."
+          },
+          {
+            "$": "field",
+            "name": "wapp_name",
+            "$type": "string",
+            "label": "Name (folder slug)",
+            "default": "",
+            "tip": "Lowercase, no spaces. Folder slug under wapps/."
+          },
+          {
+            "$": "field",
+            "name": "wapp_id",
+            "$type": "string",
+            "label": "ID (reverse domain)",
+            "default": "",
+            "tip": "Stable identifier for manifest.id."
+          },
+          {
+            "$": "field",
+            "name": "wapp_version",
+            "$type": "string",
+            "label": "Version",
+            "default": "0.1.0",
+            "tip": "Semantic version, e.g. 0.1.0."
+          },
+          {
+            "$": "field",
+            "name": "wapp_description",
+            "$type": "string",
+            "label": "Description",
+            "default": "",
+            "tip": "Long-form summary, written to manifest.summary."
+          }
+        ]
+      },
+      {
+        "$": "group",
+        "name": "editor_prefs",
+        "label": "Editor",
+        "children": [
+          {
+            "$": "field",
+            "name": "pref_editor_font_size",
+            "$type": "int",
+            "label": "Editor font size",
+            "default": 18,
+            "min": 10,
+            "max": 36,
+            "tip": "Font size for the code editor. Takes effect immediately."
+          },
+          {
+            "$": "field",
+            "name": "pref_log_font_size",
+            "$type": "int",
+            "label": "Log font size",
+            "default": 15,
+            "min": 10,
+            "max": 28,
+            "tip": "Font size for compiler / test output. Takes effect immediately."
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "$": "screen",
+    "name": "Tests",
+    "tip": "Run the wapp's bundled test suite.",
+    "children": [
+      {
+        "$": "action",
+        "name": "run-tests",
+        "label": "Run tests",
+        "style": "primary",
+        "tip": "Run tests.wasm against the installed copy."
+      },
+      {
+        "$": "field",
+        "name": "output",
+        "$type": "log",
+        "label": "Test output",
+        "font_size": 15,
+        "line_height": 1.5,
+        "tip": "Streams tests.case + tests.complete from the runner."
+      }
+    ]
+  }
+]

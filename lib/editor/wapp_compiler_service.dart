@@ -94,6 +94,16 @@ abstract class CompilerBackend {
     required ProfileStorage pkg,
     required ProfileStorage workStorage,
   });
+
+  /// Build a wapp's test suite into a `tests.wasm` exporting
+  /// `module_run_tests`. [testSources] are absolute paths to the
+  /// wapp's `tests/*.c` (each typically `#include`s the lib under
+  /// test, so they're passed at their real location). The SDK runner
+  /// (`wapp_test.c`) is linked in automatically.
+  Future<CompileResult> compileTests({
+    required List<String> testSources,
+    required ProfileStorage workStorage,
+  });
 }
 
 // ── Service singleton ───────────────────────────────────────────────
@@ -139,6 +149,40 @@ class WappCompilerService {
         monitor.reportSuccess(taskId);
       } else {
         monitor.reportFailure(taskId, result.error ?? 'compile failed');
+      }
+      return result;
+    } catch (e) {
+      monitor.reportFailure(taskId, e);
+      return CompileResult.failure(e.toString());
+    }
+  }
+
+  /// Build a wapp's test suite (see [CompilerBackend.compileTests]).
+  Future<CompileResult> compileTests({
+    required List<String> testSources,
+    required ProfileStorage workStorage,
+  }) async {
+    final monitor = TaskMonitorService.instance;
+    const taskId = 'compiler.tests';
+    monitor.unregister(taskId);
+    monitor.register(MonitoredTask(
+      id: taskId,
+      name: 'Compile wapp tests',
+      description: 'Backend: ${backend.name}',
+      serviceName: 'compiler',
+      priority: TaskPriority.normal,
+      type: TaskType.oneshot,
+    ));
+    monitor.reportStart(taskId);
+    try {
+      final result = await backend.compileTests(
+        testSources: testSources,
+        workStorage: workStorage,
+      );
+      if (result.ok) {
+        monitor.reportSuccess(taskId);
+      } else {
+        monitor.reportFailure(taskId, result.error ?? 'tests compile failed');
       }
       return result;
     } catch (e) {

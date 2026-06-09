@@ -512,6 +512,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 # Geogram Board Selection
 #
 CONFIG_GEOGRAM_BOARD_EPAPER_1IN54=y
+# CONFIG_GEOGRAM_BOARD_TDONGLE_S3 is not set
 # CONFIG_GEOGRAM_BOARD_HELTEC_V3 is not set
 # end of Geogram Board Selection
 

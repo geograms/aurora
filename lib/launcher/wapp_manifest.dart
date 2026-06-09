@@ -71,6 +71,10 @@ class WappManifest {
   /// intel/arm/esp32/N/A/… Empty = unspecified (any).
   final List<String> supportedHardware;
 
+  /// True when the user authored/edited this wapp via the App Creator
+  /// (`manifest.user_modified`). The launcher badges these as customized.
+  final bool userModified;
+
   WappManifest({
     required this.id,
     required this.name,
@@ -90,6 +94,7 @@ class WappManifest {
     this.fileHandlers = const [],
     this.supportedPlatforms = const [],
     this.supportedHardware = const [],
+    this.userModified = false,
   });
 
   /// Whether this wapp advertises support for [host] (an OS name from
@@ -201,6 +206,7 @@ class WappManifest {
       fileHandlers: fileHandlers,
       supportedPlatforms: topList('platforms'),
       supportedHardware: topList('hardware'),
+      userModified: json['user_modified'] == true,
     );
   }
 

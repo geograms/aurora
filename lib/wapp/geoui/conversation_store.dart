@@ -116,6 +116,7 @@ class ConversationStore {
       'time': (d['time'] ?? '').toString(),
       'meta': (d['meta'] ?? '').toString(),
       'key': (d['key'] ?? '').toString(),
+      if ((d['via'] ?? '').toString().isNotEmpty) 'via': d['via'].toString(),
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     });
@@ -140,6 +141,7 @@ class ConversationStore {
       'text': (d['text'] ?? '').toString(),
       'time': (d['time'] ?? '').toString(),
       'meta': (d['meta'] ?? '').toString(),
+      if ((d['via'] ?? '').toString().isNotEmpty) 'via': d['via'].toString(),
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     };

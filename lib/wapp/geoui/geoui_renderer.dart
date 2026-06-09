@@ -4,9 +4,10 @@ import 'package:flutter/material.dart';
 
 import '../i18n_context.dart';
 import 'geoui_ast.dart';
-import 'widgets/code_editor_field.dart';
+import '../../editor/code_editor_field.dart';
 import 'widgets/icon_field.dart';
 import 'widgets/log_view_field.dart';
+import 'widgets/chat_view_field.dart';
 
 /// Bindings interface for reading/writing field values.
 abstract class GeoUiBindings {
@@ -340,9 +341,34 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       'enum' => _renderEnumField(fieldName, label, tip, field),
       'code' => _renderCodeField(fieldName, label, tip, field),
       'log' => _renderLogField(fieldName, label, tip, field),
+      'chat' => _renderChatField(fieldName, label, tip, field),
       'icon' => _renderIconField(fieldName, label, tip, field),
       _ => _renderStringField(fieldName, label, tip, field),
     };
+  }
+
+  Widget _renderChatField(
+      String name, String label, String? tip, GeoUiBlock field) {
+    // Messages are a List<Map> seeded empty by _seedFieldDefaults. Each
+    // entry: {dir:'in'|'out', from, text, time}. On send we stash the
+    // typed text in a companion `<name>_input` binding and fire the
+    // `<name>_send` action so the host's _sendCommand bundles it to the
+    // wapp (no new host protocol needed).
+    final stored = widget.bindings.getValue(name);
+    final messages = stored is List
+        ? stored.whereType<Map>().map((m) => m.cast<String, dynamic>()).toList()
+        : const <Map<String, dynamic>>[];
+    return ChatViewField(
+      fieldName: name,
+      label: label,
+      tip: tip,
+      hint: field.getString('hint') ?? 'Message…',
+      messages: messages,
+      onSend: (text) {
+        widget.bindings.setValue('${name}_input', text);
+        widget.onAction?.call('${name}_send');
+      },
+    );
   }
 
   Widget _renderCodeField(

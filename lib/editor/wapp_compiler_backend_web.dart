@@ -34,4 +34,15 @@ class _WebStubBackend implements CompilerBackend {
       'a pre-compiled wapp from the store.',
     );
   }
+
+  @override
+  Future<CompileResult> compileTests({
+    required List<String> testSources,
+    required ProfileStorage workStorage,
+  }) async {
+    return CompileResult.failure(
+      'Running tests needs the desktop build (the wasi-sdk toolchain '
+      'is not available in the browser).',
+    );
+  }
 }

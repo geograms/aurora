@@ -75,72 +75,90 @@ class _LogViewFieldState extends State<LogViewField> {
       WidgetsBinding.instance.addPostFrameCallback((_) => _autoScroll());
     }
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (widget.label.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(left: 4, bottom: 6),
-              child: Text(
-                widget.label,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: cs.primary,
-                      fontWeight: FontWeight.w600,
+    // Adapt to the parent's height. When the parent hands down a bounded
+    // height (e.g. the App Creator Files tab puts us in a fixed-height box),
+    // fill it with an Expanded log surface so the inner list scrolls rather
+    // than overflowing. When the height is unbounded (the GeoUI renderer
+    // lays fields out inside a scroll view), self-size between a sensible
+    // min and max instead.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bounded = constraints.maxHeight.isFinite;
+
+        final logBox = Container(
+          constraints: bounded
+              ? null
+              : const BoxConstraints(minHeight: 120, maxHeight: 300),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F1115),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: cs.outlineVariant.withAlpha(80)),
+          ),
+          child: lines.isEmpty
+              ? Center(
+                  child: Text(
+                    '(no output)',
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: Colors.white.withAlpha(100),
                     ),
-              ),
-            ),
-          Container(
-            constraints:
-                const BoxConstraints(minHeight: 120, maxHeight: 300),
-            decoration: BoxDecoration(
-              color: const Color(0xFF0F1115),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: cs.outlineVariant.withAlpha(80)),
-            ),
-            child: lines.isEmpty
-                ? Center(
-                    child: Text(
-                      '(no output)',
-                      style: TextStyle(
+                  ),
+                )
+              : Scrollbar(
+                  controller: _scrollController,
+                  child: ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    itemCount: lines.length,
+                    itemBuilder: (context, i) => Text(
+                      lines[i],
+                      style: const TextStyle(
                         fontFamily: 'monospace',
                         fontSize: 12,
-                        color: Colors.white.withAlpha(100),
-                      ),
-                    ),
-                  )
-                : Scrollbar(
-                    controller: _scrollController,
-                    child: ListView.builder(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
-                      itemCount: lines.length,
-                      itemBuilder: (context, i) => Text(
-                        lines[i],
-                        style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          height: 1.4,
-                          color: Colors.white,
-                        ),
+                        height: 1.4,
+                        color: Colors.white,
                       ),
                     ),
                   ),
+                ),
+        );
+
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: bounded ? MainAxisSize.max : MainAxisSize.min,
+            children: [
+              if (widget.label.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, bottom: 6),
+                  child: Text(
+                    widget.label,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                ),
+              // Fill remaining height when bounded; otherwise let the box
+              // size itself via its min/max constraints above.
+              bounded ? Expanded(child: logBox) : logBox,
+              if (widget.tip != null && widget.tip!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, top: 6),
+                  child: Text(
+                    widget.tip!,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                        ),
+                  ),
+                ),
+            ],
           ),
-          if (widget.tip != null && widget.tip!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(left: 4, top: 6),
-              child: Text(
-                widget.tip!,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: cs.onSurfaceVariant,
-                    ),
-              ),
-            ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

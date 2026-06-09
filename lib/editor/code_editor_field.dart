@@ -41,6 +41,12 @@ class CodeEditorField extends StatefulWidget {
   /// nothing-burger.
   final bool readOnly;
 
+  /// When true the editor fills its parent's height (used inside the
+  /// single-wapp editor's split pane) instead of the default
+  /// 240–520px box. The parent must give it bounded height (e.g. an
+  /// Expanded), and the label/tip are dropped to maximise editor area.
+  final bool expand;
+
   const CodeEditorField({
     super.key,
     required this.fieldName,
@@ -50,6 +56,7 @@ class CodeEditorField extends StatefulWidget {
     required this.onChanged,
     this.tip,
     this.readOnly = false,
+    this.expand = false,
   });
 
   @override
@@ -118,6 +125,11 @@ class _CodeEditorFieldState extends State<CodeEditorField> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
 
+    // Fill mode: the editor box fills its parent (the single-wapp
+    // editor gives it an Expanded). No label/tip chrome — the panel
+    // header supplies the heading — so the whole pane is editor.
+    if (widget.expand) return _editorBox(cs, fill: true);
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Column(
@@ -134,66 +146,7 @@ class _CodeEditorFieldState extends State<CodeEditorField> {
                     ),
               ),
             ),
-          Container(
-            constraints:
-                const BoxConstraints(minHeight: 240, maxHeight: 520),
-            decoration: BoxDecoration(
-              // vs2015 background matches the highlighting theme chosen
-              // by SyntaxHighlightController when brightness == dark.
-              color: const Color(0xFF1E1E1E),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: cs.outlineVariant.withAlpha(80)),
-            ),
-            child: Scrollbar(
-              child: SingleChildScrollView(
-                child: IntrinsicHeight(
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _LineNumberGutter(
-                        lineCount: _lineCount,
-                        fontSize: _fontSize,
-                        lineHeight: _lineHeight,
-                        fontFamily: _fontFamily,
-                      ),
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 10),
-                          child: TextField(
-                            controller: _controller,
-                            maxLines: null,
-                            minLines: 10,
-                            readOnly: widget.readOnly,
-                            enableInteractiveSelection: true,
-                            keyboardType: TextInputType.multiline,
-                            textAlignVertical: TextAlignVertical.top,
-                            cursorColor: Colors.white,
-                            style: TextStyle(
-                              fontFamily: _fontFamily,
-                              fontSize: _fontSize,
-                              height: _lineHeight,
-                              // Dim the text when read-only so the
-                              // state is visually obvious — matches
-                              // the muted look of a disabled input.
-                              color: widget.readOnly
-                                  ? Colors.white54
-                                  : Colors.white,
-                            ),
-                            decoration: const InputDecoration(
-                              border: InputBorder.none,
-                              isDense: true,
-                              isCollapsed: true,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
+          _editorBox(cs, fill: false),
           if (widget.tip != null && widget.tip!.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(left: 4, top: 6),
@@ -205,6 +158,102 @@ class _CodeEditorFieldState extends State<CodeEditorField> {
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  /// The dark editor box (gutter + highlighted TextField). When [fill]
+  /// it has no max height so it expands to the bounded height its parent
+  /// gives it; otherwise it uses the default 240–520px box.
+  Widget _editorBox(ColorScheme cs, {required bool fill}) {
+    final decoration = BoxDecoration(
+      color: const Color(0xFF1E1E1E),
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: cs.outlineVariant.withAlpha(80)),
+    );
+    // Fill mode: a self-scrolling TextField that exactly fills the
+    // bounded height its parent (an Expanded) gives it — guaranteed not
+    // to overflow. (The line-number gutter needs the intrinsic-height
+    // layout below, which grows with content, so it's used only in the
+    // capped non-fill box.)
+    if (fill) {
+      return Container(
+        width: double.infinity,
+        decoration: decoration,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: TextField(
+          controller: _controller,
+          expands: true,
+          maxLines: null,
+          minLines: null,
+          readOnly: widget.readOnly,
+          enableInteractiveSelection: true,
+          keyboardType: TextInputType.multiline,
+          textAlignVertical: TextAlignVertical.top,
+          cursorColor: Colors.white,
+          scrollPhysics: const ClampingScrollPhysics(),
+          style: TextStyle(
+            fontFamily: _fontFamily,
+            fontSize: _fontSize,
+            height: _lineHeight,
+            color: widget.readOnly ? Colors.white54 : Colors.white,
+          ),
+          decoration: const InputDecoration(
+            border: InputBorder.none,
+            isDense: true,
+            isCollapsed: true,
+          ),
+        ),
+      );
+    }
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(minHeight: 240, maxHeight: 520),
+      decoration: decoration,
+      child: Scrollbar(
+        child: SingleChildScrollView(
+          child: IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _LineNumberGutter(
+                  lineCount: _lineCount,
+                  fontSize: _fontSize,
+                  lineHeight: _lineHeight,
+                  fontFamily: _fontFamily,
+                ),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 10),
+                    child: TextField(
+                      controller: _controller,
+                      maxLines: null,
+                      minLines: 10,
+                      readOnly: widget.readOnly,
+                      enableInteractiveSelection: true,
+                      keyboardType: TextInputType.multiline,
+                      textAlignVertical: TextAlignVertical.top,
+                      cursorColor: Colors.white,
+                      style: TextStyle(
+                        fontFamily: _fontFamily,
+                        fontSize: _fontSize,
+                        height: _lineHeight,
+                        color:
+                            widget.readOnly ? Colors.white54 : Colors.white,
+                      ),
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
+                        isDense: true,
+                        isCollapsed: true,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

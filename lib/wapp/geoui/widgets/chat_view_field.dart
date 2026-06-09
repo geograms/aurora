@@ -201,6 +201,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final from = m['from']?.toString() ?? '';
     final text = m['text']?.toString() ?? '';
     final time = m['time']?.toString() ?? '';
+    final via = m['via']?.toString() ?? '';
     return Align(
       alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -219,15 +220,28 @@ class _ChatViewFieldState extends State<ChatViewField> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (!outgoing && from.isNotEmpty)
+            if (!outgoing && (from.isNotEmpty || via.isNotEmpty))
               Padding(
                 padding: const EdgeInsets.only(bottom: 2),
-                child: Text(
-                  from,
-                  style: const TextStyle(
-                      color: Color(0xFF7FB0E0),
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (from.isNotEmpty)
+                      Flexible(
+                        child: Text(
+                          from,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Color(0xFF7FB0E0),
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    if (via.isNotEmpty) ...[
+                      if (from.isNotEmpty) const SizedBox(width: 6),
+                      _viaChip(via),
+                    ],
+                  ],
                 ),
               ),
             Text(text,
@@ -281,6 +295,39 @@ class _ChatViewFieldState extends State<ChatViewField> {
       cursor: SystemMouseCursors.click,
       child: GestureDetector(onTap: () => widget.onLocate!(m), child: row),
     );
+  }
+
+  /// A small uppercase origin chip ("BLE", "NET", …). The wapp supplies the
+  /// label as opaque text; the colour is derived from the string so distinct
+  /// transports get distinct, stable colours without any domain knowledge here.
+  Widget _viaChip(String via) {
+    final color = _viaColor(via);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withAlpha(40),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withAlpha(130), width: 0.6),
+      ),
+      child: Text(
+        via.toUpperCase(),
+        style: TextStyle(
+          color: color,
+          fontSize: 9,
+          height: 1.1,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.4,
+        ),
+      ),
+    );
+  }
+
+  Color _viaColor(String s) {
+    var h = 0;
+    for (final c in s.toUpperCase().codeUnits) {
+      h = (h * 31 + c) & 0x7fffffff;
+    }
+    return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.62).toColor();
   }
 
   Widget _composeBar(ColorScheme cs) {

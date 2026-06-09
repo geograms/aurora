@@ -166,6 +166,26 @@ class FunctionalityRegistry {
         ParamDef('handle', 'int'),
       ], ReturnDef('void')),
     ]),
+    'hal.socket': FunctionalityDef(
+        'hal.socket', 'Raw TCP sockets (async, host network)', [
+      EndpointDef('hal_socket_open', 'Open a TCP connection', [
+        ParamDef('host', 'string'),
+        ParamDef('port', 'int'),
+      ], ReturnDef('int', 'Handle (>=0) or -1 on error')),
+      EndpointDef('hal_socket_status', 'Connection state', [
+        ParamDef('handle', 'int'),
+      ], ReturnDef('int', '0=connecting, 1=open, 2=closed/error')),
+      EndpointDef('hal_socket_send', 'Queue bytes to send', [
+        ParamDef('handle', 'int'),
+        ParamDef('data', 'bytes'),
+      ], ReturnDef('int', 'Bytes accepted or -1 on error')),
+      EndpointDef('hal_socket_recv', 'Drain received bytes', [
+        ParamDef('handle', 'int'),
+      ], ReturnDef('int', 'Bytes read (0 if none yet)')),
+      EndpointDef('hal_socket_close', 'Close the connection', [
+        ParamDef('handle', 'int'),
+      ], ReturnDef('void')),
+    ]),
     // hal.http / hal.lora / hal.ble — the transport HAL — are defined in
     // lib/connections/, the single home for connection code, and spread in
     // here so the registry still advertises them as core functionalities.

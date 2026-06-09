@@ -1,0 +1,44 @@
+name: build-windows
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Sync version
+        shell: bash
+        run: |
+          CODE=$(git rev-list --count HEAD)
+          VER=$(grep '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//' | cut -d+ -f1)
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then VER="${GITHUB_REF_NAME#v}"; fi
+          sed -i "s/^version:.*/version: ${VER}+${CODE}/" pubspec.yaml
+          dart run tool/update_version.dart
+
+      - run: flutter pub get
+      - run: flutter build windows --release
+
+      - name: Build Inno Setup installer
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\aurora.iss
+
+      - name: Publish to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/installer/aurora-windows-x64-setup.exe
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

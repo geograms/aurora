@@ -7,6 +7,7 @@ import 'connections/builtin_connections.dart';
 import 'editor/editor_install.dart';
 import 'wapp/host_event_bridge.dart';
 import 'wapp/background_wapp_manager.dart';
+import 'services/update_service.dart';
 import 'services/notification_service.dart';
 import 'services/preferences_service.dart';
 import 'services/log_service.dart';
@@ -171,4 +172,8 @@ Future<void> main() async {
   // receiving over BLE/APRS-IS without its page open. Fire-and-forget so a
   // slow/failed engine never blocks startup.
   unawaited(BackgroundWappManager.instance.startAutostart());
+
+  // Check GitHub for a newer Geogram Aurora release and, if found, surface one
+  // notification (Settings → Updates does the install). Best-effort, off web.
+  unawaited(UpdateService.instance.backgroundCheck());
 }

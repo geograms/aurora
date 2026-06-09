@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Paths the FileProvider may expose to the system package installer. Covers
+     wherever path_provider places the downloaded APK (app support / cache,
+     internal or external). -->
+<paths>
+    <files-path name="files" path="." />
+    <cache-path name="cache" path="." />
+    <external-files-path name="ext-files" path="." />
+    <external-cache-path name="ext-cache" path="." />
+</paths>

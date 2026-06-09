@@ -31,6 +31,8 @@ import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
 import '../services/remote_api_service.dart';
 import '../services/android_permissions_service.dart';
+import '../version.dart';
+import 'update_page.dart';
 import '../profile/iwi_profile.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_avatar.dart';

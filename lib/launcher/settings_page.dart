@@ -237,6 +237,43 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                 ),
                 const SizedBox(height: 24),
 
+                // ── Updates ──
+                Text('Updates',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                        )),
+                const SizedBox(height: 4),
+                Text(
+                  'Check for new Geogram Aurora releases (stable or beta) and '
+                  'install them in place.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: ListTile(
+                    leading: const Icon(Icons.system_update),
+                    title: const Text('Update Center'),
+                    subtitle: Text(
+                      'Version $kAppVersion',
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const UpdatePage()),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+
                 // ── Remote control API ──
                 Text('Remote control',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(

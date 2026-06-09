@@ -42,6 +42,57 @@ Future<int> _seedDefaults() async {
   return _seedDefaultsFromAssets();
 }
 
+/// Upgrade already-installed wapps when the APK bundles a newer version.
+///
+/// Seeding (above) only ever runs once per profile, so a shipped wapp fix would
+/// otherwise never reach a device that already has the wapp. This pass runs on
+/// every launch and, for each `assets/wapps/*.wapp`, overwrites the installed
+/// copy IFF the bundled `manifest.version` is strictly newer. It deliberately:
+///   - never installs a wapp the user doesn't already have (no resurrecting
+///     something they uninstalled — that's seeding's job, once),
+///   - never clobbers a wapp the user edited (`user_modified`),
+///   - preserves wapp DATA (messages/settings live outside the package dir, so
+///     the reinstall only swaps code/UI).
+/// Returns the number upgraded.
+Future<int> upgradeBundledWapps() async {
+  var upgraded = 0;
+  const prefix = 'assets/wapps/';
+  final installed = installedAppsStorage();
+  try {
+    final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+    final bundles = manifest
+        .listAssets()
+        .where((a) => a.startsWith(prefix) && a.endsWith('.wapp'));
+    for (final asset in bundles) {
+      final name =
+          asset.substring(prefix.length, asset.length - '.wapp'.length);
+      final instManifest = await installed.readJson('$name/manifest.json');
+      if (instManifest == null) continue; // not installed — leave to seeding
+      if (instManifest['user_modified'] == true) continue; // keep user edits
+      final instVer = (instManifest['version'] as String?) ?? '0.0.0';
+
+      final data = await rootBundle.load(asset);
+      final bytes = data.buffer.asUint8List();
+      final bundledVer =
+          WappInstallerService.instance.versionFromZipBytes(bytes);
+      if (bundledVer == null) continue;
+      if (WappInstallerService.compareVersions(bundledVer, instVer) <= 0) {
+        continue; // bundled not newer
+      }
+
+      final res = await WappInstallerService.instance
+          .installFromBytes(wappId: name, zipBytes: bytes);
+      if (res.ok) {
+        upgraded++;
+        debugPrint('upgradeBundledWapps: $name $instVer -> $bundledVer');
+      }
+    }
+  } catch (_) {
+    // No bundled wapps / asset manifest unavailable — nothing to upgrade.
+  }
+  return upgraded;
+}
+
 /// Install every default wapp bundled under `assets/wapps/*.wapp` — the
 /// curated seed set packaged as flat .wapp zips so it survives into a real
 /// APK / app bundle (Android/iOS, packaged desktop). Returns the count.

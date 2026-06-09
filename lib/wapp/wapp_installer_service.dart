@@ -115,6 +115,7 @@ class WappInstallerService {
     String? icon,
     Map<String, Map<String, String>>? translations,
     bool overwrite = false,
+    bool userModified = false,
   }) async {
     if (id.isEmpty) {
       return InstallResult.failure(id, 'wapp id is required');
@@ -220,6 +221,9 @@ class WappInstallerService {
       'summary': description,
       'icon': manifestIcon,
       'tags': const ['user'],
+      // Flag wapps the user authored/edited via the App Creator so the
+      // launcher can badge them as customized (vs pristine seeds).
+      if (userModified) 'user_modified': true,
       'entry_ui': 'screens/home.ui.json',
       'tick_interval_ms': tickIntervalMs,
       'permissions': const <String>[],
@@ -292,6 +296,43 @@ class WappInstallerService {
     EventBus().fire(WappLoadedEvent(wappId: id, wappName: title));
 
     return InstallResult.success(id);
+  }
+
+  /// Read the `version` from the `manifest.json` inside a `.wapp` (ZIP) without
+  /// installing it. Returns null if the bytes aren't a valid wapp / have no
+  /// version. Used to decide whether a bundled wapp is newer than an installed
+  /// one (see the launcher's upgradeBundledWapps).
+  String? versionFromZipBytes(Uint8List zipBytes) {
+    try {
+      final decoded = ZipDecoder().decodeBytes(zipBytes);
+      for (final entry in decoded) {
+        if (!entry.isFile) continue;
+        final rel = entry.name.replaceAll('\\', '/');
+        if (rel == 'manifest.json' || rel.endsWith('/manifest.json')) {
+          final json = jsonDecode(utf8.decode(entry.content as List<int>));
+          final v = (json is Map) ? json['version'] : null;
+          return v is String ? v : null;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Compare two dotted version strings ("1.2.3"). Returns >0 if [a] is newer
+  /// than [b], 0 if equal, <0 if older. Non-numeric suffixes are ignored.
+  static int compareVersions(String a, String b) {
+    int part(String s) {
+      final m = RegExp(r'^\d+').firstMatch(s.trim());
+      return m == null ? 0 : int.parse(m.group(0)!);
+    }
+    final pa = a.split('.'), pb = b.split('.');
+    final n = pa.length > pb.length ? pa.length : pb.length;
+    for (var i = 0; i < n; i++) {
+      final x = i < pa.length ? part(pa[i]) : 0;
+      final y = i < pb.length ? part(pb[i]) : 0;
+      if (x != y) return x - y;
+    }
+    return 0;
   }
 
   /// Install a wapp from raw `.wapp` (ZIP) bytes. Extracts into

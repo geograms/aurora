@@ -137,6 +137,19 @@ Future<void> main() async {
     mode: BootStart.sequential,
     init: ensureProfileSeeded,
   );
+  BootOrchestrator.instance.register(
+    id: 'upgrade-bundled-wapps',
+    name: 'Upgrade bundled wapps',
+    description:
+        'After seeding, replace any installed wapp whose bundled (.wapp) '
+        'version is newer than the installed one, so an app update ships wapp '
+        'fixes to devices without a manual reinstall. Skips uninstalled and '
+        'user-modified wapps; preserves wapp data. Runs every launch.',
+    mode: BootStart.sequential,
+    init: () async {
+      await upgradeBundledWapps();
+    },
+  );
 
   // Run every registered boot task. Sequential boot tasks run first,
   // alone, in registration order; then all parallels run concurrently.

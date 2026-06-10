@@ -1627,8 +1627,11 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             final cs = Theme.of(ctx).colorScheme;
             return AlertDialog(
               title: Text(title),
+              // Scrollable so the body + chips + input + optional toggle never
+              // overflow when the on-screen keyboard shrinks the dialog.
               content: SizedBox(
                 width: 380,
+                child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1702,6 +1705,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                         ),
                       ),
                   ],
+                ),
                 ),
               ),
               actions: [

@@ -28,6 +28,7 @@ import 'package:flutter/foundation.dart';
 import '../models/monitored_task.dart';
 import '../profile/storage_paths.dart';
 import '../services/background_service.dart';
+import 'geoui/geo_chat_archive.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
 import 'android_foreground_service.dart';
@@ -158,6 +159,11 @@ class _WappBackgroundService extends BackgroundService {
   final WappEngine engine;
   final PreferencesService prefs;
 
+  /// Geo-chat archive for this wapp (shared with the foreground page via the
+  /// data dir), so Live messages are persisted even while running headless.
+  late final GeoChatArchive _geoArchive =
+      GeoChatArchive.forStorage(wappDataStorageFor(prefs, name));
+
   @override
   Future<void> onStart() async {
     engine.init();
@@ -194,6 +200,13 @@ class _WappBackgroundService extends BackgroundService {
         if (cmd != null && cmd.isNotEmpty) {
           engine.sendMessage(jsonEncode({'command': cmd, 'fields': _savedFields()}));
           engine.handleEvent();
+        }
+      } else if (type == 'ui.chat.append') {
+        // No UI in the background, but still archive geo-tagged Live messages
+        // so an always-on station keeps its history as messages happen.
+        if ((data['field'] as String? ?? 'messages') == 'geochat') {
+          final msg = data['message'];
+          if (msg is Map) _geoArchive.add(msg);
         }
       } else if (type == 'notify') {
         final levelStr = (data['level'] as String? ?? 'info').toLowerCase();

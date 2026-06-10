@@ -28,6 +28,7 @@ import '../editor/code_editor_field.dart';
 import 'geoui/widgets/log_view_field.dart';
 import 'geoui/widgets/chat_view_field.dart';
 import 'geoui/conversation_store.dart';
+import 'geoui/geo_chat_archive.dart';
 import 'geoui/widgets/conversations_field.dart';
 import 'geoui/tile_cache.dart';
 import 'background_wapp_manager.dart';
@@ -271,6 +272,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   final List<Map<String, dynamic>> _geoLive = [];
   final List<Map<String, dynamic>> _geoBeacons = [];
 
+  /// Persistent, geo-queryable archive of Live geo-chat messages (generic —
+  /// see geo_chat_archive.dart). Set once the wapp data dir is known.
+  GeoChatArchive? _geoArchive;
+
   // Transport/status indicators shown on the map, pushed by the wapp via
   // `ui.map.status` (e.g. APRS-IS connected, BLE active). Each {id,label,on}.
   final List<Map<String, dynamic>> _mapStatus = [];
@@ -288,7 +293,11 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     });
   }
 
-  void _geoChatAdd(Map raw) {
+  void _geoChatAdd(Map raw, {bool archive = true}) {
+    // Persist Live (geo-tagged ">>") messages so they survive restarts and can
+    // be queried back by region. Replayed history passes archive:false so it
+    // isn't re-archived (and doesn't bump unread / notifications).
+    if (archive) _geoArchive?.add(raw);
     final msg = raw.map((k, v) => MapEntry(k.toString(), v));
     final text = (msg['text'] ?? '').toString().trimLeft();
     if (text.startsWith('>>')) {
@@ -297,8 +306,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _geoLive.add(msg);
       if (_geoLive.length > 300) _geoLive.removeRange(0, _geoLive.length - 300);
       // Notify on the Map tab when a received message lands while the chat box
-      // is closed (own outgoing echoes don't count).
-      if (msg['dir'] == 'in' && !_geoChatOpen) _geoUnread++;
+      // is closed (own outgoing echoes don't count). Not for replayed history.
+      if (archive && msg['dir'] == 'in' && !_geoChatOpen) _geoUnread++;
     } else {
       // Stamp arrival so stale presence/position beacons can be aged out.
       msg['_rxMs'] = DateTime.now().millisecondsSinceEpoch;
@@ -314,6 +323,45 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         _geoBeacons.removeRange(0, _geoBeacons.length - 300);
       }
     }
+  }
+
+  /// Load archived Live geo-chat for the region the wapp asked about and replay
+  /// it into the Live feed (oldest→newest). Driven by `ui.chat.history`.
+  void _loadGeoHistory(Map data) {
+    final arch = _geoArchive;
+    if (arch == null) return;
+    final lat = (data['lat'] as num?)?.toDouble();
+    final lon = (data['lon'] as num?)?.toDouble();
+    if (lat == null || lon == null) return;
+    final radius = (data['radius_km'] as num?)?.toDouble() ?? _mapRadiusKm ?? 100;
+    final limit = (data['limit'] as num?)?.toInt() ?? 200;
+    final since = (data['since_ms'] as num?)?.toInt();
+    final recs = arch.query(
+        lat: lat, lon: lon, radiusKm: radius, limit: limit, sinceMs: since);
+    if (recs.isEmpty || !mounted) return;
+    for (final r in recs) {
+      // The archive doesn't store the display time; derive it from the record
+      // timestamp so replayed bubbles carry a sensible label.
+      final t = (r['t'] as num?)?.toInt();
+      if (t != null && (r['time'] == null || (r['time'] as String).isEmpty)) {
+        r['time'] = _fmtArchiveTime(t);
+      }
+      _geoChatAdd(r, archive: false);
+    }
+    setState(() {});
+  }
+
+  /// Compact time label for a replayed archive message: `HH:mm` for today,
+  /// otherwise `MM-dd HH:mm` so older history is distinguishable.
+  static String _fmtArchiveTime(int epochMs) {
+    final d = DateTime.fromMillisecondsSinceEpoch(epochMs);
+    final now = DateTime.now();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final hm = '${two(d.hour)}:${two(d.minute)}';
+    if (d.year == now.year && d.month == now.month && d.day == now.day) {
+      return hm;
+    }
+    return '${two(d.month)}-${two(d.day)} $hm';
   }
 
   // Generic conversation stores keyed by the GeoUI field name. A wapp drives
@@ -580,6 +628,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final wappData = wappDataStorageFor(prefs, _wappName);
     await wappData.createDirectory('');
     _wappData = wappData;
+    _geoArchive = GeoChatArchive.forStorage(wappData);
     _engine.setStorage(wappData);
     // Restore persisted Messenger conversations before the first build so the
     // history shows immediately when the tab opens.
@@ -833,6 +882,13 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
               buf.add(msg.map((k, v) => MapEntry(k.toString(), v)));
             }
             changed = true;
+          }
+        } else if (type == 'ui.chat.history') {
+          // The wapp asks to (re)load archived geo-chat for a region, e.g. on
+          // open or after the radius changes. Generic: the host queries the
+          // archive by centre+radius and replays the matches into the feed.
+          if ((data['field'] as String? ?? 'geochat') == 'geochat') {
+            _loadGeoHistory(data);
           }
         } else if (type == 'ui.chat.clear') {
           final fieldName = data['field'] as String? ?? 'messages';

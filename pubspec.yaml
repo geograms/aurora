@@ -56,6 +56,7 @@ dependencies:
   # backend is added as an optional feature rather than shipped in the base app.
   path_provider: ^2.1.4                   # Writable app data dir on Android/iOS (no $HOME there)
   permission_handler: ^11.3.1             # Runtime permission requests (Android BLE/location/notify)
+  geolocator: ^12.0.0                      # Device GPS for the hal_sensor_gps_* HAL (real phone position)
   ble_peripheral: ^2.4.0                  # Reliable BLE advertising on Android/iOS (geogram's choice)
   bluetooth_low_energy: ^6.0.0            # BLE central (scan) + peripheral (advertise) for APRS-over-BLE
   bluez: ^0.8.2                           # BlueZ D-Bus client — Linux BLE advertising (peripheral)

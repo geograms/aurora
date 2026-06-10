@@ -14,6 +14,7 @@ import '../profile/profile_storage.dart';
 import '../connections/hal/connection_hal_imports.dart';
 import '../connections/internet/http_transport.dart';
 import '../connections/bluetooth/ble_service.dart';
+import '../services/location_service.dart';
 import '../profile/profile_service.dart';
 import 'wapp_event_broker.dart';
 
@@ -1003,8 +1004,22 @@ class WappEngine {
       WasmImport('hal', 'sensor_temperature', stubI32([], -2147483648)),
       WasmImport('hal', 'sensor_humidity', stubI32([], -2147483648)),
       WasmImport('hal', 'sensor_battery', stubI32([], -2147483648)),
-      WasmImport('hal', 'sensor_gps_lat', stubI32([], -2147483648)),
-      WasmImport('hal', 'sensor_gps_lon', stubI32([], -2147483648)),
+      // GPS — real device position via LocationService (cached; deg×1e7 int32,
+      // INT32_MIN when no fix/permission so the wapp falls back to its config).
+      WasmImport(
+          'hal',
+          'sensor_gps_lat',
+          WasmFunction(() {
+            LocationService.instance.ensureStarted();
+            return LocationService.instance.latE7 ?? -2147483648;
+          }, params: const [], results: const [ValueTy.i32])),
+      WasmImport(
+          'hal',
+          'sensor_gps_lon',
+          WasmFunction(() {
+            LocationService.instance.ensureStarted();
+            return LocationService.instance.lonE7 ?? -2147483648;
+          }, params: const [], results: const [ValueTy.i32])),
       // Display (stubs)
       WasmImport('hal', 'display_width', stubI32([], 0)),
       WasmImport('hal', 'display_height', stubI32([], 0)),

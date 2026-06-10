@@ -798,6 +798,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           }
           buf.add(line);
           changed = true;
+        } else if (type == 'ui.log.clear') {
+          // Empty a $type:"log" field's buffer (e.g. before a fresh run).
+          final fieldName = data['field'] as String? ?? 'output';
+          final existing = _fieldValues[fieldName];
+          if (existing is List && existing.isNotEmpty) {
+            existing.clear();
+            changed = true;
+          }
         } else if (type == 'ui.map.viewport') {
           _mapLat = (data['lat'] as num?)?.toDouble() ?? _mapLat;
           _mapLon = (data['lon'] as num?)?.toDouble() ?? _mapLon;

@@ -111,7 +111,11 @@ const int kBleBcastContHdr = 4;
 const Duration kBleBcastWindow = Duration(seconds: 5);
 
 /// Suppress re-delivery of a (source,msgId) for this long after completion.
-const Duration kBleBcastDedup = Duration(seconds: 30);
+/// Must exceed a sender's longest chunk air time (the ESP32 keeps an important
+/// message — ?MAIL reply / 1:1 mail — on air up to BCH_TTL_MSG=120s so a phone
+/// whose BLE stack scans only sporadically still collects every chunk); without
+/// this, the same re-aired message would be delivered repeatedly.
+const Duration kBleBcastDedup = Duration(seconds: 130);
 
 class _BcastPartial {
   final int total;

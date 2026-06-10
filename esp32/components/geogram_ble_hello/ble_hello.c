@@ -108,11 +108,14 @@ static const char *TAG = "ble_hello";
  * before a phone collects every chunk — so messages never arrive. Messages are
  * queued at high priority (never evicted to make room for a low-priority position
  * relay) and air a bit longer; positions are low priority and short-lived (they
- * are frequent, so a missed one is re-sent moments later). BCH_TTL_MSG stays
- * under the receiver's reassembly-dedup window so a retained message is not
- * re-delivered. */
+ * are frequent, so a missed one is re-sent moments later). BCH_TTL_MSG must stay
+ * UNDER the receiver's reassembly-dedup window (kBleBcastDedup, 130s) so a
+ * long-retained message is reassembled and delivered only once. It is kept LONG
+ * because some phone BLE stacks (e.g. MediaTek) scan only sporadically even in
+ * normal mode — they reliably collect every chunk of a one-shot multi-chunk
+ * message only if it stays on air for a couple of minutes. */
 #define BCH_TTL_POS         8           /* low-prio: position / area relays */
-#define BCH_TTL_MSG         25          /* high-prio: messages, ?MAIL, ?IGATE */
+#define BCH_TTL_MSG         120         /* high-prio: messages, ?MAIL, ?IGATE */
 #define BCH_PRIO_LOW        0
 #define BCH_PRIO_HIGH       1
 #define BRX_SLOTS           4           /* concurrent (addr,msgid) reassemblies */

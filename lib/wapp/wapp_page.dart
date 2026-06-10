@@ -1603,12 +1603,18 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final instant = (data['chipMode'] ?? 'instant') == 'instant';
     final input = data['input'] as Map?;
     final confirmLabel = (data['confirm'] ?? '').toString();
+    // Optional boolean toggle (e.g. a Local/Global scope switch). Generic: the
+    // wapp gets its state back as prompt_toggle.
+    final toggle = data['toggle'] as Map?;
+    final toggleLabel = (toggle?['label'] ?? '').toString();
 
     final controller = TextEditingController();
+    bool toggleOn = (toggle?['default'] == true);
     void result(String value, String text) {
       _fieldValues['prompt_id'] = id;
       _fieldValues['prompt_value'] = value;
       _fieldValues['prompt_input'] = text;
+      _fieldValues['prompt_toggle'] = toggleOn;
       _sendCommand('prompt');
     }
 
@@ -1683,6 +1689,18 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                         ],
                       ),
                     ],
+                    if (toggleLabel.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: Text(toggleLabel,
+                              style: const TextStyle(fontSize: 13)),
+                          value: toggleOn,
+                          onChanged: (v) => setLocal(() => toggleOn = v),
+                        ),
+                      ),
                   ],
                 ),
               ),

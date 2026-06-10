@@ -117,6 +117,10 @@ class ConversationStore {
       'meta': (d['meta'] ?? '').toString(),
       'key': (d['key'] ?? '').toString(),
       if ((d['via'] ?? '').toString().isNotEmpty) 'via': d['via'].toString(),
+      // Opaque threading ids set by the wapp (groups only): this message's id
+      // and the id it replies to. The host just stores + renders the relation.
+      if ((d['mid'] ?? '').toString().isNotEmpty) 'mid': d['mid'].toString(),
+      if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     });
@@ -142,6 +146,8 @@ class ConversationStore {
       'time': (d['time'] ?? '').toString(),
       'meta': (d['meta'] ?? '').toString(),
       if ((d['via'] ?? '').toString().isNotEmpty) 'via': d['via'].toString(),
+      if ((d['mid'] ?? '').toString().isNotEmpty) 'mid': d['mid'].toString(),
+      if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     };

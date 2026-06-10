@@ -63,6 +63,14 @@ class _ChatViewFieldState extends State<ChatViewField> {
   final _scroll = ScrollController();
   int _lastCount = 0;
 
+  /// Lookup of message-id -> message, rebuilt each frame, so a reply can show a
+  /// quoted snippet of the message it answers (threading). Threading ids are
+  /// opaque (the wapp sets `mid`/`parent`); the host only renders the relation.
+  final Map<String, Map<String, dynamic>> _byMid = {};
+
+  /// The message currently being replied to (null = composing a new message).
+  Map<String, dynamic>? _replyingTo;
+
   /// Whether the view is pinned to the bottom. New messages only auto-scroll
   /// while this is true, so reading back through history isn't interrupted by
   /// incoming traffic. Becomes true again once the user scrolls back down.
@@ -100,10 +108,29 @@ class _ChatViewFieldState extends State<ChatViewField> {
   void _send() {
     final text = _input.text.trim();
     if (text.isEmpty) return;
-    widget.onSend(text);
+    // When replying, prepend the compact "+<mid> " marker the wapp uses to
+    // thread the message under its parent (across APRS-IS and BLE).
+    final reply = _replyingTo;
+    final mid = (reply?['mid'] ?? '').toString();
+    final out = (reply != null && mid.isNotEmpty) ? '+$mid $text' : text;
+    widget.onSend(out);
     _input.clear();
+    if (_replyingTo != null) setState(() => _replyingTo = null);
     // Sending always jumps to the latest so the user sees their own message.
     _atBottom = true;
+  }
+
+  void _startReply(Map<String, dynamic> m) {
+    if ((m['mid'] ?? '').toString().isEmpty) return; // not threadable
+    setState(() => _replyingTo = m);
+  }
+
+  /// One-line snippet of a message for quoted-reply display.
+  String _snippet(Map<String, dynamic> m) {
+    final from = (m['from'] ?? '').toString();
+    var text = (m['text'] ?? '').toString().replaceAll('\n', ' ');
+    if (text.length > 60) text = '${text.substring(0, 60)}…';
+    return from.isEmpty ? text : '$from: $text';
   }
 
   @override
@@ -188,6 +215,12 @@ class _ChatViewFieldState extends State<ChatViewField> {
             style: TextStyle(color: Colors.white.withAlpha(90), fontSize: 13)),
       );
     }
+    // Rebuild the id->message index for quoted-reply lookups.
+    _byMid.clear();
+    for (final m in messages) {
+      final mid = (m['mid'] ?? '').toString();
+      if (mid.isNotEmpty) _byMid[mid] = m;
+    }
     return ListView.builder(
       controller: _scroll,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
@@ -202,63 +235,126 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final text = m['text']?.toString() ?? '';
     final time = m['time']?.toString() ?? '';
     final via = m['via']?.toString() ?? '';
+    final parent = (m['parent'] ?? '').toString();
+    final threadable = (m['mid'] ?? '').toString().isNotEmpty;
+    final bubble = Container(
+      margin: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      constraints: const BoxConstraints(maxWidth: 440),
+      decoration: BoxDecoration(
+        color: outgoing ? _outColor : _inColor,
+        borderRadius: BorderRadius.only(
+          topLeft: const Radius.circular(14),
+          topRight: const Radius.circular(14),
+          bottomLeft: Radius.circular(outgoing ? 14 : 4),
+          bottomRight: Radius.circular(outgoing ? 4 : 14),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (parent.isNotEmpty) _quotedParent(parent),
+          if (!outgoing && (from.isNotEmpty || via.isNotEmpty))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (from.isNotEmpty)
+                    Flexible(
+                      child: Text(
+                        from,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Color(0xFF7FB0E0),
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  if (via.isNotEmpty) ...[
+                    if (from.isNotEmpty) const SizedBox(width: 6),
+                    _viaChip(via),
+                  ],
+                ],
+              ),
+            ),
+          Text(text,
+              style: const TextStyle(color: Colors.white, fontSize: 14)),
+          if ((m['meta']?.toString() ?? '').isNotEmpty)
+            _metaLine(m),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (time.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    time,
+                    style: TextStyle(
+                        color: Colors.white.withAlpha(115), fontSize: 10),
+                  ),
+                ),
+              if (threadable) ...[
+                const SizedBox(width: 8),
+                InkWell(
+                  onTap: () => _startReply(m),
+                  borderRadius: BorderRadius.circular(4),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.reply,
+                          size: 12, color: Colors.white.withAlpha(140)),
+                      const SizedBox(width: 2),
+                      Text('Reply',
+                          style: TextStyle(
+                              color: Colors.white.withAlpha(140), fontSize: 10)),
+                    ]),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
     return Align(
       alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        constraints: const BoxConstraints(maxWidth: 440),
-        decoration: BoxDecoration(
-          color: outgoing ? _outColor : _inColor,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(14),
-            topRight: const Radius.circular(14),
-            bottomLeft: Radius.circular(outgoing ? 14 : 4),
-            bottomRight: Radius.circular(outgoing ? 4 : 14),
+      child: bubble,
+    );
+  }
+
+  /// Quoted snippet of the message this one replies to (threading). Shows the
+  /// parent's author + text when it's loaded, else just the short reference id.
+  Widget _quotedParent(String parentMid) {
+    final p = _byMid[parentMid];
+    final label = p != null ? _snippet(p) : '#$parentMid';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.fromLTRB(8, 3, 8, 3),
+      decoration: BoxDecoration(
+        color: Colors.white.withAlpha(18),
+        borderRadius: BorderRadius.circular(6),
+        border: Border(
+            left: BorderSide(color: const Color(0xFF7FB0E0), width: 2.5)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.subdirectory_arrow_right,
+              size: 12, color: const Color(0xFF7FB0E0).withAlpha(200)),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  color: Colors.white.withAlpha(170),
+                  fontSize: 11,
+                  fontStyle: FontStyle.italic),
+            ),
           ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!outgoing && (from.isNotEmpty || via.isNotEmpty))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 2),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (from.isNotEmpty)
-                      Flexible(
-                        child: Text(
-                          from,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: Color(0xFF7FB0E0),
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    if (via.isNotEmpty) ...[
-                      if (from.isNotEmpty) const SizedBox(width: 6),
-                      _viaChip(via),
-                    ],
-                  ],
-                ),
-              ),
-            Text(text,
-                style: const TextStyle(color: Colors.white, fontSize: 14)),
-            if ((m['meta']?.toString() ?? '').isNotEmpty)
-              _metaLine(m),
-            if (time.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Text(
-                  time,
-                  style: TextStyle(
-                      color: Colors.white.withAlpha(115), fontSize: 10),
-                ),
-              ),
-          ],
-        ),
+        ],
       ),
     );
   }
@@ -330,7 +426,45 @@ class _ChatViewFieldState extends State<ChatViewField> {
     return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.62).toColor();
   }
 
+  Widget _replyBanner(ColorScheme cs) {
+    final m = _replyingTo!;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+      color: Colors.white.withAlpha(12),
+      child: Row(
+        children: [
+          Icon(Icons.reply, size: 14, color: cs.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Replying to ${_snippet(m)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: Colors.white.withAlpha(180), fontSize: 12),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 16),
+            color: Colors.white.withAlpha(150),
+            visualDensity: VisualDensity.compact,
+            onPressed: () => setState(() => _replyingTo = null),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _composeBar(ColorScheme cs) {
+    if (_replyingTo != null) {
+      return Column(mainAxisSize: MainAxisSize.min, children: [
+        _replyBanner(cs),
+        _composeRow(cs),
+      ]);
+    }
+    return _composeRow(cs);
+  }
+
+  Widget _composeRow(ColorScheme cs) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
       child: Row(

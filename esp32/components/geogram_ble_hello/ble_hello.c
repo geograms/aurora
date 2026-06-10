@@ -1163,23 +1163,39 @@ static bool call_ci_eq(const char *a, const char *b) {
 #define MAIL_SCAN_BACK        400u  /* indices to scan back (newest within window) */
 #define MAIL_INFLIGHT_CHUNKS  9     /* pump tops up while live high-prio chunks < this */
 
-typedef struct { char from[MSGSTORE_CALL_LEN]; char text[MSGSTORE_TEXT_LEN]; } mail_item_t;
-static mail_item_t s_mailq[MAIL_CAP];
-static int  s_mailq_n;                       /* queued */
-static int  s_mailq_sent;                    /* delivered so far */
-static char s_mail_to[MSGSTORE_CALL_LEN];    /* the asking callsign */
+/* Pending-delivery queue. We cache only the message INDICES (4 bytes each), NOT
+ * the message bodies: this node is a no-PSRAM ESP32-S3 whose WiFi netif/DHCP is
+ * allocated right at the free-heap limit, so a multi-KB static (or stack) buffer
+ * here tips WiFi over the edge at association. Each pending message is re-read
+ * from the SD store by index when the pump actually delivers it. During
+ * collection s_mq_head/s_mq_count index it as a most-recent ring; during delivery
+ * s_mq_sent walks forward from s_mq_head. Only the BLE / cycle-timer tasks for
+ * this single node touch these, so plain statics are safe. */
+static uint32_t s_mq_idx[MAIL_CAP];
+static int  s_mq_head;                         /* oldest kept (collection ring) */
+static int  s_mq_count;                        /* collected this pull */
+static int  s_mq_sent;                         /* delivered so far (from head) */
+static char s_mail_to[MSGSTORE_CALL_LEN];      /* the asking callsign */
 
-/* Collector: keep the most-recent MAIL_CAP matching records in a ring. */
-typedef struct { mail_item_t ring[MAIL_CAP]; int count; int head; const char *call; } mail_collect_t;
+/* Collect pass: keep the indices of the most-recent MAIL_CAP matching records. */
 static bool mail_emit(const msgstore_query_rec_t *r, void *vctx) {
-    mail_collect_t *c = (mail_collect_t *)vctx;
-    if (!(r->kind == MSGSTORE_KIND_MESSAGE && call_ci_eq(r->to, c->call))) return true;
-    int idx = (c->head + c->count) % MAIL_CAP;
-    strlcpy(c->ring[idx].from, r->from, sizeof c->ring[idx].from);
-    strlcpy(c->ring[idx].text, r->text, sizeof c->ring[idx].text);
-    if (c->count < MAIL_CAP) c->count++;
-    else c->head = (c->head + 1) % MAIL_CAP;   /* full → drop the oldest kept */
-    return true;                               /* scan the whole window */
+    (void)vctx;
+    if (!(r->kind == MSGSTORE_KIND_MESSAGE && call_ci_eq(r->to, s_mail_to))) return true;
+    s_mq_idx[(s_mq_head + s_mq_count) % MAIL_CAP] = r->index;
+    if (s_mq_count < MAIL_CAP) s_mq_count++;
+    else s_mq_head = (s_mq_head + 1) % MAIL_CAP;   /* full → drop the oldest kept */
+    return true;                                   /* scan the whole window */
+}
+
+/* Fetch-by-index for delivery: capture the single record at `want`. */
+typedef struct { uint32_t want; char from[MSGSTORE_CALL_LEN]; char text[MSGSTORE_TEXT_LEN]; bool got; } mail_fetch_t;
+static bool mail_fetch_cb(const msgstore_query_rec_t *r, void *vctx) {
+    mail_fetch_t *f = (mail_fetch_t *)vctx;
+    if (r->index != f->want) return true;          /* keep scanning to it */
+    strlcpy(f->from, r->from, sizeof f->from);
+    strlcpy(f->text, r->text, sizeof f->text);
+    f->got = true;
+    return false;                                  /* stop */
 }
 
 /* Count live high-priority chunks currently in the broadcast ring (messages +
@@ -1193,27 +1209,33 @@ static int bch_live_highprio_chunks(void) {
 }
 
 /* Drain a few pending mail messages into the broadcast ring (called from the
- * cycle timer). Newest-first delivery is chronological because the queue is
- * filled oldest→newest and we send from the front. */
+ * cycle timer). Oldest-first (chronological) from the head of the ring; each is
+ * re-read from the SD store by index just before it goes on air. */
 static void mail_pump(void) {
-    while (s_mailq_sent < s_mailq_n &&
+    while (s_mq_sent < s_mq_count &&
            bch_live_highprio_chunks() < MAIL_INFLIGHT_CHUNKS) {
-        mail_item_t *m = &s_mailq[s_mailq_sent++];
-        ble_hello_broadcast(m->from, s_mail_to, m->text);
+        uint32_t idx = s_mq_idx[(s_mq_head + s_mq_sent) % MAIL_CAP];
+        s_mq_sent++;
+        if (!s_msgstore) continue;
+        mail_fetch_t f = { .want = idx, .got = false };
+        msgstore_query_t q = { .since_index = idx, .kind_filter = MSGSTORE_KIND_MESSAGE, .limit = 1 };
+        uint32_t next; bool more;
+        msgstore_query(s_msgstore, &q, mail_fetch_cb, &f, &next, &more);
+        if (f.got) ble_hello_broadcast(f.from, s_mail_to, f.text);
     }
 }
 
 /* A BLE-local station broadcast "?MAIL <days> <nonce>": it is pulling mail held
  * for it. Register it in our g/ filter, then (re)build a pending set of the
- * newest messages within the requested day-window and let the pump deliver them.
- * A re-?MAIL while a set is still draining just keeps draining (no reset), so the
- * pacing makes progress instead of restarting from the oldest each cycle. */
+ * newest message indices within the requested day-window and let the pump deliver
+ * them. A re-?MAIL while a set is still draining just keeps draining (no reset),
+ * so the pacing makes progress instead of restarting from the oldest each cycle. */
 static void handle_mail(const char *from, const char *text) {
     if (!from[0] || strcmp(from, s_callsign) == 0) return;
     heard_add(from, (int)strlen(from));      /* keep it in the g/ filter */
     if (!s_msgstore) return;
 
-    bool draining = (s_mailq_sent < s_mailq_n) && call_ci_eq(s_mail_to, from);
+    bool draining = (s_mq_sent < s_mq_count) && call_ci_eq(s_mail_to, from);
     if (!draining) {
         int days = text ? atoi(text) : 0;    /* leading integer = look-back days */
         if (days <= 0) days = MAIL_DEFAULT_DAYS;
@@ -1227,6 +1249,9 @@ static void handle_mail(const char *from, const char *text) {
             ? (uint32_t)nowt - (uint32_t)days * 86400u : 0;
 
         uint32_t latest = msgstore_get_latest_index(s_msgstore);
+        /* Set the asker BEFORE the query: mail_emit matches against s_mail_to. */
+        strlcpy(s_mail_to, from, sizeof s_mail_to);
+        s_mq_head = 0; s_mq_count = 0; s_mq_sent = 0;
         msgstore_query_t q = {
             .since_index = latest > MAIL_SCAN_BACK ? latest - MAIL_SCAN_BACK : 0,
             .call_filter = from,
@@ -1234,16 +1259,9 @@ static void handle_mail(const char *from, const char *text) {
             .limit = MAIL_SCAN_BACK,
             .since_ts = since_ts,
         };
-        mail_collect_t col = { .count = 0, .head = 0, .call = from };
         uint32_t next; bool more;
-        msgstore_query(s_msgstore, &q, mail_emit, &col, &next, &more);
-
-        for (int i = 0; i < col.count; i++)
-            s_mailq[i] = col.ring[(col.head + i) % MAIL_CAP];
-        s_mailq_n = col.count;
-        s_mailq_sent = 0;
-        strlcpy(s_mail_to, from, sizeof s_mail_to);
-        ESP_LOGI(TAG, "?MAIL %s days=%d -> %d msg in window (paced)", from, days, s_mailq_n);
+        msgstore_query(s_msgstore, &q, mail_emit, NULL, &next, &more);
+        ESP_LOGI(TAG, "?MAIL %s days=%d -> %d msg in window (paced)", from, days, s_mq_count);
     }
     mail_pump();
 }

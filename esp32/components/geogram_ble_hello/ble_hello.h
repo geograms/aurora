@@ -69,6 +69,13 @@ void ble_hello_set_aprs_cb(ble_hello_aprs_cb_t cb);
 void ble_hello_set_msgstore(msgstore_t *st);
 
 /**
+ * @brief Set this station's position (decimal degrees) used in BLE ping
+ *        replies. Pass (0,0) to mark it unknown (replies omit coordinates and
+ *        the pinger falls back to an RSSI distance estimate).
+ */
+void ble_hello_set_position(double lat, double lon);
+
+/**
  * @brief Copy the callsigns heard over BLE in the last [max_age_sec] seconds
  *        (presence beacons + APRS frame senders) into [calls].
  *

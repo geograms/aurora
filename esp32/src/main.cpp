@@ -396,6 +396,8 @@ static void tdongle_save_igate_position(double lat, double lon, int radius_km)
     if (radius_km > 0) nvs_set_i32(h, "radius_km", (int32_t)radius_km);
     nvs_commit(h);
     nvs_close(h);
+    /* Keep the BLE ping responder's position in sync with the iGate position. */
+    ble_hello_set_position(lat, lon);
 }
 
 /**
@@ -1407,6 +1409,13 @@ extern "C" void app_main(void)
                     // Runtime position/radius (POST /api/igate/position) overrides
                     // the build-time default and persists across reboots.
                     tdongle_load_igate_position();
+                    // Share the configured position with the BLE ping responder
+                    // so its ?PONG replies carry coordinates.
+                    {
+                        double plat = 0, plon = 0; int prad = 0; bool phave = false;
+                        aprsis_get_position(&plat, &plon, &prad, &phave);
+                        if (phave) ble_hello_set_position(plat, plon);
+                    }
                     // Expose the live APRS-IS connection state on /api/device.
                     station_set_aprsis_status_cb(aprsis_is_connected);
                 } else {

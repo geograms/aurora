@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -179,7 +180,7 @@ static bool     s_scanning;             /* true = scan phase, false = adv phase 
 
 /* Forward declarations */
 static int ble_hello_gap_event(struct ble_gap_event *event, void *arg);
-static void aprs_decode(const uint8_t *payload, int len, int rssi);
+static bool aprs_decode(const uint8_t *payload, int len, int rssi);
 
 static uint32_t now_sec(void)
 {
@@ -951,12 +952,128 @@ bool ble_hello_relay_aprs(const char *from, const char *to, const char *text)
     return true;
 }
 
+/* ── BLE ping reach-test (the apps' Tools tab) ───────────────────────────
+ * Control frames carried in the same compact format:
+ *   request  to="?PING", text="id,ttl,hops"
+ *   reply    to="?PONG", text="id,hops,lat,lon,pttl,dM"
+ * This station answers every ?PING once with its callsign + configured
+ * position, and forwards ?PING (ttl) / ?PONG (pttl, accumulating an RF
+ * distance estimate from RSSI) so pings reach across the BLE mesh. Ping
+ * frames are NEVER shown on the chat, archived, or gated to APRS-IS. */
+#define PING_TO "?PING"
+#define PONG_TO "?PONG"
+#define PING_DEFAULT_TTL 3
+
+static double s_pos_lat = 0, s_pos_lon = 0;
+static bool   s_have_pos = false;
+
+#define PSEEN_MAX 96
+static uint32_t s_pseen[PSEEN_MAX];
+static int s_pseen_cnt = 0;
+static bool pseen_has(uint32_t h) {
+    int n = s_pseen_cnt < PSEEN_MAX ? s_pseen_cnt : PSEEN_MAX;
+    for (int i = 0; i < n; i++) if (s_pseen[i] == h) return true;
+    return false;
+}
+static void pseen_add(uint32_t h) { s_pseen[s_pseen_cnt % PSEEN_MAX] = h; s_pseen_cnt++; }
+
+/* RSSI -> rough metres (log-distance path loss; TXREF -59 dBm, N 2.5). -1 = unknown. */
+static int est_dist_m(int rssi) {
+    if (rssi >= 0) return -1;
+    float d = powf(10.0f, (float)(-59 - rssi) / 25.0f);
+    if (d < 1.0f) d = 1.0f;
+    if (d > 5000.0f) d = 5000.0f;
+    return (int)(d + 0.5f);
+}
+
+/* idx-th comma-separated field of s into out (NUL-terminated). */
+static void csv_field(const char *s, int idx, char *out, size_t osz) {
+    out[0] = 0; int f = 0; const char *start = s;
+    for (const char *p = s;; p++) {
+        if (*p == ',' || *p == 0) {
+            if (f == idx) {
+                size_t n = (size_t)(p - start);
+                if (n >= osz) n = osz - 1;
+                memcpy(out, start, n); out[n] = 0; return;
+            }
+            if (*p == 0) return;
+            f++; start = p + 1;
+        }
+    }
+}
+
+void ble_hello_set_position(double lat, double lon) {
+    s_pos_lat = lat; s_pos_lon = lon; s_have_pos = (lat != 0.0 || lon != 0.0);
+}
+
+/* Handle a ?PING/?PONG control frame. Returns true so the caller suppresses
+ * the chat display AND the generic verbatim rebroadcast (ping has its own
+ * ttl-based forwarding). */
+static bool ping_handle(const char *from, const char *to, const char *text, int rssi)
+{
+    if (strcmp(from, s_callsign) == 0) return true;   /* ignore our own */
+    char id[16];
+    csv_field(text, 0, id, sizeof(id));
+    if (!id[0]) return true;
+
+    if (strcmp(to, PING_TO) == 0) {
+        char ttls[8], hopss[8];
+        csv_field(text, 1, ttls, sizeof(ttls));
+        csv_field(text, 2, hopss, sizeof(hopss));
+        char ks[24]; snprintf(ks, sizeof(ks), "P:%s", id);
+        uint32_t key = fnv1a((const uint8_t *)ks, strlen(ks));
+        if (pseen_has(key)) return true;
+        pseen_add(key);
+        int ttl = atoi(ttls), hops = atoi(hopss); if (hops < 0) hops = 0;
+        /* answer with our callsign + position (empty lat/lon when unknown) */
+        char body[96];
+        if (s_have_pos)
+            snprintf(body, sizeof(body), "%s,%d,%.5f,%.5f,%d,0",
+                     id, hops, s_pos_lat, s_pos_lon, PING_DEFAULT_TTL);
+        else
+            snprintf(body, sizeof(body), "%s,%d,,,%d,0", id, hops, PING_DEFAULT_TTL);
+        ble_hello_relay_aprs(s_callsign, PONG_TO, body);
+        /* digipeat the ping further */
+        if (ttl > 1) {
+            char fwd[48]; snprintf(fwd, sizeof(fwd), "%s,%d,%d", id, ttl - 1, hops + 1);
+            ble_hello_relay_aprs(from, PING_TO, fwd);   /* keep original pinger */
+        }
+        return true;
+    }
+
+    if (strcmp(to, PONG_TO) == 0) {
+        char hopss[8], las[24], los[24], pttls[8], dms[12];
+        csv_field(text, 1, hopss, sizeof(hopss));
+        csv_field(text, 2, las, sizeof(las));
+        csv_field(text, 3, los, sizeof(los));
+        csv_field(text, 4, pttls, sizeof(pttls));
+        csv_field(text, 5, dms, sizeof(dms));
+        char ks[40]; snprintf(ks, sizeof(ks), "Q:%s:%s", from, id);
+        uint32_t key = fnv1a((const uint8_t *)ks, strlen(ks));
+        if (pseen_has(key)) return true;
+        pseen_add(key);
+        int pttl = atoi(pttls);
+        if (pttl > 1) {                 /* propagate the reply back, adding our hop */
+            int hop_m = est_dist_m(rssi);
+            int dM2 = atoi(dms) + (hop_m >= 0 ? hop_m : 0);
+            char fwd[96];
+            snprintf(fwd, sizeof(fwd), "%s,%s,%s,%s,%d,%d",
+                     id, hopss, las, los, pttl - 1, dM2);
+            ble_hello_relay_aprs(from, PONG_TO, fwd);   /* keep responder as 'from' */
+        }
+        return true;
+    }
+    return false;
+}
+
 /* Decode a compact Aurora APRS payload `<from>\x1f<to>\x1f<text>` (the bytes
  * after the 2-byte company id) and deliver it via the registered callback.
+ * Returns true when the frame was a ping/pong control frame (handled here —
+ * the caller must NOT show it or relay it verbatim).
  * Untrusted input — everything is bounds-checked and NUL-terminated. */
-static void aprs_decode(const uint8_t *payload, int len, int rssi)
+static bool aprs_decode(const uint8_t *payload, int len, int rssi)
 {
-    if (!s_aprs_cb || len <= 0) return;
+    if (len <= 0) return false;
 
     /* Field buffers: text is large enough for a full GATT parcel frame, not
      * just a legacy advert. */
@@ -976,7 +1093,13 @@ static void aprs_decode(const uint8_t *payload, int len, int rssi)
         }
         if (fp < caps[fi]) fields[fi][fp++] = (char)b;
     }
-    if (!saw_sep) return;           /* not an Aurora APRS frame */
+    if (!saw_sep) return false;     /* not an Aurora APRS frame */
+
+    /* Ping reach-test control frames: handle + suppress chat/relay. */
+    if (strcmp(to, PING_TO) == 0 || strcmp(to, PONG_TO) == 0)
+        return ping_handle(from, to, text, rssi);
+
+    if (!s_aprs_cb) return false;
 
     /* Remember the sender so the iGate can filter APRS-IS for traffic to it. */
     heard_add(from, (int)strlen(from));
@@ -985,10 +1108,11 @@ static void aprs_decode(const uint8_t *payload, int len, int rssi)
      * SHOWN_DEDUP_SEC (60 min). One broadcast is received dozens of times and
      * is also relayed by the mesh, so without this the line repeats. */
     uint32_t ch = fnv1a(payload, len);
-    if (shown_recent(ch)) return;
+    if (shown_recent(ch)) return false;
     shown_mark(ch);
 
     s_aprs_cb(from, to, text, rssi);
+    return false;
 }
 
 /* Deliver one fully-assembled compact APRS frame: show it (deduped) and
@@ -996,7 +1120,7 @@ static void aprs_decode(const uint8_t *payload, int len, int rssi)
 static void process_aprs_frame(const uint8_t *mfg, int len, int rssi)
 {
     if (len < 4) return;
-    aprs_decode(&mfg[2], len - 2, rssi);
+    if (aprs_decode(&mfg[2], len - 2, rssi)) return;   /* ping: no verbatim relay */
     uint32_t ch = fnv1a(&mfg[2], len - 2);
     if (!relay_seen(ch)) {
         relay_remember(ch);
@@ -1074,12 +1198,12 @@ static brx_slot_t *brx_alloc(const uint8_t *addr, uint8_t msgid, uint8_t total)
 static void deliver_broadcast(const uint8_t *payload, int len, int rssi)
 {
     if (len <= 0) return;
+    if (aprs_decode(payload, len, rssi)) return;   /* ping: no verbatim relay */
     uint32_t ch = fnv1a(payload, len);
     if (!relay_seen(ch)) {              /* flood: rebroadcast the whole message once */
         relay_remember(ch);
         relay_enqueue_broadcast(payload, len);
     }
-    aprs_decode(payload, len, rssi);
 }
 
 /* Ingest one broadcast chunk [d] = [marker,subtype,msgid,idx,…] (company id

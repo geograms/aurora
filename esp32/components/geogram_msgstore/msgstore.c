@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "msgstore.h"
 #include "sdcard.h"
@@ -56,9 +57,21 @@ typedef struct __attribute__((packed)) {
     char     from[MSGSTORE_CALL_LEN];
     char     to[MSGSTORE_CALL_LEN];
     char     text[MSGSTORE_TEXT_LEN];
+    uint32_t ts;           /* wall-clock epoch (SNTP); 0 if clock not yet synced.
+                            * Placed AFTER text so records from the pre-ts build
+                            * (text was 4 bytes longer) still parse: their trailing
+                            * NUL padding reads back as ts==0. */
 } ms_rec_t;
 
 _Static_assert(sizeof(ms_rec_t) == 192, "record must be 192 bytes");
+
+/* Wall-clock epoch if the SNTP clock looks synced, else 0 (unknown). 1.6e9 ~=
+ * 2020-09; anything below that is the unsynced 1970 boot clock. */
+static uint32_t ms_now_epoch(void)
+{
+    time_t now = time(NULL);
+    return (now > 1600000000) ? (uint32_t)now : 0;
+}
 
 typedef struct {
     uint32_t first_index;  /* == filename number (multiple of MS_RECS_PER_SEG) */
@@ -356,6 +369,7 @@ esp_err_t msgstore_add(msgstore_t *st, const char *from, const char *to,
     strlcpy(r.from, from, sizeof r.from);
     strlcpy(r.to, to, sizeof r.to);
     strlcpy(r.text, text, sizeof r.text);
+    r.ts = ms_now_epoch();
 
     long off = (long)(idx % MS_RECS_PER_SEG) * (long)sizeof(ms_rec_t);
     if (fseek(st->active_fp, off, SEEK_SET) != 0 ||
@@ -446,6 +460,7 @@ size_t msgstore_query(msgstore_t *st, const msgstore_query_t *q,
             if (r.magic != MS_MAGIC) continue;
             if (r.index < q->since_index) continue;
             if (q->kind_filter >= 0 && r.kind != (uint8_t)q->kind_filter) continue;
+            if (q->since_ts && (r.ts == 0 || r.ts < q->since_ts)) continue;
             if (use_call && !call_matches(&r, nfilter)) continue;
 
             if (matched >= limit) { more = true; break; }   /* one more match exists */
@@ -462,6 +477,7 @@ size_t msgstore_query(msgstore_t *st, const msgstore_query_t *q,
                 out.from[MSGSTORE_CALL_LEN - 1] = 0;
                 out.to[MSGSTORE_CALL_LEN - 1] = 0;
                 out.text[MSGSTORE_TEXT_LEN - 1] = 0;
+                out.ts = r.ts;
                 if (!cb(&out, ctx)) { more = true; fclose(f); goto done; }
             }
             matched++;
@@ -580,7 +596,8 @@ static bool json_emit_cb(const msgstore_query_rec_t *r, void *vctx)
     ol += (size_t)n;
     if (!json_append_escaped(obj, sizeof obj, &ol, r->text)) return false;
 
-    n = snprintf(obj + ol, sizeof obj - ol, "\",\"type\":\"%s\"", kind_name(r->kind));
+    n = snprintf(obj + ol, sizeof obj - ol, "\",\"type\":\"%s\",\"ts\":%u",
+                 kind_name(r->kind), (unsigned)r->ts);
     if (n < 0 || ol + (size_t)n >= sizeof obj) return false;
     ol += (size_t)n;
 

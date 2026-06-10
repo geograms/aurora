@@ -1073,22 +1073,42 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
 {
     char query[192] = {0};
     char param[40];
-    uint32_t since_id = 0, limit = 0, tail = 0;
+    uint32_t since_id = 0, limit = 0, tail = 0, days = 0, since_ts = 0;
     char want_epoch = 0;
     char call[16] = {0};
     int kind = -1;
+    bool had_range = false;   /* user narrowed the query explicitly */
 
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        if (httpd_query_key_value(query, "since", param, sizeof(param)) == ESP_OK)
-            tdongle_parse_id(param, &want_epoch, &since_id);
+        if (httpd_query_key_value(query, "since", param, sizeof(param)) == ESP_OK) {
+            tdongle_parse_id(param, &want_epoch, &since_id); had_range = true;
+        }
         if (httpd_query_key_value(query, "call", param, sizeof(param)) == ESP_OK)
             strlcpy(call, param, sizeof call);
         if (httpd_query_key_value(query, "kind", param, sizeof(param)) == ESP_OK)
             kind = tdongle_kind_from_str(param);
-        if (httpd_query_key_value(query, "limit", param, sizeof(param)) == ESP_OK)
-            limit = (uint32_t)strtoul(param, NULL, 10);
-        if (httpd_query_key_value(query, "tail", param, sizeof(param)) == ESP_OK)
-            tail = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "limit", param, sizeof(param)) == ESP_OK) {
+            limit = (uint32_t)strtoul(param, NULL, 10); had_range = true;
+        }
+        if (httpd_query_key_value(query, "tail", param, sizeof(param)) == ESP_OK) {
+            tail = (uint32_t)strtoul(param, NULL, 10); had_range = true;
+        }
+        if (httpd_query_key_value(query, "days", param, sizeof(param)) == ESP_OK) {
+            days = (uint32_t)strtoul(param, NULL, 10); had_range = true;
+        }
+    }
+
+    /* Cap so a client can't pull the whole archive in one request; default to the
+     * latest 30 when no range/window is given (the user narrows with
+     * tail=/since=/limit=/days=). */
+    const uint32_t kApiDefault = 30, kApiMax = 200;
+    if (!had_range) tail = kApiDefault;
+    if (limit == 0 || limit > kApiMax) limit = kApiMax;
+
+    /* days= -> wall-clock window (only meaningful once the SNTP clock is set). */
+    if (days > 0) {
+        time_t nowt = time(NULL);
+        if (nowt > 1600000000) since_ts = (uint32_t)nowt - days * 86400u;
     }
 
     if (tail > 0 && msgstore_ready(store)) {
@@ -1097,7 +1117,7 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
         uint32_t latest = msgstore_get_latest_index(store);
         since_id = (latest + 1 > tail) ? (latest + 1 - tail) : 0;
         want_epoch = 0;
-        if (limit == 0 || limit < tail) limit = tail;
+        if (limit < tail) limit = tail;
     }
 
     const size_t buffer_size = 3072;
@@ -1115,6 +1135,7 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
             .call_filter = call[0] ? call : NULL,
             .kind_filter = kind,
             .limit = limit,
+            .since_ts = since_ts,
         };
         len = msgstore_build_json(store, buffer, buffer_size, &q);
     } else {

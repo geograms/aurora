@@ -18,6 +18,7 @@ import 'package:ble_peripheral/ble_peripheral.dart' as bp;
 import 'package:bluez/bluez.dart';
 import 'package:dbus/dbus.dart' show DBusArray;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 
 import '../../profile/profile_service.dart';
 import 'ble_gatt_client.dart';
@@ -63,6 +64,7 @@ class BleService {
   CentralManager? _central;
   bool _inited = false;
   bool _advertiseSupported = true;
+  WidgetsBindingObserver? _lifecycle;
 
   // Advertising backend: on Android/iOS use the ble_peripheral package (the
   // bluetooth_low_energy PeripheralManager doesn't reliably radiate on some
@@ -195,6 +197,14 @@ class BleService {
       _central!.discovered.listen(_onDiscovered);
       _central!.stateChanged.listen((_) => _applyScan());
       _setupParcelTransport();
+      // Re-arm the scan when the app returns to the foreground: Android may stop
+      // a scan while we were paused (screen off) without notifying us, leaving
+      // _scanning true so _applyScan would never restart it. The lifecycle hook
+      // forces a fresh discovery so reception resumes.
+      try {
+        _lifecycle ??= _BleLifecycleObserver(this);
+        WidgetsBinding.instance.addObserver(_lifecycle!);
+      } catch (_) {}
     } catch (e) {
       _central = null;
       debugPrint('BleService: central unavailable: $e');
@@ -306,6 +316,18 @@ class BleService {
 
   Future<void> stopScan() async {
     if (_scanRefs > 0) _scanRefs--;
+    await _applyScan();
+  }
+
+  // Called on app resume: if we still want to scan, force a fresh discovery in
+  // case Android quietly stopped it while we were paused (our _scanning flag
+  // would otherwise stay true and _applyScan would never restart it).
+  Future<void> _reArmScan() async {
+    if (_scanRefs <= 0 || _central == null) return;
+    if (_scanning) {
+      try { await _central!.stopDiscovery(); } catch (_) {}
+      _scanning = false;
+    }
     await _applyScan();
   }
 
@@ -614,5 +636,20 @@ class BleService {
     _rotateTimer?.cancel();
     _rotateTimer = null;
     _rotateIdx = 0;
+  }
+}
+
+/// Re-arms the BLE scan when the app returns to the foreground. Android can
+/// silently stop a scan while the app is paused (screen off); this forces a
+/// fresh discovery on resume so reception recovers without a manual toggle.
+class _BleLifecycleObserver extends WidgetsBindingObserver {
+  _BleLifecycleObserver(this._svc);
+  final BleService _svc;
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // ignore: invalid_use_of_protected_member, unawaited_futures
+      _svc._reArmScan();
+    }
   }
 }

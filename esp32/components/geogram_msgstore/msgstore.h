@@ -30,7 +30,12 @@ extern "C" {
 #endif
 
 #define MSGSTORE_CALL_LEN   10   /* callsign field (incl. NUL); matches APRS store */
-#define MSGSTORE_TEXT_LEN   160  /* APRS text body cap (incl. NUL); longer truncated */
+#define MSGSTORE_TEXT_LEN   156  /* APRS text body cap (incl. NUL); longer truncated.
+                                  * (Was 160; trimmed by 4 to fit the record `ts`
+                                  * while keeping the on-disk record 192 bytes —
+                                  * APRS messages are <=67 chars, so no real loss.
+                                  * `ts` sits AFTER text, so records written by the
+                                  * old build still read correctly with ts==0.) */
 
 /** Message kind, derived from the APRS `to` field. */
 typedef enum {
@@ -50,6 +55,7 @@ typedef struct {
     char     from[MSGSTORE_CALL_LEN];
     char     to[MSGSTORE_CALL_LEN];
     char     text[MSGSTORE_TEXT_LEN];
+    uint32_t ts;              /* wall-clock epoch when stored, 0 if clock unsynced */
 } msgstore_query_rec_t;
 
 /** Query parameters. */
@@ -58,6 +64,9 @@ typedef struct {
     const char *call_filter;  /* NULL/"" = any; matches `from` OR `to` (case-insensitive, SSID-stripped) */
     int         kind_filter;  /* -1 = any; else a msgstore_kind_t value */
     uint32_t    limit;        /* max records to emit (0 = a sensible default) */
+    uint32_t    since_ts;     /* 0 = any; else only records with ts >= since_ts
+                               * (records with ts==0 — stored before the clock
+                               * synced — are excluded when since_ts > 0) */
 } msgstore_query_t;
 
 /** Store statistics. */

@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -605,10 +606,14 @@ static void start_scan(void)
 
 /* ---- adv/scan cycle timer ----------------------------------------------- */
 
+static void mail_pump(void);
+
 static void cycle_timer_cb(void *arg)
 {
     (void)arg;
     if (!s_active) return;
+
+    mail_pump();   /* pace out any pending ?MAIL backlog as ring slots free up */
 
     /* NimBLE can scan while a connection is active (just not while
      * advertising).  Always cycle so device count stays fresh. */
@@ -1146,36 +1151,101 @@ static bool call_ci_eq(const char *a, const char *b) {
     return *a == *b;
 }
 
-/* msgstore emit callback for a ?MAIL query: broadcast each message addressed to
- * the asking callsign back over BLE as a 1:1 frame from the original sender. */
-typedef struct { const char *call; int sent; } mail_ctx_t;
+/* ---- ?MAIL store-and-forward delivery (windowed, capped, paced) ---------- */
+/* A ?MAIL request carries the look-back window in DAYS in its text field (plus a
+ * nonce). We deliver only messages stored within that window, newest-first, up to
+ * MAIL_CAP, and PACE them: dumping a whole backlog into the 16-slot broadcast ring
+ * at once makes the chunks evict each other so nothing arrives. The pending set is
+ * drained a few at a time by the adv/scan cycle timer, keeping the ring healthy. */
+#define MAIL_CAP              30    /* most-recent messages delivered per pull */
+#define MAIL_DEFAULT_DAYS     7     /* window if the request omits/!parses days */
+#define MAIL_MAX_DAYS         3650
+#define MAIL_SCAN_BACK        400u  /* indices to scan back (newest within window) */
+#define MAIL_INFLIGHT_CHUNKS  9     /* pump tops up while live high-prio chunks < this */
+
+typedef struct { char from[MSGSTORE_CALL_LEN]; char text[MSGSTORE_TEXT_LEN]; } mail_item_t;
+static mail_item_t s_mailq[MAIL_CAP];
+static int  s_mailq_n;                       /* queued */
+static int  s_mailq_sent;                    /* delivered so far */
+static char s_mail_to[MSGSTORE_CALL_LEN];    /* the asking callsign */
+
+/* Collector: keep the most-recent MAIL_CAP matching records in a ring. */
+typedef struct { mail_item_t ring[MAIL_CAP]; int count; int head; const char *call; } mail_collect_t;
 static bool mail_emit(const msgstore_query_rec_t *r, void *vctx) {
-    mail_ctx_t *c = (mail_ctx_t *)vctx;
-    if (r->kind == MSGSTORE_KIND_MESSAGE && call_ci_eq(r->to, c->call)) {
-        ble_hello_broadcast(r->from, c->call, r->text);
-        if (++c->sent >= 20) return false;   /* cap per query */
-    }
-    return true;
+    mail_collect_t *c = (mail_collect_t *)vctx;
+    if (!(r->kind == MSGSTORE_KIND_MESSAGE && call_ci_eq(r->to, c->call))) return true;
+    int idx = (c->head + c->count) % MAIL_CAP;
+    strlcpy(c->ring[idx].from, r->from, sizeof c->ring[idx].from);
+    strlcpy(c->ring[idx].text, r->text, sizeof c->ring[idx].text);
+    if (c->count < MAIL_CAP) c->count++;
+    else c->head = (c->head + 1) % MAIL_CAP;   /* full → drop the oldest kept */
+    return true;                               /* scan the whole window */
 }
 
-/* A BLE-local station broadcast "?MAIL <call>": it is pulling mail held for it.
- * Make sure it is in our APRS-IS g/ filter, then deliver the messages we have
- * archived for it (most recent) back over BLE. */
-static void handle_mail(const char *from) {
+/* Count live high-priority chunks currently in the broadcast ring (messages +
+ * ?IGATE). The pump only adds more while this is below MAIL_INFLIGHT_CHUNKS. */
+static int bch_live_highprio_chunks(void) {
+    uint32_t t = now_sec();
+    int n = 0;
+    for (int i = 0; i < BCH_RING; i++)
+        if (s_bch[i].expire > t && s_bch[i].prio == BCH_PRIO_HIGH) n++;
+    return n;
+}
+
+/* Drain a few pending mail messages into the broadcast ring (called from the
+ * cycle timer). Newest-first delivery is chronological because the queue is
+ * filled oldest→newest and we send from the front. */
+static void mail_pump(void) {
+    while (s_mailq_sent < s_mailq_n &&
+           bch_live_highprio_chunks() < MAIL_INFLIGHT_CHUNKS) {
+        mail_item_t *m = &s_mailq[s_mailq_sent++];
+        ble_hello_broadcast(m->from, s_mail_to, m->text);
+    }
+}
+
+/* A BLE-local station broadcast "?MAIL <days> <nonce>": it is pulling mail held
+ * for it. Register it in our g/ filter, then (re)build a pending set of the
+ * newest messages within the requested day-window and let the pump deliver them.
+ * A re-?MAIL while a set is still draining just keeps draining (no reset), so the
+ * pacing makes progress instead of restarting from the oldest each cycle. */
+static void handle_mail(const char *from, const char *text) {
     if (!from[0] || strcmp(from, s_callsign) == 0) return;
     heard_add(from, (int)strlen(from));      /* keep it in the g/ filter */
     if (!s_msgstore) return;
-    uint32_t latest = msgstore_get_latest_index(s_msgstore);
-    msgstore_query_t q = {
-        .since_index = latest > 200 ? latest - 200 : 0,
-        .call_filter = from,
-        .kind_filter = MSGSTORE_KIND_MESSAGE,
-        .limit = 100,
-    };
-    mail_ctx_t mc = { .call = from, .sent = 0 };
-    uint32_t next; bool more;
-    msgstore_query(s_msgstore, &q, mail_emit, &mc, &next, &more);
-    ESP_LOGI(TAG, "?MAIL %s -> delivered %d message(s)", from, mc.sent);
+
+    bool draining = (s_mailq_sent < s_mailq_n) && call_ci_eq(s_mail_to, from);
+    if (!draining) {
+        int days = text ? atoi(text) : 0;    /* leading integer = look-back days */
+        if (days <= 0) days = MAIL_DEFAULT_DAYS;
+        if (days > MAIL_MAX_DAYS) days = MAIL_MAX_DAYS;
+
+        /* Wall-clock window when the clock is synced; otherwise fall back to the
+         * most-recent records by index (the iGate can't date them — e.g. fresh
+         * boot before SNTP — so it just hands back the latest, capped). */
+        time_t nowt = time(NULL);
+        uint32_t since_ts = (nowt > 1600000000)
+            ? (uint32_t)nowt - (uint32_t)days * 86400u : 0;
+
+        uint32_t latest = msgstore_get_latest_index(s_msgstore);
+        msgstore_query_t q = {
+            .since_index = latest > MAIL_SCAN_BACK ? latest - MAIL_SCAN_BACK : 0,
+            .call_filter = from,
+            .kind_filter = MSGSTORE_KIND_MESSAGE,
+            .limit = MAIL_SCAN_BACK,
+            .since_ts = since_ts,
+        };
+        mail_collect_t col = { .count = 0, .head = 0, .call = from };
+        uint32_t next; bool more;
+        msgstore_query(s_msgstore, &q, mail_emit, &col, &next, &more);
+
+        for (int i = 0; i < col.count; i++)
+            s_mailq[i] = col.ring[(col.head + i) % MAIL_CAP];
+        s_mailq_n = col.count;
+        s_mailq_sent = 0;
+        strlcpy(s_mail_to, from, sizeof s_mail_to);
+        ESP_LOGI(TAG, "?MAIL %s days=%d -> %d msg in window (paced)", from, days, s_mailq_n);
+    }
+    mail_pump();
 }
 
 /* Decode a compact Aurora APRS payload `<from>\x1f<to>\x1f<text>` (the bytes
@@ -1214,7 +1284,7 @@ static bool aprs_decode(const uint8_t *payload, int len, int rssi)
     /* Store-and-forward control frames (suppress chat/relay):
      *  ?MAIL  = a BLE-local station pulling mail we hold for it.
      *  ?IGATE = another iGate announcing itself — nothing to do (we are one). */
-    if (strcmp(to, "?MAIL") == 0)  { heard_add(from, (int)strlen(from)); handle_mail(from); return true; }
+    if (strcmp(to, "?MAIL") == 0)  { heard_add(from, (int)strlen(from)); handle_mail(from, text); return true; }
     if (strcmp(to, "?IGATE") == 0) { return true; }
 
     if (!s_aprs_cb) return false;

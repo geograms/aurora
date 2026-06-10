@@ -76,20 +76,45 @@ static const char *TAG = "ble_hello";
 #define APRS_MFG_MAX        (2 + ADV_PAYLOAD_CAP + CONT_PAYLOAD_CAP)  /* 44 */
 
 /* Broadcast-parcel chunking (the <=300B connectionless transport). A message is
- * split into chunks; each chunk = a primary advert (subtype 0x50) + an optional
- * scan-response continuation (subtype 0x51), grouped by a 1-byte msg id with a
- * chunk index/total so every scanner in range reassembles it. See
- * lib/connections/bluetooth/ble_reassembler.dart (BleBroadcastReassembler) for
- * the matching receiver. */
+ * split into chunks; each chunk = a primary advert (subtype 0x50) grouped by a
+ * 1-byte msg id with a chunk index/total so every scanner in range reassembles
+ * it. See lib/connections/bluetooth/ble_reassembler.dart (BleBroadcastReassembler)
+ * for the matching receiver.
+ *
+ * IMPORTANT: we send each chunk as its own PRIMARY advert (<=12B payload) and do
+ * NOT pack the overflow into a 0x51 scan-response continuation. The primary and
+ * its scan response both carry company id 0xFFFF, and Android's ScanRecord keeps
+ * only ONE manufacturer-data entry per company id (last wins), so the Aurora app
+ * would receive only the continuation (an orphan, dropped) or only the primary
+ * (never completes) — a frame needing a continuation (e.g. the 13-byte
+ * "<call>\x1f?IGATE" beacon) would never reassemble on a phone. Multiple bare
+ * primaries arrive as separate adverts (one 0xFFFF entry each), so they survive
+ * the collapse and reassemble on both BlueZ and Android. The receiver still
+ * accepts 0x51 continuations for backward compatibility. */
 #define BCAST_PRIMARY       0x50        /* 'P' — chunk primary (ADV) */
-#define BCAST_CONT          0x51        /* 'Q' — chunk continuation (SCAN_RSP) */
+#define BCAST_CONT          0x51        /* 'Q' — chunk continuation (SCAN_RSP, receive-only) */
 #define BCH_PRI_HDR         6           /* marker,subtype,msgid,idx,total,flags (after company id) */
 #define BCH_ADV_PAYLOAD     (ADV_MFG_CAP - 2 - BCH_PRI_HDR)  /* 12 */
 #define BCH_CONT_HDR        4           /* marker,subtype,msgid,idx (after company id) */
-#define BCH_CONT_PAYLOAD    22          /* continuation payload bytes per chunk */
-#define BCH_CHUNK_PAYLOAD   (BCH_ADV_PAYLOAD + BCH_CONT_PAYLOAD)  /* 34 */
+#define BCH_CONT_PAYLOAD    22          /* continuation payload bytes per chunk (receive-only) */
+/* One chunk == one primary advert: no scan-response continuation on transmit
+ * (see the company-id collapse note above). */
+#define BCH_CHUNK_PAYLOAD   BCH_ADV_PAYLOAD  /* 12 */
 #define BCAST_MAX           300         /* size router threshold: <= here = broadcast */
 #define BCH_RING            16          /* chunks queued for broadcast at once */
+/* Per-chunk air time + ring priority. An iGate in a busy area relays a flood of
+ * third-party position beacons; without priority those one-shot floods evict the
+ * rare, important message chunks (?MAIL replies, 1:1 mail, ?IGATE) from the ring
+ * before a phone collects every chunk — so messages never arrive. Messages are
+ * queued at high priority (never evicted to make room for a low-priority position
+ * relay) and air a bit longer; positions are low priority and short-lived (they
+ * are frequent, so a missed one is re-sent moments later). BCH_TTL_MSG stays
+ * under the receiver's reassembly-dedup window so a retained message is not
+ * re-delivered. */
+#define BCH_TTL_POS         8           /* low-prio: position / area relays */
+#define BCH_TTL_MSG         25          /* high-prio: messages, ?MAIL, ?IGATE */
+#define BCH_PRIO_LOW        0
+#define BCH_PRIO_HIGH       1
 #define BRX_SLOTS           4           /* concurrent (addr,msgid) reassemblies */
 #define BRX_MAX_CHUNKS      16          /* max chunks per reassembled message */
 #define BRX_WINDOW_SEC      4           /* drop a partial with no new chunk this long */
@@ -353,6 +378,7 @@ typedef struct {
     uint8_t  adv_len;
     uint8_t  rsp[2 + BCH_CONT_HDR + BCH_CONT_PAYLOAD]; /* continuation mfg (0x51), 0 = none */
     uint8_t  rsp_len;
+    uint8_t  prio;                                     /* BCH_PRIO_LOW/HIGH */
     uint32_t expire;                                   /* 0 = empty slot */
 } bch_slot_t;
 static bch_slot_t s_bch[BCH_RING];
@@ -362,7 +388,8 @@ static uint8_t    s_tx_msgid;
 /* Split [payload] (<=BCAST_MAX) into broadcast-parcel chunks and queue them for
  * rebroadcast. One msg id groups the chunks; each chunk carries idx/total so
  * any scanner reassembles. Chunks air via the rotation for BCH TTL. */
-static void relay_enqueue_broadcast(const uint8_t *payload, int len)
+static void relay_enqueue_broadcast(const uint8_t *payload, int len,
+                                    uint8_t prio, uint32_t ttl_sec)
 {
     if (len <= 0) return;
     if (len > BCAST_MAX) len = BCAST_MAX;
@@ -377,14 +404,24 @@ static void relay_enqueue_broadcast(const uint8_t *payload, int len)
         int padv = chunk > BCH_ADV_PAYLOAD ? BCH_ADV_PAYLOAD : chunk;
         int pcont = chunk - padv;   /* >0 → this chunk has a continuation */
 
-        /* find a free/expired slot (evict soonest-to-lapse if all busy) */
+        /* Pick a slot: prefer a free/expired one; otherwise evict the
+         * soonest-to-lapse, but NEVER evict a still-live high-priority slot to
+         * make room for a low-priority (position) relay — that flood would
+         * otherwise starve message delivery. A high-priority enqueue may evict a
+         * live high-priority slot (soonest-to-lapse) when the ring is saturated. */
         int slot = -1;
         for (int i = 0; i < BCH_RING; i++)
             if (s_bch[i].expire == 0 || s_bch[i].expire <= t) { slot = i; break; }
         if (slot < 0) {
-            slot = 0;
-            for (int i = 1; i < BCH_RING; i++)
-                if (s_bch[i].expire < s_bch[slot].expire) slot = i;
+            for (int i = 0; i < BCH_RING; i++) {   /* among evictable slots... */
+                if (s_bch[i].prio <= prio &&        /* never bump a higher prio */
+                    (slot < 0 || s_bch[i].expire < s_bch[slot].expire))
+                    slot = i;
+            }
+            if (slot < 0) {        /* all slots outrank this one — drop it */
+                ESP_LOGW(TAG, "broadcast ring full (prio %u): dropped %d B", prio, len);
+                return;
+            }
         }
         bch_slot_t *s = &s_bch[slot];
 
@@ -406,10 +443,11 @@ static void relay_enqueue_broadcast(const uint8_t *payload, int len)
         } else {
             s->rsp_len = 0;
         }
-        s->expire = t + RELAY_TTL_SEC;
+        s->prio = prio;
+        s->expire = t + ttl_sec;
         off += chunk;
     }
-    ESP_LOGI(TAG, "broadcast msg %u: %d bytes in %d chunk(s)", msgid, len, total);
+    ESP_LOGI(TAG, "broadcast msg %u: %d bytes in %d chunk(s) prio %u", msgid, len, total, prio);
 }
 
 /* Pick the next live broadcast chunk (round-robin), reaping expired slots;
@@ -939,7 +977,12 @@ bool ble_hello_relay_aprs(const char *from, const char *to, const char *text)
     /* Size router: small text broadcasts to everyone in range (chunked adverts);
      * large payloads use GATT point-to-point (only if a peer is connected). */
     if (n <= BCAST_MAX) {
-        relay_enqueue_broadcast(buf, n);
+        /* Position/area relays are a low-priority flood; 1:1 messages to a heard
+         * station are the payload that must reliably reach the phone. */
+        bool is_pos = (to[0] == '!' && to[1] == 0);
+        relay_enqueue_broadcast(buf, n,
+                                is_pos ? BCH_PRIO_LOW : BCH_PRIO_HIGH,
+                                is_pos ? BCH_TTL_POS : BCH_TTL_MSG);
         ESP_LOGI(TAG, "iGate broadcast -> BLE: %s -> %s (%d B)",
                  from, to[0] ? to : "(geo)", n);
     } else if (gatt_client_connected()) {
@@ -1081,7 +1124,7 @@ bool ble_hello_broadcast(const char *from, const char *to, const char *text)
     if (n < (int)sizeof(buf)) buf[n++] = 0x1F;
     for (const char *p = text; *p && n < (int)sizeof(buf); p++) buf[n++] = (uint8_t)*p;
     if (n <= 2) return false;
-    if (n <= BCAST_MAX) relay_enqueue_broadcast(buf, n);
+    if (n <= BCAST_MAX) relay_enqueue_broadcast(buf, n, BCH_PRIO_HIGH, BCH_TTL_MSG);
     else if (gatt_client_connected()) gatt_send_parcel(s_conn_handle, buf, n);
     else return false;
     uint32_t ch = fnv1a(buf, n);
@@ -1274,7 +1317,14 @@ static void deliver_broadcast(const uint8_t *payload, int len, int rssi)
     uint32_t ch = fnv1a(payload, len);
     if (!relay_seen(ch)) {              /* flood: rebroadcast the whole message once */
         relay_remember(ch);
-        relay_enqueue_broadcast(payload, len);
+        /* Classify by the `to` field (after the first 0x1f): a lone "!" is a
+         * position relay (low priority); anything else is message/chat traffic. */
+        int sep = 0; while (sep < len && payload[sep] != 0x1F) sep++;
+        bool is_pos = (sep + 2 < len && payload[sep + 1] == '!' &&
+                       payload[sep + 2] == 0x1F);
+        relay_enqueue_broadcast(payload, len,
+                                is_pos ? BCH_PRIO_LOW : BCH_PRIO_HIGH,
+                                is_pos ? BCH_TTL_POS : BCH_TTL_MSG);
     }
 }
 

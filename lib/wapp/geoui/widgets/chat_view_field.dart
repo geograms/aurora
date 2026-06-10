@@ -68,6 +68,15 @@ class _ChatViewFieldState extends State<ChatViewField> {
   /// opaque (the wapp sets `mid`/`parent`); the host only renders the relation.
   final Map<String, Map<String, dynamic>> _byMid = {};
 
+  /// Number of direct replies each message id has (for the "N replies" hint and
+  /// to know which messages are thread-openable). Rebuilt each frame.
+  final Map<String, int> _replyCount = {};
+
+  /// When non-null, the list shows only one thread (its root id + every reply in
+  /// it) — a focused "4chan-style" view. Tapping a threaded message opens it;
+  /// the back arrow returns to the full conversation.
+  String? _threadRootMid;
+
   /// The message currently being replied to (null = composing a new message).
   Map<String, dynamic>? _replyingTo;
 
@@ -108,21 +117,54 @@ class _ChatViewFieldState extends State<ChatViewField> {
   void _send() {
     final text = _input.text.trim();
     if (text.isEmpty) return;
-    // When replying, prepend the compact "+<mid> " marker the wapp uses to
-    // thread the message under its parent (across APRS-IS and BLE).
-    final reply = _replyingTo;
-    final mid = (reply?['mid'] ?? '').toString();
-    final out = (reply != null && mid.isNotEmpty) ? '+$mid $text' : text;
+    // Reply target: an explicit pick, else — inside a focused thread — the
+    // thread itself, so a plain post stays in the thread (4chan style).
+    var target = (_replyingTo?['mid'] ?? '').toString();
+    if (target.isEmpty && _threadRootMid != null) target = _threadRootMid!;
+    // The "+<mid> " marker is what the wapp uses to thread (across APRS-IS/BLE).
+    final out = target.isNotEmpty ? '+$target $text' : text;
     widget.onSend(out);
     _input.clear();
     if (_replyingTo != null) setState(() => _replyingTo = null);
-    // Sending always jumps to the latest so the user sees their own message.
     _atBottom = true;
   }
 
   void _startReply(Map<String, dynamic> m) {
     if ((m['mid'] ?? '').toString().isEmpty) return; // not threadable
     setState(() => _replyingTo = m);
+  }
+
+  /// Walk up the parent chain to the visible root of a message's thread.
+  String _rootMid(Map<String, dynamic> m) {
+    var cur = m;
+    final seen = <String>{};
+    while (true) {
+      final p = (cur['parent'] ?? '').toString();
+      if (p.isEmpty) break;
+      final parent = _byMid[p];
+      if (parent == null) break; // parent not loaded → cur is the visible root
+      final cmid = (cur['mid'] ?? '').toString();
+      if (cmid.isNotEmpty) seen.add(cmid);
+      final pmid = (parent['mid'] ?? '').toString();
+      if (pmid.isEmpty || seen.contains(pmid)) break; // cycle guard
+      cur = parent;
+    }
+    return (cur['mid'] ?? '').toString();
+  }
+
+  /// A message participates in a thread if it replies to something or has replies.
+  bool _isThreaded(Map<String, dynamic> m) {
+    final mid = (m['mid'] ?? '').toString();
+    return (m['parent'] ?? '').toString().isNotEmpty ||
+        (mid.isNotEmpty && (_replyCount[mid] ?? 0) > 0);
+  }
+
+  void _openThread(Map<String, dynamic> m) {
+    final root = _rootMid(m);
+    if (root.isEmpty) return;
+    setState(() => _threadRootMid = root);
+    _atBottom = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoScroll());
   }
 
   /// One-line snippet of a message for quoted-reply display.
@@ -209,17 +251,47 @@ class _ChatViewFieldState extends State<ChatViewField> {
   }
 
   Widget _messageList(ColorScheme cs, List<Map<String, dynamic>> messages) {
+    // Rebuild the id->message index + per-message reply counts (threading).
+    _byMid.clear();
+    _replyCount.clear();
+    for (final m in messages) {
+      final mid = (m['mid'] ?? '').toString();
+      if (mid.isNotEmpty) _byMid[mid] = m;
+    }
+    for (final m in messages) {
+      final p = (m['parent'] ?? '').toString();
+      if (p.isNotEmpty) _replyCount[p] = (_replyCount[p] ?? 0) + 1;
+    }
+
+    // Focused thread view: only the tapped thread (root + every reply in it).
+    final root = _threadRootMid;
+    if (root != null) {
+      final members = [for (final m in messages) if (_rootMid(m) == root) m];
+      if (members.isEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() => _threadRootMid = null);
+        });
+      }
+      return Column(
+        children: [
+          _threadHeader(cs, members.length),
+          Expanded(
+            child: ListView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+              itemCount: members.length,
+              itemBuilder: (context, i) => _bubble(members[i], inThread: true),
+            ),
+          ),
+        ],
+      );
+    }
+
     if (messages.isEmpty) {
       return Center(
         child: Text('No messages yet',
             style: TextStyle(color: Colors.white.withAlpha(90), fontSize: 13)),
       );
-    }
-    // Rebuild the id->message index for quoted-reply lookups.
-    _byMid.clear();
-    for (final m in messages) {
-      final mid = (m['mid'] ?? '').toString();
-      if (mid.isNotEmpty) _byMid[mid] = m;
     }
     return ListView.builder(
       controller: _scroll,
@@ -229,7 +301,35 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
-  Widget _bubble(Map<String, dynamic> m) {
+  /// Header shown above a focused thread, with a back arrow to the full chat.
+  Widget _threadHeader(ColorScheme cs, int count) {
+    return InkWell(
+      onTap: () => setState(() => _threadRootMid = null),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(8, 8, 12, 8),
+        decoration: BoxDecoration(
+          color: cs.primary.withAlpha(22),
+          border: Border(bottom: BorderSide(color: cs.outlineVariant.withAlpha(60))),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.arrow_back, size: 18, color: cs.primary),
+            const SizedBox(width: 8),
+            Icon(Icons.forum_outlined, size: 15, color: cs.primary),
+            const SizedBox(width: 6),
+            Text('Thread · $count message${count == 1 ? '' : 's'}',
+                style: TextStyle(
+                    color: cs.primary, fontSize: 13, fontWeight: FontWeight.w600)),
+            const Spacer(),
+            Text('Back to chat',
+                style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 11)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _bubble(Map<String, dynamic> m, {bool inThread = false}) {
     final outgoing = (m['dir']?.toString() ?? 'in') == 'out';
     final from = m['from']?.toString() ?? '';
     final text = m['text']?.toString() ?? '';
@@ -237,6 +337,10 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final via = m['via']?.toString() ?? '';
     final parent = (m['parent'] ?? '').toString();
     final threadable = (m['mid'] ?? '').toString().isNotEmpty;
+    final mid = (m['mid'] ?? '').toString();
+    final replies = mid.isEmpty ? 0 : (_replyCount[mid] ?? 0);
+    // Outside a focused thread, a message that's part of a thread opens it on tap.
+    final canOpen = !inThread && _isThreaded(m);
     final bubble = Container(
       margin: const EdgeInsets.symmetric(vertical: 3),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -312,14 +416,43 @@ class _ChatViewFieldState extends State<ChatViewField> {
                   ),
                 ),
               ],
+              // "N replies" opens the focused thread (only in the full chat).
+              if (replies > 0 && !inThread) ...[
+                const SizedBox(width: 10),
+                InkWell(
+                  onTap: () => _openThread(m),
+                  borderRadius: BorderRadius.circular(4),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.forum_outlined,
+                          size: 12, color: const Color(0xFF7FB0E0)),
+                      const SizedBox(width: 3),
+                      Text('$replies ${replies == 1 ? 'reply' : 'replies'}',
+                          style: const TextStyle(
+                              color: Color(0xFF7FB0E0),
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600)),
+                    ]),
+                  ),
+                ),
+              ],
             ],
           ),
         ],
       ),
     );
+    final align = outgoing ? Alignment.centerRight : Alignment.centerLeft;
+    // Tapping a threaded bubble (in the full chat) opens its focused thread; the
+    // inner Reply / "N replies" / meta taps still take precedence in their areas.
+    if (!canOpen) return Align(alignment: align, child: bubble);
     return Align(
-      alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
-      child: bubble,
+      alignment: align,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _openThread(m),
+        child: bubble,
+      ),
     );
   }
 

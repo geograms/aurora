@@ -1846,14 +1846,22 @@ extern "C" void app_main(void)
     // T-Dongle-S3: main loop drives display + polls BLE device count
     {
         uint32_t last_count_ms = 0;
+        uint32_t last_igate_ms = 0;
         while (1) {
             tdongle_ui_update();
 
-            // Update device count on display every ~5 seconds
             uint32_t now_ms = esp_log_timestamp();
+            // Update device count on display every ~5 seconds
             if (now_ms - last_count_ms > 5000) {
                 tdongle_ui_set_device_count(ble_hello_device_count());
                 last_count_ms = now_ms;
+            }
+            // Announce ourselves as an iGate over BLE every ~2 min while online,
+            // so BLE-local stations know to pull their mail (?MAIL).
+            if (now_ms - last_igate_ms > 120000) {
+                last_igate_ms = now_ms;
+                if (aprsis_is_connected())
+                    ble_hello_broadcast(nostr_keys_get_callsign(), "?IGATE", "");
             }
 
             vTaskDelay(pdMS_TO_TICKS(5));

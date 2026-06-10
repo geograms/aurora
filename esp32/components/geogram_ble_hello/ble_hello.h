@@ -76,6 +76,13 @@ void ble_hello_set_msgstore(msgstore_t *st);
 void ble_hello_set_position(double lat, double lon);
 
 /**
+ * @brief Force-broadcast a compact `<from>\x1f<to>\x1f<text>` frame over BLE,
+ *        bypassing the relay-seen de-dup (used for ?IGATE beacons and ?MAIL
+ *        store-and-forward replies). Returns false if BLE isn't active.
+ */
+bool ble_hello_broadcast(const char *from, const char *to, const char *text);
+
+/**
  * @brief Copy the callsigns heard over BLE in the last [max_age_sec] seconds
  *        (presence beacons + APRS frame senders) into [calls].
  *

@@ -34,8 +34,8 @@ static const char *TAG = "aprsis";
 #define APRSIS_HOST         "rotate.aprs2.net"
 #define APRSIS_PORT         14580
 #define APRSIS_RADIUS_KM    50          /* "nearby" radius when coords defined */
-#define HEARD_AGE_SEC       1800        /* heard within 30 min count as local  */
-#define FILTER_CALLS_MAX    8           /* heard calls put in the g/ filter     */
+#define HEARD_AGE_SEC       31536000    /* keep heard stations ~1 year (store-fwd) */
+#define FILTER_CALLS_MAX    24          /* heard calls put in the g/ filter     */
 #define FILTER_CHECK_SEC    30          /* re-evaluate filter this often        */
 #define RECONNECT_DELAY_MS  8000
 #define UPLINK_Q_LEN        8

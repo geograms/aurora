@@ -58,7 +58,7 @@ static const char *TAG = "ble_hello";
 /* Heard-callsign registry: every station whose callsign we saw over BLE
  * (presence beacon or APRS frame `from`). The APRS-IS iGate reads this to
  * build its message filter (only pull traffic addressed to local stations). */
-#define HEARD_MAX           24          /* distinct callsigns remembered */
+#define HEARD_MAX           100         /* distinct callsigns remembered (store-fwd) */
 
 /* Longer APRS messages over BLE — same technique as geogram_ble_aprs
  * (BlueAPRS): a compact frame that overflows the primary legacy advert carries
@@ -1066,6 +1066,72 @@ static bool ping_handle(const char *from, const char *to, const char *text, int 
     return false;
 }
 
+/* Force-broadcast a compact frame over BLE WITHOUT the relay-seen gate (used
+ * for ?IGATE beacons and ?MAIL replies, which must go out even if the content
+ * was seen before). Still marks the content seen/shown afterwards so our own
+ * re-scan doesn't re-ingest it. */
+bool ble_hello_broadcast(const char *from, const char *to, const char *text)
+{
+    if (!s_active || !from || !to || !text) return false;
+    uint8_t buf[BCAST_MAX];
+    int n = 0;
+    for (const char *p = from; *p && n < (int)sizeof(buf); p++) buf[n++] = (uint8_t)*p;
+    if (n < (int)sizeof(buf)) buf[n++] = 0x1F;
+    for (const char *p = to; *p && n < (int)sizeof(buf); p++) buf[n++] = (uint8_t)*p;
+    if (n < (int)sizeof(buf)) buf[n++] = 0x1F;
+    for (const char *p = text; *p && n < (int)sizeof(buf); p++) buf[n++] = (uint8_t)*p;
+    if (n <= 2) return false;
+    if (n <= BCAST_MAX) relay_enqueue_broadcast(buf, n);
+    else if (gatt_client_connected()) gatt_send_parcel(s_conn_handle, buf, n);
+    else return false;
+    uint32_t ch = fnv1a(buf, n);
+    relay_remember(ch); shown_mark(ch);   /* suppress re-ingest of our own send */
+    return true;
+}
+
+/* Case-insensitive callsign compare (no SSID handling). */
+static bool call_ci_eq(const char *a, const char *b) {
+    while (*a && *b) {
+        char ca = (*a >= 'a' && *a <= 'z') ? *a - 32 : *a;
+        char cb = (*b >= 'a' && *b <= 'z') ? *b - 32 : *b;
+        if (ca != cb) return false;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+/* msgstore emit callback for a ?MAIL query: broadcast each message addressed to
+ * the asking callsign back over BLE as a 1:1 frame from the original sender. */
+typedef struct { const char *call; int sent; } mail_ctx_t;
+static bool mail_emit(const msgstore_query_rec_t *r, void *vctx) {
+    mail_ctx_t *c = (mail_ctx_t *)vctx;
+    if (r->kind == MSGSTORE_KIND_MESSAGE && call_ci_eq(r->to, c->call)) {
+        ble_hello_broadcast(r->from, c->call, r->text);
+        if (++c->sent >= 20) return false;   /* cap per query */
+    }
+    return true;
+}
+
+/* A BLE-local station broadcast "?MAIL <call>": it is pulling mail held for it.
+ * Make sure it is in our APRS-IS g/ filter, then deliver the messages we have
+ * archived for it (most recent) back over BLE. */
+static void handle_mail(const char *from) {
+    if (!from[0] || strcmp(from, s_callsign) == 0) return;
+    heard_add(from, (int)strlen(from));      /* keep it in the g/ filter */
+    if (!s_msgstore) return;
+    uint32_t latest = msgstore_get_latest_index(s_msgstore);
+    msgstore_query_t q = {
+        .since_index = latest > 200 ? latest - 200 : 0,
+        .call_filter = from,
+        .kind_filter = MSGSTORE_KIND_MESSAGE,
+        .limit = 100,
+    };
+    mail_ctx_t mc = { .call = from, .sent = 0 };
+    uint32_t next; bool more;
+    msgstore_query(s_msgstore, &q, mail_emit, &mc, &next, &more);
+    ESP_LOGI(TAG, "?MAIL %s -> delivered %d message(s)", from, mc.sent);
+}
+
 /* Decode a compact Aurora APRS payload `<from>\x1f<to>\x1f<text>` (the bytes
  * after the 2-byte company id) and deliver it via the registered callback.
  * Returns true when the frame was a ping/pong control frame (handled here —
@@ -1098,6 +1164,12 @@ static bool aprs_decode(const uint8_t *payload, int len, int rssi)
     /* Ping reach-test control frames: handle + suppress chat/relay. */
     if (strcmp(to, PING_TO) == 0 || strcmp(to, PONG_TO) == 0)
         return ping_handle(from, to, text, rssi);
+
+    /* Store-and-forward control frames (suppress chat/relay):
+     *  ?MAIL  = a BLE-local station pulling mail we hold for it.
+     *  ?IGATE = another iGate announcing itself — nothing to do (we are one). */
+    if (strcmp(to, "?MAIL") == 0)  { heard_add(from, (int)strlen(from)); handle_mail(from); return true; }
+    if (strcmp(to, "?IGATE") == 0) { return true; }
 
     if (!s_aprs_cb) return false;
 

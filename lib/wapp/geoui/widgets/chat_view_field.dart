@@ -134,6 +134,93 @@ class _ChatViewFieldState extends State<ChatViewField> {
     setState(() => _replyingTo = m);
   }
 
+  /// Toggle a like on a message. We send the opaque wire form the wapp expects
+  /// (`mid:like` / `mid:unlike`) through the same channel as a message; the
+  /// wapp transmits the vote and reports the tally back. You can only like
+  /// someone else's message (outgoing ones show the count read-only).
+  void _toggleLike(Map<String, dynamic> m) {
+    final mid = (m['mid'] ?? '').toString();
+    if (mid.isEmpty) return;
+    final liked = m['liked'] == true;
+    widget.onSend(liked ? '$mid:unlike' : '$mid:like');
+  }
+
+  /// Signature verdict badge (APRX). verified=green, forged=red,
+  /// unverified=grey (signed but sender key unknown). Nothing for unsigned.
+  Widget _authBadge(Map<String, dynamic> m) {
+    final a = (m['auth'] ?? '').toString();
+    if (a.isEmpty) return const SizedBox.shrink();
+    final IconData icon;
+    final Color color;
+    final String label;
+    switch (a) {
+      case 'verified':
+        icon = Icons.verified_user;
+        color = const Color(0xFF4CAF82);
+        label = 'verified';
+        break;
+      case 'bad':
+        icon = Icons.gpp_bad;
+        color = const Color(0xFFE0607A);
+        label = 'forged';
+        break;
+      default: // unverified
+        icon = Icons.shield_outlined;
+        color = Colors.white.withAlpha(120);
+        label = 'unverified';
+    }
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 12, color: color),
+        const SizedBox(width: 2),
+        Text(label,
+            style: TextStyle(
+                color: color, fontSize: 9.5, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+
+  static const _likeColor = Color(0xFFE8638F);
+
+  /// Heart + like count for a message. Interactive on others' messages;
+  /// read-only (just the count) on our own. Hidden when not threadable.
+  Widget _likeButton(Map<String, dynamic> m, {bool big = false}) {
+    final mid = (m['mid'] ?? '').toString();
+    if (mid.isEmpty) return const SizedBox.shrink();
+    final outgoing = (m['dir']?.toString() ?? 'in') == 'out';
+    final liked = m['liked'] == true;
+    final count = (m['likes'] as num?)?.toInt() ?? 0;
+    // Hide entirely on our own messages with no likes yet (nothing to show).
+    if (outgoing && count == 0) return const SizedBox.shrink();
+    final color = liked ? _likeColor : Colors.white.withAlpha(140);
+    final child = Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(liked ? Icons.favorite : Icons.favorite_border,
+          size: big ? 16 : 13, color: color),
+      if (count > 0) ...[
+        const SizedBox(width: 3),
+        Text('$count',
+            style: TextStyle(
+                color: color,
+                fontSize: big ? 12.5 : 10,
+                fontWeight: FontWeight.w600)),
+      ],
+    ]);
+    if (outgoing) {
+      return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+          child: child);
+    }
+    return InkWell(
+      onTap: () => _toggleLike(m),
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+        child: child,
+      ),
+    );
+  }
+
   /// Walk up the parent chain to the visible root of a message's thread.
   String _rootMid(Map<String, dynamic> m) {
     var cur = m;
@@ -263,7 +350,8 @@ class _ChatViewFieldState extends State<ChatViewField> {
       if (p.isNotEmpty) _replyCount[p] = (_replyCount[p] ?? 0) + 1;
     }
 
-    // Focused thread view: only the tapped thread (root + every reply in it).
+    // Focused thread view: the tapped thread shown forum-style — the root
+    // message becomes a topic header and the replies stack beneath it.
     final root = _threadRootMid;
     if (root != null) {
       final members = [for (final m in messages) if (_rootMid(m) == root) m];
@@ -272,15 +360,25 @@ class _ChatViewFieldState extends State<ChatViewField> {
           if (mounted) setState(() => _threadRootMid = null);
         });
       }
+      final op = _byMid[root];
+      final replies = [for (final m in members) if ((m['mid'] ?? '') != root) m];
+      var totalLikes = 0;
+      for (final m in members) {
+        totalLikes += (m['likes'] as num?)?.toInt() ?? 0;
+      }
       return Column(
         children: [
-          _threadHeader(cs, members.length),
+          op != null
+              ? _threadTopic(cs, op, members.length, totalLikes)
+              : _threadHeader(cs, members.length),
           Expanded(
             child: ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-              itemCount: members.length,
-              itemBuilder: (context, i) => _bubble(members[i], inThread: true),
+              itemCount: op != null ? replies.length : members.length,
+              itemBuilder: (context, i) => _bubble(
+                  op != null ? replies[i] : members[i],
+                  inThread: true),
             ),
           ),
         ],
@@ -298,6 +396,106 @@ class _ChatViewFieldState extends State<ChatViewField> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       itemCount: messages.length,
       itemBuilder: (context, i) => _bubble(messages[i]),
+    );
+  }
+
+  /// Forum-style topic header: the thread's root message rendered as the topic,
+  /// with a back arrow, the original post in full, and a summary line ("N
+  /// messages" + total likes in the thread) plus a like control for the topic.
+  Widget _threadTopic(
+      ColorScheme cs, Map<String, dynamic> op, int count, int totalLikes) {
+    final from = (op['from'] ?? '').toString();
+    final text = (op['text'] ?? '').toString();
+    final time = (op['time'] ?? '').toString();
+    final via = (op['via'] ?? '').toString();
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: cs.primary.withAlpha(26),
+        border: Border(
+            bottom: BorderSide(color: cs.primary.withAlpha(90), width: 1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _threadRootMid = null),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 12, 2),
+              child: Row(children: [
+                Icon(Icons.arrow_back, size: 18, color: cs.primary),
+                const SizedBox(width: 6),
+                Text('Back to chat',
+                    style: TextStyle(
+                        color: cs.primary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  if (from.isNotEmpty)
+                    Flexible(
+                      child: Text(from,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Color(0xFF7FB0E0),
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  if (via.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    _viaChip(via),
+                  ],
+                  if (time.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Text(time,
+                        style: TextStyle(
+                            color: Colors.white.withAlpha(120), fontSize: 10)),
+                  ],
+                  _authBadge(op),
+                ]),
+                const SizedBox(height: 5),
+                Text(text,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        height: 1.25)),
+                const SizedBox(height: 9),
+                Row(children: [
+                  Icon(Icons.forum_outlined,
+                      size: 14, color: Colors.white.withAlpha(160)),
+                  const SizedBox(width: 5),
+                  Text('$count message${count == 1 ? '' : 's'}',
+                      style: TextStyle(
+                          color: Colors.white.withAlpha(180),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600)),
+                  if (totalLikes > 0) ...[
+                    const SizedBox(width: 12),
+                    Icon(Icons.favorite, size: 12, color: _likeColor),
+                    const SizedBox(width: 4),
+                    Text('$totalLikes',
+                        style: TextStyle(
+                            color: _likeColor,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600)),
+                  ],
+                  const Spacer(),
+                  _likeButton(op, big: true),
+                ]),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -357,7 +555,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (parent.isNotEmpty) _quotedParent(parent),
+          // Forum-style thread view: don't re-quote the root on every reply.
+          // Nested replies (parent != root) keep their quote for context.
+          if (parent.isNotEmpty &&
+              !(inThread && parent == _threadRootMid))
+            _quotedParent(parent),
           if (!outgoing && (from.isNotEmpty || via.isNotEmpty))
             Padding(
               padding: const EdgeInsets.only(bottom: 2),
@@ -398,6 +600,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
                         color: Colors.white.withAlpha(115), fontSize: 10),
                   ),
                 ),
+              _authBadge(m),
               if (threadable) ...[
                 const SizedBox(width: 8),
                 InkWell(
@@ -436,6 +639,10 @@ class _ChatViewFieldState extends State<ChatViewField> {
                     ]),
                   ),
                 ),
+              ],
+              if (threadable) ...[
+                const SizedBox(width: 10),
+                _likeButton(m),
               ],
             ],
           ),

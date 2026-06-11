@@ -73,6 +73,14 @@ class ConversationStore {
   /// Most-recent-first display order.
   final List<String> order = [];
 
+  /// Reaction tally per message id (mid). The wapp reports each individual
+  /// like/unlike (by an opaque actor id) and the host owns the set, so each
+  /// actor counts once. Value: `{'likers': List<String>, 'mine': bool}`. The
+  /// derived count + my-state are mirrored onto every message carrying that mid
+  /// (`likes`/`liked`) so the renderer reads simple fields. Keyed by mid so it
+  /// survives message ordering and applies across conversations sharing a mid.
+  final Map<String, Map<String, dynamic>> reactions = {};
+
   /// The conversation currently shown (set by the widget) so the store can
   /// auto-manage unread counts. Null when no conversation is open.
   String? openId;
@@ -121,12 +129,16 @@ class ConversationStore {
       // and the id it replies to. The host just stores + renders the relation.
       if ((d['mid'] ?? '').toString().isNotEmpty) 'mid': d['mid'].toString(),
       if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
+      if ((d['auth'] ?? '').toString().isNotEmpty) 'auth': d['auth'].toString(),
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     });
     if (it.messages.length > 500) {
       it.messages.removeRange(0, it.messages.length - 500);
     }
+    // A like may have arrived before this message — seed its tally now.
+    final mid = (d['mid'] ?? '').toString();
+    if (mid.isNotEmpty && reactions.containsKey(mid)) _applyReaction(mid);
     if (dir == 'in' && id != openId) it.unread++;
     _bump(id);
   }
@@ -148,9 +160,12 @@ class ConversationStore {
       if ((d['via'] ?? '').toString().isNotEmpty) 'via': d['via'].toString(),
       if ((d['mid'] ?? '').toString().isNotEmpty) 'mid': d['mid'].toString(),
       if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
+      if ((d['auth'] ?? '').toString().isNotEmpty) 'auth': d['auth'].toString(),
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     };
+    final mid = (d['mid'] ?? '').toString();
+    if (mid.isNotEmpty && reactions.containsKey(mid)) _applyReaction(mid);
     if (d['bump'] == true) _bump(id);
   }
 
@@ -158,6 +173,51 @@ class ConversationStore {
     final id = (d['id'] ?? '').toString();
     final key = (d['key'] ?? '').toString();
     items[id]?.pinned.remove(key);
+  }
+
+  /// Record a reaction (like) on a message. [d]: `{mid, from, remove?, mine?}`.
+  /// The set of `likers` is deduped, so each actor counts once however many
+  /// times they vote; `remove` retracts. `mine` marks our own vote.
+  void react(Map d) {
+    final mid = (d['mid'] ?? '').toString();
+    final from = (d['from'] ?? '').toString();
+    if (mid.isEmpty || from.isEmpty) return;
+    final remove = d['remove'] == true;
+    final mine = d['mine'] == true;
+    final r = reactions.putIfAbsent(
+        mid, () => {'likers': <String>[], 'mine': false});
+    final likers = (r['likers'] as List).cast<String>();
+    if (remove) {
+      likers.remove(from);
+      if (mine) r['mine'] = false;
+    } else {
+      if (!likers.contains(from)) likers.add(from);
+      if (mine) r['mine'] = true;
+    }
+    _applyReaction(mid);
+  }
+
+  /// Mirror a mid's tally (`likes` count + `liked` mine-flag) onto every stored
+  /// message/pinned entry carrying that mid, across all conversations.
+  void _applyReaction(String mid) {
+    final r = reactions[mid];
+    if (r == null) return;
+    final count = (r['likers'] as List).length;
+    final mine = r['mine'] == true;
+    for (final it in items.values) {
+      for (final m in it.messages) {
+        if ((m['mid'] ?? '') == mid) {
+          m['likes'] = count;
+          m['liked'] = mine;
+        }
+      }
+      for (final m in it.pinned.values) {
+        if ((m['mid'] ?? '') == mid) {
+          m['likes'] = count;
+          m['liked'] = mine;
+        }
+      }
+    }
   }
 
   void clearUnread(String id) {
@@ -182,12 +242,14 @@ class ConversationStore {
   Map<String, dynamic> toJson() => {
         'order': order,
         'items': {for (final e in items.entries) e.key: e.value.toJson()},
+        'reactions': reactions,
       };
 
   /// Replace the store's contents from a previously [toJson]-ed map.
   void loadJson(Map<String, dynamic> j) {
     items.clear();
     order.clear();
+    reactions.clear();
     final its = j['items'];
     if (its is Map) {
       its.forEach((k, v) {
@@ -207,6 +269,22 @@ class ConversationStore {
     // Defensive: any item missing from the saved order still gets shown.
     for (final k in items.keys) {
       if (!order.contains(k)) order.add(k);
+    }
+    // Restore reaction tallies and re-mirror them onto the loaded messages.
+    final rx = j['reactions'];
+    if (rx is Map) {
+      rx.forEach((k, v) {
+        if (v is Map) {
+          final likers = <String>[
+            for (final e in (v['likers'] is List ? v['likers'] as List : const []))
+              e.toString()
+          ];
+          reactions[k.toString()] = {'likers': likers, 'mine': v['mine'] == true};
+        }
+      });
+      for (final mid in reactions.keys) {
+        _applyReaction(mid);
+      }
     }
   }
 }

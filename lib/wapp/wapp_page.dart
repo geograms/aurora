@@ -931,6 +931,11 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           _convStore(field).unpin(data);
           _scheduleConvoSave(field);
           changed = true;
+        } else if (type == 'ui.convo.react') {
+          final field = data['field'] as String? ?? 'conversations';
+          _convStore(field).react(data);
+          _scheduleConvoSave(field);
+          changed = true;
         } else if (type == 'ui.convo.clear') {
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).clear(data['id'] as String?);

@@ -17,6 +17,11 @@ import '../connections/bluetooth/ble_service.dart';
 import '../services/location_service.dart';
 import '../profile/profile_service.dart';
 import 'wapp_event_broker.dart';
+import '../util/nostr_nip19.dart';
+import '../util/nostr_crypto.dart';
+import '../util/aprx_sign.dart';
+import 'package:crypto/crypto.dart' show sha256;
+import 'package:hex/hex.dart';
 
 /// State for a single hal_process_exec subprocess. Lives in
 /// [WappEngine._procs] keyed by handle. The wapp polls hal_process_poll
@@ -219,12 +224,64 @@ class WappEngine {
     return String.fromCharCodes(mem.buffer.asUint8List(ptr, len));
   }
 
+  Uint8List _readBytes(int ptr, int len) {
+    final mem = _memory!.view;
+    return Uint8List.fromList(mem.buffer.asUint8List(ptr, len));
+  }
+
   int _writeStr(int ptr, int maxLen, String s) {
     final bytes = s.codeUnits;
     final n = bytes.length < maxLen ? bytes.length : maxLen;
     final mem = _memory!.view;
     for (var i = 0; i < n; i++) mem[ptr + i] = bytes[i];
     return n;
+  }
+
+  /// The active profile's public key as base64url (no padding) of the raw 32
+  /// bytes, decoded from the stored npub. Empty if unavailable.
+  String _pubkeyBase64() {
+    final npub = ProfileService.instance.activeProfile?.npub ?? '';
+    if (npub.isEmpty) return '';
+    final hex = NostrNip19.decode(npub)?.hex;
+    if (hex == null || hex.length != 64) return '';
+    final bytes = Uint8List(32);
+    for (var i = 0; i < 32; i++) {
+      bytes[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  /// Sign [msg] with the active profile's key (APRX short-Schnorr). Returns the
+  /// base85 signature string, or '' if no key. The private key never leaves here.
+  String _signMessage(Uint8List msg) {
+    final nsec = ProfileService.instance.activeProfile?.nsec ?? '';
+    if (nsec.isEmpty) return '';
+    try {
+      final privHex = NostrCrypto.decodeNsec(nsec);
+      var d = BigInt.zero;
+      for (final b in HEX.decode(privHex)) {
+        d = (d << 8) | BigInt.from(b);
+      }
+      final m = Uint8List.fromList(sha256.convert(msg).bytes);
+      return AprxSign.b85encode(AprxSign.sign(m, d));
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// Verify a base85 signature [sigStr] on [msg] for [pubB64] (base64url x-only
+  /// pubkey, as hal_identity_pubkey emits). Returns true iff valid.
+  bool _verifyMessage(String pubB64, Uint8List msg, String sigStr) {
+    try {
+      final pad = (4 - pubB64.length % 4) % 4;
+      final pub = base64Url.decode(pubB64 + ('=' * pad));
+      final sig = AprxSign.b85decode(sigStr);
+      if (sig == null || sig.length != 48 || pub.length != 32) return false;
+      final m = Uint8List.fromList(sha256.convert(msg).bytes);
+      return AprxSign.verify(m, sig, pub);
+    } catch (_) {
+      return false;
+    }
   }
 
   // ── Load ─────────────────────────────────────────────────────────────
@@ -246,6 +303,41 @@ class WappEngine {
       (int ptr, int len) => _writeStr(
           ptr, len, ProfileService.instance.activeProfile?.callsign ?? ''),
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // The active profile's Nostr public key as base64url (no padding) of the
+    // raw 32 bytes — 43 chars, compact enough for one APRS message / a BLE
+    // advert (an npub bech32 string would be 63). A wapp publishes this so
+    // peers can map callsign -> pubkey and later send encrypted messages;
+    // base64url-decoding it yields the 32-byte key used for NIP-04/44.
+    // Empty if no profile or the npub can't be decoded.
+    final halIdentityPubkey = WasmFunction(
+      (int ptr, int len) => _writeStr(ptr, len, _pubkeyBase64()),
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Sign msg with the active profile's key; write the base85 signature string.
+    final halIdentitySign = WasmFunction(
+      (int msgPtr, int msgLen, int outPtr, int outCap) {
+        if (msgLen <= 0 || outCap <= 0) return 0;
+        final sig = _signMessage(_readBytes(msgPtr, msgLen));
+        if (sig.isEmpty) return 0;
+        return _writeStr(outPtr, outCap, sig);
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Verify a base85 signature against a base64url x-only pubkey. 1 = valid.
+    final halVerify = WasmFunction(
+      (int pubPtr, int pubLen, int msgPtr, int msgLen, int sigPtr, int sigLen) {
+        if (pubLen <= 0 || msgLen <= 0 || sigLen <= 0) return 0;
+        final ok = _verifyMessage(_readStr(pubPtr, pubLen),
+            _readBytes(msgPtr, msgLen), _readStr(sigPtr, sigLen));
+        return ok ? 1 : 0;
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
     );
     final halHeapFree = WasmFunction(() => 1024 * 1024,
         params: [], results: [ValueTy.i32]);
@@ -941,6 +1033,9 @@ class WappEngine {
       // System
       WasmImport('hal', 'platform', halPlatform),
       WasmImport('hal', 'identity', halIdentity),
+      WasmImport('hal', 'identity_pubkey', halIdentityPubkey),
+      WasmImport('hal', 'identity_sign', halIdentitySign),
+      WasmImport('hal', 'verify', halVerify),
       WasmImport('hal', 'heap_free', halHeapFree),
       WasmImport('hal', 'time_ms', halTimeMs),
       WasmImport('hal', 'time_epoch', halTimeEpoch),

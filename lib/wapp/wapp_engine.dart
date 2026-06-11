@@ -325,6 +325,24 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Encode a base64url x-only pubkey to its npub bech32 string.
+    final halNpub = WasmFunction(
+      (int inPtr, int inLen, int outPtr, int outCap) {
+        if (inLen <= 0 || outCap <= 0) return 0;
+        try {
+          final b64 = _readStr(inPtr, inLen);
+          final pad = (4 - b64.length % 4) % 4;
+          final bytes = base64Url.decode(b64 + ('=' * pad));
+          if (bytes.length != 32) return 0;
+          final npub = NostrCrypto.encodeNpub(HEX.encode(bytes));
+          return _writeStr(outPtr, outCap, npub);
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // Verify a base85 signature against a base64url x-only pubkey. 1 = valid.
     final halVerify = WasmFunction(
       (int pubPtr, int pubLen, int msgPtr, int msgLen, int sigPtr, int sigLen) {
@@ -1036,6 +1054,7 @@ class WappEngine {
       WasmImport('hal', 'identity_pubkey', halIdentityPubkey),
       WasmImport('hal', 'identity_sign', halIdentitySign),
       WasmImport('hal', 'verify', halVerify),
+      WasmImport('hal', 'npub', halNpub),
       WasmImport('hal', 'heap_free', halHeapFree),
       WasmImport('hal', 'time_ms', halTimeMs),
       WasmImport('hal', 'time_epoch', halTimeEpoch),

@@ -109,8 +109,14 @@ class TorrentService {
       f.path,
       TorrentCreationOptions(
         pieceLength: pieceLengthFor(f.lengthSync()),
-        trackers: [for (final t in defaultTrackers) Uri.parse(t)],
-        creationDate: 0, // outside the info dict; pinned for reproducibility
+        // No trackers baked in: a task with a tracker list announces on start()
+        // (before we mark the staged file complete), registering us as a
+        // left=full leecher and then ignoring re-announces. We announce to the
+        // well-known trackers ourselves in seed() AFTER marking complete, so we
+        // register as a seeder. Trackers live outside the info dict, so omitting
+        // them does not change the deterministic infohash.
+        trackers: const [],
+        creationDate: 0, // pinned for reproducibility
       ),
     );
   }
@@ -149,19 +155,32 @@ class TorrentService {
       if (model == null || dir == null) return null;
       final ih = model.infoHash;
       if (_active.containsKey(ih)) return ih;
+      // The task never hash-checks existing files: a fresh state file is empty,
+      // so our already-complete staged file would read as 0% and we'd announce
+      // (and seed) as a leecher with nothing. Pre-write a COMPLETE state file
+      // — matching StateFile's format, <savePath>/<infohash>.bt.state =
+      // <full bitfield bytes> + <8-byte uploaded counter> — so the task is a
+      // 100% seeder from the first moment and every announce reports left=0.
+      // (getBit ignores padding bits beyond pieceCount, so all-0xFF == done.)
+      try {
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        final pieces = model.pieces.length;
+        final bytesLen = (pieces + 7) ~/ 8;
+        final state = Uint8List(bytesLen + 8)..fillRange(0, bytesLen, 0xFF);
+        await File('${dir.path}/$ih.bt.state').writeAsBytes(state, flush: true);
+      } catch (_) {}
       final task = TorrentTask.newTask(model, dir.path);
       _active[ih] = TorrentEntry(ih, token, true, task);
       await task.start();
-      // A task that starts already-complete only fires the trackers' "complete"
-      // event against URLs it has registered — which for a pure seed is none.
-      // Explicitly announce to every well-known tracker so downloaders can find
-      // this seed (DHT announce already happens inside start()).
+      // Announce to the well-known trackers + DHT (DHT announce happens inside
+      // start()). The state is already complete, so these register a seeder.
       for (final t in defaultTrackers) {
         try {
           task.startAnnounceUrl(Uri.parse(t), model.infoHashBuffer);
         } catch (_) {}
       }
-      LogService.instance.add('Torrent: seeding $token ih:$ih');
+      LogService.instance.add(
+          'Torrent: seeding $token ih:$ih (${model.pieces.length} pieces)');
       return ih;
     } catch (e) {
       LogService.instance.add('Torrent: seed failed: $e');

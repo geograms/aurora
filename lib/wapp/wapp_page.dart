@@ -143,6 +143,16 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   // Screens parsed from .ui.json
   final _screens = <GeoUiBlock>[];
   final _screenNames = <String>[];
+  // Screens are split into tab screens (shown in the tab bar) and menu screens
+  // (`"menu": true` — reached from the top-right options menu as a panel). Both
+  // are subsets of [_screens]; the full list keeps its indices for tab-switching.
+  final _tabScreens = <GeoUiBlock>[];
+  final _tabNames = <String>[];
+  final _menuScreens = <GeoUiBlock>[];
+  final _menuNames = <String>[];
+  // The menu screen currently shown as a full panel (null = normal tab view).
+  GeoUiBlock? _panelScreen;
+  String _panelName = '';
   TabController? _tabController;
 
   /// True when this wapp is the App Creator. Drives a navigation split
@@ -620,8 +630,23 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _seedFieldDefaults(screen);
     }
 
-    // Build tab controller
-    _tabController = TabController(length: _screenNames.length, vsync: this);
+    // Partition screens into tab screens and menu (panel) screens.
+    _tabScreens.clear(); _tabNames.clear(); _menuScreens.clear(); _menuNames.clear();
+    for (var i = 0; i < _screens.length; i++) {
+      if (_screens[i].getBool('menu') == true) {
+        _menuScreens.add(_screens[i]); _menuNames.add(_screenNames[i]);
+      } else {
+        _tabScreens.add(_screens[i]); _tabNames.add(_screenNames[i]);
+      }
+    }
+    // Defensive: never leave the tab bar empty (a wapp that flags every screen).
+    if (_tabScreens.isEmpty) {
+      _tabScreens.addAll(_screens); _tabNames.addAll(_screenNames);
+      _menuScreens.clear(); _menuNames.clear();
+    }
+
+    // Build tab controller (sized to the tab screens only)
+    _tabController = TabController(length: _tabScreens.length, vsync: this);
 
     // Set up persistent KV storage under the per-wapp data dir.
     final prefs = await PreferencesService.instance();
@@ -1568,10 +1593,13 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final lat = (m['lat'] as num?)?.toDouble();
     final lon = (m['lon'] as num?)?.toDouble();
     if (lat == null || lon == null) return;
-    final idx = _screens.indexWhere((s) =>
+    final idx = _tabScreens.indexWhere((s) =>
         s.children.any((c) => c.keyword == 'group' && c.type == 'map'));
-    if (idx >= 0 && _tabController != null && _tabController!.index != idx) {
-      _tabController!.animateTo(idx);
+    if (idx >= 0) {
+      if (_panelScreen != null) _panelScreen = null;   // leave any open panel
+      if (_tabController != null && _tabController!.index != idx) {
+        _tabController!.animateTo(idx);
+      }
     }
     // Centre directly on the target and zoom in so it's clearly visible. The
     // zoom adapts to how far the station is from us (closer → tighter) but is
@@ -1816,16 +1844,38 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           : _buildAppCreatorProjects();
     }
 
+    // A menu screen opened as a full panel: shares this state (so live updates
+    // still flow) and has a back arrow that returns to the tab view.
+    if (_panelScreen != null) {
+      return PopScope(
+        canPop: false,
+        onPopInvoked: (didPop) {
+          if (!didPop) setState(() => _panelScreen = null);
+        },
+        child: Scaffold(
+          appBar: AppBar(
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back),
+              tooltip: 'Back',
+              onPressed: () => setState(() => _panelScreen = null),
+            ),
+            title: Text(_panelName),
+          ),
+          body: _buildScreen(_panelScreen!),
+        ),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
         actions: [_buildWappOptionsMenu()],
-        bottom: _screenNames.length > 1
+        bottom: _tabNames.length > 1
             ? TabBar(
                 controller: _tabController,
                 tabs: [
-                  for (var i = 0; i < _screenNames.length; i++)
-                    _buildScreenTab(_screenNames[i], _screens[i]),
+                  for (var i = 0; i < _tabScreens.length; i++)
+                    _buildScreenTab(_tabNames[i], _tabScreens[i]),
                 ],
                 isScrollable: true,
               )
@@ -1835,25 +1885,55 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         controller: _tabController,
         physics: const NeverScrollableScrollPhysics(),
         children: [
-          for (var i = 0; i < _screens.length; i++)
-            _buildScreen(_screens[i]),
+          for (var i = 0; i < _tabScreens.length; i++)
+            _buildScreen(_tabScreens[i]),
         ],
       ),
     );
   }
 
-  /// Top-right three-line options menu shown on an open wapp. Currently
-  /// just "Edit" (opens the App Creator focused on this wapp); built as
-  /// a menu so more per-wapp options can be added later.
+  /// An icon for a menu-screen entry, picked from its name (falls back to a
+  /// generic panel icon). Purely cosmetic.
+  IconData _iconForScreen(String name) {
+    switch (name.toLowerCase()) {
+      case 'settings': return Icons.settings;
+      case 'tools': return Icons.build;
+      case 'keys': return Icons.key;
+      case 'beacon': return Icons.cell_tower;
+      case 'about': return Icons.info_outline;
+      default: return Icons.dashboard_outlined;
+    }
+  }
+
+  /// Top-right options menu: any screens flagged `"menu": true` open as panels
+  /// here (instead of cluttering the tab bar), plus "Edit".
   Widget _buildWappOptionsMenu() {
     return PopupMenuButton<String>(
       icon: const Icon(Icons.menu),
       tooltip: 'Options',
       onSelected: (value) {
-        if (value == 'edit') _editThisWapp();
+        if (value == 'edit') {
+          _editThisWapp();
+        } else if (value.startsWith('panel:')) {
+          final i = int.tryParse(value.substring(6)) ?? -1;
+          if (i >= 0 && i < _menuScreens.length) {
+            setState(() { _panelScreen = _menuScreens[i]; _panelName = _menuNames[i]; });
+          }
+        }
       },
-      itemBuilder: (_) => const [
-        PopupMenuItem<String>(
+      itemBuilder: (_) => [
+        for (var i = 0; i < _menuScreens.length; i++)
+          PopupMenuItem<String>(
+            value: 'panel:$i',
+            child: ListTile(
+              leading: Icon(_iconForScreen(_menuNames[i])),
+              title: Text(_menuNames[i]),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            ),
+          ),
+        if (_menuScreens.isNotEmpty) const PopupMenuDivider(),
+        const PopupMenuItem<String>(
           value: 'edit',
           child: ListTile(
             leading: Icon(Icons.edit),

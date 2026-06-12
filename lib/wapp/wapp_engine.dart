@@ -602,6 +602,7 @@ class WappEngine {
               'server': {
                 'running': b.running,
                 'port': b.port,
+                'url': b.lanUrl ?? '',
                 'uploads': b.uploadsEnabled,
                 'requests': b.requests,
                 'bytes': b.bytesServed,

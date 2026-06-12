@@ -49,6 +49,29 @@ class BlossomServer {
   int get requests => _requests;
   int get bytesServed => _bytesServed;
 
+  String? _lanUrl;
+
+  /// A LAN-reachable base URL for this server (http://<lan-ip>:<port>), so a
+  /// station can announce where peers may fetch its blobs. Null until started.
+  /// This is only reachable from the same network / a port-forwarded host —
+  /// across NAT, peers must use the BitTorrent path instead.
+  String? get lanUrl => _lanUrl;
+
+  Future<void> _resolveLanUrl() async {
+    try {
+      final ifaces = await NetworkInterface.list(
+          type: InternetAddressType.IPv4, includeLoopback: false);
+      for (final i in ifaces) {
+        for (final a in i.addresses) {
+          if (!a.isLoopback && !a.isLinkLocal) {
+            _lanUrl = 'http://${a.address}:$_port';
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
   /// Start serving [archive] (idempotent). Returns true when listening.
   Future<bool> start(MediaArchive archive, {int? port}) async {
     _archive = archive;
@@ -58,7 +81,9 @@ class BlossomServer {
       _server =
           await HttpServer.bind(InternetAddress.anyIPv4, _port, shared: true);
       _port = _server!.port;   // resolve an ephemeral request (port 0)
-      LogService.instance.add('Blossom: serving media on 0.0.0.0:$_port');
+      await _resolveLanUrl();
+      LogService.instance.add('Blossom: serving media on 0.0.0.0:$_port'
+          '${_lanUrl == null ? '' : ' ($_lanUrl)'}');
       _server!.listen(_handle, onError: (e) {
         LogService.instance.add('Blossom: request error: $e');
       });

@@ -17,6 +17,12 @@ import '../connections/bluetooth/ble_service.dart';
 import '../services/location_service.dart';
 import '../profile/profile_service.dart';
 import 'wapp_event_broker.dart';
+import '../profile/storage_paths.dart';
+import '../services/blossom_server.dart';
+import '../services/preferences_service.dart';
+import '../services/torrent_service.dart';
+import '../util/media_archive.dart';
+import '../util/media_ref.dart';
 import '../util/nostr_nip19.dart';
 import '../util/nostr_crypto.dart';
 import '../util/aprx_sign.dart';
@@ -105,6 +111,10 @@ class WappEngine {
   WasmInstance? _instance;
   WasmMemory? _memory;
   final List<WappLogEntry> logs = [];
+
+  /// token → deterministic torrent infohash (hex), filled asynchronously by
+  /// hal_media_infohash so a later synchronous call can return it.
+  static final Map<String, String> _infohashCache = {};
   final List<String> _inbox = [];
   final List<String> _outbox = [];
   final _stopwatch = Stopwatch();
@@ -414,6 +424,263 @@ class WappEngine {
       ],
       results: [ValueTy.i32],
     );
+    // ── Media archive + sharing HAL (Files wapp; DESIGN.md §4/§5/§6) ──────
+    // The shared content-addressed archive (media.sqlite3) + the Blossom
+    // provider endpoint + the BitTorrent seeder live host-side; these calls
+    // are the wapp-facing control surface.
+    MediaArchive? mediaArchive() {
+      final prefs = PreferencesService.instanceSync;
+      if (prefs == null) return null;
+      return MediaArchive.forStorage(wappsDataStorage(prefs));
+    }
+
+    Map<String, dynamic> metaJson(MediaMeta m) => {
+          'sha256': m.sha256,
+          'token': 'file:${m.sha256}.${m.ext}',
+          'name': m.name ?? '',
+          'ext': m.ext,
+          'description': m.description ?? '',
+          'tags': m.tags,
+          'size': m.size,
+          'first': m.firstSeenMs,
+          'last': m.lastSeenMs,
+          'shot': m.hasScreenshot,
+        };
+
+    // List archive metadata (newest first) → JSON array.
+    final halMediaList = WasmFunction(
+      (int offset, int limit, int outPtr, int outCap) {
+        final archive = mediaArchive();
+        if (archive == null || outCap <= 0) return 0;
+        final metas = archive.list(
+            offset: offset < 0 ? 0 : offset,
+            limit: limit <= 0 ? 100 : limit);
+        return _writeStr(
+            outPtr, outCap, jsonEncode([for (final m in metas) metaJson(m)]));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // One entry's metadata (token / bare hash / hex accepted) → JSON.
+    final halMediaMeta = WasmFunction(
+      (int hashPtr, int hashLen, int outPtr, int outCap) {
+        final archive = mediaArchive();
+        if (archive == null || hashLen <= 0 || outCap <= 0) return 0;
+        final m = archive.getMeta(_readStr(hashPtr, hashLen));
+        if (m == null) return 0;
+        return _writeStr(outPtr, outCap, jsonEncode(metaJson(m)));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Import a host file into the archive → wire token.
+    final halMediaPutFile = WasmFunction(
+      (int pathPtr, int pathLen, int outPtr, int outCap) {
+        final archive = mediaArchive();
+        if (archive == null || pathLen <= 0 || outCap <= 0) return 0;
+        try {
+          final path = _readStr(pathPtr, pathLen);
+          final f = File(path);
+          if (!f.existsSync()) return 0;
+          final dot = path.lastIndexOf('.');
+          final slash =
+              path.lastIndexOf('/') > path.lastIndexOf('\\')
+                  ? path.lastIndexOf('/')
+                  : path.lastIndexOf('\\');
+          final ext = (dot > slash && dot >= 0)
+              ? path.substring(dot + 1).toLowerCase()
+              : 'bin';
+          final name = path.substring(slash + 1);
+          final token = archive.putBytes(
+              f.readAsBytesSync(),
+              RegExp(r'^[a-z0-9]{1,18}$').hasMatch(ext) ? ext : 'bin',
+              name: name);
+          return _writeStr(outPtr, outCap, token);
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Update name/description/tags from a JSON object. 1 = applied.
+    final halMediaSetMeta = WasmFunction(
+      (int hashPtr, int hashLen, int jsonPtr, int jsonLen) {
+        final archive = mediaArchive();
+        if (archive == null || hashLen <= 0 || jsonLen <= 0) return 0;
+        try {
+          final d =
+              jsonDecode(_readStr(jsonPtr, jsonLen)) as Map<String, dynamic>;
+          archive.updateMeta(
+            _readStr(hashPtr, hashLen),
+            name: d['name'] as String?,
+            description: d['description'] as String?,
+            tags: (d['tags'] as List?)?.map((t) => '$t').toList(),
+          );
+          return 1;
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halMediaDelete = WasmFunction(
+      (int hashPtr, int hashLen) {
+        if (hashLen <= 0) return 0;
+        mediaArchive()?.delete(_readStr(hashPtr, hashLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halMediaStats = WasmFunction(
+      (int outPtr, int outCap) {
+        final archive = mediaArchive();
+        if (archive == null || outCap <= 0) return 0;
+        final s = archive.stats();
+        return _writeStr(
+            outPtr,
+            outCap,
+            jsonEncode({
+              'count': s.count,
+              'bytes': s.totalBytes,
+              'screenshots': s.screenshotCount
+            }));
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Apply a sharing-control JSON: {"server":bool, "port":n, "uploads":bool,
+    // "seed":bool}. Long-running work continues in the background; the wapp
+    // polls hal_share_status. 1 = accepted.
+    final halShareCtl = WasmFunction(
+      (int jsonPtr, int jsonLen) {
+        final archive = mediaArchive();
+        if (archive == null || jsonLen <= 0) return 0;
+        try {
+          final d =
+              jsonDecode(_readStr(jsonPtr, jsonLen)) as Map<String, dynamic>;
+          final prefs = PreferencesService.instanceSync;
+          if (d['uploads'] is bool) {
+            BlossomServer.instance.uploadsEnabled = d['uploads'] as bool;
+          }
+          if (d['server'] is bool) {
+            if (d['server'] as bool) {
+              BlossomServer.instance
+                  .start(archive, port: (d['port'] as num?)?.toInt());
+            } else {
+              BlossomServer.instance.stop();
+            }
+          }
+          if (d['seed'] is bool && prefs != null) {
+            TorrentService.instance.configure(
+                archive, wappsDataStorage(prefs).getAbsolutePath('share'));
+            if (d['seed'] as bool) {
+              TorrentService.instance.seedAll();
+            } else {
+              TorrentService.instance.stop();
+            }
+          }
+          return 1;
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Sharing status snapshot → JSON {server:{...}, torrents:[...]}.
+    final halShareStatus = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final b = BlossomServer.instance;
+        return _writeStr(
+            outPtr,
+            outCap,
+            jsonEncode({
+              'server': {
+                'running': b.running,
+                'port': b.port,
+                'uploads': b.uploadsEnabled,
+                'requests': b.requests,
+                'bytes': b.bytesServed,
+              },
+              'torrents': TorrentService.instance.status(),
+            }));
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Fetch a hash: try known Blossom sources, then the torrent swarm via a
+    // known infohash. Fire-and-forget; the wapp re-lists / re-checks later.
+    final halMediaFetch = WasmFunction(
+      (int tokenPtr, int tokenLen) {
+        final archive = mediaArchive();
+        if (archive == null || tokenLen <= 0) return 0;
+        final ref = MediaRef.parse(_readStr(tokenPtr, tokenLen));
+        if (ref == null) return 0;
+        if (archive.has(ref.sha256)) return 1;
+        () async {
+          for (final (kind, value) in archive.getSources(ref.sha256)) {
+            if (kind == 'blossom') {
+              final token = await BlossomServer.fetchFrom(
+                  value, ref.sha256Hex, ref.ext, archive);
+              if (token != null) return;
+            } else if (kind == 'infohash') {
+              final token = await TorrentService.instance
+                  .fetch(value, expectedSha256: ref.sha256, ext: ref.ext);
+              if (token != null) return;
+            }
+          }
+        }();
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Record an announced source for a hash: kind = blossom|infohash|callsign.
+    final halMediaAddSource = WasmFunction(
+      (int tokenPtr, int tokenLen, int kindPtr, int kindLen, int valPtr,
+          int valLen) {
+        final archive = mediaArchive();
+        if (archive == null || tokenLen <= 0 || kindLen <= 0 || valLen <= 0) {
+          return 0;
+        }
+        archive.addSource(_readStr(tokenPtr, tokenLen),
+            _readStr(kindPtr, kindLen), _readStr(valPtr, valLen));
+        return 1;
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    // The deterministic infohash for an archived token (for announcements).
+    // Returns hex via out buffer; 0 when the bytes are missing.
+    final halMediaInfohash = WasmFunction(
+      (int tokenPtr, int tokenLen, int outPtr, int outCap) {
+        final archive = mediaArchive();
+        final prefs = PreferencesService.instanceSync;
+        if (archive == null || prefs == null || tokenLen <= 0 || outCap <= 0) {
+          return 0;
+        }
+        final token = _readStr(tokenPtr, tokenLen);
+        TorrentService.instance.configure(
+            archive, wappsDataStorage(prefs).getAbsolutePath('share'));
+        // Async build; cached so a later call returns it synchronously.
+        final cached = _infohashCache[token];
+        if (cached != null) return _writeStr(outPtr, outCap, cached);
+        TorrentService.instance.infohashOf(token).then((ih) {
+          if (ih != null) _infohashCache[token] = ih;
+        });
+        return 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+
     // Verify a base85 signature against a base64url x-only pubkey. 1 = valid.
     final halVerify = WasmFunction(
       (int pubPtr, int pubLen, int msgPtr, int msgLen, int sigPtr, int sigLen) {
@@ -1125,6 +1392,17 @@ class WappEngine {
       WasmImport('hal', 'identity_pubkey', halIdentityPubkey),
       WasmImport('hal', 'identity_sign', halIdentitySign),
       WasmImport('hal', 'verify', halVerify),
+      WasmImport('hal', 'media_list', halMediaList),
+      WasmImport('hal', 'media_meta', halMediaMeta),
+      WasmImport('hal', 'media_put_file', halMediaPutFile),
+      WasmImport('hal', 'media_set_meta', halMediaSetMeta),
+      WasmImport('hal', 'media_delete', halMediaDelete),
+      WasmImport('hal', 'media_stats', halMediaStats),
+      WasmImport('hal', 'media_fetch', halMediaFetch),
+      WasmImport('hal', 'media_add_source', halMediaAddSource),
+      WasmImport('hal', 'media_infohash', halMediaInfohash),
+      WasmImport('hal', 'share_ctl', halShareCtl),
+      WasmImport('hal', 'share_status', halShareStatus),
       WasmImport('hal', 'npub', halNpub),
       WasmImport('hal', 'encrypt', halEncrypt),
       WasmImport('hal', 'decrypt', halDecrypt),

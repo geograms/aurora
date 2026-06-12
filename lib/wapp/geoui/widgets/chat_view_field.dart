@@ -15,6 +15,9 @@
 
 import 'package:flutter/material.dart';
 
+import '../../../util/media_ref.dart';
+import 'media_view.dart';
+
 class ChatViewField extends StatefulWidget {
   final String fieldName;
   final String label;
@@ -547,10 +550,20 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
+  /// The message text with media tokens removed (they render as thumbnails);
+  /// leftover runs of whitespace collapse so the caption reads naturally.
+  static String _textWithoutTokens(String text) => text
+      .replaceAll(RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}'), '')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
   Widget _bubble(Map<String, dynamic> m, {bool inThread = false}) {
     final outgoing = (m['dir']?.toString() ?? 'in') == 'out';
     final from = m['from']?.toString() ?? '';
     final text = m['text']?.toString() ?? '';
+    // APRX §16 media references: render each `file:<sha256>.<ext>` token as a
+    // tappable thumbnail and drop the raw token from the visible text.
+    final mediaRefs = MediaRef.findAll(text);
     final time = m['time']?.toString() ?? '';
     final via = m['via']?.toString() ?? '';
     final parent = (m['parent'] ?? '').toString();
@@ -612,8 +625,24 @@ class _ChatViewFieldState extends State<ChatViewField> {
                 ],
               ),
             ),
-          Text(text,
-              style: const TextStyle(color: Colors.white, fontSize: 14)),
+          if (mediaRefs.isEmpty)
+            Text(text,
+                style: const TextStyle(color: Colors.white, fontSize: 14))
+          else ...[
+            if (_textWithoutTokens(text).isNotEmpty)
+              Text(_textWithoutTokens(text),
+                  style: const TextStyle(color: Colors.white, fontSize: 14)),
+            Padding(
+              padding: const EdgeInsets.only(top: 4, bottom: 2),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final r in mediaRefs) MediaThumbnail(ref: r),
+                ],
+              ),
+            ),
+          ],
           if ((m['meta']?.toString() ?? '').isNotEmpty)
             _metaLine(m),
           Row(

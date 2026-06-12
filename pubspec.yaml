@@ -61,6 +61,13 @@ dependencies:
   bluetooth_low_energy: ^6.0.0            # BLE central (scan) + peripheral (advertise) for APRS-over-BLE
   bluez: ^0.8.2                           # BlueZ D-Bus client — Linux BLE advertising (peripheral)
   dbus: ^0.7.10                           # D-Bus values for the BlueZ advertising payload
+  dtorrent_task_v2: ^0.4.6
+  bittorrent_dht: ^0.0.15
+  dtorrent_parser: ^1.0.9
+  dtorrent_tracker: ^1.3.20
+  b_encode_decode: ^1.0.5
+  events_emitter2: ^1.0.4
+  dtorrent_common: ^1.0.8
 
 dev_dependencies:
   flutter_test:

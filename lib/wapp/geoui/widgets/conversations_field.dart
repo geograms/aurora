@@ -94,6 +94,21 @@ class ConversationsField extends StatefulWidget {
   /// Tapping a message's location meta (when it carries lat/lon).
   final void Function(Map<String, dynamic>)? onLocate;
 
+  /// Tapping a sender's name on an incoming bubble (e.g. open their profile).
+  final void Function(String from)? onSenderTap;
+
+  /// Controlled mode: the host owns which conversation is open (so it can put
+  /// the thread title + back arrow in its own AppBar). When [onOpenChanged]
+  /// is non-null, [openId] is the source of truth; otherwise the widget keeps
+  /// its own internal selection (legacy behaviour).
+  final String? openId;
+  final ValueChanged<String?>? onOpenChanged;
+
+  /// When false the narrow-layout room view skips its internal header (back
+  /// arrow + title) because the host shows that chrome in the AppBar. The
+  /// wide (side-by-side) layout always keeps the header.
+  final bool showRoomHeader;
+
   const ConversationsField({
     super.key,
     required this.store,
@@ -107,6 +122,10 @@ class ConversationsField extends StatefulWidget {
     this.roomActions = const [],
     this.toggles = const [],
     this.onLocate,
+    this.onSenderTap,
+    this.openId,
+    this.onOpenChanged,
+    this.showRoomHeader = true,
   });
 
   @override
@@ -114,10 +133,22 @@ class ConversationsField extends StatefulWidget {
 }
 
 class _ConversationsFieldState extends State<ConversationsField> {
-  String? _openId;
+  String? _internalOpenId;
+
+  /// Effective open conversation: host-owned in controlled mode, else local.
+  String? get _openId =>
+      widget.onOpenChanged != null ? widget.openId : _internalOpenId;
+
+  void _setOpen(String? id) {
+    if (widget.onOpenChanged != null) {
+      widget.onOpenChanged!(id);
+    } else {
+      setState(() => _internalOpenId = id);
+    }
+  }
 
   void _select(String id) {
-    setState(() => _openId = id);
+    _setOpen(id);
     widget.store.openId = id;
     widget.store.clearUnread(id);
     widget.onSelect(id);
@@ -125,13 +156,14 @@ class _ConversationsFieldState extends State<ConversationsField> {
 
   @override
   Widget build(BuildContext context) {
-    // Drop a selection that no longer exists.
-    if (_openId != null && !widget.store.items.containsKey(_openId)) {
-      _openId = null;
-    }
+    // Ignore a selection that no longer exists (don't mutate host state from
+    // build — just render the list until the host catches up).
+    final openId = (_openId != null && widget.store.items.containsKey(_openId))
+        ? _openId
+        : null;
     // Keep the store's notion of the open conversation in sync so it can
     // auto-manage unread counts when new messages arrive.
-    widget.store.openId = _openId;
+    widget.store.openId = openId;
     return LayoutBuilder(
       builder: (context, c) {
         final wide = c.maxWidth >= 640;
@@ -142,15 +174,15 @@ class _ConversationsFieldState extends State<ConversationsField> {
               SizedBox(width: 320, child: _list(context, wide: true)),
               const VerticalDivider(width: 1),
               Expanded(
-                child: _openId != null
-                    ? _room(context, _openId!, wide: true)
+                child: openId != null
+                    ? _room(context, openId, wide: true)
                     : _emptyRoom(context),
               ),
             ],
           );
         }
-        return _openId != null
-            ? _room(context, _openId!, wide: false)
+        return openId != null
+            ? _room(context, openId, wide: false)
             : _list(context, wide: false);
       },
     );
@@ -314,6 +346,9 @@ class _ConversationsFieldState extends State<ConversationsField> {
 
     return Column(
       children: [
+        // Narrow + host-chrome: the AppBar shows the back arrow + title, so
+        // skip the internal header entirely (one back arrow per screen).
+        if (wide || widget.showRoomHeader)
         Container(
           padding: const EdgeInsets.fromLTRB(6, 8, 6, 8),
           decoration: BoxDecoration(
@@ -325,7 +360,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
               if (!wide)
                 IconButton(
                     icon: const Icon(Icons.arrow_back),
-                    onPressed: () => setState(() => _openId = null))
+                    onPressed: () => _setOpen(null))
               else
                 const SizedBox(width: 6),
               _avatar(it, 36),
@@ -366,6 +401,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
             fill: true,
             composerAccessory: widget.toggles.isEmpty ? null : _toggleBar(context),
             onLocate: widget.onLocate,
+            onSenderTap: widget.onSenderTap,
             onSend: (text) => widget.onSend(id, text),
           ),
         ),
@@ -375,7 +411,9 @@ class _ConversationsFieldState extends State<ConversationsField> {
 
   Widget _toggleBar(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Padding(
+    return Align(
+      alignment: Alignment.centerLeft,   // keep the toggles on the left edge
+      child: Padding(
       padding: const EdgeInsets.fromLTRB(8, 2, 8, 0),
       child: Wrap(
         spacing: 4,
@@ -403,6 +441,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
               ),
             ),
         ],
+      ),
       ),
     );
   }

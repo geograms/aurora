@@ -130,6 +130,7 @@ class ConversationStore {
       if ((d['mid'] ?? '').toString().isNotEmpty) 'mid': d['mid'].toString(),
       if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
       if ((d['auth'] ?? '').toString().isNotEmpty) 'auth': d['auth'].toString(),
+      if (d['enc'] == true) 'enc': true,
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     });
@@ -161,6 +162,7 @@ class ConversationStore {
       if ((d['mid'] ?? '').toString().isNotEmpty) 'mid': d['mid'].toString(),
       if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
       if ((d['auth'] ?? '').toString().isNotEmpty) 'auth': d['auth'].toString(),
+      if (d['enc'] == true) 'enc': true,
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     };

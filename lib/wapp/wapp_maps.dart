@@ -92,6 +92,15 @@ class _SlippyMap extends StatefulWidget {
   final bool? chatOpen;
   final void Function(bool open)? onChatOpenChanged;
 
+  /// When false the map shows only the transport status pills, not the full
+  /// geo-chat overlay (the chat lives in its own tab instead).
+  final bool embedChat;
+
+  /// On mount, frame the coverage circle (centerLat/centerLon + radiusKm):
+  /// centre on it and pick the zoom that fits it in the view. Off when the
+  /// host is steering the viewport somewhere specific (e.g. locate-on-map).
+  final bool autoFitCircle;
+
   const _SlippyMap({
     required this.lat,
     required this.lon,
@@ -118,6 +127,8 @@ class _SlippyMap extends StatefulWidget {
     this.status = const [],
     this.chatOpen,
     this.onChatOpenChanged,
+    this.embedChat = true,
+    this.autoFitCircle = false,
   });
 
   @override
@@ -203,6 +214,14 @@ class _SlippyMapState extends State<_SlippyMap>
   }
 
   List<Widget> _buildChatOverlay(double w, double h) {
+    // Chat lives in its own tab — keep only the transport status pills on the
+    // map so connection/BLE state stays visible without covering the map.
+    if (!widget.embedChat) {
+      // Sit just under the search bar so the pills don't cover it.
+      return widget.status.isEmpty
+          ? const []
+          : [Positioned(top: 64, left: 12, child: _statusPills())];
+    }
     // Portrait / phone: the panel can't sit full-height on the right or it
     // covers the map — show a bottom sheet (map visible above) instead.
     final narrow = w < 600;
@@ -382,9 +401,46 @@ class _SlippyMapState extends State<_SlippyMap>
     super.initState();
     _zoom = widget.zoom;
     _centerOn(widget.lat, widget.lon);
+    // _viewSize is a guess until the first layout (the render box doesn't
+    // exist yet), which mis-centres the view — especially in portrait, where
+    // the real map area is far from the fallback size. Re-centre (and, when
+    // asked, fit the coverage circle) once the actual size is known.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        if (widget.autoFitCircle &&
+            widget.radiusKm != null &&
+            widget.centerLat != null &&
+            widget.centerLon != null) {
+          _fitCircle();
+        } else {
+          _centerOn(widget.lat, widget.lon);
+        }
+      });
+      _syncViewport();
+    });
     _pulse = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 1200))
       ..repeat();
+  }
+
+  /// Centre on the coverage circle and zoom so its diameter fits ~85% of the
+  /// view's smaller side — the whole circle is visible in any orientation.
+  void _fitCircle() {
+    final lat = widget.centerLat!, lon = widget.centerLon!;
+    final rM = widget.radiusKm! * 1000.0;
+    final size = _viewSize;
+    final minDim = min(size.width, size.height);
+    if (rM <= 0 || minDim <= 0) {
+      _centerOn(lat, lon);
+      return;
+    }
+    final mppTarget = (2 * rM) / (0.85 * minDim);   // metres/px to fit
+    final z = log(cos(lat * pi / 180) * 2 * pi * 6378137 /
+            (_tileSize * mppTarget)) /
+        ln2;
+    _zoom = z.floor().clamp(widget.minZoom, widget.maxZoom);
+    _centerOn(lat, lon);
   }
 
   @override
@@ -1272,7 +1328,17 @@ class _SearchResult {
 
 extension _WappMaps on _WappPageState {
   Widget _buildMapScreen(GeoUiBlock screen, GeoUiBlock mapGroup) {
-    return Column(
+    // A screen that carries BOTH the map group and the `geochat` chat field
+    // renders as a vertical split: map (with radius/search) on top, the geo
+    // chat panel below, separated by a drag handle so the user balances how
+    // much of each they want. One tab = pick the area AND talk to it.
+    final geoChatField = screen.children
+        .where((c) =>
+            c.keyword == 'field' &&
+            c.type == 'chat' &&
+            (c.name ?? '') == 'geochat')
+        .firstOrNull;
+    final map = Column(
       children: [
         _buildMapRadiusBar(),
         Expanded(
@@ -1349,9 +1415,79 @@ extension _WappMaps on _WappPageState {
       onLocate: _locateFromMessage,
       highlightLat: _locateLat,
       highlightLon: _locateLon,
+      // With the chat panel below the map there's no need for the floating
+      // overlay; a plain map screen (no geochat field) keeps the old overlay.
+      embedChat: geoChatField == null,
+      autoFitCircle: _mapAutoFit,
           ),
         ),
       ],
+    );
+    if (geoChatField == null) return map;
+    return LayoutBuilder(builder: (context, box) {
+      final total = box.maxHeight;
+      // Chat height from the user-set fraction, but never starve either side:
+      // chat keeps at least its header+composer, map keeps room to pan.
+      final chatH = (total * _geoSplit).clamp(150.0, total - 200.0);
+      return Column(
+        children: [
+          Expanded(child: map),
+          _geoSplitHandle(total),
+          SizedBox(
+              height: chatH,
+              child: _buildGeoChatScreen(showStatus: false)),
+        ],
+      );
+    });
+  }
+
+  /// The grab-bar between map and chat — drag to rebalance the split.
+  Widget _geoSplitHandle(double total) {
+    final cs = Theme.of(context).colorScheme;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: (d) => setState(() {
+        _geoSplit = (_geoSplit - d.delta.dy / total).clamp(0.18, 0.8);
+      }),
+      child: Container(
+        height: 20,
+        width: double.infinity,
+        color: cs.surfaceContainerHighest.withAlpha(90),
+        alignment: Alignment.center,
+        child: Container(
+          width: 40,
+          height: 4,
+          decoration: BoxDecoration(
+            color: cs.onSurfaceVariant.withAlpha(140),
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The geo chat panel: Live | Beacons feed + composer. [showStatus] is off
+  /// when the panel sits under the map (the map already shows the pills).
+  Widget _buildGeoChatScreen({bool showStatus = true}) {
+    return _GeoChatPanel(
+      chatLive: _geoLive,
+      chatBeacons: _geoBeacons,
+      status: showStatus ? _mapStatus : const [],
+      onChatSend: (text) {
+        _fieldValues['geochat_input'] = text;
+        _sendCommand('geochat_send');
+        if (mounted) setState(() {});
+      },
+      onClearChat: (tab) {
+        if (tab == 0) {
+          _geoLive.clear();
+        } else {
+          _geoBeacons.clear();
+        }
+        if (mounted) setState(() {});
+      },
+      onLocate: _locateFromMessage,
+      onSenderTap: _showProfile,
     );
   }
 
@@ -1384,8 +1520,7 @@ extension _WappMaps on _WappPageState {
       child: Row(
         children: [
           Icon(Icons.cell_tower, size: 18, color: cs.primary),
-          const SizedBox(width: 8),
-          const Text('Range', style: TextStyle(fontSize: 13)),
+          const SizedBox(width: 6),
           Expanded(
             child: Slider(
               value: _kmToSlider(km),
@@ -1403,14 +1538,153 @@ extension _WappMaps on _WappPageState {
               },
             ),
           ),
-          SizedBox(
-            width: 64,
-            child: Text(label,
-                textAlign: TextAlign.end,
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-          ),
+          const SizedBox(width: 6),
+          Text(label,
+              style:
+                  const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
         ],
       ),
+    );
+  }
+}
+
+/// Full-panel Geo Chat (its own tab). Live | Beacons sub-tabs + composer,
+/// sized to fill a whole screen so it's comfortable in portrait — the same
+/// data the map overlay used, no minimise/close chrome.
+class _GeoChatPanel extends StatefulWidget {
+  final List<Map<String, dynamic>> chatLive;
+  final List<Map<String, dynamic>> chatBeacons;
+  final List<Map<String, dynamic>> status;
+  final void Function(String text) onChatSend;
+  final void Function(int tab) onClearChat;
+  final void Function(Map<String, dynamic>)? onLocate;
+  final void Function(String from)? onSenderTap;
+  const _GeoChatPanel({
+    required this.chatLive,
+    required this.chatBeacons,
+    required this.onChatSend,
+    required this.onClearChat,
+    this.status = const [],
+    this.onLocate,
+    this.onSenderTap,
+  });
+
+  @override
+  State<_GeoChatPanel> createState() => _GeoChatPanelState();
+}
+
+class _GeoChatPanelState extends State<_GeoChatPanel> {
+  int _tab = 0; // 0 = Live, 1 = Beacons
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final live = widget.chatLive;
+    final beacons = widget.chatBeacons;
+    final showing = _tab == 0 ? live : beacons;
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 6, 6),
+          child: Row(
+            children: [
+              Expanded(child: _tabBtn(cs, 'Live', live.length, 0)),
+              const SizedBox(width: 8),
+              Expanded(child: _tabBtn(cs, 'Beacons', beacons.length, 1)),
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.delete_sweep, size: 20),
+                tooltip: 'Clear ${_tab == 0 ? "Live" : "Beacons"}',
+                visualDensity: VisualDensity.compact,
+                onPressed:
+                    showing.isEmpty ? null : () => widget.onClearChat(_tab),
+              ),
+            ],
+          ),
+        ),
+        if (widget.status.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _statusRow(cs, widget.status),
+            ),
+          ),
+        const Divider(height: 1),
+        Expanded(
+          child: ChatViewField(
+            key: ValueKey('geochat-tab-$_tab'),
+            fieldName: 'geochat',
+            label: '',
+            hint: _tab == 0 ? 'Message…' : 'Repeated beacons',
+            fill: true,
+            messages: showing,
+            onLocate: widget.onLocate,
+            onSenderTap: widget.onSenderTap,
+            onSend: widget.onChatSend,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _tabBtn(ColorScheme cs, String label, int count, int idx) {
+    final sel = _tab == idx;
+    return InkWell(
+      onTap: () => setState(() => _tab = idx),
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: sel
+              ? cs.primaryContainer
+              : cs.surfaceContainerHighest.withAlpha(90),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(
+          '$label ($count)',
+          style: TextStyle(
+            fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+            color: sel ? cs.onPrimaryContainer : cs.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _statusRow(ColorScheme cs, List<Map<String, dynamic>> items) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        for (final s in items)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest.withAlpha(120),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: (s['on'] == true)
+                        ? const Color(0xFF3FB950)
+                        : const Color(0xFF6E7681),
+                  ),
+                ),
+                const SizedBox(width: 5),
+                Text((s['label'] ?? '').toString(),
+                    style: const TextStyle(fontSize: 11.5)),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

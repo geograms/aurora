@@ -254,14 +254,9 @@ class WappEngine {
   /// Sign [msg] with the active profile's key (APRX short-Schnorr). Returns the
   /// base85 signature string, or '' if no key. The private key never leaves here.
   String _signMessage(Uint8List msg) {
-    final nsec = ProfileService.instance.activeProfile?.nsec ?? '';
-    if (nsec.isEmpty) return '';
+    final d = _profilePrivScalar();
+    if (d == null) return '';
     try {
-      final privHex = NostrCrypto.decodeNsec(nsec);
-      var d = BigInt.zero;
-      for (final b in HEX.decode(privHex)) {
-        d = (d << 8) | BigInt.from(b);
-      }
       final m = Uint8List.fromList(sha256.convert(msg).bytes);
       return AprxSign.b85encode(AprxSign.sign(m, d));
     } catch (_) {
@@ -273,15 +268,48 @@ class WappEngine {
   /// pubkey, as hal_identity_pubkey emits). Returns true iff valid.
   bool _verifyMessage(String pubB64, Uint8List msg, String sigStr) {
     try {
-      final pad = (4 - pubB64.length % 4) % 4;
-      final pub = base64Url.decode(pubB64 + ('=' * pad));
+      final pub = _b64urlDecode(pubB64);
       final sig = AprxSign.b85decode(sigStr);
-      if (sig == null || sig.length != 48 || pub.length != 32) return false;
+      if (sig == null || sig.length != 48 || pub == null || pub.length != 32) {
+        return false;
+      }
       final m = Uint8List.fromList(sha256.convert(msg).bytes);
       return AprxSign.verify(m, sig, pub);
     } catch (_) {
       return false;
     }
+  }
+
+  /// The active profile's private key as a scalar, or null if none.
+  BigInt? _profilePrivScalar() {
+    final nsec = ProfileService.instance.activeProfile?.nsec ?? '';
+    if (nsec.isEmpty) return null;
+    try {
+      var d = BigInt.zero;
+      for (final b in HEX.decode(NostrCrypto.decodeNsec(nsec))) {
+        d = (d << 8) | BigInt.from(b);
+      }
+      return d;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Decode a base64url string (with or without padding) to bytes, or null.
+  Uint8List? _b64urlDecode(String s) {
+    try {
+      final pad = (4 - s.length % 4) % 4;
+      return base64Url.decode(s + ('=' * pad));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  int _writeBytes(int ptr, int maxLen, Uint8List bytes) {
+    final n = bytes.length < maxLen ? bytes.length : maxLen;
+    final mem = _memory!.view;
+    for (var i = 0; i < n; i++) mem[ptr + i] = bytes[i];
+    return n;
   }
 
   // ── Load ─────────────────────────────────────────────────────────────
@@ -341,6 +369,49 @@ class WappEngine {
         }
       },
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Encrypt msg for a base64url pubkey with the profile key → base64url blob.
+    final halEncrypt = WasmFunction(
+      (int pubPtr, int pubLen, int msgPtr, int msgLen, int outPtr, int outCap) {
+        if (pubLen <= 0 || msgLen <= 0 || outCap <= 0) return 0;
+        try {
+          final d = _profilePrivScalar();
+          final pub = _b64urlDecode(_readStr(pubPtr, pubLen));
+          if (d == null || pub == null || pub.length != 32) return 0;
+          final blob = AprxSign.encryptFor(d, pub, _readBytes(msgPtr, msgLen));
+          if (blob == null) return 0;
+          return _writeStr(outPtr, outCap, base64Url.encode(blob).replaceAll('=', ''));
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    // Decrypt a base64url blob from a base64url pubkey → plaintext bytes.
+    final halDecrypt = WasmFunction(
+      (int pubPtr, int pubLen, int blobPtr, int blobLen, int outPtr, int outCap) {
+        if (pubLen <= 0 || blobLen <= 0 || outCap <= 0) return 0;
+        try {
+          final d = _profilePrivScalar();
+          final pub = _b64urlDecode(_readStr(pubPtr, pubLen));
+          final blob = _b64urlDecode(_readStr(blobPtr, blobLen));
+          if (d == null || pub == null || pub.length != 32 || blob == null) return 0;
+          final pt = AprxSign.decryptFrom(d, pub, blob);
+          if (pt == null) return 0;
+          return _writeBytes(outPtr, outCap, pt);
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
       results: [ValueTy.i32],
     );
     // Verify a base85 signature against a base64url x-only pubkey. 1 = valid.
@@ -1055,6 +1126,8 @@ class WappEngine {
       WasmImport('hal', 'identity_sign', halIdentitySign),
       WasmImport('hal', 'verify', halVerify),
       WasmImport('hal', 'npub', halNpub),
+      WasmImport('hal', 'encrypt', halEncrypt),
+      WasmImport('hal', 'decrypt', halDecrypt),
       WasmImport('hal', 'heap_free', halHeapFree),
       WasmImport('hal', 'time_ms', halTimeMs),
       WasmImport('hal', 'time_epoch', halTimeEpoch),

@@ -885,6 +885,24 @@ IconData geoUiResolveIcon(String name) {
       return Icons.star_outline;
     case 'favorite':
       return Icons.favorite_border;
+    case 'person_add':
+      return Icons.person_add_alt_1;
+    case 'person_remove':
+      return Icons.person_remove_alt_1;
+    case 'home':
+      return Icons.home_outlined;
+    case 'mail':
+    case 'messages':
+      return Icons.mail_outline;
+    case 'map':
+      return Icons.map_outlined;
+    case 'people':
+    case 'follows':
+      return Icons.people_outline;
+    case 'chat':
+    case 'geochat':
+    case 'forum':
+      return Icons.forum_outlined;
     case 'visibility':
       return Icons.visibility;
     default:

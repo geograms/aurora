@@ -140,6 +140,58 @@ class AprxSign {
     }
   }
 
+  // ── ECDH + AES-256-CBC encryption (NIP-04-style) ─────────────────────
+  // Shared key = X coordinate of (our scalar × their point). The X coordinate
+  // is parity-independent, so ecdh(a, B) == ecdh(b, A) without any y handling.
+  // Confidentiality only; APRX signs the ciphertext separately for integrity.
+
+  static Uint8List? _ecdhKey(BigInt d, Uint8List pubXonly) {
+    final p = _liftX(_toBig(pubXonly));
+    if (p == null) return null;
+    final s = p * d;
+    if (s == null || s.isInfinity) return null;
+    return _toBytes(s.x!.toBigInteger()!, 32);
+  }
+
+  static Uint8List _aesCbc(bool encrypt, Uint8List key, Uint8List iv, Uint8List data) {
+    final c = PaddedBlockCipherImpl(PKCS7Padding(), CBCBlockCipher(AESEngine()));
+    c.init(encrypt,
+        PaddedBlockCipherParameters(ParametersWithIV(KeyParameter(key), iv), null));
+    return c.process(data);
+  }
+
+  /// Encrypt [plaintext] to x-only pubkey [pubXonly] using our scalar [d].
+  /// Returns iv(16) ‖ ciphertext, or null on error.
+  static Uint8List? encryptFor(BigInt d, Uint8List pubXonly, Uint8List plaintext) {
+    final key = _ecdhKey(d, pubXonly);
+    if (key == null) return null;
+    final iv = Uint8List(16);
+    for (var i = 0; i < 16; i++) {
+      iv[i] = _rng.nextInt(256);
+    }
+    try {
+      final ct = _aesCbc(true, key, iv, plaintext);
+      return Uint8List.fromList([...iv, ...ct]);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Decrypt a [blob] (iv ‖ ciphertext) from x-only pubkey [pubXonly] with our
+  /// scalar [d]. Returns the plaintext, or null on error.
+  static Uint8List? decryptFrom(BigInt d, Uint8List pubXonly, Uint8List blob) {
+    if (blob.length < 17) return null;
+    final key = _ecdhKey(d, pubXonly);
+    if (key == null) return null;
+    try {
+      final iv = Uint8List.fromList(blob.sublist(0, 16));
+      final ct = Uint8List.fromList(blob.sublist(16));
+      return _aesCbc(false, key, iv, ct);
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ── APRS-safe base85 (Z85-style: 4 bytes → 5 chars) ──────────────────
   // 85 printable chars, excluding space and APRS-reserved '{', '|', '~'.
   static const String _b85 =

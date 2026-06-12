@@ -30,6 +30,7 @@ import 'geoui/widgets/chat_view_field.dart';
 import 'geoui/conversation_store.dart';
 import 'geoui/geo_chat_archive.dart';
 import 'geoui/widgets/conversations_field.dart';
+import 'geoui/widgets/people_view_field.dart';
 import 'geoui/tile_cache.dart';
 import 'background_wapp_manager.dart';
 import '../profile/iwi_profile.dart';
@@ -292,8 +293,23 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
 
   // Geo-chat panel open/closed (owned here so the unread badge survives tab
   // switches) and the count of Live messages received while it was closed.
-  bool _geoChatOpen = true;
+  // The Geo Chat tab isn't the default tab, so it starts "closed" — arrivals
+  // accumulate as an unread badge until the user opens that tab.
+  bool _geoChatOpen = false;
   int _geoUnread = 0;
+
+  /// Fraction of the Geochat tab's height given to the chat panel under the
+  /// map (the rest is map). User-resizable via the drag handle between them.
+  double _geoSplit = 0.45;
+
+  /// The conversation open in the conversations widget (host-owned so the
+  /// AppBar can show the thread title + the single back arrow in portrait).
+  String? _convOpenId;
+
+  /// When true (the default) the map frames the coverage circle on mount.
+  /// Cleared by locate-on-map so the located station stays centred instead;
+  /// restored on any rail navigation.
+  bool _mapAutoFit = true;
 
   void _setGeoChatOpen(bool open) {
     if (!mounted) return;
@@ -645,8 +661,11 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _menuScreens.clear(); _menuNames.clear();
     }
 
-    // Build tab controller (sized to the tab screens only)
+    // Build tab controller (sized to the tab screens only). The left
+    // navigation rail mirrors its index, so rebuild the rail when the active
+    // tab changes (e.g. programmatic switches like "locate on map").
     _tabController = TabController(length: _tabScreens.length, vsync: this);
+    _tabController!.addListener(() { if (mounted) setState(() {}); });
 
     // Set up persistent KV storage under the per-wapp data dir.
     final prefs = await PreferencesService.instance();
@@ -914,6 +933,18 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
               }
               buf.add(msg.map((k, v) => MapEntry(k.toString(), v)));
             }
+            changed = true;
+          }
+        } else if (type == 'ui.people.set') {
+          // Replace a $type:"people" field's section list (the social-style
+          // people list: Following / Followers with tags + row actions).
+          final fieldName = data['field'] as String? ?? 'people';
+          final sections = data['sections'];
+          if (sections is List) {
+            _fieldValues[fieldName] = sections
+                .whereType<Map>()
+                .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+                .toList();
             changed = true;
           }
         } else if (type == 'ui.chat.history') {
@@ -1562,8 +1593,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       listActions: listActions,
       roomActions: roomActions,
       toggles: toggles,
+      // Host-controlled selection: in portrait the AppBar carries the open
+      // thread's title + back arrow, so the widget skips its own header.
+      openId: _convOpenId,
+      onOpenChanged: (id) => setState(() => _convOpenId = id),
+      showRoomHeader: false,
       onToggle: (name, value) => setState(() => _fieldValues[name] = value),
       onLocate: _locateFromMessage,
+      onSenderTap: _showProfile,
       onSelect: (id) => setState(() => store.clearUnread(id)),
       onSend: (id, text) {
         _fieldValues['${field}_convo'] = id;
@@ -1616,6 +1653,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _mapZoom = zoom;
       _locateLat = lat;
       _locateLon = lon;
+      // Show the located station, not the fitted coverage circle, when the
+      // map (re)mounts for this navigation.
+      _mapAutoFit = false;
     });
   }
 
@@ -1792,38 +1832,6 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
 
   /// A tab label, with an unread-count badge on the map screen's tab when
   /// geo-chat messages have arrived while the chat box was closed.
-  Widget _buildScreenTab(String name, GeoUiBlock screen) {
-    final label = _i18n.resolve(name);
-    final isMap =
-        screen.children.any((c) => c.keyword == 'group' && c.type == 'map');
-    if (!isMap || _geoUnread <= 0) return Tab(text: label);
-    return Tab(
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(label),
-          const SizedBox(width: 6),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-            constraints: const BoxConstraints(minWidth: 18),
-            decoration: BoxDecoration(
-              color: const Color(0xFFda3633),
-              borderRadius: BorderRadius.circular(9),
-            ),
-            child: Text(
-              _geoUnread > 99 ? '99+' : '$_geoUnread',
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     if (_tabController == null) {
@@ -1866,29 +1874,163 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-        actions: [_buildWappOptionsMenu()],
-        bottom: _tabNames.length > 1
-            ? TabBar(
-                controller: _tabController,
-                tabs: [
-                  for (var i = 0; i < _tabScreens.length; i++)
-                    _buildScreenTab(_tabNames[i], _tabScreens[i]),
+    final tabView = TabBarView(
+      controller: _tabController,
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        for (var i = 0; i < _tabScreens.length; i++)
+          _buildScreen(_tabScreens[i]),
+      ],
+    );
+    // Home/away navigation: the FIRST tab is the wapp's main view and carries
+    // the left navigation rail. Selecting any other rail destination shows
+    // that panel FULL SIZE (rail hidden — more room in portrait) with the
+    // AppBar re-titled to the panel ("← Messages") and back returning home.
+    final idx = _tabController!.index;
+    final onHome = idx == 0 || _tabScreens.length <= 1;
+    void goHome() {
+      _mapAutoFit = true;   // next map mount frames the coverage circle again
+      _tabController!.animateTo(0);
+      _setGeoChatOpen(_isGeoChatScreen(_tabScreens[0]));
+    }
+
+    // Thread chrome: in portrait, an open conversation takes over the AppBar
+    // (its title + the SINGLE back arrow, which returns to the list) — the
+    // conversations widget itself renders headerless. The wide side-by-side
+    // layout keeps its own in-panel header instead.
+    final convGroup = _tabScreens[idx].children
+        .where((c) => c.keyword == 'group' && c.type == 'conversations')
+        .firstOrNull;
+    ConversationItem? thread;
+    var convField = '';
+    if (convGroup != null &&
+        _convOpenId != null &&
+        MediaQuery.of(context).size.width < 640) {
+      convField = convGroup.name ?? 'conversations';
+      thread = _convStore(convField).items[_convOpenId];
+    }
+
+    return PopScope(
+      canPop: onHome && thread == null,
+      onPopInvoked: (didPop) {
+        if (didPop) return;
+        // System back: close the open thread first, then leave for home.
+        if (thread != null) {
+          setState(() => _convOpenId = null);
+        } else {
+          goHome();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          leading: (onHome && thread == null)
+              ? null   // default: "←" pops back to the launcher
+              : IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'Back',
+                  onPressed: thread != null
+                      ? () => setState(() => _convOpenId = null)
+                      : goHome,
+                ),
+          title: thread != null
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(thread.title.isEmpty ? thread.id : thread.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    if (thread.badge.isNotEmpty)
+                      Text(thread.badge,
+                          style: TextStyle(
+                              fontSize: 11.5,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant)),
+                  ],
+                )
+              : Text(onHome ? widget.title : _i18n.resolve(_tabNames[idx])),
+          actions: [
+            // The thread's room actions (e.g. recurring bulletin) move up
+            // here while the in-panel header is hidden.
+            if (thread != null && convGroup != null)
+              for (final a in convGroup.childrenOf('action'))
+                if ((a.getString('slot') ?? 'list') == 'room')
+                  IconButton(
+                    tooltip: a.getString('tip') ?? a.name ?? '',
+                    icon: Icon(convIcon(a.getString('icon') ?? 'add')),
+                    onPressed: () {
+                      _fieldValues['${convField}_convo'] = _convOpenId;
+                      _sendCommand(a.name ?? '');
+                    },
+                  ),
+            _buildWappOptionsMenu(),
+          ],
+        ),
+        body: onHome && _tabScreens.length > 1
+            ? Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildNavRail(),
+                  const VerticalDivider(width: 1, thickness: 1),
+                  Expanded(child: tabView),
                 ],
-                isScrollable: true,
               )
-            : null,
+            : tabView,
       ),
-      body: TabBarView(
-        controller: _tabController,
-        physics: const NeverScrollableScrollPhysics(),
-        children: [
-          for (var i = 0; i < _tabScreens.length; i++)
-            _buildScreen(_tabScreens[i]),
-        ],
-      ),
+    );
+  }
+
+  /// The left navigation rail of primary (tab) screens — icon + label per
+  /// screen, top-aligned, mirroring [_tabController]'s index.
+  Widget _buildNavRail() {
+    final cs = Theme.of(context).colorScheme;
+    return NavigationRail(
+      selectedIndex: _tabController?.index ?? 0,
+      groupAlignment: -1.0,
+      onDestinationSelected: (i) {
+        _mapAutoFit = true;   // manual navigation → frame the coverage circle
+        _tabController?.animateTo(i);
+        // Entering the Geo Chat tab clears its unread badge; leaving it lets
+        // new arrivals accumulate again.
+        _setGeoChatOpen(_isGeoChatScreen(_tabScreens[i]));
+      },
+      labelType: NavigationRailLabelType.all,
+      backgroundColor: cs.surface,
+      indicatorColor: cs.primaryContainer,
+      destinations: [
+        for (var i = 0; i < _tabScreens.length; i++)
+          NavigationRailDestination(
+            icon: _railIcon(i, selected: false),
+            selectedIcon: _railIcon(i, selected: true),
+            label: Text(_i18n.resolve(_tabNames[i])),
+          ),
+      ],
+    );
+  }
+
+  /// Icon for a tab screen: the screen's declared `icon`, else inferred from
+  /// its name.
+  IconData _tabIcon(int i) {
+    final declared = _tabScreens[i].getString('icon');
+    if (declared != null && declared.isNotEmpty) return geoUiResolveIcon(declared);
+    return _iconForScreen(_tabNames[i]);
+  }
+
+  /// True if [s] is the dedicated Geo Chat tab (a screen whose content is the
+  /// `geochat` chat field).
+  bool _isGeoChatScreen(GeoUiBlock s) => s.children.any(
+      (c) => c.keyword == 'field' && c.type == 'chat' && c.name == 'geochat');
+
+  /// Rail icon widget for tab [i]; the Geo Chat tab carries the unread badge.
+  Widget _railIcon(int i, {required bool selected}) {
+    final cs = Theme.of(context).colorScheme;
+    final icon = Icon(_tabIcon(i),
+        color: selected ? cs.onPrimaryContainer : null);
+    if (!_isGeoChatScreen(_tabScreens[i]) || _geoUnread <= 0) return icon;
+    return Badge(
+      label: Text(_geoUnread > 99 ? '99+' : '$_geoUnread'),
+      backgroundColor: const Color(0xFFda3633),
+      child: icon,
     );
   }
 
@@ -1896,6 +2038,11 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// generic panel icon). Purely cosmetic.
   IconData _iconForScreen(String name) {
     switch (name.toLowerCase()) {
+      case 'activity': case 'home': case 'feed': return Icons.home_outlined;
+      case 'messenger': case 'messages': return Icons.mail_outline;
+      case 'map': return Icons.map_outlined;
+      case 'geo chat': case 'geochat': case 'chat': return Icons.forum_outlined;
+      case 'follows': case 'following': return Icons.people_outline;
       case 'settings': return Icons.settings;
       case 'tools': return Icons.build;
       case 'keys': return Icons.key;
@@ -2071,8 +2218,117 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         .any((c) => c.keyword == 'group' && c.type == 'split');
     if (hasSplit) return _filesEditorBody();
 
+    // People screen — a screen carrying a `$type:"people"` field renders as
+    // a full-height social list (sections + rows + actions) with the screen's
+    // own action buttons (e.g. "Follow a callsign") as a compact header row.
+    final peopleField = screen.children
+        .where((c) => c.keyword == 'field' && c.type == 'people')
+        .firstOrNull;
+    if (peopleField != null) return _buildPeopleScreen(screen, peopleField);
+
+    // Feed screen — a screen whose only content is a single `$type:"chat"`
+    // field (e.g. the Activity tab) renders as a full-height feed + composer
+    // (Twitter-style), not a fixed-height box inside a scroll form.
+    final directChat = screen.children
+        .where((c) => c.keyword == 'field' && c.type == 'chat')
+        .toList();
+    final hasGroups = screen.children.any((c) => c.keyword == 'group');
+    if (directChat.length == 1 && !hasGroups) {
+      // The geo-chat field gets the dedicated Live|Beacons panel; any other
+      // chat-only screen is a plain full-height feed.
+      if ((directChat.first.name ?? '') == 'geochat') {
+        return _buildGeoChatScreen();
+      }
+      return _buildChatFeedScreen(directChat.first);
+    }
+
     // Settings-like screen — use GeoUI renderer
     return _buildSettingsScreen(screen);
+  }
+
+  /// Show a station's profile: forwarded to the wapp as the generic
+  /// `profile` command with `profile_call`; the wapp answers with a prompt
+  /// (title/body/actions) describing whatever a "profile" means to it.
+  void _showProfile(String from) {
+    if (from.isEmpty) return;
+    _fieldValues['profile_call'] = from;
+    _sendCommand('profile');
+  }
+
+  /// A full-height people list (Following / Followers, tags, row actions),
+  /// with the screen's action buttons as a compact header row.
+  Widget _buildPeopleScreen(GeoUiBlock screen, GeoUiBlock field) {
+    final name = field.name ?? 'people';
+    final stored = _fieldValues[name];
+    final sections = stored is List
+        ? stored
+            .whereType<Map>()
+            .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+            .toList()
+        : const <Map<String, dynamic>>[];
+    final actions =
+        screen.children.where((c) => c.keyword == 'action').toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (actions.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+            child: Row(
+              children: [
+                for (final a in actions) ...[
+                  FilledButton.tonalIcon(
+                    icon: Icon(
+                        geoUiResolveIcon(a.getString('icon') ?? 'add'),
+                        size: 18),
+                    label: Text(_i18n.resolve(a.getString('label') ?? a.name ?? '')),
+                    onPressed: () => _sendCommand(a.name ?? ''),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+              ],
+            ),
+          ),
+        Expanded(
+          child: PeopleViewField(
+            fieldName: name,
+            sections: sections,
+            onTap: (id) {
+              _fieldValues['${name}_id'] = id;
+              _sendCommand('${name}_tap');
+            },
+            onAction: (action, id) {
+              _fieldValues['${name}_id'] = id;
+              _sendCommand(action);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// A full-height chat feed (the chat field fills the tab; the composer sits
+  /// at the bottom). Used for screens that are just a `$type:"chat"` field.
+  Widget _buildChatFeedScreen(GeoUiBlock chat) {
+    final name = chat.name ?? 'activity';
+    final hint = chat.getString('hint') ?? 'Message…';
+    final stored = _fieldValues[name];
+    final messages = stored is List
+        ? stored.whereType<Map>().map((m) => m.cast<String, dynamic>()).toList()
+        : const <Map<String, dynamic>>[];
+    return ChatViewField(
+      fieldName: name,
+      label: '',
+      hint: hint,
+      fill: true,
+      messages: messages,
+      onLocate: _locateFromMessage,
+      onSenderTap: _showProfile,
+      onSend: (text) {
+        _fieldValues['${name}_input'] = text;
+        _sendCommand('${name}_send');
+      },
+    );
   }
 
   // ── Tasks viewer ──────────────────────────────────────────────────

@@ -41,6 +41,9 @@ class ChatViewField extends StatefulWidget {
   /// message carries `lat`/`lon`.
   final void Function(Map<String, dynamic>)? onLocate;
 
+  /// Tapping a sender's name on an incoming bubble (e.g. open their profile).
+  final void Function(String from)? onSenderTap;
+
   const ChatViewField({
     super.key,
     required this.fieldName,
@@ -52,6 +55,7 @@ class ChatViewField extends StatefulWidget {
     this.fill = false,
     this.composerAccessory,
     this.onLocate,
+    this.onSenderTap,
   });
 
   @override
@@ -175,6 +179,22 @@ class _ChatViewFieldState extends State<ChatViewField> {
         Icon(icon, size: 12, color: color),
         const SizedBox(width: 2),
         Text(label,
+            style: TextStyle(
+                color: color, fontSize: 9.5, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+
+  /// Lock badge (APRX): the message was end-to-end encrypted to/from this peer.
+  Widget _encBadge(Map<String, dynamic> m) {
+    if (m['enc'] != true) return const SizedBox.shrink();
+    const color = Color(0xFF63B0E8);
+    return const Padding(
+      padding: EdgeInsets.only(left: 8),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.lock, size: 12, color: color),
+        SizedBox(width: 2),
+        Text('encrypted',
             style: TextStyle(
                 color: color, fontSize: 9.5, fontWeight: FontWeight.w600)),
       ]),
@@ -568,13 +588,21 @@ class _ChatViewFieldState extends State<ChatViewField> {
                 children: [
                   if (from.isNotEmpty)
                     Flexible(
-                      child: Text(
-                        from,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: Color(0xFF7FB0E0),
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold),
+                      // The sender name opens their profile when the host
+                      // offers one (onSenderTap).
+                      child: InkWell(
+                        onTap: widget.onSenderTap == null
+                            ? null
+                            : () => widget.onSenderTap!(from),
+                        borderRadius: BorderRadius.circular(4),
+                        child: Text(
+                          from,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: Color(0xFF7FB0E0),
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold),
+                        ),
                       ),
                     ),
                   if (via.isNotEmpty) ...[
@@ -600,6 +628,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
                         color: Colors.white.withAlpha(115), fontSize: 10),
                   ),
                 ),
+              _encBadge(m),
               _authBadge(m),
               if (threadable) ...[
                 const SizedBox(width: 8),

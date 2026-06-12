@@ -196,5 +196,20 @@ void main() {
       expect(m1!.infoHash, isNot(m2!.infoHash));
       a.close();
     });
+
+    test('magnet link carries the infohash, name and well-known trackers',
+        () async {
+      final (a, d) = freshArchive();
+      final token = a.putBytes(bytes('share me over the internet'), 'png');
+      final s = TorrentService.instance..configure(a, '${d.path}/share');
+      final magnet = await s.magnetOf(token);
+      final ih = await s.infohashOf(token);
+      expect(magnet, isNotNull);
+      expect(magnet, contains('xt=urn:btih:$ih'));
+      expect(magnet, contains('tracker.opentrackr.org'));
+      // Round-trips back to the same infohash a fetcher would join.
+      expect(TorrentService.infohashFromMagnet(magnet!), ih);
+      a.close();
+    });
   });
 }

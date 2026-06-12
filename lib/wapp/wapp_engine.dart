@@ -112,9 +112,9 @@ class WappEngine {
   WasmMemory? _memory;
   final List<WappLogEntry> logs = [];
 
-  /// token → deterministic torrent infohash (hex), filled asynchronously by
-  /// hal_media_infohash so a later synchronous call can return it.
-  static final Map<String, String> _infohashCache = {};
+  /// token → shareable magnet link, filled asynchronously by hal_media_magnet
+  /// so a later synchronous call can return it.
+  static final Map<String, String> _magnetCache = {};
   final List<String> _inbox = [];
   final List<String> _outbox = [];
   final _stopwatch = Stopwatch();
@@ -613,22 +613,33 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
-    // Fetch a hash: try known Blossom sources, then the torrent swarm via a
-    // known infohash. Fire-and-forget; the wapp re-lists / re-checks later.
+    // Fetch a file by its token: scan the LAN for a Blossom peer that has it
+    // (the Blossom path is for nearby devices), then fall back to the
+    // BitTorrent swarm via any recorded infohash. Fire-and-forget; the wapp
+    // re-lists once the bytes land.
     final halMediaFetch = WasmFunction(
       (int tokenPtr, int tokenLen) {
         final archive = mediaArchive();
+        final prefs = PreferencesService.instanceSync;
         if (archive == null || tokenLen <= 0) return 0;
         final ref = MediaRef.parse(_readStr(tokenPtr, tokenLen));
         if (ref == null) return 0;
         if (archive.has(ref.sha256)) return 1;
+        if (prefs != null) {
+          TorrentService.instance.configure(
+              archive, wappsDataStorage(prefs).getAbsolutePath('share'));
+        }
         () async {
+          // 1. LAN: scan nearby devices on the Blossom port.
+          if (await BlossomServer.scanLan(
+                  ref.sha256Hex, ref.ext, archive,
+                  port: BlossomServer.instance.port) !=
+              null) {
+            return;
+          }
+          // 2. Internet: any infohash we learned for this hash → the swarm.
           for (final (kind, value) in archive.getSources(ref.sha256)) {
-            if (kind == 'blossom') {
-              final token = await BlossomServer.fetchFrom(
-                  value, ref.sha256Hex, ref.ext, archive);
-              if (token != null) return;
-            } else if (kind == 'infohash') {
+            if (kind == 'infohash') {
               final token = await TorrentService.instance
                   .fetch(value, expectedSha256: ref.sha256, ext: ref.ext);
               if (token != null) return;
@@ -640,7 +651,30 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
-    // Record an announced source for a hash: kind = blossom|infohash|callsign.
+    // Fetch from a magnet: link (the cross-internet path — a user shares a
+    // magnet, we join the swarm). [expected] is the file:token to verify the
+    // content against (may be empty). Fire-and-forget.
+    final halMediaFetchMagnet = WasmFunction(
+      (int magPtr, int magLen, int expPtr, int expLen) {
+        final archive = mediaArchive();
+        final prefs = PreferencesService.instanceSync;
+        if (archive == null || magLen <= 0) return 0;
+        final magnet = _readStr(magPtr, magLen);
+        final ih = TorrentService.infohashFromMagnet(magnet);
+        if (ih == null) return 0;
+        final ref = expLen > 0 ? MediaRef.parse(_readStr(expPtr, expLen)) : null;
+        if (prefs != null) {
+          TorrentService.instance.configure(
+              archive, wappsDataStorage(prefs).getAbsolutePath('share'));
+        }
+        TorrentService.instance.fetch(ih,
+            expectedSha256: ref?.sha256, ext: ref?.ext ?? 'bin');
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Record a source for a hash: kind = blossom|infohash|callsign.
     final halMediaAddSource = WasmFunction(
       (int tokenPtr, int tokenLen, int kindPtr, int kindLen, int valPtr,
           int valLen) {
@@ -658,9 +692,10 @@ class WappEngine {
       ],
       results: [ValueTy.i32],
     );
-    // The deterministic infohash for an archived token (for announcements).
-    // Returns hex via out buffer; 0 when the bytes are missing.
-    final halMediaInfohash = WasmFunction(
+    // A shareable magnet: link for an archived token (xt + name + trackers) —
+    // the reference a user hands to someone on another network. Built async
+    // and cached; returns 0 until ready, then the magnet on a later call.
+    final halMediaMagnet = WasmFunction(
       (int tokenPtr, int tokenLen, int outPtr, int outCap) {
         final archive = mediaArchive();
         final prefs = PreferencesService.instanceSync;
@@ -670,11 +705,10 @@ class WappEngine {
         final token = _readStr(tokenPtr, tokenLen);
         TorrentService.instance.configure(
             archive, wappsDataStorage(prefs).getAbsolutePath('share'));
-        // Async build; cached so a later call returns it synchronously.
-        final cached = _infohashCache[token];
+        final cached = _magnetCache[token];
         if (cached != null) return _writeStr(outPtr, outCap, cached);
-        TorrentService.instance.infohashOf(token).then((ih) {
-          if (ih != null) _infohashCache[token] = ih;
+        TorrentService.instance.magnetOf(token).then((m) {
+          if (m != null) _magnetCache[token] = m;
         });
         return 0;
       },
@@ -1400,8 +1434,9 @@ class WappEngine {
       WasmImport('hal', 'media_delete', halMediaDelete),
       WasmImport('hal', 'media_stats', halMediaStats),
       WasmImport('hal', 'media_fetch', halMediaFetch),
+      WasmImport('hal', 'media_fetch_magnet', halMediaFetchMagnet),
       WasmImport('hal', 'media_add_source', halMediaAddSource),
-      WasmImport('hal', 'media_infohash', halMediaInfohash),
+      WasmImport('hal', 'media_magnet', halMediaMagnet),
       WasmImport('hal', 'share_ctl', halShareCtl),
       WasmImport('hal', 'share_status', halShareStatus),
       WasmImport('hal', 'npub', halNpub),

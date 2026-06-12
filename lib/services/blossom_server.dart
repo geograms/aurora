@@ -227,6 +227,65 @@ class BlossomServer {
         _ => 'bin',
       };
 
+  /// LAN discovery: probe every host on our local /24 subnets at [port] for a
+  /// `HEAD /<sha256-hex>`; the first that answers 200 is fetched into
+  /// [archive] (hash-verified). This is how Blossom sharing is meant to work —
+  /// scan nearby devices rather than flooding any wide-area network. Returns
+  /// the wire token, or null when no LAN peer has it.
+  static Future<String?> scanLan(
+      String sha256Hex, String ext, MediaArchive archive,
+      {int port = defaultPort,
+      Duration probeTimeout = const Duration(milliseconds: 600)}) async {
+    final bases = <String>[];
+    try {
+      final ifaces = await NetworkInterface.list(
+          type: InternetAddressType.IPv4, includeLoopback: false);
+      for (final i in ifaces) {
+        for (final a in i.addresses) {
+          if (a.isLoopback || a.isLinkLocal) continue;
+          final parts = a.address.split('.');
+          if (parts.length != 4) continue;
+          final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+          for (var h = 1; h < 255; h++) {
+            if ('$prefix.$h' == a.address) continue; // skip self
+            bases.add('http://$prefix.$h:$port');
+          }
+        }
+      }
+    } catch (_) {
+      return null;
+    }
+    // Probe in bounded-concurrency batches; fetch from the first responder.
+    const batch = 32;
+    for (var i = 0; i < bases.length; i += batch) {
+      final slice = bases.sublist(i, (i + batch).clamp(0, bases.length));
+      final hits = await Future.wait(slice.map((base) async {
+        final client = HttpClient()..connectionTimeout = probeTimeout;
+        try {
+          final req = await client
+              .openUrl('HEAD', Uri.parse('$base/$sha256Hex'))
+              .timeout(probeTimeout);
+          final res = await req.close().timeout(probeTimeout);
+          await res.drain<void>();
+          return res.statusCode == HttpStatus.ok ? base : null;
+        } catch (_) {
+          return null;
+        } finally {
+          client.close(force: true);
+        }
+      }));
+      for (final base in hits) {
+        if (base == null) continue;
+        final token = await fetchFrom(base, sha256Hex, ext, archive);
+        if (token != null) {
+          LogService.instance.add('Blossom: fetched $sha256Hex from LAN $base');
+          return token;
+        }
+      }
+    }
+    return null;
+  }
+
   /// Fetch a blob by hash from a remote Blossom server; verifies the digest
   /// before storing it in [archive]. Returns the wire token, or null.
   static Future<String?> fetchFrom(

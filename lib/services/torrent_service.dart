@@ -120,6 +120,26 @@ class TorrentService {
   Future<String?> infohashOf(String token) async =>
       (await buildTorrent(token))?.infoHash;
 
+  /// A shareable magnet link for an archived token (xt + display name +
+  /// well-known trackers), or null when the bytes are missing. This is the
+  /// reference a user hands to someone on another network to fetch the file
+  /// over BitTorrent.
+  Future<String?> magnetOf(String token) async {
+    final model = await buildTorrent(token);
+    if (model == null) return null;
+    final tr = defaultTrackers
+        .map((t) => '&tr=${Uri.encodeQueryComponent(t)}')
+        .join();
+    return 'magnet:?xt=urn:btih:${model.infoHash}'
+        '&dn=${Uri.encodeQueryComponent(model.name)}$tr';
+  }
+
+  /// Parse the 40-hex infohash out of a magnet URI, or null.
+  static String? infohashFromMagnet(String magnet) {
+    final m = RegExp(r'xt=urn:btih:([0-9a-fA-F]{40})').firstMatch(magnet);
+    return m?.group(1)?.toLowerCase();
+  }
+
   /// Seed one archived token into the swarm. Idempotent. Returns the
   /// infohash, or null when the bytes are missing / setup failed.
   Future<String?> seed(String token) async {
@@ -132,6 +152,15 @@ class TorrentService {
       final task = TorrentTask.newTask(model, dir.path);
       _active[ih] = TorrentEntry(ih, token, true, task);
       await task.start();
+      // A task that starts already-complete only fires the trackers' "complete"
+      // event against URLs it has registered — which for a pure seed is none.
+      // Explicitly announce to every well-known tracker so downloaders can find
+      // this seed (DHT announce already happens inside start()).
+      for (final t in defaultTrackers) {
+        try {
+          task.startAnnounceUrl(Uri.parse(t), model.infoHashBuffer);
+        } catch (_) {}
+      }
       LogService.instance.add('Torrent: seeding $token ih:$ih');
       return ih;
     } catch (e) {

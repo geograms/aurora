@@ -202,8 +202,10 @@ class TorrentService {
 
   /// Fetch a file from the swarm by [infoHash] (40-hex). When
   /// [expectedSha256] (b64u or hex) is given the finished bytes must match
-  /// or they are discarded. On success the bytes are archived (the fetcher
-  /// becomes a provider) and the wire token is returned.
+  /// or they are discarded. Peer discovery is hash-only: trackers + DHT for the
+  /// internet, and LSD multicast for the same LAN — no addresses are carried in
+  /// the share message. On success the bytes are archived (the fetcher becomes a
+  /// provider) and the wire token is returned.
   Future<String?> fetch(String infoHash,
       {String? expectedSha256,
       String ext = 'bin',
@@ -294,7 +296,10 @@ class TorrentService {
         metadata.addNewPeerAddress(p, PeerSource.tracker);
       }
     });
-    metadata.startDownload();
+    // startDownload flips the downloader's `_running` flag after its async setup;
+    // await it so tracker/DHT-discovered peers (added later) aren't dropped.
+    await metadata.startDownload();
+    LogService.instance.add('Torrent: fetch $ih (DHT + trackers)');
     final ihBuffer = Uint8List.fromList(hexString2Buffer(ih)!);
     tracker.runTrackers(
         [for (final t in defaultTrackers) Uri.parse(t)], ihBuffer);

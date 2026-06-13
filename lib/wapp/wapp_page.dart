@@ -31,6 +31,7 @@ import 'geoui/conversation_store.dart';
 import 'geoui/geo_chat_archive.dart';
 import 'geoui/widgets/conversations_field.dart';
 import 'geoui/widgets/people_view_field.dart';
+import 'shared_media_fetch.dart';
 import 'geoui/tile_cache.dart';
 import 'background_wapp_manager.dart';
 import '../profile/iwi_profile.dart';
@@ -919,6 +920,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           final fieldName = data['field'] as String? ?? 'messages';
           final msg = data['message'];
           if (msg is Map) {
+            _maybeFetchSharedMedia(msg['text']?.toString() ?? '',
+                (msg['dir']?.toString() ?? 'in'));
             if (fieldName == 'geochat') {
               // Split into Live vs Beacons (repeat detection).
               _geoChatAdd(msg);
@@ -1625,6 +1628,13 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   // Highlighted target from the last "locate" tap (drawn as a reticle on the
   // map so the station is unmistakable).
   double? _locateLat, _locateLon;
+
+  // An incoming chat message can carry a media token plus the seeder's
+  // BitTorrent infohash + LAN peer hint ("file:<sha>.<ext> … ih:<40hex>
+  // pa:<ip>:<port>"). The actual fetch lives in shared_media_fetch.dart so the
+  // background manager runs it too (media arrives whatever screen we're on).
+  void _maybeFetchSharedMedia(String text, String dir) =>
+      maybeFetchSharedMedia(text, dir);
 
   void _locateFromMessage(Map<String, dynamic> m) {
     final lat = (m['lat'] as num?)?.toDouble();

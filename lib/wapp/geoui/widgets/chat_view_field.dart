@@ -16,6 +16,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../util/media_ref.dart';
+import '../../shared_media_fetch.dart';
 import 'media_view.dart';
 
 class ChatViewField extends StatefulWidget {
@@ -554,6 +555,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
   /// leftover runs of whitespace collapse so the caption reads naturally.
   static String _textWithoutTokens(String text) => text
       .replaceAll(RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}'), '')
+      .replaceAll(RegExp(r'\bih:[0-9a-fA-F]{40}\b'), '') // BitTorrent hint
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 
@@ -564,6 +566,13 @@ class _ChatViewFieldState extends State<ChatViewField> {
     // APRX §16 media references: render each `file:<sha256>.<ext>` token as a
     // tappable thumbnail and drop the raw token from the visible text.
     final mediaRefs = MediaRef.findAll(text);
+    // Auto-fetch any referenced media we don't hold yet, using the ih:/pa: hints
+    // in this same message. Idempotent (dedup + archive.has + in-flight guard),
+    // so it's safe to call on every render — this catches history and live
+    // messages alike, regardless of which screen is foreground.
+    if (mediaRefs.isNotEmpty) {
+      maybeFetchSharedMedia(text, m['dir']?.toString() ?? 'in');
+    }
     final time = m['time']?.toString() ?? '';
     final via = m['via']?.toString() ?? '';
     final parent = (m['parent'] ?? '').toString();

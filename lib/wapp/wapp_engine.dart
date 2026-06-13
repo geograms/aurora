@@ -115,6 +115,10 @@ class WappEngine {
   /// token → shareable magnet link, filled asynchronously by hal_media_magnet
   /// so a later synchronous call can return it.
   static final Map<String, String> _magnetCache = {};
+
+  /// token → deterministic torrent infohash (40-hex), filled asynchronously by
+  /// hal_media_infohash so a later synchronous call can return it.
+  static final Map<String, String> _infohashCache = {};
   final List<String> _inbox = [];
   final List<String> _outbox = [];
   final _stopwatch = Stopwatch();
@@ -709,6 +713,37 @@ class WappEngine {
         if (cached != null) return _writeStr(outPtr, outCap, cached);
         TorrentService.instance.magnetOf(token).then((m) {
           if (m != null) _magnetCache[token] = m;
+        });
+        return 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // The deterministic torrent infohash (40-hex) for an archived token — the
+    // sender appends this to the share message so the receiver can join the
+    // swarm. Built async + cached; 0 until ready, then the hex on a later call.
+    final halMediaInfohash = WasmFunction(
+      (int tokenPtr, int tokenLen, int outPtr, int outCap) {
+        final archive = mediaArchive();
+        final prefs = PreferencesService.instanceSync;
+        if (archive == null || prefs == null || tokenLen <= 0 || outCap <= 0) {
+          return 0;
+        }
+        final token = _readStr(tokenPtr, tokenLen);
+        TorrentService.instance.configure(
+            archive, wappsDataStorage(prefs).getAbsolutePath('share'));
+        // Sharing a file means we should be reachable both ways: in the swarm
+        // (so off-network peers can fetch via the infohash) AND on the LAN (so
+        // same-network peers can fetch the hash over Blossom without any address
+        // on the air). start() is idempotent.
+        BlossomServer.instance.start(archive);
+        final cached = _infohashCache[token];
+        if (cached != null) return _writeStr(outPtr, outCap, cached);
+        // Seed (not just compute): appending ih: to a share message only helps
+        // the receiver if we're actually in the swarm. seed() is idempotent and
+        // returns the same deterministic infohash.
+        TorrentService.instance.seed(token).then((ih) {
+          if (ih != null) _infohashCache[token] = ih;
         });
         return 0;
       },
@@ -1437,6 +1472,7 @@ class WappEngine {
       WasmImport('hal', 'media_fetch_magnet', halMediaFetchMagnet),
       WasmImport('hal', 'media_add_source', halMediaAddSource),
       WasmImport('hal', 'media_magnet', halMediaMagnet),
+      WasmImport('hal', 'media_infohash', halMediaInfohash),
       WasmImport('hal', 'share_ctl', halShareCtl),
       WasmImport('hal', 'share_status', halShareStatus),
       WasmImport('hal', 'npub', halNpub),

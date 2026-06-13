@@ -29,6 +29,7 @@ import '../models/monitored_task.dart';
 import '../profile/storage_paths.dart';
 import '../services/background_service.dart';
 import 'geoui/geo_chat_archive.dart';
+import 'shared_media_fetch.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
 import 'android_foreground_service.dart';
@@ -204,9 +205,16 @@ class _WappBackgroundService extends BackgroundService {
       } else if (type == 'ui.chat.append') {
         // No UI in the background, but still archive geo-tagged Live messages
         // so an always-on station keeps its history as messages happen.
+        final msg = data['message'];
         if ((data['field'] as String? ?? 'messages') == 'geochat') {
-          final msg = data['message'];
           if (msg is Map) _geoArchive.add(msg);
+        }
+        // Auto-fetch shared media even with no UI: an incoming message carrying
+        // a file: token + ih:/pa: hints joins the swarm so the bytes land in the
+        // archive regardless of which screen (if any) is foreground.
+        if (msg is Map) {
+          maybeFetchSharedMedia(
+              msg['text']?.toString() ?? '', msg['dir']?.toString() ?? 'in');
         }
       } else if (type == 'notify') {
         final levelStr = (data['level'] as String? ?? 'info').toLowerCase();

@@ -34,6 +34,9 @@ class BlossomServer {
 
   static const int defaultPort = 3457;
 
+  /// GET / banner identifying an Aurora Blossom server to a LAN scanner.
+  static const String _banner = '{"app":"aurora-blossom","v":1}';
+
   HttpServer? _server;
   int _port = defaultPort;
   MediaArchive? _archive;
@@ -115,6 +118,13 @@ class BlossomServer {
       final path = req.uri.path;
       if (req.method == 'OPTIONS') {
         res.statusCode = HttpStatus.noContent;
+      } else if ((req.method == 'GET' || req.method == 'HEAD') &&
+          (path == '/' || path == '/id')) {
+        // Discovery banner: lets a LAN scanner recognise an Aurora Blossom
+        // server (GET / → this marker) without probing for a specific hash.
+        res.headers.contentType = ContentType.json;
+        res.statusCode = HttpStatus.ok;
+        if (req.method == 'GET') res.write(_banner);
       } else if ((req.method == 'GET' || req.method == 'HEAD') &&
           _blobPath(path) != null) {
         _serveBlob(req, res, _blobPath(path)!);
@@ -321,5 +331,111 @@ class BlossomServer {
     } finally {
       client?.close(force: true);
     }
+  }
+
+  // ── LAN Blossom directory ────────────────────────────────────────────────
+  // A cached list of reachable Aurora Blossom servers on the local network,
+  // refreshed by a periodic scan (driven by the Files wapp). Media resolution
+  // queries these KNOWN servers for a hash — cheap, vs scanning the whole /24
+  // on every file link.
+  static final Map<String, DateTime> _lanServers = {}; // baseUrl → lastSeen
+  static bool _scanning = false;
+
+  /// Base URLs of Blossom servers seen on the LAN recently (excludes stale).
+  static List<String> knownServers({Duration maxAge = const Duration(minutes: 10)}) {
+    final cutoff = DateTime.now().subtract(maxAge);
+    return _lanServers.entries
+        .where((e) => e.value.isAfter(cutoff))
+        .map((e) => e.key)
+        .toList(growable: false);
+  }
+
+  /// Probe the local /24(s) for Aurora Blossom servers (GET / → banner) and
+  /// refresh the directory. Returns the current reachable base URLs. This is
+  /// the routine LAN scan — run periodically, NOT per file link.
+  static Future<List<String>> discoverLan({
+    int port = defaultPort,
+    Duration probeTimeout = const Duration(milliseconds: 500),
+  }) async {
+    if (_scanning) return knownServers(); // a scan is already in flight
+    _scanning = true;
+    try {
+      return await _discoverLan(port, probeTimeout);
+    } finally {
+      _scanning = false;
+    }
+  }
+
+  static Future<List<String>> _discoverLan(
+      int port, Duration probeTimeout) async {
+    final bases = <String>[];
+    try {
+      final ifaces = await NetworkInterface.list(
+          type: InternetAddressType.IPv4, includeLoopback: false);
+      for (final i in ifaces) {
+        for (final a in i.addresses) {
+          if (a.isLoopback || a.isLinkLocal) continue;
+          final parts = a.address.split('.');
+          if (parts.length != 4) continue;
+          final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+          for (var h = 1; h < 255; h++) {
+            if ('$prefix.$h' == a.address) continue; // skip self
+            bases.add('http://$prefix.$h:$port');
+          }
+        }
+      }
+    } catch (_) {
+      return knownServers();
+    }
+    const batch = 48;
+    final now = DateTime.now();
+    for (var i = 0; i < bases.length; i += batch) {
+      final slice = bases.sublist(i, (i + batch).clamp(0, bases.length));
+      final hits = await Future.wait(slice.map((base) async {
+        final client = HttpClient()..connectionTimeout = probeTimeout;
+        try {
+          final req =
+              await client.getUrl(Uri.parse('$base/id')).timeout(probeTimeout);
+          final res = await req.close().timeout(probeTimeout);
+          if (res.statusCode != HttpStatus.ok) return null;
+          final bytes = await res
+              .fold<List<int>>(<int>[], (b, d) => b..addAll(d))
+              .timeout(probeTimeout);
+          return String.fromCharCodes(bytes).contains('aurora-blossom')
+              ? base
+              : null;
+        } catch (_) {
+          return null;
+        } finally {
+          client.close(force: true);
+        }
+      }));
+      for (final base in hits) {
+        if (base != null) _lanServers[base] = now;
+      }
+    }
+    // Drop entries not seen in this scan that are also stale.
+    _lanServers.removeWhere(
+        (_, seen) => seen.isBefore(now.subtract(const Duration(minutes: 30))));
+    final found = knownServers();
+    LogService.instance
+        .add('Blossom: LAN scan → ${found.length} server(s): ${found.join(", ")}');
+    return found;
+  }
+
+  /// Try to fetch [sha256Hex] from the KNOWN LAN servers (no scan). Returns the
+  /// wire token on the first hit, or null. Used as the LAN tier of media
+  /// resolution, before falling back to the BitTorrent swarm.
+  static Future<String?> fetchFromKnown(
+      String sha256Hex, String ext, MediaArchive archive) async {
+    for (final base in knownServers()) {
+      final token = await fetchFrom(base, sha256Hex, ext, archive);
+      if (token != null) {
+        LogService.instance
+            .add('Blossom: fetched $sha256Hex from known LAN $base');
+        return token;
+      }
+    }
+    return null;
   }
 }

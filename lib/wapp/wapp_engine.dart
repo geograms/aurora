@@ -617,6 +617,21 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Routine LAN Blossom scan (driven by the Files wapp on a timer): probe the
+    // local network for Aurora Blossom servers and refresh the cached directory.
+    // Media resolution then queries those KNOWN servers for a hash without
+    // re-scanning. Returns the current reachable-server count; writes their
+    // base URLs as a JSON array to [out]. Fire-and-forget scan (re-entrant-safe).
+    final halLanScan = WasmFunction(
+      (int outPtr, int outCap) {
+        BlossomServer.discoverLan(); // async; refreshes the directory
+        final servers = BlossomServer.knownServers();
+        if (outCap > 0) _writeStr(outPtr, outCap, jsonEncode(servers));
+        return servers.length;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // Fetch a file by its token: scan the LAN for a Blossom peer that has it
     // (the Blossom path is for nearby devices), then fall back to the
     // BitTorrent swarm via any recorded infohash. Fire-and-forget; the wapp
@@ -1475,6 +1490,7 @@ class WappEngine {
       WasmImport('hal', 'media_infohash', halMediaInfohash),
       WasmImport('hal', 'share_ctl', halShareCtl),
       WasmImport('hal', 'share_status', halShareStatus),
+      WasmImport('hal', 'lan_scan', halLanScan),
       WasmImport('hal', 'npub', halNpub),
       WasmImport('hal', 'encrypt', halEncrypt),
       WasmImport('hal', 'decrypt', halDecrypt),

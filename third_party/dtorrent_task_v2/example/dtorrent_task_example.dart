@@ -1,0 +1,76 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:dtorrent_task_v2/dtorrent_task_v2.dart';
+import 'package:events_emitter2/events_emitter2.dart';
+import 'package:logging/logging.dart';
+import 'package:path/path.dart' as path;
+import 'test_torrent_helper.dart';
+
+var scriptDir = path.dirname(Platform.script.path);
+var torrentsPath =
+    path.canonicalize(path.join(scriptDir, '..', '..', '..', 'torrents'));
+var _log = Logger('task_example');
+void main() async {
+  try {
+    // Try to use big-buck-bunny.torrent, fallback to test torrent
+    var torrentFile = path.join(torrentsPath, 'big-buck-bunny.torrent');
+    if (!await File(torrentFile).exists()) {
+      print('big-buck-bunny.torrent not found, creating test torrent...');
+      torrentFile = await ensureTestTorrentExists();
+      print('Using test torrent: $torrentFile');
+    }
+    var savePath = path.join(scriptDir, '..', 'tmp');
+    var model = await TorrentModel.parse(torrentFile);
+    // model.announces.clear();
+    var task = TorrentTask.newTask(model, savePath);
+    Timer? timer;
+    var startTime = DateTime.now().millisecondsSinceEpoch;
+    EventsListener<TaskEvent> listener = task.createListener();
+    listener
+      ..on<TaskCompleted>((event) {
+        print(
+            'Complete! spend time : ${((DateTime.now().millisecondsSinceEpoch - startTime) / 60000).toStringAsFixed(2)} minutes');
+        timer?.cancel();
+        task.stop();
+      })
+      ..on<TaskStopped>(((event) {
+        print('Task Stopped');
+      }));
+
+    var map = await task.start();
+    findPublicTrackers().listen((announceUrls) {
+      for (var element in announceUrls) {
+        task.startAnnounceUrl(element, model.infoHashBuffer);
+      }
+    });
+    _log.info('Adding dht nodes');
+    for (var element in model.nodes) {
+      _log.info('dht node $element');
+      task.addDHTNode(element);
+    }
+    print(map);
+
+    timer = Timer.periodic(Duration(seconds: 2), (timer) async {
+      var progress = '${(task.progress * 100).toStringAsFixed(2)}%';
+      var ads = ((task.averageDownloadSpeed) * 1000 / 1024).toStringAsFixed(2);
+      var aps = ((task.averageUploadSpeed) * 1000 / 1024).toStringAsFixed(2);
+      var ds = ((task.currentDownloadSpeed) * 1000 / 1024).toStringAsFixed(2);
+      var ps = ((task.uploadSpeed) * 1000 / 1024).toStringAsFixed(2);
+
+      var utpDownloadSpeed =
+          ((task.utpDownloadSpeed) * 1000 / 1024).toStringAsFixed(2);
+      var utpUploadSpeed =
+          ((task.utpUploadSpeed) * 1000 / 1024).toStringAsFixed(2);
+      var utpPeerCount = task.utpPeerCount;
+
+      var active = task.connectedPeersNumber;
+      var seeders = task.seederNumber;
+      var all = task.allPeersNumber;
+      print(
+          'Progress : $progress , Peers:($active/$seeders/$all)($utpPeerCount) . Download speed : ($utpDownloadSpeed)($ads/$ds)kb/s , upload speed : ($utpUploadSpeed)($aps/$ps)kb/s');
+    });
+  } catch (e) {
+    print(e);
+  }
+}

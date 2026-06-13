@@ -27,10 +27,12 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:b_encode_decode/b_encode_decode.dart' as bencode;
-import 'package:dtorrent_parser/dtorrent_parser.dart';
+// dtorrent_task_v2 0.5.4 bundles the parser, tracker, DHT and dtorrent_common,
+// so a single import provides TorrentModel/TorrentParser/TorrentCreator,
+// TorrentAnnounceTracker + AnnouncePeerEventEvent, MetadataDownloader and
+// hexString2Buffer. (No separate dtorrent_parser/dtorrent_tracker imports —
+// those would clash with the bundled symbols.)
 import 'package:dtorrent_task_v2/dtorrent_task_v2.dart';
-import 'package:dtorrent_tracker/dtorrent_tracker.dart';
 
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -100,7 +102,7 @@ class TorrentService {
 
   /// Build the deterministic torrent model for a token the archive holds.
   /// Returns null when the bytes are missing.
-  Future<Torrent?> buildTorrent(String token) async {
+  Future<TorrentModel?> buildTorrent(String token) async {
     final ref = MediaRef.parse(token);
     if (ref == null) return null;
     final f = await _stage(ref);
@@ -109,13 +111,12 @@ class TorrentService {
       f.path,
       TorrentCreationOptions(
         pieceLength: pieceLengthFor(f.lengthSync()),
-        // No trackers baked in: a task with a tracker list announces on start()
-        // (before we mark the staged file complete), registering us as a
-        // left=full leecher and then ignoring re-announces. We announce to the
-        // well-known trackers ourselves in seed() AFTER marking complete, so we
-        // register as a seeder. Trackers live outside the info dict, so omitting
-        // them does not change the deterministic infohash.
-        trackers: const [],
+        // Bake the well-known public trackers into the announce-list so the
+        // torrent behaves like a normal client's: the task announces to them on
+        // start() (as a seeder, since we pre-write a complete state) and a
+        // fetcher's tracker query finds us. Trackers live OUTSIDE the info dict,
+        // so they don't change the deterministic infohash (same bytes → same ih).
+        trackers: [for (final t in defaultTrackers) Uri.parse(t)],
         creationDate: 0, // pinned for reproducibility
       ),
     );
@@ -164,7 +165,7 @@ class TorrentService {
       // (getBit ignores padding bits beyond pieceCount, so all-0xFF == done.)
       try {
         if (!dir.existsSync()) dir.createSync(recursive: true);
-        final pieces = model.pieces.length;
+        final pieces = model.pieces?.length ?? 0;
         final bytesLen = (pieces + 7) ~/ 8;
         final state = Uint8List(bytesLen + 8)..fillRange(0, bytesLen, 0xFF);
         await File('${dir.path}/$ih.bt.state').writeAsBytes(state, flush: true);
@@ -180,7 +181,24 @@ class TorrentService {
         } catch (_) {}
       }
       LogService.instance.add(
-          'Torrent: seeding $token ih:$ih (${model.pieces.length} pieces)');
+          'Torrent: seeding $token ih:$ih (${model.pieces?.length ?? 0} pieces)');
+      // Observability: surface peer counts for a few minutes so a cross-network
+      // transfer (a remote fetcher connecting to us) is visible in /api/log.
+      var ticks = 0;
+      Timer.periodic(const Duration(seconds: 20), (t) {
+        try {
+          final e = _active[ih];
+          if (e == null || ++ticks > 18) {
+            t.cancel();
+            return;
+          }
+          LogService.instance.add(
+              'Torrent: seed $ih peers=${e.task.connectedPeersNumber} '
+              'seeders=${e.task.seederNumber} up=${e.task.uploadSpeed.toStringAsFixed(1)}');
+        } catch (_) {
+          t.cancel(); // never let an observability tick crash the app
+        }
+      });
       return ih;
     } catch (e) {
       LogService.instance.add('Torrent: seed failed: $e');
@@ -235,11 +253,22 @@ class TorrentService {
 
     metadataListener.on<MetaDataDownloadComplete>((event) async {
       try {
-        // BEP-9 delivers the bare info dict; wrap it into a full torrent map
-        // and round-trip through the bencode parser to get the model.
-        final model = await Torrent.parseFromBytes(Uint8List.fromList(
-            bencode.encode(
-                {'info': bencode.decode(Uint8List.fromList(event.data))})));
+        // BEP-9 delivers the bare info-dict bencode EXACTLY (sha1(it) == ih).
+        // Wrap it as a minimal torrent by RAW byte concatenation —
+        // "d" + "4:info" + <metadata bytes> + "e" — so the info-dict bytes stay
+        // byte-identical. (Re-encoding via bencode.decode/encode would reorder
+        // keys non-canonically and the parser, which hashes the exact info-dict
+        // slice, would derive a WRONG infohash.)
+        final wrapped = <int>[]
+          ..addAll('d4:info'.codeUnits)
+          ..addAll(event.data)
+          ..add(0x65); // 'e'
+        final model = TorrentParser.parseBytes(Uint8List.fromList(wrapped));
+        if (model.infoHash != ih) {
+          LogService.instance
+              .add('Torrent: $ih metadata infohash mismatch — discarded');
+          return finish(null);
+        }
         final task = TorrentTask.newTask(model, dir.path);
         _active[ih] = TorrentEntry(ih, '', false, task);
         final taskListener = task.createListener();
@@ -275,6 +304,14 @@ class TorrentService {
           }
         });
         await task.start();
+        // The metadata we fetched carries no announce list, so the task would
+        // otherwise rely on its internal DHT alone. Announce to the well-known
+        // public trackers (as in seed()) so the data download finds peers fast.
+        for (final t in defaultTrackers) {
+          try {
+            task.startAnnounceUrl(Uri.parse(t), model.infoHashBuffer);
+          } catch (_) {}
+        }
       } catch (e) {
         LogService.instance.add('Torrent: metadata parse failed: $e');
         return finish(null);

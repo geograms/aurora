@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -27,6 +28,7 @@ import androidx.core.content.ContextCompat
 class BgService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -57,6 +59,17 @@ class BgService : Service() {
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aurora:bg")
                 .apply { setReferenceCounted(false); acquire() }
         }
+        // Keep WiFi fully powered with the screen off. The wake lock alone keeps
+        // the CPU running, but WiFi power-save still stops the device from
+        // serving INCOMING connections (Blossom / BitTorrent seeds) and adds
+        // latency to pushed APRS-IS data. A high-perf WiFi lock keeps the radio
+        // up so a backgrounded/asleep device stays reachable by other devices.
+        if (wifiLock == null) {
+            val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "aurora:wifi")
+                .apply { setReferenceCounted(false); acquire() }
+        }
         handler.removeCallbacks(ticker)
         handler.postDelayed(ticker, TICK_MS)
         return START_STICKY
@@ -66,6 +79,8 @@ class BgService : Service() {
         handler.removeCallbacks(ticker)
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
         super.onDestroy()
     }
 

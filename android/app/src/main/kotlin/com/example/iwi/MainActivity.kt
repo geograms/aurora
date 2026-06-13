@@ -77,7 +77,39 @@ class MainActivity : FlutterActivity() {
             "stopDownloadService" -> {
                 DownloadForegroundService.stop(this); result.success(true)
             }
+            // Battery-optimization (Doze) exemption — required on aggressive OEMs
+            // so the foreground service + APRS-IS connection + Blossom/seed
+            // servers survive deep sleep instead of being killed.
+            "isIgnoringBatteryOptimizations" -> result.success(isIgnoringBattery())
+            "requestIgnoreBatteryOptimizations" -> {
+                requestIgnoreBattery(); result.success(true)
+            }
             else -> result.notImplemented()
+        }
+    }
+
+    private fun isIgnoringBattery(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            pm.isIgnoringBatteryOptimizations(packageName)
+        } else {
+            true
+        }
+
+    private fun requestIgnoreBattery() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || isIgnoringBattery()) return
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName"),
+                ),
+            )
+        } catch (_: Exception) {
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Exception) {
+            }
         }
     }
 

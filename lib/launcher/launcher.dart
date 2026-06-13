@@ -26,6 +26,7 @@ import '../platform/platform.dart' as platform;
 
 import '../wapp/wapp_file_handler.dart';
 import '../profile/welcome_page.dart';
+import '../services/battery_optimization.dart';
 import '../services/event_bus.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';

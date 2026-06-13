@@ -111,6 +111,13 @@ class PreferencesService {
   Future<void> setAutoStartOnBoot(bool v) =>
       _prefs.setBool('autoStartOnBoot', v);
 
+  // Whether we've already shown the Android battery-optimization exemption
+  // prompt (so we ask once rather than nagging every launch).
+  bool get batteryExemptionAsked =>
+      _prefs.getBool('battery.exemptionAsked') ?? false;
+  Future<void> setBatteryExemptionAsked(bool v) =>
+      _prefs.setBool('battery.exemptionAsked', v);
+
   // Last-known scalar field values (settings) for a wapp, as a JSON string, so
   // a background/headless engine can run with the user's configured settings
   // (callsign, server, radius, …) instead of bare defaults.

@@ -19,6 +19,7 @@ class _LauncherPageState extends State<LauncherPage> {
   void initState() {
     super.initState();
     _scanArchive();
+    _maybeRequestBatteryExemption();
     // Re-scan whenever the user switches profiles so the grid
     // reflects the new profile's apps/ folder. storage_paths.dart
     // already routes through the active profile, so just triggering
@@ -37,6 +38,17 @@ class _LauncherPageState extends State<LauncherPage> {
   void _onProfileChanged() {
     setState(() => _wapps = null);
     _scanArchive();
+  }
+
+  // One-time prompt to exempt the app from Android battery optimization, so the
+  // always-on background service (APRS-IS + Blossom/seed servers) survives deep
+  // sleep on aggressive OEMs. Asked once; the user can re-enable in settings.
+  Future<void> _maybeRequestBatteryExemption() async {
+    final prefs = await PreferencesService.instance();
+    if (prefs.batteryExemptionAsked) return;
+    if (await BatteryOptimization.isExempt()) return;
+    await prefs.setBatteryExemptionAsked(true);
+    await BatteryOptimization.requestExemption();
   }
 
   Future<void> _scanArchive() async {

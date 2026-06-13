@@ -213,8 +213,12 @@ class _WappBackgroundService extends BackgroundService {
         // a file: token + ih:/pa: hints joins the swarm so the bytes land in the
         // archive regardless of which screen (if any) is foreground.
         if (msg is Map) {
-          maybeFetchSharedMedia(
-              msg['text']?.toString() ?? '', msg['dir']?.toString() ?? 'in');
+          final mtext = msg['text']?.toString() ?? '';
+          final mdir = msg['dir']?.toString() ?? 'in';
+          maybeFetchSharedMedia(mtext, mdir);
+          // Outgoing shares: publish the bytes to public Blossom so stations on
+          // other (NAT'd) networks can fetch them over the internet.
+          maybePublishSharedMedia(mtext, mdir);
         }
       } else if (type == 'notify') {
         final levelStr = (data['level'] as String? ?? 'info').toLowerCase();

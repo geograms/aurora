@@ -21,11 +21,16 @@
  */
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' show sha256;
+
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
+import '../util/nostr_crypto.dart';
+import '../util/nostr_event.dart';
 import 'log_service.dart';
 
 class BlossomServer {
@@ -331,6 +336,111 @@ class BlossomServer {
     } finally {
       client?.close(force: true);
     }
+  }
+
+  // ── Public Blossom servers (internet reachable, content-addressed) ───────
+  // When two stations are on different NAT'd networks, direct BitTorrent peer
+  // connections are impossible (e.g. a phone behind cellular CGNAT/symmetric
+  // NAT). The reachable, no-router-config path both sides reach OUTBOUND is a
+  // public Blossom host: the sharer PUTs the blob (authed, BUD-02), any fetcher
+  // GETs it by sha256. These were verified to accept our exact BIP-340 auth and
+  // serve the blob back (blossom.band rejects by file-type; satellite needs a
+  // paid plan — excluded).
+  static const List<String> publicServers = [
+    'https://blossom.primal.net',
+    'https://nostr.download',
+  ];
+
+  static String _mimeFor(String ext) {
+    switch (ext.toLowerCase()) {
+      case 'png':
+        return 'image/png';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      case 'pdf':
+        return 'application/pdf';
+      case 'txt':
+        return 'text/plain';
+      default:
+        return 'application/octet-stream';
+    }
+  }
+
+  /// Upload [data] to one public Blossom [baseUrl] using BUD-02 authorization
+  /// (a kind-24242 NOSTR event signed with [privHex], BIP-340). Returns true on
+  /// a 2xx response. The blob is addressed by its own SHA-256, so this cannot
+  /// poison a foreign hash.
+  static Future<bool> uploadTo(String baseUrl, Uint8List data, String privHex,
+      {String ext = 'bin',
+      Duration timeout = const Duration(seconds: 30)}) async {
+    HttpClient? client;
+    try {
+      var pub = NostrCrypto.derivePublicKey(privHex);
+      if (pub.length == 66) pub = pub.substring(2); // x-only
+      final shaHex = sha256.convert(data).toString();
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final auth = NostrEvent(
+        pubkey: pub,
+        createdAt: now,
+        kind: 24242,
+        tags: [
+          ['t', 'upload'],
+          ['x', shaHex],
+          ['expiration', '${now + 600}'],
+        ],
+        content: 'Upload $shaHex',
+      )..sign(privHex);
+      final header =
+          'Nostr ${base64.encode(utf8.encode(jsonEncode(auth.toJson())))}';
+      final base = baseUrl.endsWith('/')
+          ? baseUrl.substring(0, baseUrl.length - 1)
+          : baseUrl;
+      client = HttpClient()..connectionTimeout = timeout;
+      final put =
+          await client.putUrl(Uri.parse('$base/upload')).timeout(timeout);
+      put.headers.set('Authorization', header);
+      final mime = _mimeFor(ext).split('/');
+      put.headers.contentType = ContentType(mime[0], mime[1]);
+      put.add(data);
+      final res = await put.close().timeout(timeout);
+      await res.drain();
+      final ok = res.statusCode >= 200 && res.statusCode < 300;
+      LogService.instance.add(
+          'Blossom: upload $shaHex.$ext -> $baseUrl ${res.statusCode}');
+      return ok;
+    } catch (e) {
+      LogService.instance.add('Blossom: upload to $baseUrl failed: $e');
+      return false;
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  /// Publish [data] to every public Blossom server so it is reachable over the
+  /// internet by its sha256. Returns the number of servers that accepted it.
+  static Future<int> publishToPublic(Uint8List data, String privHex,
+      {String ext = 'bin'}) async {
+    var n = 0;
+    for (final base in publicServers) {
+      if (await uploadTo(base, data, privHex, ext: ext)) n++;
+    }
+    return n;
+  }
+
+  /// Fetch [sha256Hex] from the public Blossom servers (internet tier). Returns
+  /// the archived token on the first hit, or null.
+  static Future<String?> fetchFromPublic(
+      String sha256Hex, String ext, MediaArchive archive) async {
+    for (final base in publicServers) {
+      final token = await fetchFrom(base, sha256Hex, ext, archive);
+      if (token != null) return token;
+    }
+    return null;
   }
 
   // ── LAN Blossom directory ────────────────────────────────────────────────

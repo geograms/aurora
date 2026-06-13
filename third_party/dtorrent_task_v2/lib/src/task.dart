@@ -130,6 +130,11 @@ abstract class TorrentTask with EventsEmittable<TaskEvent> {
 
   int get seederNumber;
 
+  /// The local TCP port peers connect to (the incoming peer-wire listener), or
+  /// null before [start]. Useful for diagnostics and for handing a reachable
+  /// address to another peer directly.
+  int? get peerPort;
+
   /// Current download speed
   double get currentDownloadSpeed;
 
@@ -1988,6 +1993,9 @@ class _TorrentTask
   void addDHTNode(Uri url) {
     _dht?.addBootstrapNode(url);
   }
+
+  @override
+  int? get peerPort => _serverSocket?.port;
 
   @override
   int get connectedPeersNumber {

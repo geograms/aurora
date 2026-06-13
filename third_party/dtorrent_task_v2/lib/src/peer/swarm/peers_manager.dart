@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:b_encode_decode/b_encode_decode.dart';
 import 'package:dart_ipify/dart_ipify.dart';
 import 'package:dtorrent_task_v2/src/torrent/torrent_model.dart';
 import 'package:dtorrent_task_v2/src/standalone/dtorrent_common.dart';
@@ -279,9 +280,64 @@ class PeersManager with Holepunch, PEX, EventsEmittable<PeerEvent> {
   ///  Add supported extensions here
   void _registerExtended(Peer peer) {
     _log.fine('registering extensions for peer ${peer.address}');
+    peer.registerExtend('ut_metadata');
     peer.registerExtend('ut_pex');
     peer.registerExtend('ut_holepunch');
     peer.registerExtend(extensionLtDontHave);
+    // Advertise that we can serve the info dictionary (BEP-9) so peers who
+    // joined by infohash alone can bootstrap metadata from us.
+    final infoBytes = _metaInfo.infoDictBytes;
+    if (infoBytes != null && infoBytes.isNotEmpty) {
+      peer.metaDataSize = infoBytes.length;
+    }
+  }
+
+  /// Block size for metadata pieces (BEP-9): 16 KiB.
+  static const int _metaDataBlockSize = 16 * 1024;
+
+  /// Serve a ut_metadata (BEP-9) request from a peer that joined by infohash.
+  /// Replies with the requested 16 KiB block of our info dictionary, or a
+  /// reject if we can't satisfy it.
+  void _handleMetadataRequest(Peer source, Uint8List data) {
+    final infoBytes = _metaInfo.infoDictBytes;
+    int piece;
+    try {
+      final msg = decode(data);
+      if (msg is! Map) return;
+      final type = msg['msg_type'];
+      if (type != 0) return; // we only answer requests (0); ignore data/reject
+      final p = msg['piece'];
+      if (p is! int) return;
+      piece = p;
+    } catch (_) {
+      return;
+    }
+    if (infoBytes == null || infoBytes.isEmpty) {
+      source.sendExtendMessage(
+          'ut_metadata', encode({'msg_type': 2, 'piece': piece}));
+      return;
+    }
+    final start = piece * _metaDataBlockSize;
+    if (start < 0 || start >= infoBytes.length) {
+      source.sendExtendMessage(
+          'ut_metadata', encode({'msg_type': 2, 'piece': piece}));
+      return;
+    }
+    final end = (start + _metaDataBlockSize) > infoBytes.length
+        ? infoBytes.length
+        : start + _metaDataBlockSize;
+    final chunk = infoBytes.sublist(start, end);
+    // BEP-9 data message: bencoded header {msg_type:1, piece, total_size}
+    // immediately followed by the raw block bytes. total_size is the FULL
+    // metadata size, not the block size.
+    final header = encode(
+        {'msg_type': 1, 'piece': piece, 'total_size': infoBytes.length});
+    final payload = <int>[]
+      ..addAll(header)
+      ..addAll(chunk);
+    source.sendExtendMessage('ut_metadata', payload);
+    _log.fine('Served metadata piece $piece (${chunk.length}B) to '
+        '${source.address}');
   }
 
   void _unHookPeer(Peer peer) {
@@ -296,6 +352,12 @@ class PeersManager with Holepunch, PEX, EventsEmittable<PeerEvent> {
 
   void _processExtendedMessage(Peer source, String name, Object? data) {
     _log.fine('Processing Extended Message $name');
+    if (name == 'ut_metadata') {
+      if (data is Uint8List) {
+        _handleMetadataRequest(source, data);
+      }
+      return;
+    }
     if (name == 'ut_holepunch') {
       if (data is List<int>) {
         parseHolepunchMessage(data);

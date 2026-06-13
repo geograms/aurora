@@ -266,6 +266,11 @@ abstract class Peer
 
   int? remoteReqq;
 
+  /// Total size (bytes) of the torrent's info dictionary, advertised as
+  /// `metadata_size` in our extended handshake so remote peers can fetch the
+  /// metadata from us over ut_metadata (BEP-9). Null = we don't serve metadata.
+  int? metaDataSize;
+
   /// Torrent version support (v1, v2, or hybrid)
   /// Used to set handshake reserved bits for v2 support
   TorrentVersion? _torrentVersion;
@@ -1429,6 +1434,13 @@ abstract class Peer
     d['v'] = 'Dart BT v$version';
     d['m'] = localExtended;
     d['reqq'] = reqq;
+    // Advertise that we can serve the metadata (BEP-9) so peers that joined by
+    // infohash alone (magnet / hash-only share) can bootstrap the info dict
+    // from us — essential for device-to-device sharing where we may be the only
+    // seeder. ut_metadata must also be registered (see PeersManager).
+    if (metaDataSize != null && metaDataSize! > 0) {
+      d['metadata_size'] = metaDataSize;
+    }
     var m = encode(d);
     message.addAll(m);
     return message;

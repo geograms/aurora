@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  battery_plus
   ble_peripheral
   bluetooth_low_energy_windows
   file_selector_windows

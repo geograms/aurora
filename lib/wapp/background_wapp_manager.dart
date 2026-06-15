@@ -215,7 +215,7 @@ class _WappBackgroundService extends BackgroundService {
         if (msg is Map) {
           final mtext = msg['text']?.toString() ?? '';
           final mdir = msg['dir']?.toString() ?? 'in';
-          maybeFetchSharedMedia(mtext, mdir);
+          maybeFetchSharedMedia(mtext, mdir, from: msg['from']?.toString());
           // Outgoing shares: publish the bytes to public Blossom so stations on
           // other (NAT'd) networks can fetch them over the internet.
           maybePublishSharedMedia(mtext, mdir);

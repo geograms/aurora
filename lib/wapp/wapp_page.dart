@@ -921,7 +921,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           final msg = data['message'];
           if (msg is Map) {
             _maybeFetchSharedMedia(msg['text']?.toString() ?? '',
-                (msg['dir']?.toString() ?? 'in'));
+                (msg['dir']?.toString() ?? 'in'), msg['from']?.toString());
             if (fieldName == 'geochat') {
               // Split into Live vs Beacons (repeat detection).
               _geoChatAdd(msg);
@@ -1633,8 +1633,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   // BitTorrent infohash + LAN peer hint ("file:<sha>.<ext> … ih:<40hex>
   // pa:<ip>:<port>"). The actual fetch lives in shared_media_fetch.dart so the
   // background manager runs it too (media arrives whatever screen we're on).
-  void _maybeFetchSharedMedia(String text, String dir) =>
-      maybeFetchSharedMedia(text, dir);
+  void _maybeFetchSharedMedia(String text, String dir, [String? from]) =>
+      maybeFetchSharedMedia(text, dir, from: from);
 
   void _locateFromMessage(Map<String, dynamic> m) {
     final lat = (m['lat'] as num?)?.toDouble();

@@ -571,7 +571,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
     // so it's safe to call on every render — this catches history and live
     // messages alike, regardless of which screen is foreground.
     if (mediaRefs.isNotEmpty) {
-      maybeFetchSharedMedia(text, m['dir']?.toString() ?? 'in');
+      maybeFetchSharedMedia(text, m['dir']?.toString() ?? 'in', from: from);
     }
     final time = m['time']?.toString() ?? '';
     final via = m['via']?.toString() ?? '';

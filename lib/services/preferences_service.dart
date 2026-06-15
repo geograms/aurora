@@ -84,6 +84,13 @@ class PreferencesService {
   int get remoteApiPort => _prefs.getInt('remoteApi.port') ?? 3456;
   set remoteApiPort(int v) => _prefs.setInt('remoteApi.port', v);
 
+  // Run the pure-Dart I2P node as a background process (device-to-device sharing
+  // across NATs). Off by default — it reseeds + builds tunnels (network/CPU), so
+  // it's opt-in. Governed by the task monitor + PowerGovernor (auto-paused on
+  // CPU overload / low battery).
+  bool get i2pEnabled => _prefs.getBool('i2p.enabled') ?? false;
+  set i2pEnabled(bool v) => _prefs.setBool('i2p.enabled', v);
+
   // Per-wapp autostart: when on, the wapp runs as a background service
   // (started at boot) and keeps its engine ticking even while its UI page is
   // closed — e.g. APRS staying connected to BLE/APRS-IS to receive messages.

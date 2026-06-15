@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.2+58
+version: 1.0.2+200
 
 environment:
   sdk: ^3.10.0
@@ -43,6 +43,8 @@ dependencies:
   file_selector: ^1.0.3                  # Native file picker (Linux: GTK)
   crypto: ^3.0.3                         # SHA256 for NOSTR event ids + wapp hashing
   pointycastle: ^3.9.1                   # secp256k1 / BIP-340 Schnorr
+  cryptography: ^2.7.0                   # pure-Dart X25519/Ed25519/ChaCha20-Poly1305/HKDF for the Dart I2P node
+  battery_plus: ^6.0.0                   # battery level/charging — power governor pauses background work on low battery
   bech32: ^0.2.2                         # npub / nsec encoding
   hex: ^0.2.0                            # hex ↔ bytes
   http: ^1.2.0                           # Cross-platform HTTP (native + web)

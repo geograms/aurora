@@ -21,6 +21,8 @@ import 'dart:isolate';
 import '../models/monitored_task.dart';
 import 'task_monitor_service.dart';
 
+// (TaskStateChangedEvent lives in monitored_task.dart, imported above.)
+
 abstract class BackgroundService {
   BackgroundService({
     required this.id,
@@ -45,8 +47,11 @@ abstract class BackgroundService {
   final String? description;
 
   Timer? _timer;
+  StreamSubscription? _stateSub;
   bool _started = false;
+  bool _paused = false;
   bool get isRunning => _started;
+  bool get isPaused => _paused;
 
   /// The periodic work. Override in subclasses.
   Future<void> onTick();
@@ -56,6 +61,16 @@ abstract class BackgroundService {
 
   /// Cleanup after the loop stops (e.g. dispose the engine).
   Future<void> onStop() async {}
+
+  /// Called when the governor (CPU overrun), a manual pause, or the power
+  /// governor (low battery) pauses this service. Override to SUSPEND continuous
+  /// background work and free resources — the periodic [onTick] is auto-skipped
+  /// while paused, but a service with its own long-running loops (sockets,
+  /// timers in an isolate) must stop them here. Default: no-op.
+  Future<void> onPause() async {}
+
+  /// Called when the service is resumed after a pause — re-establish work.
+  Future<void> onResume() async {}
 
   Future<void> start() async {
     if (_started) return;
@@ -69,6 +84,25 @@ abstract class BackgroundService {
       type: runsInIsolate ? TaskType.isolate : TaskType.periodic,
       interval: interval,
     ));
+    // React to governor / power-governor pause + resume transitions so a
+    // service with its own loops can suspend/restore them (not just skip ticks).
+    _stateSub = TaskMonitorService.instance.stateChanges
+        .where((e) => e.taskId == id)
+        .listen((e) async {
+      if (e.newStatus == TaskStatus.paused && !_paused) {
+        _paused = true;
+        try {
+          await onPause();
+        } catch (_) {}
+      } else if (e.oldStatus == TaskStatus.paused &&
+          e.newStatus != TaskStatus.paused &&
+          _paused) {
+        _paused = false;
+        try {
+          await onResume();
+        } catch (_) {}
+      }
+    });
     try {
       await onStart();
     } catch (e) {
@@ -101,6 +135,8 @@ abstract class BackgroundService {
     _started = false;
     _timer?.cancel();
     _timer = null;
+    await _stateSub?.cancel();
+    _stateSub = null;
     try {
       await onStop();
     } catch (_) {}

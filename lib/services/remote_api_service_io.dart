@@ -8,6 +8,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -21,6 +22,7 @@ import '../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../wapp/shared_media_fetch.dart' show resolveSharedMedia;
 import '../wapp/wapp_page.dart';
 import 'blossom_server.dart';
+import 'i2p/i2p_service.dart';
 import 'log_service.dart';
 import 'preferences_service.dart';
 import 'torrent_service.dart';
@@ -179,6 +181,85 @@ class RemoteApiService {
         return _json(res, {'ok': ih != null, 'token': token, 'ih': ih},
             status: ih != null ? HttpStatus.ok : HttpStatus.badRequest);
       }
+      // --- headless I2P control (pure-Dart node; drive desktop<->phone) ---
+      if (req.method == 'GET' && path == '/api/i2p/status') {
+        final s = I2pService.instance;
+        return _json(res, {'up': s.isUp, 'starting': s.isStarting, 'b32': s.b32});
+      }
+      if (req.method == 'POST' && path == '/api/i2p/start') {
+        // Reseed + tunnel build can take a while; start in the background and
+        // poll GET /api/i2p/status for {up:true, b32}.
+        I2pService.instance.ensureStarted();
+        return _json(res, {'started': true});
+      }
+      if (req.method == 'POST' && path == '/api/i2p/put') {
+        final data = await _body(req);
+        final archive = _mediaArchive();
+        if (archive == null) {
+          return _json(res, {'ok': false, 'error': 'storage not ready'},
+              status: HttpStatus.serviceUnavailable);
+        }
+        final bytes = base64.decode((data['data'] ?? '').toString());
+        final ext = (data['ext'] ?? 'bin').toString();
+        final token = archive.putBytes(bytes, ext);
+        final ref = MediaRef.parse(token);
+        return _json(res, {
+          'ok': true,
+          'token': token,
+          'sha256': ref?.sha256,
+          'sha256hex': ref?.sha256Hex,
+          'len': bytes.length,
+        });
+      }
+      if (req.method == 'POST' && path == '/api/i2p/fetch') {
+        final data = await _body(req);
+        final b32 = (data['b32'] ?? '').toString();
+        final ext = (data['ext'] ?? 'bin').toString();
+        final sha = _shaBytes((data['sha256'] ?? '').toString());
+        if (!I2pService.instance.isUp) {
+          return _json(res, {'ok': false, 'error': 'i2p not up'},
+              status: HttpStatus.serviceUnavailable);
+        }
+        if (b32.isEmpty || sha == null) {
+          return _json(res, {'ok': false, 'error': 'b32 and sha256 required'},
+              status: HttpStatus.badRequest);
+        }
+        final ok = await I2pService.instance.fetchByB32(b32, sha, ext);
+        return _json(res, {'ok': ok});
+      }
+      if (req.method == 'POST' && path == '/api/i2p/peer') {
+        // Register a peer's callsign -> b32 (roster for content discovery).
+        final data = await _body(req);
+        final cs = (data['callsign'] ?? '').toString();
+        final b32 = (data['b32'] ?? '').toString();
+        if (cs.isEmpty || b32.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'callsign and b32 required'},
+              status: HttpStatus.badRequest);
+        }
+        I2pService.instance.registerB32(cs, b32);
+        return _json(res, {'ok': true});
+      }
+      if (req.method == 'POST' && path == '/api/i2p/announce') {
+        final sha = _shaBytes((await _body(req))['sha256']?.toString() ?? '');
+        if (!I2pService.instance.isUp || sha == null) {
+          return _json(res, {'ok': false, 'error': 'i2p not up / bad sha256'},
+              status: HttpStatus.serviceUnavailable);
+        }
+        await I2pService.instance.announce(sha);
+        return _json(res, {'ok': true});
+      }
+      if (req.method == 'POST' && path == '/api/i2p/discover') {
+        // Find any provider of this sha256 across the network and archive it.
+        final data = await _body(req);
+        final sha = _shaBytes((data['sha256'] ?? '').toString());
+        final ext = (data['ext'] ?? 'bin').toString();
+        if (!I2pService.instance.isUp || sha == null) {
+          return _json(res, {'ok': false, 'error': 'i2p not up / bad sha256'},
+              status: HttpStatus.serviceUnavailable);
+        }
+        final ok = await I2pService.instance.discover(sha, ext);
+        return _json(res, {'ok': ok});
+      }
       return _json(res, {
         'error': 'Not found',
         'endpoints': [
@@ -191,6 +272,13 @@ class RemoteApiService {
           'POST /api/media/fetch {"sha256":"<hex|b64u>","ext":"png","ih":"<40hex?>"}',
           'POST /api/media/seed {"token":"file:<sha256>.<ext>"}',
           'POST /api/media/publish {"token":"file:<sha256>.<ext>"}',
+          'GET /api/i2p/status',
+          'POST /api/i2p/start',
+          'POST /api/i2p/put {"data":"<base64>","ext":"txt"}',
+          'POST /api/i2p/fetch {"b32":"<addr>","sha256":"<hex|b64u>","ext":"txt"}',
+          'POST /api/i2p/peer {"callsign":"X1...","b32":"<addr>"}',
+          'POST /api/i2p/announce {"sha256":"<hex|b64u>"}',
+          'POST /api/i2p/discover {"sha256":"<hex|b64u>","ext":"txt"}',
         ],
       }, status: HttpStatus.notFound);
     } catch (e) {
@@ -200,6 +288,24 @@ class RemoteApiService {
             status: HttpStatus.internalServerError);
       } catch (_) {}
     }
+  }
+
+  /// Normalise a sha256 given as 64-hex or 43-char base64url to 32 raw bytes.
+  Uint8List? _shaBytes(String s) {
+    try {
+      if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(s)) {
+        final out = Uint8List(32);
+        for (var i = 0; i < 32; i++) {
+          out[i] = int.parse(s.substring(i * 2, i * 2 + 2), radix: 16);
+        }
+        return out;
+      }
+      if (s.length == 43) {
+        final b = base64Url.decode('$s=');
+        return b.length == 32 ? b : null;
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// Parse a JSON request body into a map (empty on no/invalid body).

@@ -7,6 +7,8 @@ import 'connections/builtin_connections.dart';
 import 'editor/editor_install.dart';
 import 'wapp/host_event_bridge.dart';
 import 'wapp/background_wapp_manager.dart';
+import 'services/power_governor.dart';
+import 'services/i2p/i2p_background_service.dart';
 import 'services/update_service.dart';
 import 'services/notification_service.dart';
 import 'services/preferences_service.dart';
@@ -166,6 +168,16 @@ Future<void> main() async {
       port: prefs.remoteApiPort,
       navigatorKey: rootNavigatorKey,
     );
+  }
+
+  // Power governor: pause non-critical background tasks on low battery, resume
+  // when power recovers (complements the task monitor's CPU-budget governor).
+  unawaited(PowerGovernor.instance.start());
+
+  // I2P node as a governable background process (opt-in; runs in its own isolate
+  // and is auto-paused on CPU overload / low battery). Fire-and-forget.
+  if (prefs.i2pEnabled) {
+    unawaited(I2pBackgroundService().start());
   }
 
   // Background wapp services the user enabled (autostart) — keep e.g. APRS

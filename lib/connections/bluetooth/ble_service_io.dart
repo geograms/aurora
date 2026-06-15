@@ -407,6 +407,8 @@ class BleService {
     final effectiveMs =
         ttl.inMilliseconds > cycleMs * 2 ? ttl.inMilliseconds : cycleMs * 2 + 2000;
     final expiresMs = DateTime.now().millisecondsSinceEpoch + effectiveMs;
+    debugPrint('BleService: enqueue broadcast ${payload.length}B '
+        '($total chunk${total == 1 ? "" : "s"}, on-air ${effectiveMs ~/ 1000}s)');
     for (var idx = 0; idx < total; idx++) {
       final off = idx * cap;
       final end = (off + cap < payload.length) ? off + cap : payload.length;

@@ -1460,7 +1460,14 @@ class WappEngine {
         final mem = _memory!.view;
         final bytes = Uint8List(bufLen);
         for (var i = 0; i < bufLen; i++) bytes[i] = mem[bufPtr + i];
-        ble.enqueueAdvert(this, bytes);
+        // Keep wapp broadcasts on air long enough to span a receiver's
+        // duty-cycled scan. Android phones scan in bursts (~every 2 min), so a
+        // one-shot 10 s advert almost always falls between scan windows and the
+        // message never arrives — only continuously-repeated beacons get through.
+        // 120 s (< the 130 s receiver dedup, so it still delivers exactly once)
+        // spans a full scan cycle. The wapp re-advertising replaces stale frames.
+        ble.enqueueAdvert(this, bytes,
+            ttl: const Duration(seconds: 120));
         return 0;
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],

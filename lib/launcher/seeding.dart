@@ -4,7 +4,7 @@ part of 'launcher.dart';
 
 /// Folder names always auto-installed on first run, on top of every
 /// `kind: "system"` wapp. Keeps the default set in one place.
-const _kDefaultSeedNames = {'install', 'maps'};
+const _kDefaultSeedNames = {'install', 'maps', 'aprs'};
 
 /// First-run bootstrap, run as a boot task BEFORE the UI so the launcher
 /// never renders an empty grid mid-seed. Installs the curated default

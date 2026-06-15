@@ -106,9 +106,14 @@ const int kBleBcastPrimaryHdr = 6;
 /// Continuation-chunk header length: [marker, subtype, msgId, idx].
 const int kBleBcastContHdr = 4;
 
-/// Drop partials with no new chunk within this window. Must exceed the sender's
-/// advert rotation interval so a partial survives across one full chunk cycle.
-const Duration kBleBcastWindow = Duration(seconds: 5);
+/// Drop incomplete multi-chunk partials with no new chunk within this window.
+/// Android receivers scan in sparse bursts (tens of seconds to ~2 min apart), so
+/// the two chunks of a small message can be caught in DIFFERENT bursts — the
+/// partial must survive across those gaps or multi-chunk messages never
+/// reassemble (single-chunk beacons complete instantly and were the only thing
+/// getting through). Sized to span the sender's on-air time (~120 s), within the
+/// dedup window so a completed message still delivers once.
+const Duration kBleBcastWindow = Duration(seconds: 120);
 
 /// Suppress re-delivery of a (source,msgId) for this long after completion.
 /// Must exceed a sender's longest chunk air time (the ESP32 keeps an important

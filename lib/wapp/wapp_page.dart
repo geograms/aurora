@@ -662,11 +662,18 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _menuScreens.clear(); _menuNames.clear();
     }
 
-    // Build tab controller (sized to the tab screens only). The left
-    // navigation rail mirrors its index, so rebuild the rail when the active
-    // tab changes (e.g. programmatic switches like "locate on map").
+    // Build tab controller (sized to the tab screens only). The top tab bar
+    // mirrors its index; rebuild on change (incl. programmatic switches like
+    // "locate on map") and toggle the Geo Chat unread badge when that tab is
+    // entered/left.
     _tabController = TabController(length: _tabScreens.length, vsync: this);
-    _tabController!.addListener(() { if (mounted) setState(() {}); });
+    _tabController!.addListener(() {
+      if (!mounted) return;
+      if (!_tabController!.indexIsChanging) {
+        _setGeoChatOpen(_isGeoChatScreen(_tabScreens[_tabController!.index]));
+      }
+      setState(() {});
+    });
 
     // Set up persistent KV storage under the per-wapp data dir.
     final prefs = await PreferencesService.instance();
@@ -1892,22 +1899,17 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           _buildScreen(_tabScreens[i]),
       ],
     );
-    // Home/away navigation: the FIRST tab is the wapp's main view and carries
-    // the left navigation rail. Selecting any other rail destination shows
-    // that panel FULL SIZE (rail hidden — more room in portrait) with the
-    // AppBar re-titled to the panel ("← Messages") and back returning home.
+    // Top-tab navigation: the primary screens (Activity, Messages, Geochat,
+    // Follows…) are equal tabs in a horizontal bar at the top — tapping one
+    // switches content inline, no per-panel back button.
     final idx = _tabController!.index;
-    final onHome = idx == 0 || _tabScreens.length <= 1;
-    void goHome() {
-      _mapAutoFit = true;   // next map mount frames the coverage circle again
-      _tabController!.animateTo(0);
-      _setGeoChatOpen(_isGeoChatScreen(_tabScreens[0]));
-    }
+    final showTabs = _tabScreens.length > 1;
 
     // Thread chrome: in portrait, an open conversation takes over the AppBar
-    // (its title + the SINGLE back arrow, which returns to the list) — the
-    // conversations widget itself renders headerless. The wide side-by-side
-    // layout keeps its own in-panel header instead.
+    // (its title + a back arrow that returns to the list) — the conversations
+    // widget itself renders headerless. The wide side-by-side layout keeps its
+    // own in-panel header instead. This back arrow is intra-Messages (closing a
+    // conversation), distinct from tab navigation.
     final convGroup = _tabScreens[idx].children
         .where((c) => c.keyword == 'group' && c.type == 'conversations')
         .firstOrNull;
@@ -1921,27 +1923,22 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     }
 
     return PopScope(
-      canPop: onHome && thread == null,
+      // Only intercept system-back to close an open conversation thread; with
+      // tabs there is no "home" to return to (back leaves for the launcher).
+      canPop: thread == null,
       onPopInvoked: (didPop) {
         if (didPop) return;
-        // System back: close the open thread first, then leave for home.
-        if (thread != null) {
-          setState(() => _convOpenId = null);
-        } else {
-          goHome();
-        }
+        if (thread != null) setState(() => _convOpenId = null);
       },
       child: Scaffold(
         appBar: AppBar(
-          leading: (onHome && thread == null)
-              ? null   // default: "←" pops back to the launcher
-              : IconButton(
+          leading: thread != null
+              ? IconButton(
                   icon: const Icon(Icons.arrow_back),
                   tooltip: 'Back',
-                  onPressed: thread != null
-                      ? () => setState(() => _convOpenId = null)
-                      : goHome,
-                ),
+                  onPressed: () => setState(() => _convOpenId = null),
+                )
+              : null, // default "←" pops back to the launcher
           title: thread != null
               ? Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1958,7 +1955,29 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                                   .onSurfaceVariant)),
                   ],
                 )
-              : Text(onHome ? widget.title : _i18n.resolve(_tabNames[idx])),
+              : Text(widget.title),
+          // The horizontal tab bar lives under the title. Hidden while a
+          // conversation thread is taking over the screen in portrait.
+          bottom: (showTabs && thread == null)
+              ? TabBar(
+                  controller: _tabController,
+                  isScrollable: _tabScreens.length > 4,
+                  tabAlignment:
+                      _tabScreens.length > 4 ? TabAlignment.start : TabAlignment.fill,
+                  onTap: (i) {
+                    _mapAutoFit = true; // manual nav → frame the coverage circle
+                    _setGeoChatOpen(_isGeoChatScreen(_tabScreens[i]));
+                  },
+                  tabs: [
+                    for (var i = 0; i < _tabScreens.length; i++)
+                      Tab(
+                        icon: _railIcon(i, selected: _tabController!.index == i),
+                        text: _i18n.resolve(_tabNames[i]),
+                        iconMargin: const EdgeInsets.only(bottom: 2),
+                      ),
+                  ],
+                )
+              : null,
           actions: [
             // The thread's room actions (e.g. recurring bulletin) move up
             // here while the in-panel header is hidden.
@@ -1976,45 +1995,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             _buildWappOptionsMenu(),
           ],
         ),
-        body: onHome && _tabScreens.length > 1
-            ? Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _buildNavRail(),
-                  const VerticalDivider(width: 1, thickness: 1),
-                  Expanded(child: tabView),
-                ],
-              )
-            : tabView,
+        body: tabView,
       ),
-    );
-  }
-
-  /// The left navigation rail of primary (tab) screens — icon + label per
-  /// screen, top-aligned, mirroring [_tabController]'s index.
-  Widget _buildNavRail() {
-    final cs = Theme.of(context).colorScheme;
-    return NavigationRail(
-      selectedIndex: _tabController?.index ?? 0,
-      groupAlignment: -1.0,
-      onDestinationSelected: (i) {
-        _mapAutoFit = true;   // manual navigation → frame the coverage circle
-        _tabController?.animateTo(i);
-        // Entering the Geo Chat tab clears its unread badge; leaving it lets
-        // new arrivals accumulate again.
-        _setGeoChatOpen(_isGeoChatScreen(_tabScreens[i]));
-      },
-      labelType: NavigationRailLabelType.all,
-      backgroundColor: cs.surface,
-      indicatorColor: cs.primaryContainer,
-      destinations: [
-        for (var i = 0; i < _tabScreens.length; i++)
-          NavigationRailDestination(
-            icon: _railIcon(i, selected: false),
-            selectedIcon: _railIcon(i, selected: true),
-            label: Text(_i18n.resolve(_tabNames[i])),
-          ),
-      ],
     );
   }
 

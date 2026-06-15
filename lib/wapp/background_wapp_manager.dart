@@ -31,6 +31,7 @@ import '../services/background_service.dart';
 import 'geoui/geo_chat_archive.dart';
 import 'shared_media_fetch.dart';
 import '../services/notification_service.dart';
+import '../services/wapp_unread_service.dart';
 import '../services/preferences_service.dart';
 import 'android_foreground_service.dart';
 import 'wapp_engine.dart';
@@ -236,6 +237,10 @@ class _WappBackgroundService extends BackgroundService {
           tag: data['tag'] as String?,
           scope: NotificationScope.both,
         ));
+        // A background wapp can't render UI, so surface activity as an unread
+        // count on its launcher tile (e.g. the APRS app icon). Cleared/reset to
+        // the authoritative value when the user opens the wapp.
+        WappUnreadService.instance.add(name, 1);
       }
       // ui.* and everything else: no UI in the background — ignore.
     }

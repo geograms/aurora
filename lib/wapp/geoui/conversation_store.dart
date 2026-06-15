@@ -256,6 +256,11 @@ class ConversationStore {
     }
   }
 
+  /// Total unread across all conversations — drives the Messages tab/app-icon
+  /// badge.
+  int get totalUnread =>
+      items.values.fold(0, (sum, it) => sum + (it.unread > 0 ? it.unread : 0));
+
   static int _nowMs() => DateTime.now().millisecondsSinceEpoch;
 
   /// Conversations for display, most-recently-active first. Primary key is

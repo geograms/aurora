@@ -39,6 +39,7 @@ import '../models/monitored_task.dart';
 import '../services/event_bus.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
+import '../services/wapp_unread_service.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
 import '../profile/storage_paths.dart';
@@ -318,6 +319,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _geoChatOpen = open;
       if (open) _geoUnread = 0; // opening clears the Map-tab notification
     });
+    _syncAppBadge();
   }
 
   void _geoChatAdd(Map raw, {bool archive = true}) {
@@ -1112,6 +1114,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       } catch (_) {}
     }
     if (changed && mounted) {
+      _syncAppBadge();
       setState(() {});
       // Terminal-style wapps tail their log — auto-scroll to the
       // newest line. The Wapp Store (install wapp) reuses the same
@@ -1611,7 +1614,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       onToggle: (name, value) => setState(() => _fieldValues[name] = value),
       onLocate: _locateFromMessage,
       onSenderTap: _showProfile,
-      onSelect: (id) => setState(() => store.clearUnread(id)),
+      onSelect: (id) {
+        setState(() => store.clearUnread(id));
+        _syncAppBadge();
+      },
       onSend: (id, text) {
         _fieldValues['${field}_convo'] = id;
         _fieldValues['${field}_input'] = text;
@@ -2026,14 +2032,40 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   bool _isGeoChatScreen(GeoUiBlock s) => s.children.any(
       (c) => c.keyword == 'field' && c.type == 'chat' && c.name == 'geochat');
 
-  /// Rail icon widget for tab [i]; the Geo Chat tab carries the unread badge.
+  /// Push this wapp's total unread (all conversation stores + geo-chat) to the
+  /// launcher tile badge (e.g. the APRS app icon on the main panel), keyed by
+  /// the same folder id the launcher uses.
+  void _syncAppBadge() {
+    var total = _geoUnread;
+    for (final s in _convStores.values) {
+      total += s.totalUnread;
+    }
+    WappUnreadService.instance
+        .setCount(BackgroundWappManager.folderName(widget.wappDir), total);
+  }
+
+  /// Total unread across the conversation stores of a tab screen (Messages).
+  int _tabUnread(int i) {
+    var n = 0;
+    for (final g in _tabScreens[i].children) {
+      if (g.keyword == 'group' && g.type == 'conversations') {
+        n += _convStore(g.name ?? 'conversations').totalUnread;
+      }
+    }
+    return n;
+  }
+
+  /// Rail/tab icon for tab [i] with an unread badge: the Geo Chat tab uses the
+  /// geo-chat counter; a Messages (conversations) tab uses the summed unread of
+  /// its conversations.
   Widget _railIcon(int i, {required bool selected}) {
     final cs = Theme.of(context).colorScheme;
     final icon = Icon(_tabIcon(i),
         color: selected ? cs.onPrimaryContainer : null);
-    if (!_isGeoChatScreen(_tabScreens[i]) || _geoUnread <= 0) return icon;
+    final count = _isGeoChatScreen(_tabScreens[i]) ? _geoUnread : _tabUnread(i);
+    if (count <= 0) return icon;
     return Badge(
-      label: Text(_geoUnread > 99 ? '99+' : '$_geoUnread'),
+      label: Text(count > 99 ? '99+' : '$count'),
       backgroundColor: const Color(0xFFda3633),
       child: icon,
     );

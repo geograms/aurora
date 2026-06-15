@@ -146,6 +146,9 @@ class _LauncherPageState extends State<LauncherPage> {
   }
 
   Future<void> _openWapp(WappManifest manifest) async {
+    // Opening clears the tile's unread badge; the wapp re-publishes its live
+    // count (from its conversation stores) once it's running.
+    WappUnreadService.instance.clear(BackgroundWappManager.folderName(manifest.dirPath));
     // Install-driven dependency gate: if this wapp declares requires
     // that no installed wapp satisfies, prompt the user to install a
     // provider instead of letting it fail at runtime. The user can
@@ -803,6 +806,41 @@ class _AppIcon extends StatelessWidget {
                       ),
                     ),
                     child: const Icon(Icons.edit, size: 11, color: Colors.white),
+                  ),
+                ),
+              // Unread badge — a count chip (e.g. APRS messages) in the
+              // top-right, driven by WappUnreadService and updated live.
+              if (wappId != null)
+                Positioned(
+                  top: -6,
+                  right: -6,
+                  child: ValueListenableBuilder<Map<String, int>>(
+                    valueListenable: WappUnreadService.instance.counts,
+                    builder: (context, counts, _) {
+                      final n = counts[wappId] ?? 0;
+                      if (n <= 0) return const SizedBox.shrink();
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
+                        constraints: const BoxConstraints(minWidth: 18),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFda3633),
+                          borderRadius: BorderRadius.circular(9),
+                          border: Border.all(
+                            color: Theme.of(context).scaffoldBackgroundColor,
+                            width: 1.5,
+                          ),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          n > 99 ? '99+' : '$n',
+                          style: const TextStyle(
+                              fontSize: 11,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700),
+                        ),
+                      );
+                    },
                   ),
                 ),
             ],

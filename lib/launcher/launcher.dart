@@ -43,6 +43,7 @@ import '../profile/profile_storage_factory.dart';
 import '../wapp/dependency_resolver.dart';
 import '../profile/storage_paths.dart';
 import '../services/task_monitor_service.dart';
+import '../services/wapp_unread_service.dart';
 import '../wapp/wapp_installer_service.dart';
 import '../wapp/wapp_signing_service.dart';
 import '../wapp/background_wapp_manager.dart';

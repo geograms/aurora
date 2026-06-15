@@ -92,7 +92,12 @@ jobs:
           sed -i "s/^version:.*/version: ${VER}+${CODE}/" pubspec.yaml
           dart run tool/update_version.dart
       - run: flutter pub get
+      # MSVC 14.51 (VS 2022 18.x on windows-latest) turns <experimental/coroutine>
+      # into a hard error (STL1011); several BLE/permission plugins still include
+      # it. CL prepends this define to every cl.exe call so the plugins compile.
       - run: flutter build windows --release
+        env:
+          CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
       - name: Build Inno Setup installer
         shell: cmd
         run: |

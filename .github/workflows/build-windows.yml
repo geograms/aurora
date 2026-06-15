@@ -28,7 +28,11 @@ jobs:
           dart run tool/update_version.dart
 
       - run: flutter pub get
+      # MSVC 14.51 hard-errors on <experimental/coroutine> (STL1011) used by some
+      # plugins; CL prepends this define to every cl.exe call so they compile.
       - run: flutter build windows --release
+        env:
+          CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
 
       - name: Build Inno Setup installer
         shell: cmd

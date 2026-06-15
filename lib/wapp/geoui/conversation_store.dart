@@ -87,7 +87,11 @@ class ConversationStore {
 
   ConversationItem _ensure(String id) {
     final it = items.putIfAbsent(id, () => ConversationItem(id, title: id));
-    if (!order.contains(id)) order.insert(0, id);
+    // Append, don't front-insert: a conversation only rises to the top when it
+    // has ACTUAL activity (addMessage / bump). Front-inserting here made groups
+    // merely listed via upsert (metadata, no message) jump above conversations
+    // with recent messages.
+    if (!order.contains(id)) order.add(id);
     return it;
   }
 

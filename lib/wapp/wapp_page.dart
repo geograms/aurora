@@ -1964,6 +1964,12 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                   isScrollable: _tabScreens.length > 4,
                   tabAlignment:
                       _tabScreens.length > 4 ? TabAlignment.start : TabAlignment.fill,
+                  // Compact label so wider names (e.g. "Messages") fit a
+                  // quarter-width tab without being clipped.
+                  labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                  labelStyle:
+                      const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600),
+                  unselectedLabelStyle: const TextStyle(fontSize: 11.5),
                   onTap: (i) {
                     _mapAutoFit = true; // manual nav → frame the coverage circle
                     _setGeoChatOpen(_isGeoChatScreen(_tabScreens[i]));

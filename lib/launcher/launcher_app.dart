@@ -109,9 +109,29 @@ class _IwiAppState extends State<IwiApp> {
         if (mounted) setState(() => _permsGranted = granted);
       });
     }
-    if (hasProfile) return const LauncherPage();
+    if (hasProfile) {
+      // Seed the active profile's default wapps before the grid renders. The
+      // boot task only seeds whatever profile existed at startup; a profile
+      // created via WelcomePage (first run) or added via the switcher needs
+      // seeding here. ensureProfileSeeded is idempotent (per-profile
+      // .seeded.json), so re-running for an already-seeded profile is instant.
+      // Keyed by profile id so it re-runs when the active profile changes.
+      final pid = ProfileService.instance.activeProfile!.id;
+      return FutureBuilder<void>(
+        key: ValueKey('seed-$pid'),
+        future: ensureProfileSeeded(),
+        builder: (context, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Scaffold(
+                body: Center(child: CircularProgressIndicator()));
+          }
+          return const LauncherPage();
+        },
+      );
+    }
     // saveAndActivate flips activeProfileNotifier, so _onProfileChanged
-    // rebuilds with hasProfile==true and swaps to the launcher.
+    // rebuilds with hasProfile==true and swaps to the launcher (via the
+    // seed gate above).
     return WelcomePage(onComplete: () {});
   }
 }

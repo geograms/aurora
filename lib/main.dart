@@ -106,16 +106,11 @@ Future<void> main() async {
     mode: BootStart.sequential,
     init: () async {
       await ProfileService.instance.load();
-      // Aurora opens straight onto the wapp launcher — no welcome /
-      // profile-creation gate. Storage paths still route through an
-      // active profile, so on a fresh install we silently mint a
-      // default identity. The user can still add / switch / rename
-      // profiles later via the launcher's profile switcher.
-      if (!ProfileService.instance.hasProfiles) {
-        final preview =
-            ProfileService.instance.generatePreview(nickname: 'aurora');
-        await ProfileService.instance.saveAndActivate(preview);
-      }
+      // On a fresh install (no profiles) the launcher shows the WelcomePage
+      // first-run flow — vanity callsign generator + a nickname the USER
+      // chooses. We do NOT silently mint a default 'aurora' identity. The
+      // active profile is seeded with the default wapps once it exists (see
+      // the seed gate in launcher_app).
     },
   );
   BootOrchestrator.instance.register(

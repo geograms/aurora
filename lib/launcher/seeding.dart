@@ -12,6 +12,9 @@ const _kDefaultSeedNames = {'install', 'maps'};
 /// `.seeded.json` marker means a later "uninstall everything" sticks —
 /// we never re-seed.
 Future<void> ensureProfileSeeded() async {
+  // No real profile yet (fresh install before WelcomePage) — don't seed the
+  // `_no_profile` fallback; the seed gate re-runs this once a profile exists.
+  if (ProfileService.instance.activeProfile == null) return;
   final profileRoot = activeProfileRoot();
   if (await profileRoot.readJson('.seeded.json') != null) return;
 

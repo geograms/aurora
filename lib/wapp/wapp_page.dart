@@ -1715,13 +1715,19 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         return StatefulBuilder(
           builder: (ctx, setLocal) {
             final cs = Theme.of(ctx).colorScheme;
+            final mq = MediaQuery.of(ctx).size;
             return AlertDialog(
               title: Text(title),
-              // Scrollable so the body + chips + input + optional toggle never
-              // overflow when the on-screen keyboard shrinks the dialog.
+              // A roomy, easily-scrollable panel — nearly full width and up to
+              // 70% of the screen height — so a long chip list (e.g. the group
+              // picker) scrolls comfortably instead of a cramped little dialog.
+              insetPadding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
               content: SizedBox(
-                width: 380,
-                child: SingleChildScrollView(
+                width: mq.width,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: mq.height * 0.7),
+                  child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1795,6 +1801,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                         ),
                       ),
                   ],
+                ),
                 ),
                 ),
               ),

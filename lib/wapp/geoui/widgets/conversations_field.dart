@@ -198,11 +198,16 @@ class _ConversationsFieldState extends State<ConversationsField> {
           padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
           child: Row(
             children: [
-              Text(widget.title,
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleMedium
-                      ?.copyWith(fontWeight: FontWeight.w700)),
+              // The narrow (phone) layout already shows the screen name in the
+              // app bar tab, so the in-list title would just repeat it — only
+              // show it in the wide side-by-side layout where the list is its
+              // own column.
+              if (wide)
+                Text(widget.title,
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleMedium
+                        ?.copyWith(fontWeight: FontWeight.w700)),
               const Spacer(),
               for (final a in widget.listActions)
                 IconButton(

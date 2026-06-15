@@ -2066,6 +2066,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     if (count <= 0) return icon;
     return Badge(
       label: Text(count > 99 ? '99+' : '$count'),
+      textColor: Colors.white,
       backgroundColor: const Color(0xFFda3633),
       child: icon,
     );

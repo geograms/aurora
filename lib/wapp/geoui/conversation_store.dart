@@ -13,6 +13,12 @@ class ConversationItem {
   String icon; // generic icon name (person, campaign, tag, group, chat…)
   int unread;
 
+  /// Host wall-clock (ms) of the last real activity (message / pin / new
+  /// unread) — the primary sort key so the most recently active conversations
+  /// sit on top. 0 for legacy rows that predate this field; the list sort then
+  /// falls back to unread-first, then non-empty, then insertion order.
+  int activityTs;
+
   /// Normal messages, in arrival order. Each: {dir, from, text, time}.
   final List<Map<String, dynamic>> messages = [];
 
@@ -27,6 +33,7 @@ class ConversationItem {
     this.badge = '',
     this.icon = 'chat',
     this.unread = 0,
+    this.activityTs = 0,
   });
 
   Map<String, dynamic> toJson() => {
@@ -36,6 +43,7 @@ class ConversationItem {
         'badge': badge,
         'icon': icon,
         'unread': unread,
+        'activityTs': activityTs,
         'messages': messages,
         'pinned': pinned,
       };
@@ -48,6 +56,7 @@ class ConversationItem {
       badge: (j['badge'] ?? '').toString(),
       icon: (j['icon'] ?? 'chat').toString(),
       unread: (j['unread'] as num?)?.toInt() ?? 0,
+      activityTs: (j['activityTs'] as num?)?.toInt() ?? 0,
     );
     final msgs = j['messages'];
     if (msgs is List) {
@@ -111,9 +120,14 @@ class ConversationStore {
     if (d.containsKey('badge')) it.badge = (d['badge'] ?? '').toString();
     if (d.containsKey('icon')) it.icon = (d['icon'] ?? 'chat').toString();
     if (d.containsKey('unread')) {
-      it.unread = (d['unread'] as num?)?.toInt() ?? it.unread;
+      final nv = (d['unread'] as num?)?.toInt() ?? it.unread;
+      if (nv > it.unread) it.activityTs = _nowMs(); // new unread = activity
+      it.unread = nv;
     }
-    if (d['bump'] == true) _bump(id);
+    if (d['bump'] == true) {
+      it.activityTs = _nowMs();
+      _bump(id);
+    }
   }
 
   void addMessage(Map d) {
@@ -145,6 +159,7 @@ class ConversationStore {
     final mid = (d['mid'] ?? '').toString();
     if (mid.isNotEmpty && reactions.containsKey(mid)) _applyReaction(mid);
     if (dir == 'in' && id != openId) it.unread++;
+    it.activityTs = _nowMs();
     _bump(id);
   }
 
@@ -241,8 +256,28 @@ class ConversationStore {
     }
   }
 
-  List<ConversationItem> ordered() =>
-      [for (final id in order) if (items.containsKey(id)) items[id]!];
+  static int _nowMs() => DateTime.now().millisecondsSinceEpoch;
+
+  /// Conversations for display, most-recently-active first. Primary key is
+  /// [ConversationItem.activityTs] (host-stamped on real activity). Legacy rows
+  /// (activityTs == 0, saved before that field existed) tie on 0 and fall back
+  /// to: unread first, then non-empty, then insertion order — which fixes
+  /// already-persisted lists where unread/active rows had sunk below empties.
+  List<ConversationItem> ordered() {
+    final list = [for (final id in order) if (items.containsKey(id)) items[id]!];
+    final idx = {for (var i = 0; i < order.length; i++) order[i]: i};
+    list.sort((a, b) {
+      if (a.activityTs != b.activityTs) {
+        return b.activityTs.compareTo(a.activityTs); // newer first
+      }
+      final ua = a.unread > 0 ? 1 : 0, ub = b.unread > 0 ? 1 : 0;
+      if (ua != ub) return ub.compareTo(ua); // unread before read
+      final ma = a.messages.isNotEmpty ? 1 : 0, mb = b.messages.isNotEmpty ? 1 : 0;
+      if (ma != mb) return mb.compareTo(ma); // non-empty before empty
+      return (idx[a.id] ?? 0).compareTo(idx[b.id] ?? 0); // stable
+    });
+    return list;
+  }
 
   /// Serialize the whole store for on-disk persistence.
   Map<String, dynamic> toJson() => {

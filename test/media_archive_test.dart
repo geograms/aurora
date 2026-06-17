@@ -182,4 +182,100 @@ void main() {
     expect(s.screenshotCount, 1);
     a.close();
   });
+
+  // ── Files-wapp first-pass additions ───────────────────────────────────────
+
+  test('FTS search by name / description / tag, and a miss', () {
+    final (a, _) = freshArchive();
+    final t1 = a.putBytes(bytes('fox content'), 'txt',
+        name: 'fox notes', description: 'about a fox', tags: ['animals']);
+    final t2 = a.putBytes(bytes('beethoven content'), 'mp3',
+        name: 'beethoven 9th', tags: ['classical', 'music']);
+    final s1 = MediaRef.parse(t1)!.sha256, s2 = MediaRef.parse(t2)!.sha256;
+    expect(a.search('beethoven').map((m) => m.sha256), contains(s2));
+    expect(a.search('fox').map((m) => m.sha256), contains(s1));
+    expect(a.search('classical').map((m) => m.sha256), contains(s2));
+    expect(a.search('zzzznomatch'), isEmpty);
+    a.close();
+  });
+
+  test('lookupBySha exact lookup', () {
+    final (a, _) = freshArchive();
+    final t = a.putBytes(bytes('exact'), 'txt', name: 'exact file');
+    expect(a.lookupBySha(t)?.name, 'exact file');
+    final sha = MediaRef.parse(t)!.sha256;
+    expect(a.lookupBySha(sha)?.name, 'exact file');
+    a.close();
+  });
+
+  test('description clamped to 250 chars on put and update', () {
+    final (a, _) = freshArchive();
+    final t = a.putBytes(bytes('clamp'), 'txt', description: 'x' * 400);
+    expect(a.getMeta(t)!.description!.length, 250);
+    a.updateMeta(t, description: 'y' * 300);
+    expect(a.getMeta(t)!.description!.length, 250);
+    a.close();
+  });
+
+  test('folder / parent stored, searchable, and grouped', () {
+    final (a, _) = freshArchive();
+    final t1 = a.putBytes(bytes('track1'), 'mp3', name: 'ode to joy');
+    final t2 = a.putBytes(bytes('track2'), 'mp3', name: 'scherzo');
+    final t3 = a.putBytes(bytes('other'), 'txt', name: 'misc');
+    a.updateMeta(t1, folder: 'Symphony No 9', parent: 'Beethoven');
+    a.updateMeta(t2, folder: 'Symphony No 9', parent: 'Beethoven');
+
+    final m1 = a.getMeta(t1)!;
+    expect(m1.folder, 'Symphony No 9');
+    expect(m1.parent, 'Beethoven');
+    // searchable by folder/parent text
+    expect(a.search('Beethoven').map((m) => m.sha256),
+        contains(MediaRef.parse(t1)!.sha256));
+
+    final album = a
+        .folders()
+        .where((f) => f.parent == 'Beethoven' && f.folder == 'Symphony No 9');
+    expect(album, isNotEmpty);
+    expect(album.first.count, 2);
+    // uncategorized bucket holds t3
+    expect(a.folders().any((f) => f.parent == '' && f.folder == ''), isTrue);
+    expect(a.listByFolder('Beethoven', 'Symphony No 9').length, 2);
+    expect(a.has(t3), isTrue);
+    a.close();
+  });
+
+  test('download counter increments; defaults to 0; locally added is pinned', () {
+    final (a, _) = freshArchive();
+    final t = a.putBytes(bytes('dl'), 'bin');
+    expect(a.getMeta(t)!.downloads, 0);
+    expect(a.getMeta(t)!.pinned, isTrue);
+    a.incrementDownloads(t);
+    a.incrementDownloads(t);
+    expect(a.getMeta(t)!.downloads, 2);
+    a.close();
+  });
+
+  test('delete also removes the file from the FTS index', () {
+    final (a, _) = freshArchive();
+    final t = a.putBytes(bytes('bye'), 'txt', name: 'shopping list');
+    expect(a.search('shopping'), isNotEmpty);
+    a.delete(t);
+    expect(a.search('shopping'), isEmpty);
+    a.close();
+  });
+
+  test('new columns persist across reopen', () {
+    final (a, dir) = freshArchive();
+    final t = a.putBytes(bytes('persist cols'), 'mp3', name: 'song');
+    a.updateMeta(t, folder: 'Album', parent: 'Artist');
+    a.incrementDownloads(t);
+    a.close();
+    final b = MediaArchive.forStorage(makeFilesystemStorage(dir.path));
+    final m = b.getMeta(t)!;
+    expect(m.folder, 'Album');
+    expect(m.parent, 'Artist');
+    expect(m.downloads, 1);
+    expect(b.search('Album').map((x) => x.sha256), contains(MediaRef.parse(t)!.sha256));
+    b.close();
+  });
 }

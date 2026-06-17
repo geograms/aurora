@@ -173,6 +173,7 @@ class BlossomServer {
       return;
     }
     _bytesServed += data.length;
+    archive.incrementDownloads(hex); // a GET is one download by another node
     res.add(data);
   }
 

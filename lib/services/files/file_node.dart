@@ -87,6 +87,9 @@ class FileTransferNode {
   final Map<String, ProviderConnection> _provConns = {};
   // Files we advertise, for periodic republish (TTL refresh).
   final Map<String, _Provided> _provided = {};
+  // Arbitrary DHT keys we advertise regardless of the file serve-quota (used for
+  // folder discovery: folderId -> provider). Republished alongside files.
+  final Map<String, _Provided> _providedKeys = {};
 
   /// The Kademlia index node (provider lookup/publish). Null unless [enableDht].
   DhtNode? dht;
@@ -100,6 +103,10 @@ class FileTransferNode {
   /// rnsd forwards them — this is what makes fetch work across the internet.
   final Uint8List? Function(RnsIdentity peer)? nextHopFor;
 
+  /// Called when we serve a file's manifest to another node (one download by a
+  /// peer), with the 32-byte file hash. Drives the per-file download metric.
+  final void Function(Uint8List fileHash)? onServed;
+
   FileTransferNode({
     required this.identity,
     required this.source,
@@ -108,6 +115,7 @@ class FileTransferNode {
     bool enableDht = false,
     ServeQuota? serveQuota,
     this.nextHopFor,
+    this.onServed,
   }) : serveQuota = serveQuota ?? ServeQuota() {
     if (enableDht) {
       dht = DhtNode(identity: identity, sendRpc: _dhtSendRpc, log: log);
@@ -172,7 +180,8 @@ class FileTransferNode {
       final id = _hex(link.linkId!);
       _serve[id] = _ServeEntry(
         link,
-        FileServeSession(link, source, quota: serveQuota, requesterId: id),
+        FileServeSession(link, source,
+            quota: serveQuota, requesterId: id, onServed: onServed),
       );
       send((await link.buildProof()).pack());
       log?.call('files: accepted link $id');
@@ -382,6 +391,31 @@ class FileTransferNode {
     return _publishOne(sha256, capacity, manifestHash);
   }
 
+  /// Advertise ourselves as a provider of an arbitrary 32-byte DHT [key] (e.g. a
+  /// folder id), independent of the file serve-quota — folders are metadata, not
+  /// bulk bytes, so they should always be discoverable. Remembered for republish.
+  Future<int> publishKey(Uint8List key, {int capacity = kCapUnknown}) async {
+    final d = dht;
+    if (d == null) return 0;
+    _providedKeys[_hex(key)] = _Provided(Uint8List.fromList(key), capacity, null);
+    final rec = await ProviderRecord.create(
+        providerIdentity: identity, sha256: key, capacity: capacity);
+    return d.publish(rec);
+  }
+
+  /// Resolve the provider node identities advertising a 32-byte [key] (folder id
+  /// or sha256), best capacity first, excluding ourselves.
+  Future<List<RnsIdentity>> resolveProviders(Uint8List key) async {
+    final d = dht;
+    if (d == null) return const [];
+    final recs = await d.resolve(key);
+    final self = _hex(identity.hash);
+    return [
+      for (final r in recs)
+        if (_hex(r.providerIdentity.hash) != self) r.providerIdentity
+    ];
+  }
+
   /// Stop advertising [sha256] (let its record expire at TTL).
   void unpublishProvider(Uint8List sha256) => _provided.remove(_hex(sha256));
 
@@ -393,9 +427,17 @@ class FileTransferNode {
     for (final p in _provided.values.toList()) {
       await _publishOne(p.sha, p.capacity, p.manifestHash);
     }
-    if (_provided.isNotEmpty) {
-      log?.call('files: republished ${_provided.length} record(s)');
+    // Folder (and other ungated) keys advertise regardless of the serve-quota.
+    final d = dht;
+    if (d != null) {
+      for (final p in _providedKeys.values.toList()) {
+        final rec = await ProviderRecord.create(
+            providerIdentity: identity, sha256: p.sha, capacity: p.capacity);
+        await d.publish(rec);
+      }
     }
+    final n = _provided.length + _providedKeys.length;
+    if (n > 0) log?.call('files: republished $n record(s)');
   }
 
   Future<int> _publishOne(Uint8List sha256, int capacity, Uint8List? manifestHash) async {

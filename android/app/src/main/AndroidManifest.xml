@@ -4,6 +4,12 @@
          API server, APRS-IS sockets, and all http(s) traffic. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Broad file access so an owner can add a real on-disk folder and serve
+         its files straight from disk (granted at runtime via the system
+         "All files access" screen; requested only when the user adds a disk folder). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
 
     <!-- Bluetooth LE for APRS-over-BLE (scan + advertise). On Android 12+
          the *_SCAN/CONNECT/ADVERTISE runtime permissions are used; on <=30 the

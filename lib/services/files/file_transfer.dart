@@ -65,9 +65,13 @@ class FileServeSession {
   final FileSource source;
   final ServeQuota? quota; // optional serving budget / anti-abuse guard
   final String requesterId; // best-effort requester key (the link id)
+  /// Called once per download a peer starts (when we serve the manifest), with
+  /// the 32-byte file hash — drives the per-file download metric.
+  final void Function(Uint8List fileHash)? onServed;
   RnsResourceSender? _sender; // current in-flight resource
 
-  FileServeSession(this.link, this.source, {this.quota, this.requesterId = ''});
+  FileServeSession(this.link, this.source,
+      {this.quota, this.requesterId = '', this.onServed});
 
   /// Process one inbound packet for this link; returns packets to send back.
   List<RnsPacket> onPacket(RnsPacket p) {
@@ -130,6 +134,8 @@ class FileServeSession {
       s.prepare();
       _sender = s;
       quota?.record(requesterId, fileHash, payload.length, manifest: manifest);
+      // A manifest serve marks the start of one download by another node.
+      if (manifest) onServed?.call(fileHash);
       return [s.advertisementPacket()];
     } catch (_) {
       // Payload too large for a single Resource segment (v1 limit) — decline.

@@ -1704,7 +1704,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final toggle = data['toggle'] as Map?;
     final toggleLabel = (toggle?['label'] ?? '').toString();
 
-    final controller = TextEditingController();
+    final controller =
+        TextEditingController(text: (input?['value'] ?? '').toString());
     bool toggleOn = (toggle?['default'] == true);
     void result(String value, String text) {
       _fieldValues['prompt_id'] = id;

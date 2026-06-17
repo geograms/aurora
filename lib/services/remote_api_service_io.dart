@@ -283,6 +283,19 @@ class RemoteApiService {
         if (arch != null) {
           RnsService.instance.fileServeSource = MediaFileSource(arch);
         }
+        // Persist the social relay/index DB + folder key-store under the shared
+        // wapp-data root.
+        final prefs = PreferencesService.instanceSync;
+        if (prefs != null) {
+          RnsService.instance.relayStorePath =
+              wappsDataStorage(prefs).getAbsolutePath('social.sqlite3');
+          RnsService.instance.folderStorePath =
+              wappsDataStorage(prefs).getAbsolutePath('folders.json');
+          RnsService.instance.diskFoldersPath =
+              wappsDataStorage(prefs).getAbsolutePath('disk_folders.json');
+          RnsService.instance.subscriptionsPath =
+              wappsDataStorage(prefs).getAbsolutePath('folder_subscriptions.json');
+        }
         final ok = await RnsService.instance
             .start(mode: mode, host: host, port: port, announceName: name);
         return _json(res, {'started': ok, ...RnsService.instance.status()});
@@ -355,6 +368,149 @@ class RemoteApiService {
         final arch = _mediaArchive();
         if (arch != null) token = arch.putBytes(bytes, ext);
         return _json(res, {'ok': true, 'len': bytes.length, 'token': token});
+      }
+      if (req.method == 'POST' && path == '/api/rns/relay/publish') {
+        // {"event": {NIP-01 signed event json}} — store locally + fan out to an
+        // indexer. The event must already be Schnorr-signed by the caller.
+        final data = await _body(req);
+        final ev = data['event'];
+        if (ev is! Map) {
+          return _json(res, {'ok': false, 'error': 'event object required'},
+              status: HttpStatus.badRequest);
+        }
+        final ok = await RnsService.instance
+            .relayPublish(Map<String, dynamic>.from(ev));
+        return _json(res, {'ok': ok});
+      }
+      if (req.method == 'POST' && path == '/api/rns/relay/search') {
+        // {"q":"text","kinds":[1],"limit":50,"topic":"reticulum"}
+        final data = await _body(req);
+        final q = '${data['q'] ?? ''}';
+        final kinds = (data['kinds'] as List?)?.map((e) => e as int).toList();
+        final limit = int.tryParse('${data['limit'] ?? 50}') ?? 50;
+        final topic = data['topic']?.toString();
+        final events = await RnsService.instance
+            .relaySearch(q, kinds: kinds, limit: limit, topic: topic);
+        return _json(res, {'ok': true, 'count': events.length, 'events': events});
+      }
+      if (req.method == 'POST' && path == '/api/rns/relay/query') {
+        // {"filter":{NIP-01 filter}, "topic":"reticulum"}
+        final data = await _body(req);
+        final filter = data['filter'];
+        if (filter is! Map) {
+          return _json(res, {'ok': false, 'error': 'filter object required'},
+              status: HttpStatus.badRequest);
+        }
+        final events = await RnsService.instance.relayQuery(
+            Map<String, dynamic>.from(filter),
+            topic: data['topic']?.toString());
+        return _json(res, {'ok': true, 'count': events.length, 'events': events});
+      }
+      if (req.method == 'POST' && path == '/api/rns/relay/topic') {
+        // {"topic":"reticulum"} — add a topic to our indexer interest set.
+        final data = await _body(req);
+        final topic = '${data['topic'] ?? ''}'.trim();
+        if (topic.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'topic required'},
+              status: HttpStatus.badRequest);
+        }
+        RnsService.instance.addRelayTopic(topic);
+        return _json(res, {'ok': true, 'indexers': RnsService.instance.relayIndexerCount});
+      }
+      if (req.method == 'POST' && path == '/api/rns/folder/create') {
+        // {"name":"My folder","desc":"..."} -> creates a mutable folder.
+        final data = await _body(req);
+        final name = '${data['name'] ?? ''}'.trim();
+        if (name.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'name required'},
+              status: HttpStatus.badRequest);
+        }
+        final id = RnsService.instance
+            .folderCreate(name, desc: '${data['desc'] ?? ''}');
+        return _json(res, {'ok': id != null, 'folderId': id});
+      }
+      if (req.method == 'POST' && path == '/api/rns/folder/edit') {
+        // {"folderId":"<hex>","op":{"op":"addFile","x":"<sha256hex>",...}}
+        final data = await _body(req);
+        final folderId = '${data['folderId'] ?? ''}'.trim();
+        final op = data['op'];
+        if (folderId.isEmpty || op is! Map) {
+          return _json(res, {'ok': false, 'error': 'folderId + op required'},
+              status: HttpStatus.badRequest);
+        }
+        RnsService.instance
+            .folderEdit(folderId, Map<String, dynamic>.from(op));
+        return _json(res, {'ok': true});
+      }
+      if (req.method == 'POST' && path == '/api/rns/folder/browse') {
+        // {"folderId":"<hex>"} -> the cached folder state (refreshes async).
+        final data = await _body(req);
+        final folderId = '${data['folderId'] ?? ''}'.trim();
+        if (folderId.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId required'},
+              status: HttpStatus.badRequest);
+        }
+        return _json(res,
+            {'ok': true, 'state': RnsService.instance.folderBrowse(folderId)});
+      }
+      if (req.method == 'GET' && path == '/api/rns/folder/list') {
+        return _json(res, {'folders': RnsService.instance.folderList()});
+      }
+      if (req.method == 'POST' && path == '/api/rns/folder/adddisk') {
+        // {"path":"/abs/dir"} — register an on-disk directory as an owned folder
+        // (served from disk, not copied to the archive).
+        final data = await _body(req);
+        final p = '${data['path'] ?? ''}'.trim();
+        if (p.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'path required'},
+              status: HttpStatus.badRequest);
+        }
+        final id = await RnsService.instance.folderAddFromDisk(p);
+        return _json(res, {'ok': id != null, 'folderId': id});
+      }
+      if (req.method == 'POST' && path == '/api/rns/folder/rescan') {
+        final data = await _body(req);
+        final fid = data['folderId']?.toString();
+        await RnsService.instance.folderRescan(fid);
+        return _json(res, {'ok': true, 'owned': RnsService.instance.ownedDiskFolders()});
+      }
+      if (req.method == 'POST' && path == '/api/rns/folder/download') {
+        // {"folderId":..,"sha":..,"name":..} or {"folderId":..,"all":true}
+        final data = await _body(req);
+        final fid = '${data['folderId'] ?? ''}'.trim();
+        if (fid.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId required'},
+              status: HttpStatus.badRequest);
+        }
+        if (data['all'] == true) {
+          final n = await RnsService.instance.folderDownloadAll(fid);
+          return _json(res, {'ok': true, 'downloaded': n});
+        }
+        final sha = '${data['sha'] ?? ''}'.trim();
+        final name = '${data['name'] ?? sha}';
+        if (sha.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'sha or all required'},
+              status: HttpStatus.badRequest);
+        }
+        final ok = await RnsService.instance.folderDownloadFile(fid, sha, name);
+        return _json(res, {'ok': ok});
+      }
+      if (req.method == 'POST' && path == '/api/rns/folder/autosync') {
+        // {"folderId":..,"on":true}
+        final data = await _body(req);
+        final fid = '${data['folderId'] ?? ''}'.trim();
+        if (fid.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId required'},
+              status: HttpStatus.badRequest);
+        }
+        RnsService.instance.setFolderAutoSync(fid, data['on'] == true);
+        return _json(res, {'ok': true});
+      }
+      if (req.method == 'GET' && path == '/api/rns/folder/subscriptions') {
+        return _json(res, {'subscriptions': RnsService.instance.folderSubscriptions()});
+      }
+      if (req.method == 'GET' && path == '/api/rns/folder/owned') {
+        return _json(res, {'owned': RnsService.instance.ownedDiskFolders()});
       }
       if (req.method == 'GET' && path == '/api/ble/status') {
         return _json(res, BleService.instance.gattStatus());

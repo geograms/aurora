@@ -5,7 +5,7 @@ import 'dart:typed_data';
 
 import 'dart:io'
     if (dart.library.html) '../platform/io_stub.dart'
-    show File, FileMode, Process, Socket, RawSynchronousSocket;
+    show Directory, File, FileMode, Platform, Process, Socket, RawSynchronousSocket;
 
 import 'package:wasm_run/wasm_run.dart';
 
@@ -18,8 +18,10 @@ import '../services/location_service.dart';
 import '../profile/profile_service.dart';
 import 'wapp_event_broker.dart';
 import '../profile/storage_paths.dart';
+import '../services/android_permissions_service.dart';
 import '../services/blossom_server.dart';
 import '../services/preferences_service.dart';
+import '../services/reticulum/rns_service.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -449,6 +451,10 @@ class WappEngine {
           'first': m.firstSeenMs,
           'last': m.lastSeenMs,
           'shot': m.hasScreenshot,
+          'folder': m.folder ?? '',
+          'parent': m.parent ?? '',
+          'downloads': m.downloads,
+          'pinned': m.pinned,
         };
 
     // List archive metadata (newest first) → JSON array.
@@ -507,7 +513,8 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
-    // Update name/description/tags from a JSON object. 1 = applied.
+    // Update name/description/tags/folder/parent from a JSON object. The host
+    // clamps description to 250 chars. 1 = applied.
     final halMediaSetMeta = WasmFunction(
       (int hashPtr, int hashLen, int jsonPtr, int jsonLen) {
         final archive = mediaArchive();
@@ -520,6 +527,8 @@ class WappEngine {
             name: d['name'] as String?,
             description: d['description'] as String?,
             tags: (d['tags'] as List?)?.map((t) => '$t').toList(),
+            folder: d['folder'] as String?,
+            parent: d['parent'] as String?,
           );
           return 1;
         } catch (_) {
@@ -527,6 +536,232 @@ class WappEngine {
         }
       },
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Search the archive: an exact sha256 (token / 43-char b64u / 64-hex)
+    // returns that one entry; anything else is a full-text query over
+    // name/description/tags/folder/parent. → JSON array of metas.
+    final halMediaSearch = WasmFunction(
+      (int qPtr, int qLen, int outPtr, int outCap) {
+        final archive = mediaArchive();
+        if (archive == null || qLen <= 0 || outCap <= 0) return 0;
+        final q = _readStr(qPtr, qLen).trim();
+        final looksLikeSha =
+            RegExp(r'^(file:)?[A-Za-z0-9_-]{43}(\.[a-z0-9]+)?$').hasMatch(q) ||
+                RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(q);
+        final List<MediaMeta> metas;
+        if (looksLikeSha) {
+          final one = archive.lookupBySha(q);
+          metas = one == null ? const [] : [one];
+        } else {
+          metas = archive.search(q, limit: 100);
+        }
+        return _writeStr(
+            outPtr, outCap, jsonEncode([for (final m in metas) metaJson(m)]));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Virtual-folder tree: JSON array of {parent, folder, count}.
+    final halMediaFolders = WasmFunction(
+      (int outPtr, int outCap) {
+        final archive = mediaArchive();
+        if (archive == null || outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            jsonEncode([for (final f in archive.folders()) f.toJson()]));
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Files inside one virtual folder. Input JSON {"parent":..,"folder":..}
+    // (empty strings = the uncategorized bucket). → JSON array of metas.
+    final halMediaListFolder = WasmFunction(
+      (int jsonPtr, int jsonLen, int outPtr, int outCap) {
+        final archive = mediaArchive();
+        if (archive == null || jsonLen <= 0 || outCap <= 0) return 0;
+        try {
+          final d =
+              jsonDecode(_readStr(jsonPtr, jsonLen)) as Map<String, dynamic>;
+          final metas = archive.listByFolder(
+              (d['parent'] ?? '').toString(), (d['folder'] ?? '').toString());
+          return _writeStr(outPtr, outCap,
+              jsonEncode([for (final m in metas) metaJson(m)]));
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // ── Mutable folders (IPNS-like) ─────────────────────────────────────────
+    // Create a folder: input {"name":..,"desc":..} → folderId hex (or empty).
+    final halFolderCreate = WasmFunction(
+      (int jsonPtr, int jsonLen, int outPtr, int outCap) {
+        if (jsonLen <= 0 || outCap <= 0) return 0;
+        try {
+          final d =
+              jsonDecode(_readStr(jsonPtr, jsonLen)) as Map<String, dynamic>;
+          final id = RnsService.instance.folderCreate(
+              (d['name'] ?? '').toString(),
+              desc: (d['desc'] ?? '').toString());
+          return id == null ? 0 : _writeStr(outPtr, outCap, id);
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Owned folders → JSON array of {folderId, npub, name}.
+    final halFolderList = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        return _writeStr(
+            outPtr, outCap, jsonEncode(RnsService.instance.folderList()));
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Apply an edit: folderId + op JSON ({"op":"addFile","x":..} etc). 1=started.
+    final halFolderEdit = WasmFunction(
+      (int idPtr, int idLen, int jsonPtr, int jsonLen) {
+        if (idLen <= 0 || jsonLen <= 0) return 0;
+        try {
+          final op =
+              jsonDecode(_readStr(jsonPtr, jsonLen)) as Map<String, dynamic>;
+          RnsService.instance.folderEdit(_readStr(idPtr, idLen), op);
+          return 1;
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Browse a folder → cached FolderState JSON (refreshes in the background).
+    final halFolderBrowse = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (idLen <= 0 || outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderBrowse(_readStr(idPtr, idLen))));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // ── Disk-backed owner folders + consumer downloads ──────────────────────
+    // Register an on-disk directory as an owned folder (async). 1 = started;
+    // poll hal_folder_owned for the resulting folderId.
+    final halFolderAddDisk = WasmFunction(
+      (int pPtr, int pLen) {
+        if (pLen <= 0) return 0;
+        // ignore: discarded_futures
+        RnsService.instance.folderAddFromDisk(_readStr(pPtr, pLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Re-scan owned disk folders (one if id given, else all). 1 = started.
+    final halFolderRescan = WasmFunction(
+      (int idPtr, int idLen) {
+        // ignore: discarded_futures
+        RnsService.instance.folderRescan(idLen > 0 ? _readStr(idPtr, idLen) : null);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Download from a folder: json {"sha":..,"name":..} or {"all":true}. 1=started.
+    final halFolderDownload = WasmFunction(
+      (int idPtr, int idLen, int jsonPtr, int jsonLen) {
+        if (idLen <= 0 || jsonLen <= 0) return 0;
+        try {
+          final fid = _readStr(idPtr, idLen);
+          final d = jsonDecode(_readStr(jsonPtr, jsonLen)) as Map<String, dynamic>;
+          if (d['all'] == true) {
+            // ignore: discarded_futures
+            RnsService.instance.folderDownloadAll(fid);
+          } else {
+            final sha = '${d['sha'] ?? ''}';
+            if (sha.isEmpty) return 0;
+            // ignore: discarded_futures
+            RnsService.instance.folderDownloadFile(fid, sha, '${d['name'] ?? sha}');
+          }
+          return 1;
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Toggle auto-sync for a folder (on != 0).
+    final halFolderAutosync = WasmFunction(
+      (int idPtr, int idLen, int on) {
+        if (idLen <= 0) return 0;
+        RnsService.instance.setFolderAutoSync(_readStr(idPtr, idLen), on != 0);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Owned disk folders → JSON [{folderId, dir, files}].
+    final halFolderOwned = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        return _writeStr(
+            outPtr, outCap, jsonEncode(RnsService.instance.ownedDiskFolders()));
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Folder subscriptions → JSON [{folderId, autoSync, downloaded}].
+    final halFolderSubs = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderSubscriptions()));
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // List a real directory (for the in-app folder browser): JSON
+    // [{"name","path","dir"}], directories first. Subject to OS file access.
+    final halFsListdir = WasmFunction(
+      (int pPtr, int pLen, int outPtr, int outCap) {
+        if (pLen <= 0 || outCap <= 0) return 0;
+        try {
+          final dir = Directory(_readStr(pPtr, pLen));
+          if (!dir.existsSync()) return 0;
+          final items = <Map<String, dynamic>>[];
+          for (final e in dir.listSync(followLinks: false)) {
+            items.add({
+              'name': e.path.split(Platform.pathSeparator).last,
+              'path': e.path,
+              'dir': e is Directory,
+            });
+          }
+          items.sort((a, b) {
+            final d = (b['dir'] == true ? 1 : 0) - (a['dir'] == true ? 1 : 0);
+            return d != 0 ? d : (a['name'] as String).compareTo(b['name'] as String);
+          });
+          return _writeStr(outPtr, outCap, jsonEncode(items));
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Request broad file access (Android all-files). 1 = granted/not-needed.
+    // Fire-and-forget (opens the system screen on Android); poll fs_listdir.
+    final halStorageRequest = WasmFunction(
+      (int _) {
+        // ignore: discarded_futures
+        AndroidPermissionsService.instance.requestAllFilesAccess();
+        return 1;
+      },
+      params: [ValueTy.i32],
       results: [ValueTy.i32],
     );
     final halMediaDelete = WasmFunction(
@@ -1490,6 +1725,21 @@ class WappEngine {
       WasmImport('hal', 'media_set_meta', halMediaSetMeta),
       WasmImport('hal', 'media_delete', halMediaDelete),
       WasmImport('hal', 'media_stats', halMediaStats),
+      WasmImport('hal', 'media_search', halMediaSearch),
+      WasmImport('hal', 'media_folders', halMediaFolders),
+      WasmImport('hal', 'media_list_folder', halMediaListFolder),
+      WasmImport('hal', 'folder_create', halFolderCreate),
+      WasmImport('hal', 'folder_list', halFolderList),
+      WasmImport('hal', 'folder_edit', halFolderEdit),
+      WasmImport('hal', 'folder_browse', halFolderBrowse),
+      WasmImport('hal', 'folder_add_disk', halFolderAddDisk),
+      WasmImport('hal', 'folder_rescan', halFolderRescan),
+      WasmImport('hal', 'folder_download', halFolderDownload),
+      WasmImport('hal', 'folder_autosync', halFolderAutosync),
+      WasmImport('hal', 'folder_owned', halFolderOwned),
+      WasmImport('hal', 'folder_subs', halFolderSubs),
+      WasmImport('hal', 'fs_listdir', halFsListdir),
+      WasmImport('hal', 'storage_request', halStorageRequest),
       WasmImport('hal', 'media_fetch', halMediaFetch),
       WasmImport('hal', 'media_fetch_magnet', halMediaFetchMagnet),
       WasmImport('hal', 'media_add_source', halMediaAddSource),

@@ -71,4 +71,29 @@ class AndroidPermissionsService {
       LogService.instance.add('AndroidPermissions: request failed: $e');
     }
   }
+
+  /// Whether broad "All files access" is granted (needed to read/serve an owner's
+  /// on-disk folder). Always true off Android.
+  Future<bool> hasAllFilesAccess() async {
+    if (!_isAndroid) return true;
+    try {
+      return (await Permission.manageExternalStorage.status).isGranted;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Request "All files access" (Android opens its special-access settings
+  /// screen). Call only when the user adds a disk-backed folder. No-op elsewhere.
+  Future<bool> requestAllFilesAccess() async {
+    if (!_isAndroid) return true;
+    try {
+      final s = await Permission.manageExternalStorage.request();
+      LogService.instance.add('Permission manageExternalStorage: ${s.name}');
+      return s.isGranted;
+    } catch (e) {
+      LogService.instance.add('AndroidPermissions: all-files request failed: $e');
+      return false;
+    }
+  }
 }

@@ -43,6 +43,10 @@ class MediaMeta {
   final int lastSeenMs;      // epoch ms of last access
   final int size;            // byte length of the data blob
   final bool hasScreenshot;
+  final String? folder;      // virtual folder name (categorization)
+  final String? parent;      // virtual parent-folder name
+  final int downloads;       // times served to others (metric)
+  final bool pinned;         // locally added/authored — never auto-evicted
 
   const MediaMeta({
     required this.sha256,
@@ -56,7 +60,28 @@ class MediaMeta {
     this.name,
     this.description,
     this.tags = const [],
+    this.folder,
+    this.parent,
+    this.downloads = 0,
+    this.pinned = true,
   });
+
+  Map<String, dynamic> toJson() => {
+        'sha256': sha256,
+        if (sha1 != null) 'sha1': sha1,
+        if (name != null) 'name': name,
+        'ext': ext,
+        if (description != null) 'description': description,
+        'tags': tags,
+        'firstSeen': firstSeenMs,
+        'lastSeen': lastSeenMs,
+        'size': size,
+        'hasScreenshot': hasScreenshot,
+        if (folder != null) 'folder': folder,
+        if (parent != null) 'parent': parent,
+        'downloads': downloads,
+        'pinned': pinned,
+      };
 }
 
 class MediaArchiveStats {
@@ -64,6 +89,17 @@ class MediaArchiveStats {
   final int totalBytes;
   final int screenshotCount;
   const MediaArchiveStats(this.count, this.totalBytes, this.screenshotCount);
+}
+
+/// One node in the virtual-folder tree (a distinct parent/folder grouping).
+class MediaFolder {
+  final String parent; // '' = top level
+  final String folder; // '' = uncategorized within the parent
+  final int count;
+  const MediaFolder(this.parent, this.folder, this.count);
+
+  Map<String, dynamic> toJson() =>
+      {'parent': parent, 'folder': folder, 'count': count};
 }
 
 class MediaArchive {
@@ -126,6 +162,38 @@ class MediaArchive {
           PRIMARY KEY (sha256, kind, value)
         );
       ''');
+      // Additive migrations (idempotent: ALTER throws if the column exists, so
+      // each is wrapped). folder/parent drive virtual-folder navigation;
+      // downloads is the times-served-to-others metric; pinned protects locally
+      // added content from the storage-budget evictor (pass 2).
+      for (final col in const [
+        'folder TEXT',
+        'parent TEXT',
+        'downloads INTEGER NOT NULL DEFAULT 0',
+        'pinned INTEGER NOT NULL DEFAULT 1',
+      ]) {
+        try {
+          db.execute('ALTER TABLE media ADD COLUMN $col;');
+        } catch (_) {/* column already present */}
+      }
+      db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_media_folder ON media(parent, folder);');
+      // Full-text index for local search (works even when the RNS node is off).
+      db.execute('''
+        CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
+          name, description, tags, folder, parent, sha256 UNINDEXED,
+          tokenize = 'unicode61'
+        );
+      ''');
+      // Backfill the FTS index if it was just created on an existing archive.
+      final ftsN =
+          (db.select('SELECT COUNT(*) c FROM media_fts').first['c'] as int);
+      final medN = (db.select('SELECT COUNT(*) c FROM media').first['c'] as int);
+      if (ftsN == 0 && medN > 0) {
+        for (final r in db.select('SELECT sha256 FROM media')) {
+          _syncFts(db, r['sha256'] as String);
+        }
+      }
       _db = db;
       return db;
     } catch (e) {
@@ -163,6 +231,57 @@ class MediaArchive {
     return e;
   }
 
+  /// Max chars for a file description (host-enforced).
+  static const int kMaxDescription = 250;
+  static String? _clampDesc(String? d) =>
+      d == null ? null : (d.length > kMaxDescription ? d.substring(0, kMaxDescription) : d);
+
+  /// Rebuild the FTS row for [key] from the current media row.
+  void _syncFts(Database db, String key) {
+    try {
+      db.execute('DELETE FROM media_fts WHERE sha256=?', [key]);
+      final rows = db.select(
+          'SELECT name,description,tags,folder,parent FROM media WHERE sha256=?',
+          [key]);
+      if (rows.isEmpty) return;
+      final r = rows.first;
+      var tagsText = '';
+      final rawTags = r['tags'];
+      if (rawTags is String && rawTags.isNotEmpty) {
+        try {
+          tagsText = (jsonDecode(rawTags) as List).join(' ');
+        } catch (_) {}
+      }
+      db.execute(
+        'INSERT INTO media_fts(name,description,tags,folder,parent,sha256) '
+        'VALUES(?,?,?,?,?,?)',
+        [
+          r['name'] ?? '',
+          r['description'] ?? '',
+          tagsText,
+          r['folder'] ?? '',
+          r['parent'] ?? '',
+          key,
+        ],
+      );
+    } catch (e) {
+      debugPrint('MediaArchive: fts sync failed: $e');
+    }
+  }
+
+  /// Turn free text into a safe FTS5 MATCH expression (prefix on the last term).
+  static String? _ftsMatch(String text) {
+    final terms = text
+        .toLowerCase()
+        .split(RegExp(r'[^\p{L}\p{N}]+', unicode: true))
+        .where((t) => t.isNotEmpty)
+        .toList();
+    if (terms.isEmpty) return null;
+    final quoted = [for (final t in terms) '"${t.replaceAll('"', '')}"'];
+    quoted[quoted.length - 1] = '${quoted.last}*';
+    return quoted.join(' ');
+  }
+
   // ── API ─────────────────────────────────────────────────────────────────
 
   /// Store [data]; returns the wire token `file:<sha256>.<ext>`. Identical
@@ -189,7 +308,7 @@ class MediaArchive {
           sha1b64,
           name,
           e,
-          description,
+          _clampDesc(description),
           tags == null ? null : jsonEncode(tags),
           now,
           now,
@@ -203,9 +322,10 @@ class MediaArchive {
           'UPDATE media SET last_seen=?, '
           'name=COALESCE(name,?), description=COALESCE(description,?), '
           'tags=COALESCE(tags,?) WHERE sha256=?',
-          [now, name, description, tags == null ? null : jsonEncode(tags), key],
+          [now, name, _clampDesc(description), tags == null ? null : jsonEncode(tags), key],
         );
       }
+      _syncFts(db, key);
     } catch (e2) {
       debugPrint('MediaArchive: putBytes failed: $e2');
     }
@@ -264,7 +384,8 @@ class MediaArchive {
     try {
       final rows = db.select(
           'SELECT sha256,sha1,tlsh,name,ext,description,tags,first_seen,'
-          'last_seen,size,(screenshot IS NOT NULL) AS has_shot '
+          'last_seen,size,folder,parent,downloads,pinned,'
+          '(screenshot IS NOT NULL) AS has_shot '
           'FROM media WHERE sha256=?',
           [key]);
       if (rows.isEmpty) return null;
@@ -288,6 +409,10 @@ class MediaArchive {
         lastSeenMs: r['last_seen'] as int,
         size: r['size'] as int,
         hasScreenshot: (r['has_shot'] as int) != 0,
+        folder: r['folder'] as String?,
+        parent: r['parent'] as String?,
+        downloads: (r['downloads'] as int?) ?? 0,
+        pinned: ((r['pinned'] as int?) ?? 1) != 0,
       );
     } catch (e) {
       debugPrint('MediaArchive: getMeta failed: $e');
@@ -296,18 +421,33 @@ class MediaArchive {
   }
 
   /// Update mutable metadata; null arguments leave the column unchanged.
+  /// [description] is clamped to [kMaxDescription] chars. [folder]/[parent]
+  /// drive the virtual-folder navigation. The FTS index is kept in sync.
   void updateMeta(String tokenOrSha256,
-      {String? name, String? description, List<String>? tags}) {
+      {String? name,
+      String? description,
+      List<String>? tags,
+      String? folder,
+      String? parent}) {
     final key = _keyOf(tokenOrSha256);
     final db = _ensureDb();
     if (key == null || db == null) return;
     try {
       db.execute(
         'UPDATE media SET name=COALESCE(?,name), '
-        'description=COALESCE(?,description), tags=COALESCE(?,tags) '
+        'description=COALESCE(?,description), tags=COALESCE(?,tags), '
+        'folder=COALESCE(?,folder), parent=COALESCE(?,parent) '
         'WHERE sha256=?',
-        [name, description, tags == null ? null : jsonEncode(tags), key],
+        [
+          name,
+          _clampDesc(description),
+          tags == null ? null : jsonEncode(tags),
+          folder,
+          parent,
+          key,
+        ],
       );
+      _syncFts(db, key);
     } catch (e) {
       debugPrint('MediaArchive: updateMeta failed: $e');
     }
@@ -349,6 +489,7 @@ class MediaArchive {
     if (key == null || db == null) return;
     try {
       db.execute('DELETE FROM media WHERE sha256=?', [key]);
+      db.execute('DELETE FROM media_fts WHERE sha256=?', [key]);
     } catch (e) {
       debugPrint('MediaArchive: delete failed: $e');
     }
@@ -368,6 +509,84 @@ class MediaArchive {
       ];
     } catch (e) {
       debugPrint('MediaArchive: list failed: $e');
+      return const [];
+    }
+  }
+
+  /// Full-text search over name/description/tags/folder/parent (local index).
+  /// Best matches first (bm25), then most-recently accessed.
+  List<MediaMeta> search(String query, {int limit = 50}) {
+    final db = _ensureDb();
+    if (db == null) return const [];
+    final q = _ftsMatch(query);
+    if (q == null) return const [];
+    try {
+      final rows = db.select(
+        'SELECT m.sha256 FROM media_fts '
+        'JOIN media m ON m.sha256 = media_fts.sha256 '
+        'WHERE media_fts MATCH ? '
+        'ORDER BY bm25(media_fts), m.last_seen DESC LIMIT ?',
+        [q, limit],
+      );
+      return [for (final r in rows) ?getMeta(r['sha256'] as String)];
+    } catch (e) {
+      debugPrint('MediaArchive: search failed: $e');
+      return const [];
+    }
+  }
+
+  /// Exact lookup by a sha256 (token, base64url, or 64-char hex). Null if absent.
+  MediaMeta? lookupBySha(String shaOrToken) => getMeta(shaOrToken);
+
+  /// Increment the times-served-to-others counter for a file (the download
+  /// metric). No-op when the file isn't held.
+  void incrementDownloads(String tokenOrSha256) {
+    final key = _keyOf(tokenOrSha256);
+    final db = _ensureDb();
+    if (key == null || db == null) return;
+    try {
+      db.execute(
+          'UPDATE media SET downloads = downloads + 1 WHERE sha256=?', [key]);
+    } catch (e) {
+      debugPrint('MediaArchive: incrementDownloads failed: $e');
+    }
+  }
+
+  /// The virtual-folder tree: one entry per distinct (parent, folder) with a
+  /// file count, for navigation. Empty parent/folder means "uncategorized".
+  List<MediaFolder> folders() {
+    final db = _ensureDb();
+    if (db == null) return const [];
+    try {
+      final rows = db.select(
+        "SELECT COALESCE(parent,'') p, COALESCE(folder,'') f, COUNT(*) c "
+        'FROM media GROUP BY p, f ORDER BY p, f',
+      );
+      return [
+        for (final r in rows)
+          MediaFolder(r['p'] as String, r['f'] as String, r['c'] as int)
+      ];
+    } catch (e) {
+      debugPrint('MediaArchive: folders failed: $e');
+      return const [];
+    }
+  }
+
+  /// Files in a given virtual (parent, folder), most recently accessed first.
+  /// Pass empty strings for the uncategorized bucket.
+  List<MediaMeta> listByFolder(String parent, String folder,
+      {int offset = 0, int limit = 200}) {
+    final db = _ensureDb();
+    if (db == null) return const [];
+    try {
+      final rows = db.select(
+        "SELECT sha256 FROM media WHERE COALESCE(parent,'')=? "
+        "AND COALESCE(folder,'')=? ORDER BY last_seen DESC LIMIT ? OFFSET ?",
+        [parent, folder, limit, offset],
+      );
+      return [for (final r in rows) ?getMeta(r['sha256'] as String)];
+    } catch (e) {
+      debugPrint('MediaArchive: listByFolder failed: $e');
       return const [];
     }
   }

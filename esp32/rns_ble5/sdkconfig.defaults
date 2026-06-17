@@ -1,0 +1,45 @@
+# NimBLE with BLE 5 extended advertising, observer (scan) role only.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_EXT_ADV=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+
+# BLE 5.0 controller features (ESP32-S3).
+CONFIG_BT_LE_50_FEATURE_SUPPORT=y
+CONFIG_BT_LE_EXT_ADV=y
+
+# Native USB CDC serial console for the T-Dongle-S3 (no UART pins exposed).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Larger host-task stack: the gap callbacks run here and Ed25519 signing is
+# stack-heavy.
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
+
+# Select the T-Dongle-S3 board so the LCD/UI components compile (they are
+# guarded by CONFIG_GEOGRAM_BOARD_TDONGLE_S3 and would otherwise be empty).
+CONFIG_GEOGRAM_BOARD_TDONGLE_S3=y
+
+# Partition table comes from platformio.ini (board_build.partitions =
+# partitions.csv): a 2MB factory app, NVS kept at 0x9000 so the RNS identity
+# persists. 16MB flash has plenty of room.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# LVGL is configured via Kconfig (the esp-idf lvgl component defaults to
+# CONFIG_LV_CONF_SKIP=y, so lv_conf.h is ignored). LVGL's Kconfig defaults enable
+# Montserrat 14 but NOT 10; tdongle_ui uses the 10px font, so enable it here.
+CONFIG_LV_FONT_MONTSERRAT_10=y
+
+# WiFi + BLE coexistence (the iGate needs WiFi STA while BLE5 keeps running).
+# Software coexistence lets the single radio time-share WiFi and BLE.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# Custom 2-app-OTA-less layout would be overkill; the firmware (LVGL + WiFi +
+# APRS-IS) outgrows the 1MB single-app, so use a 2MB factory partition.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE is not set
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

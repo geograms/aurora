@@ -94,10 +94,15 @@ static const char *TAG = "ble_hello";
  * accepts 0x51 continuations for backward compatibility. */
 #define BCAST_PRIMARY       0x50        /* 'P' — chunk primary (ADV) */
 #define BCAST_CONT          0x51        /* 'Q' — chunk continuation (SCAN_RSP, receive-only) */
-#define BCH_PRI_HDR         6           /* marker,subtype,msgid,idx,total,flags (after company id) */
-#define BCH_ADV_PAYLOAD     (ADV_MFG_CAP - 2 - BCH_PRI_HDR)  /* 12 */
-#define BCH_CONT_HDR        4           /* marker,subtype,msgid,idx (after company id) */
+#define BCAST_NACK          0x52        /* 'R' — receiver→sender resend request */
+/* srcTag (1 byte) follows the subtype: a sender discriminator so a NACK can be
+ * addressed to the right advertiser. Matches kBleBcastPrimaryHdr/etc in
+ * lib/connections/bluetooth/ble_reassembler.dart. */
+#define BCH_PRI_HDR         7           /* marker,subtype,srcTag,msgid,idx,total,flags */
+#define BCH_ADV_PAYLOAD     (ADV_MFG_CAP - 2 - BCH_PRI_HDR)  /* 11 */
+#define BCH_CONT_HDR        5           /* marker,subtype,srcTag,msgid,idx */
 #define BCH_CONT_PAYLOAD    22          /* continuation payload bytes per chunk (receive-only) */
+#define BCH_NACK_HDR        6           /* marker,subtype,srcTag,msgid,total,bmStart */
 /* One chunk == one primary advert: no scan-response continuation on transmit
  * (see the company-id collapse note above). */
 #define BCH_CHUNK_PAYLOAD   BCH_ADV_PAYLOAD  /* 12 */
@@ -121,7 +126,13 @@ static const char *TAG = "ble_hello";
 #define BCH_PRIO_HIGH       1
 #define BRX_SLOTS           4           /* concurrent (addr,msgid) reassemblies */
 #define BRX_MAX_CHUNKS      16          /* max chunks per reassembled message */
-#define BRX_WINDOW_SEC      4           /* drop a partial with no new chunk this long */
+/* Keep an incomplete partial alive long enough to (a) collect chunks across the
+ * sparse scan bursts of a duty-cycling radio and (b) issue resend requests
+ * before giving up. Must stay under the dedup window so a completed message is
+ * still delivered once. */
+#define BRX_WINDOW_SEC      14          /* drop a partial with no new chunk this long */
+#define BRX_NACK_IDLE_SEC   4           /* request resends after this idle gap */
+#define BRX_MAX_NACKS       3           /* cap resend requests per partial */
 
 /* GATT UUIDs */
 #define SVC_UUID            0xFFE0
@@ -140,6 +151,7 @@ static const char *TAG = "ble_hello";
 static bool     s_active;
 static char     s_callsign[8];          /* "X3XXXX\0" */
 static uint8_t  s_device_id;            /* (MAC hash % 15) + 1 */
+static uint8_t  s_tx_srctag;            /* broadcast source tag (low byte of callsign hash) */
 
 /* Manufacturer data: [company_lo, company_hi, marker, device_id, callsign...] */
 static uint8_t  s_mfg_data[4 + 6];     /* max 10 bytes */
@@ -238,6 +250,13 @@ static void build_mfg_data(void)
     if (cslen > 6) cslen = 6;
     memcpy(&s_mfg_data[4], s_callsign, cslen);
     s_mfg_len = (uint8_t)(4 + cslen);
+
+    /* Our broadcast source tag: low byte of an FNV-1a hash of the full callsign
+     * (stable per identity). A receiver echoes this byte back in a NACK so only
+     * this node re-airs. Self-consistent; need not match any other node's algo. */
+    uint32_t h = 2166136261u;
+    for (const char *p = s_callsign; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+    s_tx_srctag = (uint8_t)(h & 0xFF);
 }
 
 /* ---- scan tracking ------------------------------------------------------ */
@@ -432,6 +451,7 @@ static void relay_enqueue_broadcast(const uint8_t *payload, int len,
         int a = 0;
         s->adv[a++] = COMPANY_ID_LO; s->adv[a++] = COMPANY_ID_HI;
         s->adv[a++] = GEOGRAM_MARKER; s->adv[a++] = BCAST_PRIMARY;
+        s->adv[a++] = s_tx_srctag;
         s->adv[a++] = msgid; s->adv[a++] = (uint8_t)idx; s->adv[a++] = (uint8_t)total;
         s->adv[a++] = pcont > 0 ? 0x01 : 0x00;   /* flags: bit0 = has continuation */
         memcpy(&s->adv[a], &payload[off], padv); a += padv;
@@ -441,6 +461,7 @@ static void relay_enqueue_broadcast(const uint8_t *payload, int len,
             int c = 0;
             s->rsp[c++] = COMPANY_ID_LO; s->rsp[c++] = COMPANY_ID_HI;
             s->rsp[c++] = GEOGRAM_MARKER; s->rsp[c++] = BCAST_CONT;
+            s->rsp[c++] = s_tx_srctag;
             s->rsp[c++] = msgid; s->rsp[c++] = (uint8_t)idx;
             memcpy(&s->rsp[c], &payload[off + padv], pcont); c += pcont;
             s->rsp_len = (uint8_t)c;
@@ -467,6 +488,60 @@ static int bch_pick(void)
         return s_bch_rr;
     }
     return -1;
+}
+
+/* Queue one pre-built manufacturer frame (company id included) into the chunk
+ * ring as a single advert — used for short-lived control frames (NACKs) that are
+ * NOT chunked. High priority so they air promptly; short TTL. */
+static void bch_enqueue_frame(const uint8_t *mfg, int len, uint32_t ttl_sec)
+{
+    if (len <= 0 || len > (int)sizeof(((bch_slot_t *)0)->adv)) return;
+    uint32_t t = now_sec();
+    int slot = -1;
+    for (int i = 0; i < BCH_RING; i++)
+        if (s_bch[i].expire == 0 || s_bch[i].expire <= t) { slot = i; break; }
+    if (slot < 0) {                         /* evict soonest-to-lapse */
+        slot = 0;
+        for (int i = 1; i < BCH_RING; i++)
+            if (s_bch[i].expire < s_bch[slot].expire) slot = i;
+    }
+    bch_slot_t *s = &s_bch[slot];
+    memcpy(s->adv, mfg, len);
+    s->adv_len = (uint8_t)len;
+    s->rsp_len = 0;
+    s->prio = BCH_PRIO_HIGH;
+    s->expire = t + ttl_sec;
+}
+
+/* A peer asked us (by our srcTag) to re-air specific chunks of one of our
+ * broadcast messages: refresh the matching ring slots so they keep airing.
+ * [d] = [marker,subtype,srcTag,msgid,total,bmStart,bitmap…] (company id stripped). */
+static void bch_handle_nack(const uint8_t *d, int dlen)
+{
+    if (dlen < BCH_NACK_HDR) return;
+    /* layout: d[2]=srcTag d[3]=msgid d[4]=total d[5]=bmStart d[6..]=bitmap */
+    uint8_t srctag = d[2], msgid = d[3], bmstart = d[5];
+    if (srctag != s_tx_srctag) return;      /* not addressed to us */
+    uint32_t t = now_sec();
+    int reaired = 0;
+    for (int b = BCH_NACK_HDR; b < dlen; b++) {
+        for (int bit = 0; bit < 8; bit++) {
+            if (!(d[b] & (1 << bit))) continue;
+            int idx = bmstart + (b - BCH_NACK_HDR) * 8 + bit;
+            for (int i = 0; i < BCH_RING; i++) {
+                bch_slot_t *s = &s_bch[i];
+                if (s->expire == 0) continue;
+                /* adv = [lo,hi,marker,subtype,srcTag,msgid,idx,…] */
+                if (s->adv_len > 6 && s->adv[3] == BCAST_PRIMARY &&
+                    s->adv[4] == srctag && s->adv[5] == msgid && s->adv[6] == idx) {
+                    s->prio = BCH_PRIO_HIGH;
+                    s->expire = t + BCH_TTL_MSG;
+                    reaired++;
+                }
+            }
+        }
+    }
+    if (reaired) ESP_LOGI(TAG, "NACK rx msg %u: re-aired %d chunk(s)", msgid, reaired);
 }
 
 /* Pick the next live frame to rebroadcast (round-robin), reaping expired
@@ -607,6 +682,7 @@ static void start_scan(void)
 /* ---- adv/scan cycle timer ----------------------------------------------- */
 
 static void mail_pump(void);
+static void brx_emit_nacks(void);
 
 static void cycle_timer_cb(void *arg)
 {
@@ -614,6 +690,7 @@ static void cycle_timer_cb(void *arg)
     if (!s_active) return;
 
     mail_pump();   /* pace out any pending ?MAIL backlog as ring slots free up */
+    brx_emit_nacks();  /* request resends for stalled multi-chunk partials */
 
     /* NimBLE can scan while a connection is active (just not while
      * advertising).  Always cycle so device count stays fresh. */
@@ -1351,9 +1428,12 @@ static void flush_pending(void)
 typedef struct {
     bool     used;
     uint8_t  addr[6];
+    uint8_t  srctag;                    /* sender tag (for addressing a NACK back) */
     uint8_t  msgid;
     uint8_t  total;
     uint32_t updated;
+    uint8_t  nack_count;               /* resend requests already sent */
+    uint32_t last_nack;                /* seconds-since-boot of last NACK (backoff) */
     bool     have_pri[BRX_MAX_CHUNKS];
     bool     expects_cont[BRX_MAX_CHUNKS];
     bool     have_cont[BRX_MAX_CHUNKS];
@@ -1423,16 +1503,17 @@ static void deliver_broadcast(const uint8_t *payload, int len, int rssi)
  * already stripped). On the last missing piece, reassemble and deliver. */
 static void brx_ingest(const uint8_t *addr, const uint8_t *d, int dlen, int rssi)
 {
-    if (dlen < 4) return;
-    uint8_t sub = d[1], msgid = d[2], idx = d[3];
+    if (dlen < 5) return;
+    uint8_t sub = d[1], srctag = d[2], msgid = d[3], idx = d[4];
 
     brx_slot_t *s = brx_find(addr, msgid);
     if (sub == BCAST_PRIMARY) {
         if (dlen < BCH_PRI_HDR) return;
-        uint8_t total = d[4], flags = d[5];
+        uint8_t total = d[5], flags = d[6];
         if (total == 0 || total > BRX_MAX_CHUNKS || idx >= total) return;
         if (!s) s = brx_alloc(addr, msgid, total);
         if (!s || s->total != total) return;
+        s->srctag = srctag;
         int plen = dlen - BCH_PRI_HDR;
         if (plen > BCH_ADV_PAYLOAD) plen = BCH_ADV_PAYLOAD;
         if (plen < 0) plen = 0;
@@ -1443,6 +1524,7 @@ static void brx_ingest(const uint8_t *addr, const uint8_t *d, int dlen, int rssi
         s->updated = now_sec();
     } else {                            /* BCAST_CONT */
         if (!s || idx >= s->total) return;   /* continuation before primary — drop */
+        s->srctag = srctag;
         int clen = dlen - BCH_CONT_HDR;
         if (clen > BCH_CONT_PAYLOAD) clen = BCH_CONT_PAYLOAD;
         if (clen < 0) clen = 0;
@@ -1470,6 +1552,54 @@ static void brx_ingest(const uint8_t *addr, const uint8_t *d, int dlen, int rssi
     }
     s->used = false;
     deliver_broadcast(buf, n, rssi);
+}
+
+/* Request resends for any incomplete partial that has stalled: build a NACK
+ * (bitmap of missing chunk indices) addressed to the sender's srcTag and queue
+ * it for advertising. The sender hears its own tag and re-airs those chunks.
+ * Called periodically from the duty cycle. */
+static void brx_emit_nacks(void)
+{
+    uint32_t t = now_sec();
+    for (int i = 0; i < BRX_SLOTS; i++) {
+        brx_slot_t *s = &s_brx[i];
+        if (!s->used) continue;
+        if (t - s->updated < BRX_NACK_IDLE_SEC) continue;   /* still receiving */
+        if (s->nack_count >= BRX_MAX_NACKS) continue;
+        /* backoff: idle, 2×idle, 3×idle between requests */
+        if (s->last_nack && (t - s->last_nack) < BRX_NACK_IDLE_SEC * (s->nack_count + 1))
+            continue;
+
+        int bmstart = -1, bmend = -1;
+        for (int k = 0; k < s->total; k++) {
+            bool miss = !s->have_pri[k] || (s->expects_cont[k] && !s->have_cont[k]);
+            if (!miss) continue;
+            if (bmstart < 0) bmstart = k;
+            bmend = k;
+        }
+        if (bmstart < 0) continue;                          /* nothing missing */
+        int bmbytes = (bmend - bmstart) / 8 + 1;
+        uint8_t frame[2 + BCH_NACK_HDR + 8];
+        if (bmbytes > 8) bmbytes = 8;
+        int n = 0;
+        frame[n++] = COMPANY_ID_LO; frame[n++] = COMPANY_ID_HI;
+        frame[n++] = GEOGRAM_MARKER; frame[n++] = BCAST_NACK;
+        frame[n++] = s->srctag; frame[n++] = s->msgid;
+        frame[n++] = s->total; frame[n++] = (uint8_t)bmstart;
+        for (int b = 0; b < bmbytes; b++) frame[n + b] = 0;
+        for (int k = bmstart; k <= bmend; k++) {
+            bool miss = !s->have_pri[k] || (s->expects_cont[k] && !s->have_cont[k]);
+            if (!miss) continue;
+            int off = k - bmstart;
+            frame[n + off / 8] |= (uint8_t)(1 << (off % 8));
+        }
+        n += bmbytes;
+        bch_enqueue_frame(frame, n, 6);
+        s->nack_count++;
+        s->last_nack = t;
+        ESP_LOGI(TAG, "emit NACK msg %u tag %u (missing from idx %d)",
+                 s->msgid, s->srctag, bmstart);
+    }
 }
 
 /* ---- GAP event handler -------------------------------------------------- */
@@ -1514,6 +1644,15 @@ static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
 
         /* Any other event means the held primary (if any) had no continuation. */
         flush_pending();
+
+        /* Resend request (0x52): a receiver asking us to re-air missing chunks.
+         * Handle it here — it is NOT a data chunk. */
+        if (mlen >= 2 + BCH_NACK_HDR && mfg[2] == GEOGRAM_MARKER &&
+            mfg[3] == BCAST_NACK) {
+            track_device(addr);
+            bch_handle_nack(&mfg[2], mlen - 2);
+            break;
+        }
 
         /* Broadcast-parcel chunk (0x50 primary in ADV / 0x51 continuation in
          * SCAN_RSP): route to the reassembler, not the presence/compact paths

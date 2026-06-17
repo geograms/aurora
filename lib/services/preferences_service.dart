@@ -91,6 +91,29 @@ class PreferencesService {
   bool get i2pEnabled => _prefs.getBool('i2p.enabled') ?? false;
   set i2pEnabled(bool v) => _prefs.setBool('i2p.enabled', v);
 
+  // Verbose BLE transport logging (advertise/scan/broadcast frames, NACKs).
+  // Off by default; when on, the BLE layer routes diagnostics to LogService so
+  // they show in the in-app log (and /api/log) without needing adb logcat.
+  bool get bleDebug => _prefs.getBool('ble.debug') ?? false;
+  set bleDebug(bool v) => _prefs.setBool('ble.debug', v);
+
+  // Auto-pair: when two Aurora devices discover each other, automatically open a
+  // GATT link (no manual pairing) for larger point-to-point transfers (e.g.
+  // binary files / RNS resources). The link is transient — it idles out so the
+  // connectionless broadcast (APRS, RNS announces) resumes. On by default.
+  bool get bleAutoPair => _prefs.getBool('ble.autoPair') ?? true;
+  set bleAutoPair(bool v) => _prefs.setBool('ble.autoPair', v);
+
+  // Reticulum file sharing: daily OUTBOUND budget we'll spend serving files to
+  // others (anti-abuse + politeness on metered links). Default 1 GB/day.
+  int get fileServeQuotaMb => _prefs.getInt('files.serveQuotaMb') ?? 1024;
+  set fileServeQuotaMb(int v) => _prefs.setInt('files.serveQuotaMb', v);
+
+  // Whether to serve files while on a metered/cellular connection. Off by
+  // default — receiving still works; we just don't spend cellular data serving.
+  bool get fileServeOnCellular => _prefs.getBool('files.serveOnCellular') ?? false;
+  set fileServeOnCellular(bool v) => _prefs.setBool('files.serveOnCellular', v);
+
   // Per-wapp autostart: when on, the wapp runs as a background service
   // (started at boot) and keeps its engine ticking even while its UI page is
   // closed — e.g. APRS staying connected to BLE/APRS-IS to receive messages.

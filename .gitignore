@@ -44,3 +44,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# iGate provisioning secrets (real values; example is committed)
+esp32/rns_ble5/src/igate_secrets.h

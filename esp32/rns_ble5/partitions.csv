@@ -1,0 +1,6 @@
+# Name,   Type, SubType, Offset,  Size
+# NVS at the standard 0x9000 so the RNS identity (and now WiFi creds + callsign)
+# persist across firmware flashes. 2MB factory app for LVGL + WiFi + APRS-IS.
+nvs,      data, nvs,     0x9000,  0x6000
+phy_init, data, phy,     0xf000,  0x1000
+factory,  app,  factory, 0x10000, 0x200000

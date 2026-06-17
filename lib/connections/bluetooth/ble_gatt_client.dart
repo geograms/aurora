@@ -65,7 +65,11 @@ class BleGattClient {
   Future<void> _connect(Peripheral peripheral) async {
     _connecting = true;
     try {
-      await _central.connect(peripheral);
+      // Bound the connect: the underlying stack otherwise waits ~30s before it
+      // reports a failed establishment (status 147), keeping the radio quiet for
+      // the caller far too long. A short timeout lets scans resume and a fresh
+      // discovery retry promptly.
+      await _central.connect(peripheral).timeout(const Duration(seconds: 12));
       try {
         await _central.requestMTU(peripheral, mtu: 512);
       } catch (_) {}
@@ -82,6 +86,8 @@ class BleGattClient {
       if (write == null || notify == null) {
         debugPrint('BleGatt(client): peer has no FFF1/FFF2');
         await _central.disconnect(peripheral);
+        _lastDrop = DateTime.now();
+        onLinkChange?.call(false);
         return;
       }
       await _central.setCharacteristicNotifyState(peripheral, notify, state: true);
@@ -94,12 +100,42 @@ class BleGattClient {
       try {
         await _central.disconnect(peripheral);
       } catch (_) {}
+      _lastDrop = DateTime.now();
+      // Tell the service the attempt ended so it can resume scanning and retry on
+      // the next discovery (the connect path otherwise never signals failure).
+      onLinkChange?.call(false);
     } finally {
       _connecting = false;
     }
   }
 
+  /// Drop the current GATT link (e.g. when idle) so the radio is free to scan /
+  /// advertise the connectionless broadcast again. No-op if not connected.
+  Future<void> disconnect() async {
+    final peer = _peer;
+    if (peer == null) return;
+    try {
+      await _central.disconnect(peer);
+    } catch (e) {
+      debugPrint('BleGatt(client): disconnect failed: $e');
+    }
+    // connectionStateChanged also clears these, but do it eagerly so a caller
+    // that checks isConnected right after sees the link as down.
+    _peer = null;
+    _writeChar = null;
+    _lastDrop = DateTime.now();
+    onLinkChange?.call(false);
+  }
+
   /// Write raw bytes (a parcel or receipt) to the connected peer's FFF1.
+  ///
+  /// Uses WRITE-WITH-RESPONSE: the await completes only when the peer ACKs the
+  /// write at the ATT layer, which paces the sender (the queue awaits this before
+  /// the next parcel). Write-WITHOUT-response has no flow control, so rapid
+  /// successive parcels overrun the controller buffer and only the first lands —
+  /// exactly the "header arrives, data parcels lost" failure. The peer's FFF1 is
+  /// a plain/unencrypted characteristic, so with-response does NOT trigger
+  /// bonding/pairing (this mirrors the proven geogram-android sender).
   Future<void> writeRaw(Uint8List data) async {
     final peer = _peer;
     final ch = _writeChar;
@@ -109,7 +145,7 @@ class BleGattClient {
         peer,
         ch,
         value: data,
-        type: GATTCharacteristicWriteType.withoutResponse,
+        type: GATTCharacteristicWriteType.withResponse,
       );
     } catch (e) {
       debugPrint('BleGatt(client): write failed: $e');

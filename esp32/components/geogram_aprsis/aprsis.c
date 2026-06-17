@@ -24,10 +24,26 @@
 #include "lwip/netdb.h"
 
 #include "wifi_bsp.h"
-#include "ble_hello.h"
 #include "msgstore.h"
 
 static const char *TAG = "aprsis";
+
+/* BLE integration hooks (see aprsis.h) — set by the firmware that owns the BLE
+ * link. Both optional: NULL get_heard => no heard calls; NULL relay => no
+ * downlink (uplink-only iGate). */
+static aprsis_get_heard_fn s_get_heard = NULL;
+static aprsis_relay_fn     s_relay     = NULL;
+
+void aprsis_set_ble_hooks(aprsis_get_heard_fn get_heard, aprsis_relay_fn relay)
+{
+    s_get_heard = get_heard;
+    s_relay = relay;
+}
+
+static int hook_get_heard(char calls[][8], int max, uint32_t max_age_sec)
+{
+    return s_get_heard ? s_get_heard(calls, max, max_age_sec) : 0;
+}
 
 /* ---- configuration ------------------------------------------------------ */
 
@@ -274,7 +290,7 @@ static bool is_local_call(const char *c)
 {
     if (call_eq(c, s_call)) return true;
     char heard[FILTER_CALLS_MAX][8];
-    int hn = ble_hello_get_heard(heard, FILTER_CALLS_MAX, HEARD_AGE_SEC);
+    int hn = hook_get_heard(heard, FILTER_CALLS_MAX, HEARD_AGE_SEC);
     for (int i = 0; i < hn; i++) if (call_eq(c, heard[i])) return true;
     return false;
 }
@@ -283,7 +299,7 @@ static bool is_local_call(const char *c)
 static void build_filter(char *out, size_t max)
 {
     char heard[FILTER_CALLS_MAX][8];
-    int hn = ble_hello_get_heard(heard, FILTER_CALLS_MAX, HEARD_AGE_SEC);
+    int hn = hook_get_heard(heard, FILTER_CALLS_MAX, HEARD_AGE_SEC);
     int o = snprintf(out, max, "g/%s", s_call);
     for (int i = 0; i < hn && o < (int)max - 12; i++)
         o += snprintf(out + o, max - o, "/%s", heard[i]);
@@ -360,7 +376,7 @@ static void handle_info_line(const char *line)
                      MSGSTORE_KIND_MESSAGE, 0, false);
         /* Relay over BLE only what is addressed to a locally-heard callsign (the
          * phone user) — third-party area chatter is archived but not pushed. */
-        if (local) ble_hello_relay_aprs(p.from, p.addressee, p.text);
+        if (local && s_relay) s_relay(p.from, p.addressee, p.text);
     } else if (p.type == APRS_POSITION && p.has_pos) {
         /* BEACONS archive: automated position reports. Only arrive when a position
          * is set (the r/ filter is added then), so they are already within radius.
@@ -368,7 +384,7 @@ static void handle_info_line(const char *line)
         char pos[40];
         snprintf(pos, sizeof pos, "%.3f,%.3f", p.lat, p.lon);
         msgstore_add(s_beacon_store, p.from, "!", pos, MSGSTORE_KIND_POSITION, 0, false);
-        if (s_have_pos) ble_hello_relay_aprs(p.from, "!", pos);
+        if (s_have_pos && s_relay) s_relay(p.from, "!", pos);
     }
 }
 

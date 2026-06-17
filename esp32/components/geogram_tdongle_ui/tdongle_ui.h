@@ -41,8 +41,18 @@ void tdongle_ui_set_device_count(int count);
 
 /**
  * @brief Update the IP address shown in the bottom-left corner.
+ *
+ * Renders with an "IP: " prefix (for the WiFi firmware).
  */
 void tdongle_ui_set_ip(const char *ip);
+
+/**
+ * @brief Set the bottom-left status text verbatim (no "IP: " prefix).
+ *
+ * For firmwares that have no IP to show (e.g. the BLE-only RNS dongle, which
+ * uses this slot for its own dest hash / relay counter).
+ */
+void tdongle_ui_set_info(const char *text);
 
 #ifdef __cplusplus
 }

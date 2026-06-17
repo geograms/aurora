@@ -83,28 +83,46 @@ class BleReassembler {
 // A message is broadcast as N chunks; each chunk is one advertisement made of a
 // primary field and (optionally) a scan-response continuation field, all under
 // company id 0xFFFF and marker 0x3E:
-//   PRIMARY (0x50): [0x3E,0x50, msgId, idx, total, flags, payload…]
+//   PRIMARY (0x50): [0x3E,0x50, srcTag, msgId, idx, total, flags, payload…]
 //                   flags bit0 = this chunk also has a 0x51 continuation
-//   CONT    (0x51): [0x3E,0x51, msgId, idx, payload…]   (extra bytes for chunk idx)
+//   CONT    (0x51): [0x3E,0x51, srcTag, msgId, idx, payload…] (extra bytes, idx)
+//   NACK    (0x52): [0x3E,0x52, srcTag, msgId, total, bmStart, bitmap…]
 // (the bytes above are the manufacturer data with the 2-byte company id already
 // stripped, i.e. what the scan API hands us). A receiver groups chunks by
 // (source, msgId), reassembles when every chunk is present, delivers once, and
 // dedups by (source,msgId) so the many repeats from the rotation/flood are not
 // re-delivered. App-agnostic transport framing — no message semantics here.
+//
+// Reliability: the broadcast channel is one-way (advertising), so a receiver
+// that catches only some chunks of a multi-chunk message cannot otherwise
+// recover the rest — Android scanners batch their scans, so a single burst sees
+// only a subset. The NACK (0x52) frame is the return channel: a receiver with a
+// stalled partial advertises a NACK listing the chunk indices it is still
+// missing (as a bitmap), keyed by the sender's [srcTag] and the [msgId]. The
+// sender hears its own srcTag, re-airs exactly those chunks, and the partial
+// completes. This is selective-repeat ARQ over connectionless advertising.
+//
+// [srcTag] is an opaque 1-byte sender discriminator (low byte of a hash of the
+// sender's stable identity) so that, with several senders broadcasting at once,
+// only the intended sender re-airs in response to a NACK.
 
 const int kBleBcastPrimary = 0x50; // 'P'
 const int kBleBcastCont = 0x51; // 'Q'
+const int kBleBcastNack = 0x52; // 'R' — receiver→sender resend request
 
 /// Largest payload sent over the connectionless broadcast transport; above this
 /// the size router uses GATT point-to-point instead. Shared with the ESP32
 /// (BCAST_MAX in ble_hello.c).
 const int kBleBcastMax = 300;
 
-/// Primary-chunk header length: [marker, subtype, msgId, idx, total, flags].
-const int kBleBcastPrimaryHdr = 6;
+/// Primary-chunk header length: [marker, subtype, srcTag, msgId, idx, total, flags].
+const int kBleBcastPrimaryHdr = 7;
 
-/// Continuation-chunk header length: [marker, subtype, msgId, idx].
-const int kBleBcastContHdr = 4;
+/// Continuation-chunk header length: [marker, subtype, srcTag, msgId, idx].
+const int kBleBcastContHdr = 5;
+
+/// NACK header length: [marker, subtype, srcTag, msgId, total, bmStart].
+const int kBleBcastNackHdr = 6;
 
 /// Drop incomplete multi-chunk partials with no new chunk within this window.
 /// Android receivers scan in sparse bursts (tens of seconds to ~2 min apart), so
@@ -122,11 +140,24 @@ const Duration kBleBcastWindow = Duration(seconds: 120);
 /// this, the same re-aired message would be delivered repeatedly.
 const Duration kBleBcastDedup = Duration(seconds: 130);
 
+/// A receiver's request for a sender to re-air missing chunks of one message.
+class NackRequest {
+  final int srcTag;
+  final int msgId;
+  final int total;
+  final List<int> missing;
+  const NackRequest(this.srcTag, this.msgId, this.total, this.missing);
+}
+
 class _BcastPartial {
   final int total;
   final List<Uint8List?> primary; // per-chunk primary payload (header stripped)
   final List<Uint8List?> cont; // per-chunk continuation payload (or null)
   final List<bool> expectsCont; // chunk advertised a continuation
+  int? srcTag; // sender discriminator, captured from the first primary chunk
+  int msgId = 0; // the 1-byte message id these chunks belong to
+  int nackCount = 0; // resend requests already emitted for this partial
+  DateTime? lastNackAt; // when the last NACK was emitted (for backoff)
   DateTime updated;
   _BcastPartial(this.total)
       : primary = List<Uint8List?>.filled(total, null),
@@ -140,6 +171,16 @@ class _BcastPartial {
       if (expectsCont[i] && cont[i] == null) return false;
     }
     return true;
+  }
+
+  /// Chunk indices still missing (primary not seen, or an expected continuation
+  /// not seen). What a NACK asks the sender to re-air.
+  List<int> missingIndices() {
+    final out = <int>[];
+    for (var i = 0; i < total; i++) {
+      if (primary[i] == null || (expectsCont[i] && cont[i] == null)) out.add(i);
+    }
+    return out;
   }
 
   Uint8List assemble() {
@@ -158,16 +199,69 @@ class BleBroadcastReassembler {
   final Map<String, DateTime> _seen = {};
 
   static bool isChunk(Uint8List d) =>
-      d.length >= 4 &&
+      d.length >= 5 &&
       d[0] == kBleMarker &&
       (d[1] == kBleBcastPrimary || d[1] == kBleBcastCont);
+
+  /// True for a 0x52 resend-request frame. A NACK must NOT be treated as a data
+  /// chunk by [isChunk] / [ingest].
+  static bool isNack(Uint8List d) =>
+      d.length >= kBleBcastNackHdr &&
+      d[0] == kBleMarker &&
+      d[1] == kBleBcastNack;
+
+  /// Parse a 0x52 frame into a request, or null if malformed. The bitmap is
+  /// LSB-first: bit k set ⇒ chunk index (bmStart + k) is missing.
+  static NackRequest? parseNack(Uint8List d) {
+    if (!isNack(d)) return null;
+    final srcTag = d[2];
+    final msgId = d[3];
+    final total = d[4];
+    final bmStart = d[5];
+    final missing = <int>[];
+    for (var b = kBleBcastNackHdr; b < d.length; b++) {
+      final byte = d[b];
+      for (var bit = 0; bit < 8; bit++) {
+        if (byte & (1 << bit) != 0) {
+          final idx = bmStart + (b - kBleBcastNackHdr) * 8 + bit;
+          if (idx < total) missing.add(idx);
+        }
+      }
+    }
+    if (missing.isEmpty) return null;
+    return NackRequest(srcTag, msgId, total, missing);
+  }
+
+  /// Build a 0x52 frame requesting [missing] chunk indices of message [msgId]
+  /// from sender [srcTag]. Returns null if nothing is missing. bmStart is the
+  /// lowest missing index so the bitmap stays compact for high indices.
+  static Uint8List? buildNack(
+      int srcTag, int msgId, int total, List<int> missing) {
+    if (missing.isEmpty) return null;
+    final bmStart = missing.reduce((a, b) => a < b ? a : b);
+    final maxIdx = missing.reduce((a, b) => a > b ? a : b);
+    final bytes = (maxIdx - bmStart) ~/ 8 + 1;
+    final out = Uint8List(kBleBcastNackHdr + bytes);
+    out[0] = kBleMarker;
+    out[1] = kBleBcastNack;
+    out[2] = srcTag & 0xFF;
+    out[3] = msgId & 0xFF;
+    out[4] = total & 0xFF;
+    out[5] = bmStart & 0xFF;
+    for (final idx in missing) {
+      final off = idx - bmStart;
+      out[kBleBcastNackHdr + off ~/ 8] |= 1 << (off % 8);
+    }
+    return out;
+  }
 
   /// Feed one broadcast-chunk manufacturer-data entry. Returns the full payload
   /// exactly once when the message completes (and is not a duplicate), else null.
   Uint8List? ingest(String from, Uint8List data) {
     if (!isChunk(data)) return null;
     final sub = data[1];
-    final msgId = data[2];
+    final srcTag = data[2];
+    final msgId = data[3];
     final key = '$from|$msgId';
 
     final seenAt = _seen[key];
@@ -176,21 +270,26 @@ class BleBroadcastReassembler {
     }
 
     if (sub == kBleBcastPrimary) {
-      if (data.length < 6) return null;
-      final idx = data[3];
-      final total = data[4];
-      final flags = data[5];
+      if (data.length < kBleBcastPrimaryHdr) return null;
+      final idx = data[4];
+      final total = data[5];
+      final flags = data[6];
       if (total == 0 || idx >= total) return null;
       final p = _partials.putIfAbsent(key, () => _BcastPartial(total));
       if (p.total != total) return null; // inconsistent header — ignore
-      p.primary[idx] = Uint8List.fromList(data.sublist(6));
+      p.srcTag = srcTag;
+      p.msgId = msgId;
+      p.primary[idx] = Uint8List.fromList(data.sublist(kBleBcastPrimaryHdr));
       p.expectsCont[idx] = (flags & 0x01) != 0;
       p.updated = DateTime.now();
     } else {
-      final idx = data[3];
+      if (data.length < kBleBcastContHdr) return null;
+      final idx = data[4];
       final p = _partials[key];
       if (p == null || idx >= p.total) return null; // continuation before primary
-      p.cont[idx] = Uint8List.fromList(data.sublist(4));
+      p.srcTag ??= srcTag;
+      p.msgId = msgId;
+      p.cont[idx] = Uint8List.fromList(data.sublist(kBleBcastContHdr));
       p.updated = DateTime.now();
     }
 
@@ -201,6 +300,41 @@ class BleBroadcastReassembler {
       return p.assemble();
     }
     return null;
+  }
+
+  /// Incomplete partials that warrant a resend request now: idle for at least
+  /// [idle], under the [maxRetries] cap, and past a growing backoff since the
+  /// last NACK. The caller emits each NACK and then calls [markNacked].
+  List<NackRequest> partialsNeedingNack(
+      {required Duration idle, required int maxRetries}) {
+    final now = DateTime.now();
+    final out = <NackRequest>[];
+    _partials.forEach((_, p) {
+      if (p.srcTag == null) return; // never saw a primary → can't address sender
+      if (p.complete) return;
+      if (now.difference(p.updated) < idle) return; // still receiving
+      if (p.nackCount >= maxRetries) return;
+      final last = p.lastNackAt;
+      // Backoff grows with each retry: idle, 2×idle, 3×idle, …
+      if (last != null && now.difference(last) < idle * (p.nackCount + 1)) {
+        return;
+      }
+      final missing = p.missingIndices();
+      if (missing.isEmpty) return;
+      out.add(NackRequest(p.srcTag!, p.msgId, p.total, missing));
+    });
+    return out;
+  }
+
+  /// Record that a NACK was emitted for partials of sender [srcTag] / [msgId].
+  void markNacked(int srcTag, int msgId) {
+    final now = DateTime.now();
+    _partials.forEach((_, p) {
+      if (p.srcTag == srcTag && p.msgId == msgId) {
+        p.nackCount++;
+        p.lastNackAt = now;
+      }
+    });
   }
 
   /// Drop stale partials and expired dedup entries. Call periodically.

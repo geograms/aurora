@@ -316,3 +316,10 @@ void tdongle_ui_set_ip(const char *ip)
     snprintf(s_ip_str, sizeof(s_ip_str), "IP: %s", ip);
     s_ip_dirty = true;
 }
+
+void tdongle_ui_set_info(const char *text)
+{
+    if (!text) return;
+    snprintf(s_ip_str, sizeof(s_ip_str), "%s", text);
+    s_ip_dirty = true;
+}

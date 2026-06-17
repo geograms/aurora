@@ -12,6 +12,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../connections/bluetooth/ble_service.dart';
 import '../platform/platform.dart' as platform;
 import '../profile/profile_service.dart';
 import '../profile/storage_paths.dart';
@@ -22,8 +23,10 @@ import '../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../wapp/shared_media_fetch.dart' show resolveSharedMedia;
 import '../wapp/wapp_page.dart';
 import 'blossom_server.dart';
+import 'files/media_file_source.dart';
 import 'i2p/i2p_service.dart';
 import 'log_service.dart';
+import 'reticulum/rns_service.dart';
 import 'preferences_service.dart';
 import 'torrent_service.dart';
 
@@ -260,6 +263,110 @@ class RemoteApiService {
         final ok = await I2pService.instance.discover(sha, ext);
         return _json(res, {'ok': ok});
       }
+
+      // ── Reticulum (RNS) device-to-device validation ──
+      if (req.method == 'GET' && path == '/api/rns/status') {
+        return _json(res, RnsService.instance.status());
+      }
+      if (req.method == 'POST' && path == '/api/rns/start') {
+        // {"mode":"tcpserver"|"tcpclient"|"ble","host":"127.0.0.1","port":4242}
+        final data = await _body(req);
+        final mode = (data['mode'] ?? 'tcpclient').toString();
+        final host = (data['host'] ?? '127.0.0.1').toString();
+        final port = int.tryParse('${data['port'] ?? 4242}') ?? 4242;
+        // Announce our callsign so peers/repeaters can show a human name (the
+        // announce app_data is plaintext; this is a public presence beacon).
+        final cs = (ProfileService.instance.activeProfile?.callsign ?? '').trim();
+        final name = cs.isNotEmpty ? cs : 'aurora';
+        // Serve content we already hold (received media, imports) over RNS.
+        final arch = _mediaArchive();
+        if (arch != null) {
+          RnsService.instance.fileServeSource = MediaFileSource(arch);
+        }
+        final ok = await RnsService.instance
+            .start(mode: mode, host: host, port: port, announceName: name);
+        return _json(res, {'started': ok, ...RnsService.instance.status()});
+      }
+      if (req.method == 'POST' && path == '/api/rns/announce') {
+        // {"text":"hello"} — one-to-many announce of our chat destination.
+        final data = await _body(req);
+        final text = (data['text'] ?? '').toString();
+        if (!RnsService.instance.isUp) {
+          return _json(res, {'ok': false, 'error': 'rns not up'},
+              status: HttpStatus.serviceUnavailable);
+        }
+        await RnsService.instance.announce(text);
+        return _json(res, {'ok': true});
+      }
+      if (req.method == 'GET' && path == '/api/rns/inbox') {
+        return _json(res, {'inbox': RnsService.instance.inbox});
+      }
+      if (req.method == 'POST' && path == '/api/rns/get') {
+        // {"sha256":"<hex|b64u>","ext":"png"} — DISCOVER providers via the DHT,
+        // fetch the bytes from the best one, cache them, and auto-seed (publish
+        // our own provider record). No peer needed; the DHT is the index.
+        final data = await _body(req);
+        final shaB = _shaBytes('${data['sha256'] ?? ''}');
+        final ext = '${data['ext'] ?? 'bin'}';
+        if (shaB == null) {
+          return _json(res, {'ok': false, 'error': 'sha256 required'},
+              status: HttpStatus.badRequest);
+        }
+        final bytes = await RnsService.instance.dhtResolveFetch(shaB);
+        if (bytes == null) {
+          return _json(res, {'ok': false, 'error': 'not found via DHT'});
+        }
+        String? token;
+        final arch = _mediaArchive();
+        if (arch != null) token = arch.putBytes(bytes, ext);
+        final holders = await RnsService.instance.dhtPublish(shaB); // auto-seed
+        return _json(res,
+            {'ok': true, 'len': bytes.length, 'token': token, 'seeded': holders});
+      }
+      if (req.method == 'POST' && path == '/api/rns/seed') {
+        // {"sha256":"<hex|b64u>"} — publish a provider record for content we hold,
+        // so peers can discover us as a source.
+        final data = await _body(req);
+        final shaB = _shaBytes('${data['sha256'] ?? ''}');
+        if (shaB == null) {
+          return _json(res, {'ok': false, 'error': 'sha256 required'},
+              status: HttpStatus.badRequest);
+        }
+        final holders = await RnsService.instance.dhtPublish(shaB);
+        return _json(res, {'ok': true, 'seeded': holders});
+      }
+      if (req.method == 'POST' && path == '/api/rns/fetchfile') {
+        // {"sha256":"<hex|b64u>","peer":"<peer dest hex>","ext":"png"} — fetch a
+        // file by content hash from a known peer over a Reticulum link; on success
+        // cache it in MediaArchive (so we can then serve it too).
+        final data = await _body(req);
+        final shaB = _shaBytes('${data['sha256'] ?? ''}');
+        final peer = '${data['peer'] ?? ''}'.trim();
+        final ext = '${data['ext'] ?? 'bin'}';
+        if (shaB == null || peer.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'sha256 + peer required'},
+              status: HttpStatus.badRequest);
+        }
+        final bytes = await RnsService.instance.fetchFileFrom(shaB, peer);
+        if (bytes == null) {
+          return _json(res, {'ok': false, 'error': 'fetch failed'});
+        }
+        String? token;
+        final arch = _mediaArchive();
+        if (arch != null) token = arch.putBytes(bytes, ext);
+        return _json(res, {'ok': true, 'len': bytes.length, 'token': token});
+      }
+      if (req.method == 'GET' && path == '/api/ble/status') {
+        return _json(res, BleService.instance.gattStatus());
+      }
+      if (req.method == 'POST' && path == '/api/ble/gattsend') {
+        // {"size":1024} — send a test blob point-to-point over GATT (auto-pairs).
+        final data = await _body(req);
+        final size = int.tryParse('${data['size'] ?? 1024}') ?? 1024;
+        BleService.instance.gattSendTest(size);
+        return _json(res, {'ok': true, 'size': size, ...BleService.instance.gattStatus()});
+      }
+
       return _json(res, {
         'error': 'Not found',
         'endpoints': [
@@ -279,6 +386,10 @@ class RemoteApiService {
           'POST /api/i2p/peer {"callsign":"X1...","b32":"<addr>"}',
           'POST /api/i2p/announce {"sha256":"<hex|b64u>"}',
           'POST /api/i2p/discover {"sha256":"<hex|b64u>","ext":"txt"}',
+          'GET /api/rns/status',
+          'POST /api/rns/start {"mode":"tcpserver|tcpclient|ble","host":"..","port":4242}',
+          'POST /api/rns/announce {"text":"hello"}',
+          'GET /api/rns/inbox',
         ],
       }, status: HttpStatus.notFound);
     } catch (e) {

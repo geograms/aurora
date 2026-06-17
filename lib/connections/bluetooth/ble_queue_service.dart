@@ -234,8 +234,17 @@ class BLEQueueService {
 
       // Register the receipt waiter BEFORE sending — a fast peer (the ESP32)
       // can answer before the post-send delays finish, and the receipt would
-      // otherwise be dropped, forcing a needless retry.
-      final receiptFuture = _awaitReceipt(message.msgId);
+      // otherwise be dropped, forcing a needless retry. The timeout must cover
+      // the whole SEND duration (each parcel takes ~interParcelDelay, plus a
+      // listen window every parcelsBeforePause) and then the base receipt window
+      // — otherwise large messages (e.g. 30 parcels) time out mid-send and never
+      // complete.
+      final sendMs = parcelsToSend.length *
+              (BLEParcelConstants.interParcelDelayMs + 60) +
+          (parcelsToSend.length ~/ BLEParcelConstants.parcelsBeforePause) *
+              BLEParcelConstants.listenWindowMs;
+      final receiptFuture = _awaitReceipt(message.msgId,
+          timeoutMs: sendMs + BLEParcelConstants.receiptTimeoutMs);
 
       // Send parcels
       int parcelsSent = 0;
@@ -302,11 +311,12 @@ class BLEQueueService {
   /// Register a receipt waiter immediately (synchronously) and return a future
   /// that resolves with the receipt or null on timeout. Registering before the
   /// parcels are sent avoids losing a receipt from a fast peer.
-  Future<BLEReceipt?> _awaitReceipt(String msgId) {
+  Future<BLEReceipt?> _awaitReceipt(String msgId, {int? timeoutMs}) {
     final completer = Completer<BLEReceipt>();
     _pendingReceipts[msgId] = completer;
     return completer.future
-        .timeout(Duration(milliseconds: BLEParcelConstants.receiptTimeoutMs))
+        .timeout(Duration(
+            milliseconds: timeoutMs ?? BLEParcelConstants.receiptTimeoutMs))
         .then<BLEReceipt?>((r) => r)
         .catchError((_) {
           _log('BLEQueue: Receipt timeout for $msgId');
@@ -382,64 +392,60 @@ class BLEQueueService {
     }
   }
 
-  /// Handle an incoming parcel
+  /// Handle an incoming parcel.
+  ///
+  /// The wire format gives NO explicit header/data type flag, and
+  /// [BLEParcel.fromBytesAsHeader] never returns null for a >=9-byte buffer (it
+  /// always yields parcelNum 0 / isHeader true). So we MUST distinguish by
+  /// state: the FIRST parcel seen for a msgId is its header; any subsequent
+  /// parcel for that msgId is a data parcel. (Delivery is ordered — the sender's
+  /// queue writes the header first and retransmits only data parcels — so the
+  /// header always arrives before its data.)
   void _handleIncomingParcel(String deviceId, Uint8List data) {
-    // Initialize buffer map for device if needed
     _incomingBuffers.putIfAbsent(deviceId, () => {});
     final deviceBuffers = _incomingBuffers[deviceId]!;
 
-    // Try to parse parcel
-    BLEParcel? parcel;
+    if (data.length < BLEParcelConstants.dataOverhead) {
+      _log('BLEQueue: Incoming data too short to be a parcel (${data.length}B)');
+      return;
+    }
+    final msgId = String.fromCharCodes(data.sublist(0, 2));
+    final existing = deviceBuffers[msgId];
 
-    // First try as header (if we don't have this message yet)
-    parcel = BLEParcel.fromBytesAsHeader(data);
-
-    if (parcel != null && parcel.isHeader) {
-      // New message header
-      if (!deviceBuffers.containsKey(parcel.msgId)) {
-        final incoming = BLEIncomingMessage(
-          msgId: parcel.msgId,
-          totalParcels: parcel.totalParcels,
-          expectedChecksum: parcel.checksum,
-          flags: parcel.flags,
-          sourceDeviceId: deviceId,
-        );
-        incoming.addParcel(parcel);
-        deviceBuffers[parcel.msgId] = incoming;
-        final compressionInfo = parcel.isCompressed
-            ? ', compressed with algorithm ${parcel.compressionAlgorithm}'
-            : '';
-        _log('BLEQueue: Started receiving ${parcel.msgId} '
-            '(${parcel.totalParcels} parcels expected$compressionInfo)');
-      } else {
-        // Already have header, treat as duplicate
-        deviceBuffers[parcel.msgId]!.addParcel(parcel);
-      }
-    } else {
-      // Try as data parcel
-      parcel = BLEParcel.fromBytesAsData(data);
-
-      if (parcel != null && !parcel.isHeader) {
-        final incoming = deviceBuffers[parcel.msgId];
-        if (incoming != null) {
-          incoming.addParcel(parcel);
-          _log('BLEQueue: Received parcel ${parcel.parcelNum} '
-              'for ${parcel.msgId}');
-        } else {
-          _log('BLEQueue: Received data parcel for unknown '
-              'message ${parcel.msgId}');
-        }
-      } else {
-        _log('BLEQueue: Failed to parse incoming data as parcel');
+    if (existing == null) {
+      // First parcel for this message → header.
+      final header = BLEParcel.fromBytesAsHeader(data);
+      if (header == null) {
+        _log('BLEQueue: Failed to parse incoming data as header');
         return;
       }
+      final incoming = BLEIncomingMessage(
+        msgId: header.msgId,
+        totalParcels: header.totalParcels,
+        expectedChecksum: header.checksum,
+        flags: header.flags,
+        sourceDeviceId: deviceId,
+      );
+      incoming.addParcel(header);
+      deviceBuffers[msgId] = incoming;
+      final compressionInfo = header.isCompressed
+          ? ', compressed with algorithm ${header.compressionAlgorithm}'
+          : '';
+      _log('BLEQueue: Started receiving ${header.msgId} '
+          '(${header.totalParcels} parcels expected$compressionInfo)');
+      if (incoming.isComplete) _finalizeIncomingMessage(deviceId, incoming);
+      return;
     }
 
-    // Check if message is complete
-    final incoming = deviceBuffers[parcel.msgId];
-    if (incoming != null && incoming.isComplete) {
-      _finalizeIncomingMessage(deviceId, incoming);
+    // Subsequent parcel for a known message → data parcel.
+    final dp = BLEParcel.fromBytesAsData(data);
+    if (dp == null || dp.parcelNum == 0) {
+      _log('BLEQueue: Failed to parse incoming data parcel for $msgId');
+      return;
     }
+    existing.addParcel(dp);
+    _log('BLEQueue: Received parcel ${dp.parcelNum} for $msgId');
+    if (existing.isComplete) _finalizeIncomingMessage(deviceId, existing);
   }
 
   /// Finalize a complete incoming message

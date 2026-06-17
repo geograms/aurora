@@ -21,6 +21,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 
 import '../../profile/profile_service.dart';
+import '../../services/log_service.dart';
+import '../../services/preferences_service.dart';
+import 'ble5_bus.dart';
 import 'ble_gatt_client.dart';
 import 'ble_gatt_server.dart';
 import 'ble_parcel.dart';
@@ -53,8 +56,12 @@ class BleInboundFrame {
 class _Advert {
   final Object owner;
   final Uint8List payload;
-  final int expiresMs;
-  _Advert(this.owner, this.payload, this.expiresMs);
+  int expiresMs;
+  // While > now (epoch ms) this advert is prioritised: the rotation airs only
+  // boosted adverts, so a NACK-requested chunk is re-aired rapidly instead of
+  // waiting its turn behind every other queued chunk. 0 = not boosted.
+  int boostUntilMs;
+  _Advert(this.owner, this.payload, this.expiresMs, {this.boostUntilMs = 0});
 }
 
 class BleService {
@@ -97,6 +104,31 @@ class BleService {
   final BleBroadcastReassembler _bcast = BleBroadcastReassembler();
   Timer? _bcastSweep;
 
+  // Our 1-byte sender discriminator (srcTag): low byte of a stable hash of the
+  // active callsign, written into every broadcast chunk so a NACK can address
+  // the right sender. Opaque to the framing layer. Recomputed on first use.
+  int? _myTag;
+  // Owner of internally-generated control adverts (NACK frames) so they survive
+  // a wapp's clearAdverts and aren't attributed to any wapp.
+  final Object _ctrlOwner = Object();
+  // True while at least one outbound NACK is in flight (awaiting resends): used
+  // to bias the BlueZ duty cycle toward scanning so we catch the re-aired chunks.
+  bool _awaitingResend = false;
+
+  // BLE 5 connectionless broadcast (Android): when supported, APRS group
+  // messages ride the shared Ble5Bus as ONE extended advert each (subtype 0x41),
+  // multiplexed with Reticulum announces on a single advertising set. This
+  // replaces the fragile legacy 13-24B chunk + NACK broadcast for the common
+  // case; the legacy path stays only as a fallback for non-BLE5 devices.
+  bool _ble5 = false; // device supports + we use BLE5 for APRS broadcast
+  bool _ble5Checked = false;
+  bool _ble5Wired = false;
+  // BLE5 advert keys we registered, per owner, so clearAdverts can drop them.
+  final Map<Object, Set<String>> _ble5Keys = {};
+  // Receiver dedup for single-frame BLE5 APRS (keyed by payload hash) so the
+  // sender's TTL re-airs are delivered to the wapp exactly once.
+  final Map<String, DateTime> _ble5Seen = {};
+
   // Generic GATT parcel transport: this device is both a client (connects out
   // to peers' servers) and a server (peers connect in), bridged by one queue.
   BleGattClient? _gatt;
@@ -104,6 +136,10 @@ class BleService {
   final BLEQueueService _queue = BLEQueueService();
   bool _parcelWired = false;
   bool _gattLinkUp = false; // a GATT client link is active → pause scanning
+  // Auto-pair: last GATT data activity (epoch ms); an idle link is dropped so
+  // the connectionless broadcast (APRS, RNS announces) resumes.
+  int _gattActivityMs = 0;
+  static const int _gattIdleMs = 25000;
 
   // Wire the parcel queue to both GATT endpoints. The single send callback
   // routes by deviceId: a peer that connected to our server is notified on
@@ -114,27 +150,61 @@ class BleService {
     if (_parcelWired || _central == null) return;
     _parcelWired = true;
     _bcastSweep ??=
-        Timer.periodic(const Duration(seconds: 2), (_) => _bcast.sweep());
+        Timer.periodic(const Duration(seconds: 2), (_) => _bcastTick());
     _gatt = BleGattClient(_central!, onData: (from, data) {
+      _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
       _queue.onDataReceived(from, data);
     }, onLinkChange: (connected) {
       _gattLinkUp = connected;
+      if (connected) {
+        _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+        _dbg('GATT link up (client) to ${_gatt?.peerId}');
+        // Keep the BLE5 scan paused while the link is up so the transfer holds
+        // (extended scan vs an active connection contend on one radio).
+        unawaited(Ble5Bus.instance.stopScan());
+        _flushPendingGatt();
+      } else {
+        _dbg('GATT link down (client)');
+        _resumeBle5Scan(); // transfer done/failed → resume broadcast reception
+      }
       _applyScan(); // pause scanning while a GATT link is up (radio contention)
     })
       ..start();
     _gattServer = BleGattServer(onData: (from, data) {
+      _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
       _queue.onDataReceived(from, data);
     }, onClientsChanged: () {
+      final n = _gattServer?.clientIds.length ?? 0;
+      if (n > 0) {
+        _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+        unawaited(Ble5Bus.instance.stopScan()); // free the radio for the transfer
+      } else {
+        _resumeBle5Scan();
+      }
+      _dbg('GATT server clients: $n');
       _applyScan(); // pause scanning while we're serving a client (contention)
     });
     _queue.setSendCallback((deviceId, data) async {
+      _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+      // Native GATT path (BLE5): route by which role holds this peer.
+      if (_ngClientUp && deviceId == _ngClientPeer) {
+        await Ble5Bus.instance.gattWrite(data); // our client -> peer FFF1
+        return;
+      }
+      if (deviceId == _ngServerCentral) {
+        await Ble5Bus.instance.serverNotify(data); // our server -> central FFF2
+        return;
+      }
+      // Legacy (non-BLE5) plugin path.
       if (_gattServer?.clientIds.contains(deviceId) ?? false) {
-        await _gattServer!.notify(deviceId, data);
+        await _gattServer!.notify(deviceId, data); // server -> client FFF2
       } else {
-        await _gatt?.writeRaw(data);
+        await _gatt?.writeRaw(data); // client -> peer FFF1
       }
     });
     _queue.incomingMessages.listen((m) {
+      _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+      _dbg('GATT message received ${m.payload.length}B from ${m.sourceDeviceId}');
       if (!_inbound.isClosed) {
         _inbound.add(BleInboundFrame(m.sourceDeviceId, 0, m.payload));
       }
@@ -147,6 +217,8 @@ class BleService {
     final ids = <String>{...?_gattServer?.clientIds};
     final p = _gatt?.peerId;
     if (p != null) ids.add(p);
+    if (_ngClientUp && _ngClientPeer != null) ids.add(_ngClientPeer!);
+    if (_ngServerCentral != null) ids.add(_ngServerCentral!);
     return ids.toList();
   }
 
@@ -172,6 +244,24 @@ class BleService {
 
   static String _hex(Uint8List b) =>
       b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+  /// Our broadcast source tag: low byte of an FNV-1a hash of the active callsign
+  /// (stable per identity). Cached; recomputed if it was never set. Falls back to
+  /// a fixed non-zero value when no callsign is available yet.
+  int get _srcTag {
+    final cached = _myTag;
+    if (cached != null) return cached;
+    final cs = ProfileService.instance.activeProfile?.callsign ?? '';
+    if (cs.isEmpty) return 0x7E; // no identity yet — don't cache the fallback
+    var h = 0x811c9dc5; // FNV-1a 32-bit offset basis
+    for (final c in cs.codeUnits) {
+      h ^= c;
+      h = (h * 0x01000193) & 0xFFFFFFFF;
+    }
+    final tag = h & 0xFF;
+    _myTag = tag;
+    return tag;
+  }
 
   void _warnThrottled(String msg) {
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -227,6 +317,134 @@ class BleService {
       _advertiseSupported = false; // no advertise backend (e.g. desktop w/o BlueZ)
       debugPrint('BleService: advertising unavailable (scan-only)');
     }
+    await _initBle5();
+  }
+
+  // Detect BLE5 support once and, if present, wire the shared bus so APRS
+  // broadcast uses single extended adverts instead of legacy chunking.
+  Future<void> _initBle5() async {
+    if (_ble5Checked) return;
+    _ble5Checked = true;
+    try {
+      _ble5 = await Ble5Bus.instance.supported();
+    } catch (_) {
+      _ble5 = false;
+    }
+    if (_ble5 && !_ble5Wired) {
+      _ble5Wired = true;
+      Ble5Bus.instance.onFrame(Ble5Subtype.aprs, _onBle5Aprs);
+      // Any legacy broadcast chunks aired during the brief startup window before
+      // BLE5 was confirmed must be dropped now — otherwise their rotation keeps
+      // re-airing through the single ble_peripheral advertiser, clobbering the
+      // GATT connectable presence beacon (which breaks GATT connects).
+      _adverts.clear();
+      _stopRotation();
+      _bcast.sweep();
+      // GATT large-file transfer runs ENTIRELY native on BLE5 devices: a single
+      // coordinated stack (native GATT server + client + legacy connectable advert
+      // + legacy discovery scan) with plain/unencrypted characteristics — no
+      // pairing, and no dual-plugin handle-cache confusion. BLE5 extended
+      // advertising carries only the connectionless broadcast (APRS + RNS).
+      Ble5Bus.instance
+        ..onGattConnected = _onNgConnected
+        ..onGattDisconnected = _onNgDisconnected
+        ..onGattData = _onNgClientData
+        ..onGattDiscovered = _onNgDiscovered
+        ..onGattServerData = _onNgServerData
+        ..onGattServerConnected = _onNgServerConnected
+        ..onGattServerDisconnected = _onNgServerDisconnected
+        ..startGattEvents();
+      _dbg('BLE5 broadcast + native GATT enabled');
+    }
+  }
+
+  // ── Native GATT event handlers (BLE5) ─────────────────────────────────────
+  void _onNgConnected() {
+    _ngClientUp = true;
+    _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+    _dbg('native GATT client link up to $_ngClientPeer');
+    unawaited(Ble5Bus.instance.stopScan()); // quiet the extended scan during xfer
+    _applyScan();
+    _flushPendingGatt();
+  }
+
+  void _onNgDisconnected() {
+    _dbg('native GATT client link down ($_ngClientPeer)');
+    _ngClientUp = false;
+    _ngClientPeer = null;
+    if (_ngServerCentral == null) _resumeBle5Scan();
+    _applyScan();
+  }
+
+  void _onNgClientData(Uint8List data) {
+    _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+    _queue.onDataReceived(_ngClientPeer ?? 'gatt', data);
+  }
+
+  void _onNgDiscovered(String address, String callsign) {
+    if (address.isEmpty) return;
+    final myCall = (ProfileService.instance.activeProfile?.callsign ?? '').trim();
+    if (callsign.isNotEmpty && callsign == myCall) return; // ourselves
+    _lastPeerAddr = address;
+    _lastPeerCall = callsign;
+    _lastPeerMs = DateTime.now().millisecondsSinceEpoch;
+    _maybeAutoPair();
+  }
+
+  int _ngServerRxCount = 0;
+  void _onNgServerData(String address, Uint8List data) {
+    _ngServerCentral = address;
+    _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+    _dbg('native server rx #${++_ngServerRxCount} ${data.length}B from $address');
+    _queue.onDataReceived(address, data);
+  }
+
+  void _onNgServerConnected(String address) {
+    _ngServerCentral = address;
+    _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+    _dbg('native GATT server: central $address connected');
+    unawaited(Ble5Bus.instance.stopScan()); // quiet extended scan during xfer
+    _applyScan();
+  }
+
+  void _onNgServerDisconnected(String address) {
+    if (_ngServerCentral == address) _ngServerCentral = null;
+    _dbg('native GATT server: central $address disconnected');
+    if (!_ngClientUp) _resumeBle5Scan();
+    _applyScan();
+  }
+
+  // One inbound single-frame APRS broadcast over BLE5. Dedup by payload hash
+  // (the sender re-airs the same bytes for its TTL) and deliver once to wapps.
+  void _onBle5Aprs(Ble5Frame f) {
+    if (f.data.isEmpty || _inbound.isClosed) return;
+    final key = _hashHex(f.data);
+    final now = DateTime.now();
+    final seen = _ble5Seen[key];
+    if (seen != null && now.difference(seen) < kBleBcastDedup) return;
+    _ble5Seen[key] = now;
+    _dbg('BLE5 APRS rx ${f.data.length}B from ${f.addr} rssi=${f.rssi}');
+    _inbound.add(BleInboundFrame(f.addr, f.rssi, f.data));
+  }
+
+  // Verbose BLE transport diagnostics — emitted only when the "BLE debug"
+  // setting is on, and routed to LogService so they show in the in-app log and
+  // /api/log (not just adb logcat).
+  void _dbg(String msg) {
+    if (PreferencesService.instanceSync?.bleDebug ?? false) {
+      debugPrint('BleService: $msg');
+      LogService.instance.add('BLE: $msg');
+    }
+  }
+
+  // Short stable hex hash of a payload (FNV-1a 32-bit) for dedup / advert keys.
+  static String _hashHex(Uint8List b) {
+    var h = 0x811c9dc5;
+    for (final x in b) {
+      h ^= x;
+      h = (h * 0x01000193) & 0xFFFFFFFF;
+    }
+    return h.toRadixString(16);
   }
 
   Future<bool> _bluezReady() async {
@@ -257,13 +475,36 @@ class BleService {
     for (final m in e.advertisement.manufacturerSpecificData) {
       if (m.id != kBleCompanyId || m.data.isEmpty) continue;
       final d = m.data;
+      // On BLE5 devices the legacy chunk/NACK broadcast path is fully retired
+      // (APRS + RNS ride the BLE5 extended bus) and GATT discovery is handled by
+      // the NATIVE legacy scan (which gives the peer's MAC for the native
+      // connect). So the bluetooth_low_energy _central scan ignores our company
+      // frames entirely here — processing legacy chunks/NACKs would restart the
+      // multi-chunk re-air loop that thrashes the advertiser and breaks connects.
+      if (_ble5) continue;
+      if (BleBroadcastReassembler.isNack(d)) {
+        // A resend request — handle it here; it is NOT a data chunk and must not
+        // reach the chunk reassembler or the legacy single-frame path.
+        _onNack(d);
+        continue;
+      }
       if (BleBroadcastReassembler.isChunk(d)) {
         final full = _bcast.ingest(from, d);
         if (full != null && !_inbound.isClosed) {
-          debugPrint('BleService: broadcast-parcel reassembled (${full.length}B) from $from');
+          _dbg('broadcast-parcel reassembled (${full.length}B) from $from');
           _inbound.add(BleInboundFrame(from, e.rssi, full));
         }
       } else {
+        // Presence beacon ([0x3E, deviceId 1..15, callsign…]): a connectable
+        // Aurora peer. Consider auto-pairing a GATT link for larger transfers.
+        if (d.length >= 3 && d[0] == kBleMarker && d[1] >= 1 && d[1] <= 15) {
+          // Remember this connectable peer so a later queued payload can dial it
+          // even though Android won't report it again for a while.
+          _lastPeer = e.peripheral;
+          _lastPeerCall = String.fromCharCodes(d.sublist(2)).trim();
+          _lastPeerMs = DateTime.now().millisecondsSinceEpoch;
+          _maybeAutoPair(); // in case a payload is already waiting
+        }
         legacy.add(d);
       }
     }
@@ -288,19 +529,171 @@ class BleService {
     }
   }
 
+  /// Auto-pair: when we have a large payload waiting (and no link yet), open a
+  /// GATT link to the most recently discovered Aurora peer with NO manual
+  /// pairing. The SENDER (the side with data) initiates; the receiver stays a
+  /// passive server, so the two don't both connect. On-demand only — when
+  /// nothing is queued we stay in broadcast mode, and [_bcastTick] drops the
+  /// link once the transfer idles. Called both on discovery and when data queues.
+  void _maybeAutoPair() {
+    if (!(PreferencesService.instanceSync?.bleAutoPair ?? true)) return;
+    if (_pendingGatt.isEmpty) return;                         // nothing to send
+    final fresh =
+        DateTime.now().millisecondsSinceEpoch - _lastPeerMs <= _peerFreshMs;
+    if (_ble5) {
+      // Native connect path: dial the most-recently discovered peer's address
+      // (from the native legacy discovery scan). The SENDER (side with data)
+      // dials; the receiver stays a passive native server. Plain characteristics
+      // = no pairing. Already serving a central → don't also dial (tie-breaker).
+      if (_ngClientUp || _ngServerCentral != null) return;
+      if (!fresh || _lastPeerAddr.isEmpty) return;
+      _ngClientPeer = _lastPeerAddr;
+      _dbg('auto-pair: native GATT connect to $_lastPeerCall ($_lastPeerAddr) '
+          'for ${_pendingGatt.length} payload(s)');
+      Ble5Bus.instance.gattConnect(_lastPeerAddr);
+      return;
+    }
+    // Legacy plugin path (non-BLE5): bluetooth_low_energy considerPeer.
+    if (_gattServer?.clientIds.isNotEmpty ?? false) return; // already serving
+    final peer = _lastPeer;
+    if (peer == null || (_gatt?.isConnected ?? true) || !fresh) return;
+    final myCall = (ProfileService.instance.activeProfile?.callsign ?? '').trim();
+    if (_lastPeerCall == myCall && _lastPeerCall.isNotEmpty) return;
+    _dbg('auto-pair: opening GATT to $_lastPeerCall (legacy plugin)');
+    _gatt!.considerPeer(peer);
+  }
+
+  // Resume the shared BLE5 extended scan after a GATT connect/transfer ends.
+  void _resumeBle5Scan() {
+    if (_ble5 && _scanRefs > 0) unawaited(Ble5Bus.instance.startScan());
+  }
+
+  /// Periodic broadcast housekeeping: sweep stale partials/dedup, then emit a
+  /// NACK for any incomplete partial that has stalled (a multi-chunk message we
+  /// caught only part of). The sender hears its own srcTag and re-airs the
+  /// missing chunks. While requests are outstanding, bias toward scanning so we
+  /// catch the resends.
+  void _bcastTick() {
+    _bcast.sweep();
+    // Prune the BLE5 single-frame dedup table.
+    if (_ble5Seen.isNotEmpty) {
+      final now = DateTime.now();
+      _ble5Seen.removeWhere((_, t) => now.difference(t) > kBleBcastDedup);
+    }
+    // Drop an idle auto-paired GATT link so the radio returns to the
+    // connectionless broadcast (APRS + RNS announces) when no transfer is active.
+    // Only the CLIENT side disconnects (the dialer); the server lets the central
+    // leave. On BLE5 this is the native client link.
+    final linkUp = _ngClientUp || (_gatt?.isConnected ?? false);
+    if (linkUp && _gattActivityMs > 0) {
+      final idle = DateTime.now().millisecondsSinceEpoch - _gattActivityMs;
+      if (idle > _gattIdleMs) {
+        _dbg('GATT idle ${idle ~/ 1000}s — disconnecting to resume broadcast');
+        if (_ngClientUp) {
+          unawaited(Ble5Bus.instance.gattDisconnect());
+        } else {
+          unawaited(_gatt!.disconnect());
+        }
+      }
+    }
+    // The legacy chunk/NACK ARQ is retired on BLE5 devices — never emit NACKs
+    // (they thrash the single advertiser and clobber the connectable beacon).
+    if (_ble5) return;
+    final reqs = _bcast.partialsNeedingNack(
+        idle: const Duration(seconds: 4), maxRetries: 4);
+    if (reqs.isEmpty) {
+      if (_awaitingResend) {
+        _awaitingResend = false;
+      }
+      return;
+    }
+    final wasAwaiting = _awaitingResend;
+    _awaitingResend = true;
+    for (final r in reqs) {
+      final frame =
+          BleBroadcastReassembler.buildNack(r.srcTag, r.msgId, r.total, r.missing);
+      if (frame == null) continue;
+      if (frame.length > (_useBlePeripheral ? 20 : 24)) {
+        // Too many missing indices to fit one advert — request the lowest few
+        // that do fit; subsequent ticks will request the rest.
+        continue;
+      }
+      _dbg('emit NACK msgId=${r.msgId} tag=${r.srcTag} missing=${r.missing}');
+      _enqueueControl(frame);
+      _bcast.markNacked(r.srcTag, r.msgId);
+    }
+    // NOTE: do NOT re-arm the Android scan here. Android already scans
+    // continuously (no duty-cycle), and stop+start discovery during recovery
+    // trips Android's "scanning too frequently" throttle (max ~5 starts/30s),
+    // which disables the scanner mid-transfer — fatal for multi-chunk messages
+    // like RNS announces. The continuous scan picks up the re-aired chunks.
+    if (wasAwaiting) {/* still awaiting; nothing to do */}
+  }
+
+  /// A peer asked us (by our [srcTag]) to re-air specific chunks of one of our
+  /// broadcast messages. Find those chunks still queued, boost + refresh them,
+  /// and air the first one immediately. Chunks already expired/superseded can't
+  /// be re-aired (we no longer hold the payload) — log and skip them gracefully.
+  void _onNack(Uint8List d) {
+    if (_ble5) return; // legacy chunk ARQ retired on BLE5 (no re-air thrash)
+    final req = BleBroadcastReassembler.parseNack(d);
+    if (req == null) return;
+    if (req.srcTag != _srcTag) return; // not addressed to us
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final boostUntil = now + 4000;
+    final reaired = <int>[];
+    final missing = <int>[];
+    for (final idx in req.missing) {
+      _Advert? hit;
+      for (final a in _adverts) {
+        final p = a.payload;
+        if (p.length > kBleBcastPrimaryHdr &&
+            p[1] == kBleBcastPrimary &&
+            p[2] == req.srcTag &&
+            p[3] == req.msgId &&
+            p[4] == idx) {
+          hit = a;
+          break;
+        }
+      }
+      if (hit != null) {
+        hit.boostUntilMs = boostUntil;
+        if (hit.expiresMs < boostUntil) hit.expiresMs = boostUntil;
+        reaired.add(idx);
+      } else {
+        missing.add(idx);
+      }
+    }
+    _dbg('NACK rx msgId=${req.msgId} '
+        'reair=$reaired${missing.isEmpty ? "" : " gone=$missing"}');
+    if (reaired.isNotEmpty) {
+      _rotateIdx = 0;
+      _rotate();
+    }
+  }
+
   Future<bool> startScan() async {
     await _ensure();
-    if (_central == null) return false;
+    // Start the shared BLE5 extended scan (also feeds Reticulum). Independent of
+    // the legacy _central scan, which still runs for legacy/ESP32 peers.
+    if (_ble5) await Ble5Bus.instance.startScan();
+    if (_central == null) return _ble5; // BLE5-only is still usable
     _scanRefs++;
     // The adapter may not report poweredOn immediately after init (Android
     // reads state asynchronously); wait briefly so the first scan isn't lost.
     await _awaitPoweredOn();
     await _applyScan();
-    // Also become a connectable peer (GATT server) so others can reach us
-    // directly. No-op where ble_peripheral is unsupported (e.g. Linux/BlueZ).
-    if (_gattServer?.isRunning != true) {
-      final cs = ProfileService.instance.activeProfile?.callsign ?? '';
-      unawaited(_gattServer?.start(cs) ?? Future<void>.value());
+    // Become a connectable peer for large-file GATT transfer. On BLE5 the entire
+    // endpoint is NATIVE: one coordinated GATT server + legacy connectable advert
+    // + legacy discovery scan (avoids the dual-plugin handle-cache confusion that
+    // dropped writes and broke notify). On non-BLE5 devices, fall back to the
+    // ble_peripheral server + a legacy connectable presence beacon. No-op on
+    // Linux/BlueZ.
+    final cs = ProfileService.instance.activeProfile?.callsign ?? '';
+    if (_ble5) {
+      unawaited(Ble5Bus.instance.startServer(cs.isEmpty ? 'AURORA' : cs));
+    } else if (_gattServer?.isRunning != true) {
+      unawaited(_gattServer?.start(cs, advertise: true) ?? Future<void>.value());
     }
     return true;
   }
@@ -341,8 +734,10 @@ class BleService {
     // peer is connected to our server) — scan and connection contend on a single
     // radio and the link drops otherwise. This is what kept the phone<->desktop
     // link from holding (the serving side kept scanning).
-    final serverBusy = _gattServer?.clientIds.isNotEmpty ?? false;
-    final want = _scanRefs > 0 && !_gattLinkUp && !serverBusy;
+    final serverBusy = (_gattServer?.clientIds.isNotEmpty ?? false) ||
+        _ngServerCentral != null;
+    final want =
+        _scanRefs > 0 && !_gattLinkUp && !_ngClientUp && !serverBusy;
     try {
       if (want && !_scanning && c.state == BluetoothLowEnergyState.poweredOn) {
         await c.startDiscovery();
@@ -373,19 +768,109 @@ class BleService {
   void enqueueAdvert(Object owner, Uint8List payload,
       {Duration ttl = const Duration(seconds: 10)}) {
     _ensure();
-    // Size router: small text (APRS and the like) goes out connectionless as a
-    // broadcast-parcel — chunked adverts every device in range reassembles, no
-    // pairing, no per-peer link. Larger payloads (files, long text) use GATT
-    // point-to-point to whatever peers are connected (an explicit, on-demand
-    // transfer — we no longer auto-connect on every presence beacon).
-    if (payload.length <= kBleBcastMax) {
-      _enqueueBroadcast(owner, payload, ttl);
-    } else {
-      final peers = _connectedPeers();
+    // Size router. SMALL → connectionless one-to-many broadcast (one sender,
+    // many listeners, aired ONCE, never per-peer). LARGE → point-to-point GATT
+    // (a binary file / RNS resource), which auto-pairs a transient link.
+    final smallCap = _ble5 ? Ble5Bus.maxFrame : kBleBcastMax;
+    if (payload.length > smallCap) {
+      _gattSend(payload);
+      return;
+    }
+    // BLE5 path (preferred): a whole APRS message fits ONE extended advert, so
+    // register it as a single frame on the shared bus (no chunking, no NACK).
+    // Keyed by payload hash so the wapp's periodic re-advertise refreshes it.
+    if (_ble5) {
+      final key = 'aprs:${_hashHex(payload)}';
+      final keys = _ble5Keys.putIfAbsent(owner, () => <String>{});
+      final fresh = keys.add(key);
+      if (keys.length > 64) keys.remove(keys.first);
+      if (fresh) _dbg('BLE5 APRS advert ${payload.length}B key=$key');
+      Ble5Bus.instance.advertiseFrame(key, Ble5Subtype.aprs, payload, ttl: ttl);
+      return;
+    }
+    // Legacy small-chunk connectionless broadcast (non-BLE5 devices).
+    _enqueueBroadcast(owner, payload, ttl);
+  }
+
+  // Large payloads await a GATT link; auto-pair opens one on the next discovered
+  // peer, then [_flushPendingGatt] sends them. Bounded so a peer that never
+  // appears can't grow this unbounded.
+  final List<Uint8List> _pendingGatt = [];
+  // Most recently discovered connectable Aurora peer. Android dedups scan
+  // results (a peer is reported once, then suppressed), so we remember the last
+  // one and dial it when data is queued — not only on a fresh discovery event.
+  Peripheral? _lastPeer;
+  String _lastPeerCall = '';
+  String _lastPeerAddr = ''; // BLE MAC for the native connect path (from beacon)
+  int _lastPeerMs = 0;
+  static const int _peerFreshMs = 60000;
+  // Native GATT (BLE5 devices): the whole transfer endpoint is native — server +
+  // client + legacy connectable advert + legacy discovery scan, one coordinated
+  // stack. _ngClientPeer is the address we dialed; _ngServerCentral is the
+  // address of a central connected to our server.
+  bool _ngClientUp = false;
+  String? _ngClientPeer;
+  String? _ngServerCentral;
+
+  /// Send a large payload point-to-point over GATT. If a link is up, enqueue it
+  /// to the connected peer(s); otherwise stash it and let auto-pair open a link.
+  void _gattSend(Uint8List payload) {
+    final peers = _connectedPeers();
+    if (peers.isNotEmpty) {
       for (final id in peers) {
         _queue.enqueue(BLEOutgoingMessage(payload: payload, targetDeviceId: id));
       }
+      _dbg('GATT send ${payload.length}B to ${peers.length} peer(s)');
+      return;
     }
+    _pendingGatt.add(payload);
+    if (_pendingGatt.length > 16) _pendingGatt.removeAt(0);
+    _dbg('GATT: ${payload.length}B queued, awaiting auto-pair link');
+    _maybeAutoPair(); // dial the last-seen peer now (Android won't re-report it)
+  }
+
+  final Object _testOwner = Object();
+
+  /// GATT auto-pair status (for diagnostics / the remote API).
+  Map<String, dynamic> gattStatus() => {
+        'autoPair': PreferencesService.instanceSync?.bleAutoPair ?? true,
+        'ble5': _ble5,
+        'native': _ble5,
+        'clientLinkUp': _ngClientUp || (_gatt?.isConnected ?? false),
+        'clientPeer': _ngClientPeer ?? _gatt?.peerId,
+        'serverClients': _ngServerCentral != null
+            ? [_ngServerCentral!]
+            : (_gattServer?.clientIds.toList() ?? <String>[]),
+        'pendingGatt': _pendingGatt.length,
+        'lastPeer': _ble5
+            ? (_lastPeerAddr.isEmpty ? null : _lastPeerAddr)
+            : _lastPeer?.uuid.toString(),
+        'idleMs': _gattActivityMs == 0
+            ? null
+            : DateTime.now().millisecondsSinceEpoch - _gattActivityMs,
+      };
+
+  /// Test helper: send [size] bytes point-to-point over GATT. Larger than the
+  /// broadcast cap, so it routes through the auto-pairing GATT path.
+  void gattSendTest(int size) {
+    final n = size < 1 ? 1 : (size > 8192 ? 8192 : size);
+    final blob = Uint8List(n);
+    for (var i = 0; i < n; i++) {
+      blob[i] = 0x41 + (i % 26); // A..Z filler
+    }
+    _dbg('gattSendTest: ${n}B');
+    enqueueAdvert(_testOwner, blob, ttl: const Duration(seconds: 30));
+  }
+
+  /// Flush stashed large payloads to the freshly-connected peer.
+  void _flushPendingGatt() {
+    final peer = (_ngClientUp ? _ngClientPeer : null) ?? _gatt?.peerId;
+    if (peer == null || _pendingGatt.isEmpty) return;
+    for (final p in _pendingGatt) {
+      _queue.enqueue(BLEOutgoingMessage(payload: p, targetDeviceId: peer));
+    }
+    _dbg('GATT: flushed ${_pendingGatt.length} pending payload(s) to $peer');
+    _pendingGatt.clear();
   }
 
   // Rolling per-message id (1 byte) grouping a broadcast's chunks; paired with
@@ -394,11 +879,13 @@ class BleService {
 
   /// Split [payload] (<= [kBleBcastMax]) into broadcast-parcel chunks and queue
   /// them into the advert rotation. Each chunk is one ADV-only manufacturer
-  /// field `[3E 50 msgId idx total flags data]` — neither ble_peripheral nor the
-  /// BlueZ backend exposes scan-response data, so flags bit0 (continuation) is
-  /// always 0 and the per-chunk payload is bounded by the legacy advert size.
+  /// field `[3E 50 srcTag msgId idx total flags data]` — neither ble_peripheral
+  /// nor the BlueZ backend exposes scan-response data, so flags bit0
+  /// (continuation) is always 0 and the per-chunk payload is bounded by the
+  /// legacy advert size. [srcTag] lets a receiver address a NACK back to us.
   void _enqueueBroadcast(Object owner, Uint8List payload, Duration ttl) {
     final cap = (_useBlePeripheral ? 20 : 24) - kBleBcastPrimaryHdr;
+    final tag = _srcTag;
     final msgId = _bcastTxMsgId = (_bcastTxMsgId + 1) & 0xFF;
     final total = payload.isEmpty ? 1 : ((payload.length + cap - 1) ~/ cap);
     // Keep the whole chunk set on air long enough for at least two full rotation
@@ -407,8 +894,9 @@ class BleService {
     final effectiveMs =
         ttl.inMilliseconds > cycleMs * 2 ? ttl.inMilliseconds : cycleMs * 2 + 2000;
     final expiresMs = DateTime.now().millisecondsSinceEpoch + effectiveMs;
-    debugPrint('BleService: enqueue broadcast ${payload.length}B '
-        '($total chunk${total == 1 ? "" : "s"}, on-air ${effectiveMs ~/ 1000}s)');
+    _dbg('enqueue broadcast (legacy) ${payload.length}B '
+        '($total chunk${total == 1 ? "" : "s"}, on-air ${effectiveMs ~/ 1000}s, '
+        'msgId=$msgId tag=$tag)');
     for (var idx = 0; idx < total; idx++) {
       final off = idx * cap;
       final end = (off + cap < payload.length) ? off + cap : payload.length;
@@ -416,13 +904,27 @@ class BleService {
       final adv = Uint8List(kBleBcastPrimaryHdr + chunk.length)
         ..[0] = kBleMarker
         ..[1] = kBleBcastPrimary
-        ..[2] = msgId
-        ..[3] = idx
-        ..[4] = total
-        ..[5] = 0 // flags: ADV-only, no scan-response continuation
+        ..[2] = tag
+        ..[3] = msgId
+        ..[4] = idx
+        ..[5] = total
+        ..[6] = 0 // flags: ADV-only, no scan-response continuation
         ..setRange(kBleBcastPrimaryHdr, kBleBcastPrimaryHdr + chunk.length, chunk);
       _adverts.add(_Advert(owner, adv, expiresMs));
     }
+    _rotateTimer ??= Timer.periodic(
+        const Duration(milliseconds: _rotateIntervalMs), (_) => _rotate());
+    _rotate();
+  }
+
+  /// Queue a short-lived control frame (e.g. a NACK) straight into the advert
+  /// rotation, bypassing the chunking/air-time-extension of [_enqueueBroadcast]
+  /// (a control frame must NOT be pinned on air for a message's whole TTL). The
+  /// frame is also boosted so the rotation airs it promptly.
+  void _enqueueControl(Uint8List frame, {Duration ttl = const Duration(seconds: 6)}) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _adverts.add(_Advert(_ctrlOwner, frame, now + ttl.inMilliseconds,
+        boostUntilMs: now + ttl.inMilliseconds));
     _rotateTimer ??= Timer.periodic(
         const Duration(milliseconds: _rotateIntervalMs), (_) => _rotate());
     _rotate();
@@ -434,6 +936,13 @@ class BleService {
   static const int _rotateIntervalMs = 900;
 
   void clearAdverts(Object owner) {
+    // Drop this owner's BLE5 broadcast frames from the shared bus.
+    final ble5Keys = _ble5Keys.remove(owner);
+    if (ble5Keys != null) {
+      for (final k in ble5Keys) {
+        Ble5Bus.instance.removeFrame(k);
+      }
+    }
     _adverts.removeWhere((a) => a.owner == owner);
     if (_adverts.isEmpty) {
       _stopRotation();
@@ -487,7 +996,7 @@ class BleService {
         final t = DateTime.now().millisecondsSinceEpoch;
         if (t - _dropLogMs > 10000) {
           _dropLogMs = t;
-          debugPrint('BleService: dropped $dropped BLE frame(s) too long for '
+          _dbg('dropped $dropped BLE frame(s) too long for '
               'legacy advertising (>${maxLen}B)');
         }
       }
@@ -498,8 +1007,13 @@ class BleService {
       await _applyScan();
       return;
     }
-    if (_rotateIdx >= _adverts.length) _rotateIdx = 0;
-    final payload = _adverts[_rotateIdx++].payload;
+    // Boost-aware rotation: while any advert is boosted (a NACK frame, or a
+    // chunk a peer just asked us to re-air), rotate ONLY among the boosted set so
+    // those air rapidly instead of waiting their turn behind every queued chunk.
+    final boosted = _adverts.where((a) => a.boostUntilMs > now).toList();
+    final active = boosted.isNotEmpty ? boosted : _adverts;
+    if (_rotateIdx >= active.length) _rotateIdx = 0;
+    final payload = active[_rotateIdx++].payload;
 
     // Android/iOS (ble_peripheral) — or when nothing is being received —
     // advertise continuously and concurrently with scanning. Keeping the frame
@@ -511,8 +1025,10 @@ class BleService {
     }
 
     // BlueZ + scanning: a single controller can't do both at once, so
-    // time-slice — mostly scan, one tick in three a brief advertise burst.
-    _dutyTick = (_dutyTick + 1) % 3;
+    // time-slice — mostly scan, one tick in three a brief advertise burst. While
+    // awaiting resends, scan even more (1-in-4) so we catch the re-aired chunks.
+    final period = _awaitingResend ? 4 : 3;
+    _dutyTick = (_dutyTick + 1) % period;
     if (_dutyTick == 0) {
       await _stopScanWindow();
       await _advertiseFrame(payload);

@@ -1419,6 +1419,10 @@ extern "C" void app_main(void)
 #if FEATURE_APRSIS
                 ret = aprsis_init(callsign);
                 if (ret == ESP_OK) {
+                    // Bridge the iGate to this firmware's legacy-BLE link (heard
+                    // registry + relay). The rns_ble5 dongle sets BLE5 hooks
+                    // instead — aprsis itself no longer depends on ble_hello.
+                    aprsis_set_ble_hooks(ble_hello_get_heard, ble_hello_relay_aprs);
                     ESP_LOGI(TAG, "APRS-IS iGate started for %s", callsign);
 #if defined(TDONGLE_DEFAULT_LAT) && defined(TDONGLE_DEFAULT_LON)
 #ifndef TDONGLE_DEFAULT_RADIUS_KM

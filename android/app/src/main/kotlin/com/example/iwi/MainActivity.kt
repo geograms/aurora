@@ -47,6 +47,9 @@ class MainActivity : FlutterActivity() {
         // Update Center channel: APK install + download foreground service.
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, UPDATE_CHANNEL)
             .setMethodCallHandler { call, result -> handleUpdate(call, result) }
+
+        // BLE 5 extended advertising/scanning for the Reticulum broadcast transport.
+        Ble5(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
     }
 
     private fun handleUpdate(call: MethodCall, result: MethodChannel.Result) {

@@ -30,13 +30,19 @@ class BleGattServer {
 
   bool _inited = false;
   bool _running = false;
+  bool _advertiseEnabled = true; // false on BLE5 (extended advert is connectable)
   String _callsign = '';
   final Set<String> _clients = {};
 
   bool get isRunning => _running;
   Set<String> get clientIds => _clients;
 
-  Future<void> start(String callsign) async {
+  /// Register the FFE0 GATT server (and, when [advertise] is true, air the
+  /// legacy connectable presence beacon). On BLE5 the caller advertises
+  /// connectably via the extended advert instead, so it passes advertise:false —
+  /// the server still accepts the incoming connection (Android routes it to the
+  /// registered server regardless of which advert is on air).
+  Future<void> start(String callsign, {bool advertise = true}) async {
     if (_running) return;
     // ble_peripheral has no Linux implementation (the channel throws there);
     // on Linux this device stays a client only.
@@ -58,7 +64,7 @@ class BleGattServer {
               '(${_clients.length} client(s))');
           // Android stops advertising while a central is connected; re-advertise
           // once the last client leaves so we stay discoverable/reconnectable.
-          if (!connected && _clients.isEmpty) {
+          if (!connected && _clients.isEmpty && _advertiseEnabled) {
             _advertise();
           }
           onClientsChanged?.call();
@@ -104,7 +110,8 @@ class BleGattServer {
       }
       _callsign = callsign.isEmpty ? 'AURORA' : callsign;
       _running = true;
-      await _advertise();
+      _advertiseEnabled = advertise;
+      if (advertise) await _advertise();
     } catch (e) {
       debugPrint('BleGatt(server): start failed: $e');
     }

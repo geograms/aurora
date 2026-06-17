@@ -34,6 +34,17 @@ extern "C" {
  */
 esp_err_t aprsis_init(const char *callsign);
 
+/* BLE integration hooks — set so this component does not hard-depend on any one
+ * BLE firmware (legacy ble_hello on the main build, BLE5 on the rns_ble5 dongle).
+ *   get_heard: fill calls[][8] with up to [max] callsigns heard over BLE within
+ *              [max_age_sec]; return the count. Used for the APRS-IS g/ filter
+ *              and to decide which downlink traffic to relay. NULL => none heard.
+ *   relay    : push one APRS frame (from,to,text) out over BLE (downlink). NULL
+ *              => downlink disabled (uplink-only iGate). */
+typedef int (*aprsis_get_heard_fn)(char calls[][8], int max, uint32_t max_age_sec);
+typedef bool (*aprsis_relay_fn)(const char *from, const char *to, const char *text);
+void aprsis_set_ble_hooks(aprsis_get_heard_fn get_heard, aprsis_relay_fn relay);
+
 /**
  * @brief Attach the two archives the iGate writes received traffic to.
  *

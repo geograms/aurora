@@ -85,6 +85,13 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
     EventBus().fire(LocaleChangedEvent(locale: p.activeLocale()));
   }
 
+  void _onBleDebugChanged(bool enabled) {
+    final p = _prefs;
+    if (p == null) return;
+    p.bleDebug = enabled;
+    if (mounted) setState(() {});
+  }
+
   Future<void> _onRemoteApiChanged(bool enabled) async {
     final p = _prefs;
     if (p == null) return;
@@ -308,6 +315,25 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                     ),
                     value: _prefs?.remoteApiEnabled ?? false,
                     onChanged: _onRemoteApiChanged,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: SwitchListTile(
+                    secondary: const Icon(Icons.bug_report),
+                    title: const Text('BLE debug logging'),
+                    subtitle: Text(
+                      'Log BLE advertise/scan/broadcast activity to the app log',
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                    value: _prefs?.bleDebug ?? false,
+                    onChanged: _onBleDebugChanged,
                   ),
                 ),
                 const SizedBox(height: 24),

@@ -45,6 +45,18 @@ class FolderService {
   int _now() =>
       nowSec?.call() ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
+  /// Our personal npub (from the active profile key) — stamped into folders we
+  /// own so peers can later message the admin directly. Null if no identity.
+  String? _ownerNpub() {
+    final p = adminPrivHex();
+    if (p == null || p.isEmpty) return null;
+    try {
+      return NostrCrypto.encodeNpub(NostrCrypto.derivePublicKey(p));
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Generate + store a new folder master key, returning its folderId (hex
   /// master pubkey; npub is the shareable address). Synchronous — no network.
   /// Call [publishInitial] to put its first key-set + metadata on the relay.
@@ -61,7 +73,8 @@ class FolderService {
     if (owner == null) return;
     await publish(buildKeyset(owner.priv, const [], createdAt: _now()));
     await publish(buildOp(owner.priv, folderId,
-        opSetMeta(name: name, desc: desc.isEmpty ? null : desc),
+        opSetMeta(
+            name: name, desc: desc.isEmpty ? null : desc, owner: _ownerNpub()),
         createdAt: _now()));
   }
 
@@ -87,15 +100,22 @@ class FolderService {
   }
 
   Future<bool> addFile(String folderId, String shaHex,
-          {String? name, String? desc, String? mime, int? size}) =>
+          {String? name, String? desc, String? mime, int? size, int? ts}) =>
       _emitOp(folderId,
-          opAddFile(shaHex, name: name, desc: desc, mime: mime, size: size));
+          opAddFile(shaHex, name: name, desc: desc, mime: mime, size: size, ts: ts));
 
-  Future<bool> removeFile(String folderId, String shaHex) =>
-      _emitOp(folderId, opRmFile(shaHex));
+  Future<bool> removeFile(String folderId, String shaHex, {String? name}) =>
+      _emitOp(folderId, opRmFile(shaHex, name: name));
 
-  Future<bool> setMeta(String folderId, {String? name, String? desc}) =>
-      _emitOp(folderId, opSetMeta(name: name, desc: desc));
+  Future<bool> setMeta(String folderId, {String? name, String? desc, String? tags}) =>
+      // Stamp/refresh the owner npub when we hold the master key, so existing
+      // folders gain it on the next edit (for later admin messaging).
+      _emitOp(folderId,
+          opSetMeta(
+              name: name,
+              desc: desc,
+              tags: tags,
+              owner: keystore.owns(folderId) ? _ownerNpub() : null));
 
   Future<bool> linkFolder(String folderId, String targetFolderId,
           {String? name}) =>

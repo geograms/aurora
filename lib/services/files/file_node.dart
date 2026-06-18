@@ -32,7 +32,7 @@ import 'file_transfer.dart';
 import 'provider_connection.dart';
 import 'serve_quota.dart';
 
-const String kFilesApp = 'aurora';
+const String kFilesApp = 'geogram';
 const List<String> kFilesAspects = ['files'];
 
 class _ServeEntry {
@@ -56,6 +56,20 @@ class _DhtRpcEntry {
   final Completer<Uint8List?> done = Completer<Uint8List?>();
   bool sent = false; // request sent (link active)
   _DhtRpcEntry(this.link, this.reqBytes);
+}
+
+class _DepositEntry {
+  final RnsLink link;
+  final Uint8List sha;
+  final Uint8List bytes;
+  final String ext;
+  final Uint8List pub;
+  final Uint8List sig;
+  final Completer<bool> done;
+  FileDepositSession? dep; // null until the link is active
+  Timer? timeout;
+  _DepositEntry(
+      this.link, this.sha, this.bytes, this.ext, this.pub, this.sig, this.done);
 }
 
 class _Provided {
@@ -107,6 +121,15 @@ class FileTransferNode {
   /// peer), with the 32-byte file hash. Drives the per-file download metric.
   final void Function(Uint8List fileHash)? onServed;
 
+  /// Store-and-forward hosting hooks (see FileServeSession). When both are set
+  /// this node accepts blob deposits from peers; null = deposits declined.
+  final DepositVerdict Function(
+      Uint8List sha, int size, String ext, String pubHex, String sigHex)?
+      onDepositOffer;
+  final void Function(
+      Uint8List sha, Uint8List bytes, String originPubHex, int tier, String ext)?
+      onDepositStore;
+
   FileTransferNode({
     required this.identity,
     required this.source,
@@ -116,6 +139,8 @@ class FileTransferNode {
     ServeQuota? serveQuota,
     this.nextHopFor,
     this.onServed,
+    this.onDepositOffer,
+    this.onDepositStore,
   }) : serveQuota = serveQuota ?? ServeQuota() {
     if (enableDht) {
       dht = DhtNode(identity: identity, sendRpc: _dhtSendRpc, log: log);
@@ -154,6 +179,11 @@ class FileTransferNode {
         await _onFetchPacket(fetch, p);
         return true;
       }
+      final dep = _deposit[id];
+      if (dep != null) {
+        await _onDepositPacket(dep, p);
+        return true;
+      }
       final ds = _dhtServeLinks[id];
       if (ds != null) {
         await _onDhtServePacket(ds, p);
@@ -181,7 +211,11 @@ class FileTransferNode {
       _serve[id] = _ServeEntry(
         link,
         FileServeSession(link, source,
-            quota: serveQuota, requesterId: id, onServed: onServed),
+            quota: serveQuota,
+            requesterId: id,
+            onServed: onServed,
+            onDepositOffer: onDepositOffer,
+            onDepositStore: onDepositStore),
       );
       send((await link.buildProof()).pack());
       log?.call('files: accepted link $id');
@@ -260,6 +294,70 @@ class FileTransferNode {
   void _finishFetch(_FetchEntry e, Uint8List? result, String? err) {
     if (err != null) log?.call('files: fetch failed: $err');
     if (!e.done.isCompleted) e.done.complete(result);
+  }
+
+  // ── Deposit side (ask a host to keep a blob) ───────────────────────────────
+  final Map<String, _DepositEntry> _deposit = {}; // link_id hex -> deposit
+
+  /// Deposit [bytes] (sha256 = [sha], extension [ext]) to [hostPublicIdentity]
+  /// for store-and-forward hosting. [pub]/[sig] are the depositor's NOSTR x-only
+  /// pubkey (32B) and a Schnorr signature over depositAuthMessageHex(shaHex) (64B)
+  /// that authorizes hosting this blob. Returns true if the host stored it.
+  Future<bool> deposit(
+    Uint8List sha,
+    Uint8List bytes,
+    String ext,
+    Uint8List pub,
+    Uint8List sig,
+    RnsIdentity hostPublicIdentity, {
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
+    final link =
+        await RnsLink.initiator(hostPublicIdentity, kFilesApp, kFilesAspects);
+    link.nextHop = nextHopFor?.call(hostPublicIdentity);
+    final req = link.buildRequest();
+    final entry = _DepositEntry(link, sha, bytes, ext, pub, sig, Completer<bool>());
+    final id = _hex(link.linkId!);
+    _deposit[id] = entry;
+    entry.timeout = Timer(timeout, () {
+      if (!entry.done.isCompleted) {
+        log?.call('files: deposit timeout ${_hex(sha)}');
+        entry.done.complete(false);
+      }
+    });
+    send(req.pack());
+    final ok = await entry.done.future;
+    entry.timeout?.cancel();
+    _deposit.remove(id);
+    return ok;
+  }
+
+  Future<void> _onDepositPacket(_DepositEntry e, RnsPacket p) async {
+    if (e.dep == null) {
+      if (p.packetType == RnsPacketType.proof && p.context == RnsContext.lrproof) {
+        final rtt = await e.link.handleProof(p);
+        if (rtt == null) {
+          if (!e.done.isCompleted) e.done.complete(false);
+          return;
+        }
+        send(rtt.pack());
+        final d =
+            FileDepositSession(e.link, e.sha, e.bytes, e.ext, e.pub, e.sig);
+        e.dep = d;
+        send(d.start().pack());
+      }
+      return;
+    }
+    final d = e.dep!;
+    for (final out in d.onPacket(p)) {
+      send(out.pack());
+    }
+    if (d.state == FileDepositState.done) {
+      if (!e.done.isCompleted) e.done.complete(true);
+    } else if (d.state == FileDepositState.failed) {
+      log?.call('files: deposit rejected: ${d.error}');
+      if (!e.done.isCompleted) e.done.complete(false);
+    }
   }
 
   // ── DHT over Reticulum links ───────────────────────────────────────────────

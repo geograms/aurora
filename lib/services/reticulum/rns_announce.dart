@@ -105,7 +105,18 @@ class RnsAnnounceBuilder {
 
 /// Parse + cryptographically validate an inbound ANNOUNCE packet. Returns null
 /// if the packet isn't a valid announce (bad signature or dest-hash mismatch).
-Future<RnsAnnounce?> validateAnnounce(RnsPacket p) async {
+///
+/// [trustIf], when supplied, is called after the (cheap) structural parse and
+/// dest-hash binding check with the parsed (destHash, publicKey, appData). If it
+/// returns true, the expensive Ed25519 signature verification is skipped — used
+/// to avoid re-verifying an unchanged re-announce of a destination we already
+/// verified once. The dest-hash↔key binding is always enforced, so a skipped
+/// verify can only ever reuse trust in the *same* key the caller already holds.
+Future<RnsAnnounce?> validateAnnounce(
+  RnsPacket p, {
+  bool Function(Uint8List destHash, Uint8List publicKey, Uint8List appData)?
+      trustIf,
+}) async {
   if (p.packetType != RnsPacketType.announce) return null;
   final data = p.data;
   final hasRatchet = p.contextFlag == RnsFlag.set;
@@ -137,11 +148,19 @@ Future<RnsAnnounce?> validateAnnounce(RnsPacket p) async {
     ..add(appData);
 
   final identity = RnsIdentity.fromPublicKey(publicKey);
-  if (!await identity.validate(signature, signedData.toBytes())) return null;
 
-  // dest_hash must equal truncated_hash(name_hash + identity.hash).
+  // dest_hash must equal truncated_hash(name_hash + identity.hash). Cheap, and
+  // binds the destination to this public key — always enforced.
   final expected = RnsCrypto.truncatedHash([...nameHash, ...identity.hash]);
   if (!RnsCrypto.constantTimeEquals(expected, p.destHash)) return null;
+
+  // The Ed25519 verify is the costly step. Skip it only when the caller already
+  // trusts this exact (destHash, key, appData) — i.e. a re-announce of a dest we
+  // verified before. New/changed announces are always fully verified.
+  final trusted = trustIf?.call(p.destHash, publicKey, appData) ?? false;
+  if (!trusted && !await identity.validate(signature, signedData.toBytes())) {
+    return null;
+  }
 
   return RnsAnnounce(
     destHash: Uint8List.fromList(p.destHash),

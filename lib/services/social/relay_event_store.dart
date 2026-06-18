@@ -163,6 +163,22 @@ class RelayEventStore {
     ''');
     db.execute('CREATE INDEX IF NOT EXISTS idx_sf_dest ON sf_inbox(dest);');
     db.execute('CREATE INDEX IF NOT EXISTS idx_sf_exp ON sf_inbox(expires_at);');
+
+    // Store-and-forward hosting columns (added later; ALTER on existing DBs).
+    // received_at = when WE accepted the event (drives retention + monthly caps,
+    // distinct from the author's created_at). tier = 0 self / 1 followed /
+    // 2 stranger, for tier-aware quota + eviction.
+    final cols = {
+      for (final r in db.select('PRAGMA table_info(events)'))
+        r['name'] as String
+    };
+    if (!cols.contains('received_at')) {
+      db.execute('ALTER TABLE events ADD COLUMN received_at INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!cols.contains('tier')) {
+      db.execute('ALTER TABLE events ADD COLUMN tier INTEGER NOT NULL DEFAULT 2;');
+    }
+    db.execute('CREATE INDEX IF NOT EXISTS idx_ev_tier ON events(tier, received_at);');
   }
 
   // ── Ingest ────────────────────────────────────────────────────────────────
@@ -170,8 +186,14 @@ class RelayEventStore {
   /// Ingest a NOSTR event. Verifies the event id and Schnorr signature, dedups
   /// by id, and applies NIP-01 replaceable/deletion semantics.
   /// Returns true if the event was stored (new or replacing an older one),
-  /// false if rejected (bad sig) or superseded/duplicate.
-  bool put(NostrEvent e) {
+  /// false if rejected (bad sig) or superseded/duplicate. [tier] (0 self /
+  /// 1 followed / 2 stranger) and [receivedAtMs] are recorded for the hosting
+  /// quota/eviction; they default to stranger / now when not supplied (e.g. our
+  /// own local publishes pass tier 0).
+  bool put(NostrEvent e, {int tier = 2, int? receivedAtMs}) {
+    _pendingTier = tier;
+    _pendingReceivedSec =
+        (receivedAtMs ?? DateTime.now().millisecondsSinceEpoch) ~/ 1000;
     final id = e.id;
     final sig = e.sig;
     if (id == null || sig == null || id.isEmpty || sig.isEmpty) return false;
@@ -215,13 +237,18 @@ class RelayEventStore {
     return true;
   }
 
+  // Hosting metadata for the next _insert (set by put()).
+  int _pendingTier = 2;
+  int _pendingReceivedSec = 0;
+
   void _insert(NostrEvent e) {
     _db.execute('BEGIN');
     try {
       _db.execute(
-        'INSERT INTO events(id, pubkey, created_at, kind, content, raw) '
-        'VALUES(?,?,?,?,?,?)',
-        [e.id, e.pubkey, e.createdAt, e.kind, e.content, jsonEncode(e.toJson())],
+        'INSERT INTO events(id, pubkey, created_at, kind, content, raw, received_at, tier) '
+        'VALUES(?,?,?,?,?,?,?,?)',
+        [e.id, e.pubkey, e.createdAt, e.kind, e.content, jsonEncode(e.toJson()),
+         _pendingReceivedSec, _pendingTier],
       );
       final metaParts = <String>[];
       for (final t in e.tags) {
@@ -466,6 +493,51 @@ class RelayEventStore {
         (DateTime.now().millisecondsSinceEpoch ~/ 1000) - maxAge.inSeconds;
     final old = _db.select(
       'SELECT id FROM events WHERE created_at < ? AND kind NOT IN (0,3)',
+      [cutoff],
+    );
+    for (final r in old) {
+      _deleteById(r['id'] as String);
+    }
+    return old.length;
+  }
+
+  // ── Store-and-forward hosting: tier usage + tier-aware retention ───────────
+
+  /// Current hosting usage for the quota policy: count of stranger NOTES (kind 1)
+  /// received in the current calendar month, total bytes (raw size) of stranger
+  /// content, and total bytes of all hosted content. Bytes approximate by the
+  /// stored raw JSON length (text is small; media bytes live in the archive).
+  ({int strangerNotesThisMonth, int strangerBytes, int totalBytes}) hostUsage(
+      {int? nowMs}) {
+    final now =
+        DateTime.fromMillisecondsSinceEpoch(nowMs ?? DateTime.now().millisecondsSinceEpoch);
+    final monthStart =
+        DateTime(now.year, now.month).millisecondsSinceEpoch ~/ 1000;
+    final n = _db.select(
+      'SELECT COUNT(*) c FROM events WHERE deleted=0 AND tier=2 AND kind=1 '
+      'AND received_at >= ?',
+      [monthStart],
+    ).first['c'] as int;
+    final sb = _db.select(
+      'SELECT COALESCE(SUM(LENGTH(raw)),0) b FROM events WHERE deleted=0 AND tier=2',
+    ).first['b'] as int;
+    final tb = _db.select(
+      'SELECT COALESCE(SUM(LENGTH(raw)),0) b FROM events WHERE deleted=0',
+    ).first['b'] as int;
+    return (strangerNotesThisMonth: n, strangerBytes: sb, totalBytes: tb);
+  }
+
+  /// Tier-aware retention sweep for hosted text events: delete stranger events
+  /// (tier 2) whose received_at is older than [strangerMaxAge]. Never deletes our
+  /// own (tier 0) or followed (tier 1) text, and always keeps profiles/contacts.
+  /// Returns the number removed. (Storage-pressure eviction of media is handled
+  /// in the archive; text is tiny so age-based pruning suffices here.)
+  int pruneHosted({required Duration strangerMaxAge, int? nowMs}) {
+    final cutoff =
+        ((nowMs ?? DateTime.now().millisecondsSinceEpoch) ~/ 1000) -
+            strangerMaxAge.inSeconds;
+    final old = _db.select(
+      'SELECT id FROM events WHERE tier=2 AND received_at < ? AND kind NOT IN (0,3)',
       [cutoff],
     );
     for (final r in old) {

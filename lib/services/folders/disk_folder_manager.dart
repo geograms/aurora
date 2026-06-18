@@ -11,6 +11,7 @@
  * FolderService (owner signing + ops), the folder reducer (for the diff), and
  * the file DHT provider layer.
  */
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -27,8 +28,13 @@ class DiskFolderManager {
   final Future<void> Function(String folderId) publishFolderProvider;
   final Future<void> Function(Uint8List sha32) publishFileProvider;
   final void Function(DiskFolderSource source) registerSource;
+  final void Function(DiskFolderSource source)? unregisterSource;
   final String registryPath; // disk_folders.json (':memory:' for tests)
   final void Function(String msg)? log;
+
+  /// Persist a folder's current on-disk file list to the durable disk index
+  /// (sha -> path/size/mtime/name). Optional; null in tests.
+  final void Function(String folderId, List<DiskFile> files)? indexFiles;
 
   final Map<String, DiskFolderSource> _sources = {}; // folderId -> source
   final Map<String, String> _dirs = {}; // folderId -> dirPath
@@ -39,6 +45,8 @@ class DiskFolderManager {
     required this.publishFolderProvider,
     required this.publishFileProvider,
     required this.registerSource,
+    this.unregisterSource,
+    this.indexFiles,
     required this.registryPath,
     this.log,
   });
@@ -52,25 +60,54 @@ class DiskFolderManager {
           }
       ];
 
+  /// A whole storage root (the entire device) must never be a single shared
+  /// folder: re-indexing it would walk + hash everything on every sync. Guards
+  /// against accidental "share my whole phone" footguns.
+  static bool _isUnsafeShareRoot(String dir) {
+    var p = dir.replaceAll('\\', '/');
+    if (p.length > 1 && p.endsWith('/')) p = p.substring(0, p.length - 1);
+    const roots = {
+      '/', '/storage', '/storage/emulated', '/storage/emulated/0',
+      '/sdcard', '/storage/self', '/storage/self/primary', '/mnt',
+      '/mnt/sdcard', '/data',
+    };
+    return roots.contains(p);
+  }
+
   /// Re-adopt previously-registered disk folders (index + serve), without
   /// forcing a publish (the periodic sync handles that).
   Future<void> load() async {
+    var pruned = false;
     for (final entry in _readRegistry().entries) {
       final folderId = entry.key, dir = entry.value;
+      if (_isUnsafeShareRoot(dir)) {
+        log?.call('disk folder: dropping unsafe whole-storage share $dir');
+        pruned = true;
+        continue; // not re-adopted; pruned from the registry below
+      }
       final key = _readKeyFile(dir);
       if (key == null) continue;
       folders.keystore
           .add(FolderKey(folderId, key.$1, key.$2, _now()));
-      final src = DiskFolderSource(dir)..scan();
+      // Index in the background (yielding) so adopting a large shared folder at
+      // startup never freezes the UI; serving works once the first scan lands.
+      final src = DiskFolderSource(dir);
       _sources[folderId] = src;
       _dirs[folderId] = dir;
       registerSource(src);
+      unawaited(src.scanAsync());
     }
+    if (pruned) _writeRegistry();
   }
 
-  /// Register [dirPath] as an owned folder and synchronize it. Returns folderId.
+  /// Register [dirPath] as an owned folder and synchronize it. Returns folderId,
+  /// or '' if the path is a whole-storage root (never shareable as one folder).
   Future<String> addFromDisk(String dirPath) async {
     final dir = Directory(dirPath).absolute.path;
+    if (_isUnsafeShareRoot(dir)) {
+      log?.call('disk folder: refusing to share whole-storage root $dir');
+      return '';
+    }
     var key = _readKeyFile(dir);
     var isNew = false;
     if (key == null) {
@@ -103,8 +140,10 @@ class DiskFolderManager {
   Future<void> sync(String folderId) async {
     final src = _sources[folderId];
     if (src == null) return;
-    src.scan();
+    await src.scanAsync();
     final desired = <String, DiskFile>{for (final f in src.files) f.name: f};
+    // Persist the current on-disk inventory to the durable disk index.
+    indexFiles?.call(folderId, src.files);
 
     final state = await localState(folderId);
     final published = <String, String>{}; // name -> sha
@@ -116,13 +155,18 @@ class DiskFolderManager {
     for (final f in desired.values) {
       final prev = published[f.name];
       if (prev == f.sha) continue;
-      if (prev != null) await folders.removeFile(folderId, prev);
-      await folders.addFile(folderId, f.sha, name: f.name, size: f.size, mime: _mime(f.ext));
+      if (prev != null) await folders.removeFile(folderId, prev, name: f.name);
+      await folders.addFile(folderId, f.sha,
+          name: f.name,
+          size: f.size,
+          mime: _mime(f.ext),
+          ts: f.mtimeMs > 0 ? f.mtimeMs ~/ 1000 : null);
       changed++;
     }
     for (final entry in published.entries) {
+      // entry.key is the file name, entry.value its sha.
       if (!desired.containsKey(entry.key)) {
-        await folders.removeFile(folderId, entry.value);
+        await folders.removeFile(folderId, entry.value, name: entry.key);
         changed++;
       }
     }
@@ -138,6 +182,20 @@ class DiskFolderManager {
 
   bool owns(String folderId) => _sources.containsKey(folderId);
   String? dirOf(String folderId) => _dirs[folderId];
+
+  /// Stop sharing a disk folder: unregister its source (stop serving its bytes),
+  /// drop it from the owned list + registry + keystore so it no longer appears
+  /// nor is advertised. The on-disk files and the in-folder key file are LEFT
+  /// untouched, so re-adding the same directory resumes with the same folderId.
+  void removeDisk(String folderId) {
+    final src = _sources.remove(folderId);
+    _dirs.remove(folderId);
+    if (src != null) unregisterSource?.call(src);
+    folders.keystore.remove(folderId);
+    _writeRegistry();
+    final tag = folderId.length >= 8 ? folderId.substring(0, 8) : folderId;
+    log?.call('disk folder $tag: removed (stopped sharing)');
+  }
 
   // ── key file + registry ─────────────────────────────────────────────────
 

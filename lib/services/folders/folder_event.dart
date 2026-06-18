@@ -74,7 +74,9 @@ class FileEntry {
   final String? desc;
   final String? mime;
   final int? size;
-  const FileEntry(this.sha, {this.name, this.desc, this.mime, this.size});
+  final int? ts; // file date (unix seconds): mtime if known, else when added
+  const FileEntry(this.sha,
+      {this.name, this.desc, this.mime, this.size, this.ts});
 
   Map<String, dynamic> toJson() => {
         'x': sha,
@@ -82,6 +84,7 @@ class FileEntry {
         if (desc != null) 'desc': desc,
         if (mime != null) 'mime': mime,
         if (size != null) 'size': size,
+        if (ts != null) 'ts': ts,
       };
 }
 
@@ -138,7 +141,7 @@ NostrEvent buildOp(String authorPrivHex, String folderId,
 // ── Operation payload builders ──────────────────────────────────────────────
 
 Map<String, dynamic> opAddFile(String shaHex,
-        {String? name, String? desc, String? mime, int? size}) =>
+        {String? name, String? desc, String? mime, int? size, int? ts}) =>
     {
       'op': 'addFile',
       'x': shaHex,
@@ -146,12 +149,15 @@ Map<String, dynamic> opAddFile(String shaHex,
       'desc': ?desc,
       'mime': ?mime,
       'size': ?size,
+      'ts': ?ts,
     };
 
-Map<String, dynamic> opRmFile(String shaHex) => {'op': 'rmFile', 'x': shaHex};
+Map<String, dynamic> opRmFile(String shaHex, {String? name}) =>
+    {'op': 'rmFile', 'x': shaHex, 'n': ?name};
 
-Map<String, dynamic> opSetMeta({String? name, String? desc}) =>
-    {'op': 'setMeta', 'name': ?name, 'desc': ?desc};
+Map<String, dynamic> opSetMeta(
+        {String? name, String? desc, String? tags, String? owner}) =>
+    {'op': 'setMeta', 'name': ?name, 'desc': ?desc, 'tags': ?tags, 'owner': ?owner};
 
 Map<String, dynamic> opLink(String folderId, {String? name}) =>
     {'op': 'link', 'f': folderId, 'name': ?name};

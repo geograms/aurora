@@ -21,6 +21,7 @@ import '../platform/platform.dart' as platform;
 
 import 'native/media_capability.dart';
 
+import 'file_folder_picker.dart';
 import 'geoui/geoui_ast.dart';
 import 'geoui/geoui_parser.dart';
 import 'geoui/geoui_renderer.dart';
@@ -39,6 +40,7 @@ import '../models/monitored_task.dart';
 import '../services/event_bus.dart';
 import '../services/notification_service.dart';
 import '../services/preferences_service.dart';
+import '../services/reticulum/rns_service.dart';
 import '../services/wapp_unread_service.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
@@ -307,6 +309,15 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// The conversation open in the conversations widget (host-owned so the
   /// AppBar can show the thread title + the single back arrow in portrait).
   String? _convOpenId;
+
+  /// In-wapp navigation state, driven by the wapp via `ui.nav` messages. When
+  /// [_wappNavBack] is true the AppBar shows [_wappNavTitle] (e.g. the current
+  /// folder name) and the back arrow / system-back are forwarded to the wapp as
+  /// a `nav_back` command (go up one level) instead of leaving the wapp. The
+  /// wapp clears it (back:false) once it returns to its root, so the next back
+  /// shows the wapp name and exits. Generic — no app knowledge here.
+  String? _wappNavTitle;
+  bool _wappNavBack = false;
 
   /// When true (the default) the map frames the coverage circle on mount.
   /// Cleared by locate-on-map so the located station stays centred instead;
@@ -989,14 +1000,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           _convStore(field).addMessage(data);
           _scheduleConvoSave(field);
           changed = true;
-        } else if (type == 'ui.convo.pin') {
+        } else if (type == 'ui.convo.remove') {
           final field = data['field'] as String? ?? 'conversations';
-          _convStore(field).pin(data);
-          _scheduleConvoSave(field);
-          changed = true;
-        } else if (type == 'ui.convo.unpin') {
-          final field = data['field'] as String? ?? 'conversations';
-          _convStore(field).unpin(data);
+          _convStore(field).remove(data);
           _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.react') {
@@ -1014,6 +1020,66 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           // optional text input + optional chips) and returns the result as a
           // "prompt" command. No app knowledge here.
           _showWappPrompt(data);
+        } else if (type == 'ui.nav') {
+          // In-wapp navigation chrome: the wapp reports the current title and
+          // whether system-back should drill up (true) or leave the wapp
+          // (false). Drives the AppBar title + back interception below.
+          final t = data['title'] as String?;
+          final b = data['back'] == true;
+          if (t != _wappNavTitle || b != _wappNavBack) {
+            _wappNavTitle = (t != null && t.isNotEmpty) ? t : null;
+            _wappNavBack = b;
+            changed = true;
+          }
+        } else if (type == 'ui.screen.open') {
+          // The wapp asks the host to open one of its screens as a full-size
+          // panel (e.g. a per-folder Stats / Edit panel reached from a row
+          // menu). Matched by screen name; no-op if unknown.
+          final want = (data['name'] as String? ?? '').trim();
+          for (var i = 0; i < _screens.length; i++) {
+            if (_screenNames[i] == want) {
+              _panelScreen = _screens[i];
+              _panelName = _screenNames[i];
+              changed = true;
+              break;
+            }
+          }
+        } else if (type == 'ui.screen.close') {
+          if (_panelScreen != null) {
+            _panelScreen = null;
+            changed = true;
+          }
+        } else if (type == 'ui.field.set') {
+          // Set a scalar field's value (prefill an editor). The cached
+          // TextEditingController re-syncs to the new value on the next build.
+          final f = data['field'] as String?;
+          if (f != null && f.isNotEmpty) {
+            _fieldValues[f] = data['value'];
+            changed = true;
+          }
+        } else if (type == 'social.follow' || type == 'social.unfollow') {
+          // Generic NOSTR-follow bridge: a wapp (e.g. APRS, when you follow a
+          // callsign whose public key it knows) tells the host to host that
+          // pubkey's content with the "followed" retention tier. App-agnostic —
+          // the host just keeps a set of followed pubkeys.
+          final key = (data['pubkey'] ?? '').toString();
+          if (key.isNotEmpty) {
+            if (type == 'social.follow') {
+              RnsService.instance.followPubkey(key);
+            } else {
+              RnsService.instance.unfollowPubkey(key);
+            }
+          }
+        } else if (type == 'social.note') {
+          // A wapp (APRS) tells the host to store one of OUR posts (a group
+          // bulletin or Activity message) as a signed NOSTR note, so peers can
+          // request our posts later. Generic on the host side.
+          final text = (data['text'] ?? '').toString();
+          final topic = (data['topic'] ?? '').toString();
+          if (text.isNotEmpty) {
+            unawaited(RnsService.instance
+                .publishNote(text, topic: topic.isEmpty ? null : topic));
+          }
         } else if (type == 'ui.toast') {
           // Legacy message shape — route through the unified service
           // so old wapps inherit system-tray delivery + history.
@@ -1099,6 +1165,11 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           // pick_video / pick_subtitle). Show the native picker and
           // deliver the result back as a file.open message.
           unawaited(_handleFilePick(data));
+        } else if (type == 'fs.pick') {
+          // A wapp wants the user to browse and pick a file OR folder (Files
+          // wapp "Add / Share"). Show the file/folder navigator; deliver the
+          // result back as fs.picked {path, dir}.
+          unawaited(_handleFsPick(data));
         } else if (type == 'video.load') {
           _handleVideoLoad(data);
           changed = true;
@@ -1429,6 +1500,53 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     } catch (_) {}
   }
 
+  /// Attach a file to the chat composer: pick a file (native dialog), archive
+  /// it into the shared media archive, advertise it on Reticulum so receivers
+  /// can fetch it, and return its `file:<sha>.<ext>` token to insert.
+  Future<String?> _attachFileToChat() async {
+    try {
+      const images = XTypeGroup(
+        label: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic'],
+      );
+      const any = XTypeGroup(label: 'All files');
+      final file = await openFile(acceptedTypeGroups: const [images, any]);
+      if (file == null) return null;
+      final bytes = await file.readAsBytes();
+      if (bytes.isEmpty) return null;
+      final dot = file.name.lastIndexOf('.');
+      final ext = dot >= 0 ? file.name.substring(dot + 1).toLowerCase() : 'bin';
+      return attachMediaFile(bytes, ext, name: file.name);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Browse and pick a file OR folder; return it to the wapp as fs.picked.
+  /// data: {title, mode: "both"|"file"|"folder", initial}
+  Future<void> _handleFsPick(Map<String, dynamic> data) async {
+    final mode = (data['mode'] as String?) ?? 'both';
+    try {
+      final res = await FileFolderPicker.show(
+        context,
+        title: (data['title'] as String?) ?? 'Add / Share',
+        initialDirectory: data['initial'] as String?,
+        allowFileSelect: mode != 'folder',
+        allowFolderSelect: mode != 'file',
+      );
+      if (res == null) return;
+      final name = res.path.split('/').last;
+      _engine.sendMessage(jsonEncode({
+        'type': 'fs.picked',
+        'path': res.path,
+        'name': name,
+        'dir': res.isDir,
+      }));
+      _engine.handleEvent();
+      _drainOutbox();
+    } catch (_) {}
+  }
+
   /// Render a `$type:"video"` screen: the media_kit surface fills the
   /// body; everything else on the screen (the header-actions menu) is
   /// laid over the top-right so the user can still pick a video.
@@ -1598,7 +1716,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       final cur = _fieldValues[name];
       final value = cur is bool ? cur : (f.getBool('default') ?? false);
       _fieldValues[name] = value;
-      toggles.add(ComposerToggle(name, f.getString('label') ?? name, value));
+      toggles.add(ComposerToggle(name, f.getString('label') ?? name, value,
+          localOnly: f.getBool('localOnly') ?? false));
     }
     return ConversationsField(
       store: store,
@@ -1614,6 +1733,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       onToggle: (name, value) => setState(() => _fieldValues[name] = value),
       onLocate: _locateFromMessage,
       onSenderTap: _showProfile,
+      onAttach: _attachFileToChat,
       onSelect: (id) {
         setState(() => store.clearUnread(id));
         _syncAppBadge();
@@ -1627,11 +1747,50 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         _fieldValues['${field}_convo'] = openId;
         _sendCommand(name);
       },
-      onPinnedDismiss: (id, key) {
+      onForward: (id, m) => _showForwardPanel(field, store, m),
+      onHide: (id, key) {
         _fieldValues['${field}_convo'] = id;
-        _fieldValues['${field}_pinkey'] = key;
-        _sendCommand('${field}_unpin');
+        _fieldValues['${field}_hidekey'] = key;
+        _sendCommand('${field}_hide');
       },
+      onBlock: (from) {
+        if (from.isEmpty) return;
+        _fieldValues['${field}_blockcall'] = from;
+        _sendCommand('${field}_block');
+      },
+    );
+  }
+
+  // ── Forward a message ──────────────────────────────────────────────────
+  // A WhatsApp/Telegram-style picker: search a known contact (any conversation
+  // we already have — DMs and group rooms) or type a fresh callsign / #group,
+  // then re-send the message's text there. Forwarding reuses the normal send
+  // path (no wire marker, so non-Aurora stations read it cleanly).
+  void _showForwardPanel(
+      String field, ConversationStore store, Map<String, dynamic> m) {
+    final raw = (m['text'] ?? '').toString();
+    if (raw.isEmpty) return;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheet) => _ForwardPanel(
+        contacts: store.ordered(),
+        onPick: (target) {
+          Navigator.pop(sheet);
+          final id = target.trim();
+          if (id.isEmpty) return;
+          _fieldValues['${field}_convo'] = id;
+          _fieldValues['${field}_input'] = raw;
+          _sendCommand('${field}_send');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                  content: Text('Forwarded to $id'),
+                  duration: const Duration(seconds: 1)),
+            );
+          }
+        },
+      ),
     );
   }
 
@@ -1690,6 +1849,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final id = (data['id'] ?? '').toString();
     final title = (data['title'] ?? '').toString();
     final body = (data['body'] ?? '').toString();
+    // Optional: text the user can copy to the clipboard (e.g. a file token /
+    // sha). Renders a Copy button under the body — the only way to grab a
+    // reference on a touch device.
+    final copyText = (data['copy'] ?? '').toString();
     final chips = (data['chips'] as List?)
             ?.whereType<Map>()
             .map((c) => MapEntry(
@@ -1742,9 +1905,26 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                     if (body.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 12),
-                        child: Text(body,
+                        child: SelectableText(body,
                             style: TextStyle(
                                 color: cs.onSurfaceVariant, fontSize: 12.5)),
+                      ),
+                    if (copyText.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.copy, size: 16),
+                          label: const Text('Copy'),
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: copyText));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Copied to clipboard'),
+                                duration: Duration(seconds: 1),
+                              ),
+                            );
+                          },
+                        ),
                       ),
                     if (chips.isNotEmpty)
                       Wrap(
@@ -1936,13 +2116,21 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       thread = _convStore(convField).items[_convOpenId];
     }
 
+    // In-wapp drill navigation (e.g. folder → subfolder): the wapp owns the
+    // depth; back drills up one level until it reports back:false at its root.
+    final navBack = thread == null && _wappNavBack;
+
     return PopScope(
-      // Only intercept system-back to close an open conversation thread; with
-      // tabs there is no "home" to return to (back leaves for the launcher).
-      canPop: thread == null,
+      // Intercept system-back to close an open conversation thread, or to drill
+      // up one in-wapp level. Otherwise back leaves for the launcher.
+      canPop: thread == null && !navBack,
       onPopInvoked: (didPop) {
         if (didPop) return;
-        if (thread != null) setState(() => _convOpenId = null);
+        if (thread != null) {
+          setState(() => _convOpenId = null);
+        } else if (navBack) {
+          _sendCommand('nav_back');
+        }
       },
       child: Scaffold(
         appBar: AppBar(
@@ -1952,7 +2140,13 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                   tooltip: 'Back',
                   onPressed: () => setState(() => _convOpenId = null),
                 )
-              : null, // default "←" pops back to the launcher
+              : navBack
+                  ? IconButton(
+                      icon: const Icon(Icons.arrow_back),
+                      tooltip: 'Up',
+                      onPressed: () => _sendCommand('nav_back'),
+                    )
+                  : null, // default "←" pops back to the launcher
           title: thread != null
               ? Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1969,7 +2163,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                                   .onSurfaceVariant)),
                   ],
                 )
-              : Text(widget.title),
+              : Text(navBack ? _wappNavTitle! : widget.title),
           // The horizontal tab bar lives under the title. Hidden while a
           // conversation thread is taking over the screen in portrait.
           bottom: (showTabs && thread == null)
@@ -2012,6 +2206,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                       _sendCommand(a.name ?? '');
                     },
                   ),
+            ..._channelIndicators(),
             _buildWappOptionsMenu(),
           ],
         ),
@@ -2082,6 +2277,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       case 'map': return Icons.map_outlined;
       case 'geo chat': case 'geochat': case 'chat': return Icons.forum_outlined;
       case 'follows': case 'following': return Icons.people_outline;
+      case 'folders': return Icons.folder_shared;
+      case 'sharing': case 'share': return Icons.share;
+      case 'library': case 'files': return Icons.folder;
       case 'settings': return Icons.settings;
       case 'tools': return Icons.build;
       case 'keys': return Icons.key;
@@ -2091,15 +2289,75 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     }
   }
 
-  /// Top-right options menu: any screens flagged `"menu": true` open as panels
-  /// here (instead of cluttering the tab bar), plus "Edit".
+  /// Screen-level actions of the active tab when it is a people screen. People
+  /// screens fill the body, so their actions have no inline home — they live in
+  /// the top-right options menu instead of a separate in-panel dropdown.
+  List<GeoUiBlock> _activeScreenMenuActions() {
+    final tc = _tabController;
+    if (tc == null || _tabScreens.isEmpty) return const [];
+    final s = _tabScreens[tc.index];
+    final isPeople =
+        s.children.any((c) => c.keyword == 'field' && c.type == 'people');
+    if (!isPeople) return const [];
+    return s.children.where((c) => c.keyword == 'action').toList();
+  }
+
+  /// Compact channel/transport indicators for the AppBar (left of the menu),
+  /// driven by the wapp's `ui.map.status` items. Each known channel shows as a
+  /// small chip (NET, BLE, … future LoRa/radio) — coloured when active, dimmed
+  /// when configured-but-inactive. Same colour scheme as the chat origin chips.
+  List<Widget> _channelIndicators() {
+    if (_mapStatus.isEmpty) return const [];
+    // Only show a channel tag when that channel is actually available — a dimmed
+    // "off" tag read as still-usable. Available ones are all green.
+    const green = Color(0xFF34C759);
+    final chips = <Widget>[];
+    for (final s in _mapStatus) {
+      final label = (s['label'] ?? '').toString();
+      if (label.isEmpty || s['on'] != true) continue;   // hide unavailable
+      chips.add(Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+          decoration: BoxDecoration(
+            color: green.withAlpha(40),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: green.withAlpha(130), width: 0.6),
+          ),
+          child: Text(
+            label.toUpperCase(),
+            style: const TextStyle(
+              color: green,
+              fontSize: 9,
+              height: 1.1,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.4,
+            ),
+          ),
+        ),
+      ));
+    }
+    if (chips.isEmpty) return const [];
+    return [
+      Center(
+        child: Row(mainAxisSize: MainAxisSize.min, children: chips),
+      ),
+      const SizedBox(width: 4),
+    ];
+  }
+
+  /// Top-right options menu: the active screen's actions (for people screens),
+  /// then any screens flagged `"menu": true` (open as panels), plus "Edit".
   Widget _buildWappOptionsMenu() {
+    final actions = _activeScreenMenuActions();
     return PopupMenuButton<String>(
       icon: const Icon(Icons.menu),
       tooltip: 'Options',
       onSelected: (value) {
         if (value == 'edit') {
           _editThisWapp();
+        } else if (value.startsWith('action:')) {
+          _sendCommand(value.substring(7));
         } else if (value.startsWith('panel:')) {
           final i = int.tryParse(value.substring(6)) ?? -1;
           if (i >= 0 && i < _menuScreens.length) {
@@ -2108,6 +2366,17 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         }
       },
       itemBuilder: (_) => [
+        for (final a in actions)
+          PopupMenuItem<String>(
+            value: 'action:${a.name ?? ''}',
+            child: ListTile(
+              leading: Icon(geoUiResolveIcon(a.getString('icon') ?? 'settings')),
+              title: Text(_i18n.resolve(a.getString('label') ?? a.name ?? '')),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            ),
+          ),
+        if (actions.isNotEmpty) const PopupMenuDivider(),
         for (var i = 0; i < _menuScreens.length; i++)
           PopupMenuItem<String>(
             value: 'panel:$i',
@@ -2305,29 +2574,12 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
             .toList()
         : const <Map<String, dynamic>>[];
-    final actions =
-        screen.children.where((c) => c.keyword == 'action').toList();
+    // Screen-level actions are surfaced in the wapp's existing top-right
+    // options menu (see [_buildWappOptionsMenu]) — a people screen fills the
+    // body, so a second in-panel menu would be redundant.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (actions.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
-            child: Row(
-              children: [
-                for (final a in actions) ...[
-                  FilledButton.tonalIcon(
-                    icon: Icon(
-                        geoUiResolveIcon(a.getString('icon') ?? 'add'),
-                        size: 18),
-                    label: Text(_i18n.resolve(a.getString('label') ?? a.name ?? '')),
-                    onPressed: () => _sendCommand(a.name ?? ''),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-              ],
-            ),
-          ),
         Expanded(
           child: PeopleViewField(
             fieldName: name,
@@ -2363,11 +2615,62 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       messages: messages,
       onLocate: _locateFromMessage,
       onSenderTap: _showProfile,
+      onItemTap: _openConvoFromFeed,
+      // Activity posts can carry an image or video (only those, for now).
+      onAttach: _attachImageOrVideoToChat,
       onSend: (text) {
         _fieldValues['${name}_input'] = text;
         _sendCommand('${name}_send');
       },
     );
+  }
+
+  /// Attach an image or video (only) to a composer: pick, archive, advertise on
+  /// Reticulum, return the `file:<sha>.<ext>` token to insert.
+  Future<String?> _attachImageOrVideoToChat() async {
+    try {
+      const images = XTypeGroup(
+        label: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic'],
+      );
+      const videos = XTypeGroup(
+        label: 'Videos',
+        extensions: ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', '3gp'],
+      );
+      final file = await openFile(acceptedTypeGroups: const [images, videos]);
+      if (file == null) return null;
+      final bytes = await file.readAsBytes();
+      if (bytes.isEmpty) return null;
+      final dot = file.name.lastIndexOf('.');
+      final ext = dot >= 0 ? file.name.substring(dot + 1).toLowerCase() : 'bin';
+      return attachMediaFile(bytes, ext, name: file.name);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Tapping an Activity-feed item jumps to its conversation in the Messages tab
+  // so the user can continue it. The item carries a `convo` ("#GROUP" or a
+  // callsign); we switch to the conversations tab and open that room (creating
+  // the row if it doesn't exist yet, e.g. a brand-new BLE contact).
+  void _openConvoFromFeed(Map<String, dynamic> m) {
+    final convo = (m['convo'] ?? '').toString().trim();
+    if (convo.isEmpty) return;
+    final idx = _tabScreens.indexWhere((s) => s.children
+        .any((c) => c.keyword == 'group' && c.type == 'conversations'));
+    if (idx < 0) return;
+    const field = 'conversations';
+    final store = _convStore(field);
+    if (!store.items.containsKey(convo)) store.upsert({'id': convo});
+    setState(() {
+      _panelScreen = null;
+      _convOpenId = convo;
+      store.clearUnread(convo);
+      if (_tabController != null && _tabController!.index != idx) {
+        _tabController!.animateTo(idx);
+      }
+    });
+    _syncAppBadge();
   }
 
   // ── Tasks viewer ──────────────────────────────────────────────────
@@ -5287,12 +5590,127 @@ class _WappFieldBindings implements GeoUiBindings {
     } else if (value is num || value is bool) {
       _engine.kvSet(fieldName, value.toString());
     }
+    // Settings field that drives the host media auto-download threshold (MB).
+    if (fieldName == 'media_auto_mb') {
+      final mb = int.tryParse('$value'.trim());
+      if (mb != null) PreferencesService.instanceSync?.mediaAutoMaxMb = mb;
+    }
     _onChange();
   }
 }
 
+// ── Forward-message picker ───────────────────────────────────────────────
+// A search box over existing conversations (DMs + group rooms) plus a free
+// callsign/#group field, used to forward a message somewhere else.
+class _ForwardPanel extends StatefulWidget {
+  final List<ConversationItem> contacts;
+  final void Function(String target) onPick;
+  const _ForwardPanel({required this.contacts, required this.onPick});
+
+  @override
+  State<_ForwardPanel> createState() => _ForwardPanelState();
+}
+
+class _ForwardPanelState extends State<_ForwardPanel> {
+  final _search = TextEditingController();
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final q = _search.text.trim().toUpperCase();
+    final matches = [
+      for (final c in widget.contacts)
+        if (q.isEmpty ||
+            c.id.toUpperCase().contains(q) ||
+            c.title.toUpperCase().contains(q))
+          c
+    ];
+    // Offer the typed text itself as a fresh target (callsign or #group) when it
+    // isn't already an exact existing conversation.
+    final typed = _search.text.trim();
+    final exact = widget.contacts.any((c) => c.id.toUpperCase() == q);
+    return Padding(
+      padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: SafeArea(
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.6,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                child: Row(
+                  children: [
+                    const Icon(Icons.forward, size: 20),
+                    const SizedBox(width: 8),
+                    Text('Forward to',
+                        style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: TextField(
+                  controller: _search,
+                  autofocus: true,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search),
+                    hintText: 'Search contacts, or type a callsign / #group',
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                  onSubmitted: (v) {
+                    if (v.trim().isNotEmpty) widget.onPick(v.trim());
+                  },
+                ),
+              ),
+              const SizedBox(height: 4),
+              Expanded(
+                child: ListView(
+                  children: [
+                    if (typed.isNotEmpty && !exact)
+                      ListTile(
+                        leading: CircleAvatar(
+                            backgroundColor: cs.primaryContainer,
+                            child: const Icon(Icons.send, size: 18)),
+                        title: Text('Send to "$typed"'),
+                        subtitle: const Text('new callsign or #group'),
+                        onTap: () => widget.onPick(typed),
+                      ),
+                    for (final c in matches)
+                      ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: cs.secondaryContainer,
+                          child: Icon(
+                              c.id.startsWith('#') ? Icons.groups : Icons.person,
+                              size: 18),
+                        ),
+                        title: Text(c.title.isEmpty ? c.id : c.title),
+                        subtitle: c.title.isEmpty || c.title == c.id
+                            ? null
+                            : Text(c.id),
+                        onTap: () => widget.onPick(c.id),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── Slippy tile map widget ───────────────────────────────────────────
-
-
 
 

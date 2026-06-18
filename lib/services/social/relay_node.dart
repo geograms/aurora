@@ -1,7 +1,7 @@
 /*
  * RelayNode — a NOSTR relay/indexer endpoint on the Dart Reticulum stack.
  *
- * Registers an 'aurora'/['relay'] destination and answers relay requests over an
+ * Registers a 'geogram'/['relay'] destination and answers relay requests over an
  * RnsLink (responder side): EVENT publishes an event into the local
  * [RelayEventStore], REQ runs a NIP-01 filter (incl. NIP-50 search) and returns
  * the matches, COUNT returns a tally. As a client (initiator side) it can
@@ -33,7 +33,7 @@ import 'relay_event_store.dart';
 import 'relay_protocol.dart';
 import 'spam.dart';
 
-const String kRelayApp = 'aurora';
+const String kRelayApp = 'geogram';
 const List<String> kRelayAspects = ['relay'];
 
 // Max relay message we send as a single link packet (else an RNS Resource).
@@ -49,6 +49,23 @@ class RelayNode {
   /// Optional anti-spam acceptance policy applied to inbound EVENTs (PoW / rate
   /// / size). Null = accept anything with a valid signature.
   final SpamPolicy? spam;
+
+  /// Whether to act as a relay SERVER (accept inbound links and answer
+  /// EVENT/REQ/COUNT from the network). A phone/leaf sets this false: it still
+  /// queries other relays (the client API below), but never serves the network
+  /// — serving the whole network's queries off the device store pegged the UI
+  /// isolate (57 MB/s of sqlite reads) and ANR'd the app. Mutable so the owner
+  /// can flip hosting on/off at runtime (capacity / settings switch).
+  bool serve;
+
+  /// Hosting tier classifier: maps an author pubkey (hex) to a retention tier
+  /// index (0 self / 1 followed / 2 stranger). Null = treat everyone as stranger.
+  int Function(String pubHex)? tierOfPub;
+
+  /// Hosting admission gate for inbound EVENTs: returns a rejection reason, or
+  /// null to accept. Null hook = accept (subject only to spam). Lets the owner
+  /// enforce per-tier quotas without coupling the relay to the policy.
+  String? Function(NostrEvent ev, int tier)? admitEvent;
 
   /// Called whenever an event is accepted via an inbound EVENT (so the owner can
   /// fan it out / re-index). Optional.
@@ -69,11 +86,15 @@ class RelayNode {
     this.spam,
     this.onEvent,
     this.log,
+    this.serve = true,
+    this.tierOfPub,
+    this.admitEvent,
   });
 
   /// Feed an inbound packet; true if it belonged to the relay.
   Future<bool> handlePacket(RnsPacket p) async {
-    if (p.packetType == RnsPacketType.linkRequest &&
+    if (serve &&
+        p.packetType == RnsPacketType.linkRequest &&
         RnsCrypto.constantTimeEquals(p.destHash, relayDestHash)) {
       await _accept(p);
       return true;
@@ -230,7 +251,16 @@ class RelayNode {
             rl.sendMessage(RelayProtocol.stored(false, verdict.reason));
             break;
           }
-          final ok = store.put(ev);
+          // Hosting tier + quota: classify the author, then run the admission
+          // gate. self (0) is always admitted; strangers can be refused past
+          // their monthly note / storage caps.
+          final tier = tierOfPub?.call(ev.pubkey) ?? 2;
+          final reject = admitEvent?.call(ev, tier);
+          if (reject != null) {
+            rl.sendMessage(RelayProtocol.stored(false, reject));
+            break;
+          }
+          final ok = store.put(ev, tier: tier);
           if (ok) onEvent?.call(ev);
           rl.sendMessage(RelayProtocol.stored(ok, ok ? null : 'rejected'));
           break;

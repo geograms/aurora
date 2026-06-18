@@ -14,10 +14,23 @@
  */
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart';
 import 'media_view.dart';
+
+/// Stable colour for a transport/channel label ("NET", "BLE", "LORA", …),
+/// derived from the string so each gets a distinct, consistent hue with no
+/// domain knowledge. Shared by the chat origin chips and the AppBar channel
+/// indicators so they match.
+Color viaTagColor(String s) {
+  var h = 0;
+  for (final c in s.toUpperCase().codeUnits) {
+    h = (h * 31 + c) & 0x7fffffff;
+  }
+  return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.62).toColor();
+}
 
 class ChatViewField extends StatefulWidget {
   final String fieldName;
@@ -48,6 +61,23 @@ class ChatViewField extends StatefulWidget {
   /// Tapping a sender's name on an incoming bubble (e.g. open their profile).
   final void Function(String from)? onSenderTap;
 
+  /// Attach a file: when set, an attach (paperclip) button appears in the
+  /// composer. Returns a `file:<sha>.<ext>` token to insert into the input
+  /// (the host archives the file + advertises it), or null if cancelled.
+  final Future<String?> Function()? onAttach;
+
+  /// Long-press message actions. When set, the bubble menu offers each one.
+  /// Forward gives the whole message; hide gives it (host reads its `key`);
+  /// block gives it (host reads its `from`). All purely local on the host.
+  final void Function(Map<String, dynamic> m)? onForward;
+  final void Function(Map<String, dynamic> m)? onHide;
+  final void Function(Map<String, dynamic> m)? onBlock;
+
+  /// Tapping a feed item that carries a `convo` (e.g. the Activity feed). The
+  /// host opens that conversation. Only items with a non-empty `convo` are
+  /// tappable; others ignore the tap.
+  final void Function(Map<String, dynamic> m)? onItemTap;
+
   const ChatViewField({
     super.key,
     required this.fieldName,
@@ -60,6 +90,11 @@ class ChatViewField extends StatefulWidget {
     this.composerAccessory,
     this.onLocate,
     this.onSenderTap,
+    this.onAttach,
+    this.onForward,
+    this.onHide,
+    this.onBlock,
+    this.onItemTap,
   });
 
   @override
@@ -556,6 +591,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
   static String _textWithoutTokens(String text) => text
       .replaceAll(RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}'), '')
       .replaceAll(RegExp(r'\bih:[0-9a-fA-F]{40}\b'), '') // BitTorrent hint
+      .replaceAll(RegExp(r'\bsz:\d+\b'), '') // media size hint
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 
@@ -647,7 +683,9 @@ class _ChatViewFieldState extends State<ChatViewField> {
                 spacing: 6,
                 runSpacing: 6,
                 children: [
-                  for (final r in mediaRefs) MediaThumbnail(ref: r),
+                  for (final r in mediaRefs)
+                    MediaThumbnail(
+                        ref: r, size: mediaSizeHint(text), from: from),
                 ],
               ),
             ),
@@ -711,23 +749,110 @@ class _ChatViewFieldState extends State<ChatViewField> {
                 const SizedBox(width: 10),
                 _likeButton(m),
               ],
+              // Overflow menu (⋮): the desktop-friendly way to reach copy /
+              // forward / hide / block without a long-press.
+              const SizedBox(width: 8),
+              InkWell(
+                onTap: () => _showMessageMenu(m, text, from, outgoing),
+                borderRadius: BorderRadius.circular(4),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+                  child: Icon(Icons.more_vert,
+                      size: 15, color: Colors.white.withAlpha(150)),
+                ),
+              ),
             ],
           ),
         ],
       ),
     );
     final align = outgoing ? Alignment.centerRight : Alignment.centerLeft;
-    // Tapping a threaded bubble (in the full chat) opens its focused thread; the
-    // inner Reply / "N replies" / meta taps still take precedence in their areas.
-    if (!canOpen) return Align(alignment: align, child: bubble);
+    // A feed item carrying a `convo` (e.g. Activity) jumps to that conversation
+    // on tap. Otherwise, tapping a threaded bubble opens its focused thread.
+    final convo = (m['convo'] ?? '').toString();
+    final canJump = widget.onItemTap != null && convo.isNotEmpty;
+    final void Function()? onTap = canJump
+        ? () => widget.onItemTap!(m)
+        : (canOpen ? () => _openThread(m) : null);
+    // Long-press opens a message menu (copy / forward / hide / block). The inner
+    // Reply / "N replies" / meta taps still take precedence in their areas.
     return Align(
       alignment: align,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => _openThread(m),
+        onLongPress: () => _showMessageMenu(m, text, from, outgoing),
+        onTap: onTap,
         child: bubble,
       ),
     );
+  }
+
+  /// Long-press message menu: copy plus any host-provided local actions.
+  void _showMessageMenu(
+      Map<String, dynamic> m, String text, String from, bool outgoing) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.copy),
+              title: const Text('Copy'),
+              onTap: () {
+                Navigator.pop(sheet);
+                _copyText(text);
+              },
+            ),
+            if (widget.onForward != null)
+              ListTile(
+                leading: const Icon(Icons.forward),
+                title: const Text('Forward'),
+                onTap: () {
+                  Navigator.pop(sheet);
+                  widget.onForward!(m);
+                },
+              ),
+            if (widget.onHide != null)
+              ListTile(
+                leading: const Icon(Icons.visibility_off_outlined),
+                title: const Text('Hide this message'),
+                onTap: () {
+                  Navigator.pop(sheet);
+                  widget.onHide!(m);
+                },
+              ),
+            // Block only makes sense for someone else's message.
+            if (widget.onBlock != null && !outgoing && from.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.block, color: Colors.red),
+                title: Text('Block $from',
+                    style: const TextStyle(color: Colors.red)),
+                onTap: () {
+                  Navigator.pop(sheet);
+                  widget.onBlock!(m);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Copy a message's human-readable text (media tokens stripped) to the
+  /// clipboard, with a brief confirmation.
+  void _copyText(String raw) {
+    final stripped = _textWithoutTokens(raw).trim();
+    final out = stripped.isEmpty ? raw.trim() : stripped;
+    if (out.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: out));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Message copied'), duration: Duration(seconds: 1)),
+      );
+    }
   }
 
   /// Quoted snippet of the message this one replies to (threading). Shows the
@@ -825,13 +950,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
-  Color _viaColor(String s) {
-    var h = 0;
-    for (final c in s.toUpperCase().codeUnits) {
-      h = (h * 31 + c) & 0x7fffffff;
-    }
-    return HSLColor.fromAHSL(1, (h % 360).toDouble(), 0.55, 0.62).toColor();
-  }
+  Color _viaColor(String s) => viaTagColor(s);
 
   Widget _replyBanner(ColorScheme cs) {
     final m = _replyingTo!;
@@ -871,11 +990,27 @@ class _ChatViewFieldState extends State<ChatViewField> {
     return _composeRow(cs);
   }
 
+  Future<void> _attach() async {
+    final token = await widget.onAttach!();
+    if (token == null || token.isEmpty) return;
+    final cur = _input.text;
+    _input.text = cur.isEmpty ? token : '$cur $token';
+    _input.selection = TextSelection.collapsed(offset: _input.text.length);
+    if (mounted) setState(() {});
+  }
+
   Widget _composeRow(ColorScheme cs) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
       child: Row(
         children: [
+          if (widget.onAttach != null)
+            IconButton(
+              icon: const Icon(Icons.attach_file),
+              tooltip: 'Attach a file',
+              color: cs.primary,
+              onPressed: _attach,
+            ),
           Expanded(
             child: TextField(
               controller: _input,

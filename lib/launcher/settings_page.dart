@@ -105,6 +105,14 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
     if (mounted) setState(() {});
   }
 
+  Future<void> _editRnsServers() async {
+    if (_prefs == null) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const RnsServersPage()),
+    );
+    if (mounted) setState(() {}); // refresh the subtitle count on return
+  }
+
   Future<void> _pickDirectory() async {
     final defaultPath =
         _prefs == null ? '' : wappsDataStorage(_prefs!).basePath;
@@ -338,6 +346,102 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                 ),
                 const SizedBox(height: 24),
 
+                // ── Reticulum ──
+                Text('Reticulum',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                        )),
+                const SizedBox(height: 4),
+                Text(
+                  'Bootstrap hubs the node connects to. It tries each in order '
+                  'until one answers with real Reticulum traffic.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: ListTile(
+                    leading: const Icon(Icons.dns),
+                    title: const Text('Bootstrap servers'),
+                    subtitle: Text(
+                      () {
+                        final list = _prefs?.rnsBootstrapServers ?? const [];
+                        if (list.isEmpty) return 'None set';
+                        final n = list.length;
+                        return '$n server${n == 1 ? '' : 's'} — ${list.first}'
+                            '${n > 1 ? ' …' : ''}';
+                      }(),
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                    trailing: const Icon(Icons.edit),
+                    onTap: _editRnsServers,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Host for the mesh: act as a NOSTR relay + file host so peers '
+                  'have a free place to store notes and files. Tiered fair-use '
+                  'quotas apply — your own and people you follow are kept; '
+                  'strangers are capped.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: Column(
+                    children: [
+                      SwitchListTile(
+                        secondary: const Icon(Icons.cloud_upload_outlined),
+                        title: const Text('Host for the mesh'),
+                        subtitle: Text(
+                          'Store notes + files for other nodes (relay + Blossom)',
+                          style: TextStyle(color: cs.onSurfaceVariant),
+                        ),
+                        value: _prefs?.hostEnabled ?? true,
+                        onChanged: (v) {
+                          _prefs?.hostEnabled = v;
+                          RnsService.instance.applyHostingSettings();
+                          setState(() {});
+                        },
+                      ),
+                      const Divider(height: 1),
+                      SwitchListTile(
+                        secondary: const Icon(Icons.battery_charging_full),
+                        title: const Text('Only when charging on Wi-Fi'),
+                        subtitle: Text(
+                          'Host only while charging on Wi-Fi/Ethernet (off = host '
+                          'on any connection)',
+                          style: TextStyle(color: cs.onSurfaceVariant),
+                        ),
+                        value: _prefs?.hostCapacityGated ?? true,
+                        onChanged: (_prefs?.hostEnabled ?? true)
+                            ? (v) {
+                                _prefs?.hostCapacityGated = v;
+                                RnsService.instance.applyHostingSettings();
+                                setState(() {});
+                              }
+                            : null,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+
                 // ── Data Directory ──
                 Text('Storage',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
@@ -517,5 +621,237 @@ class _WappDataEntry {
   final String path;
   final int size;
   _WappDataEntry(this.name, this.path, this.size);
+}
+
+// ── Reticulum bootstrap servers ──────────────────────────────────────────
+//
+// A full-screen editor for the ordered list of bootstrap hubs. The node tries
+// each in order until one answers with real Reticulum traffic, so order is the
+// priority. Add / edit (separate host + port fields) / remove / reorder, all
+// persisted immediately.
+
+class RnsServersPage extends StatefulWidget {
+  const RnsServersPage({super.key});
+
+  @override
+  State<RnsServersPage> createState() => _RnsServersPageState();
+}
+
+class _RnsServersPageState extends State<RnsServersPage> {
+  PreferencesService? _prefs;
+  List<String> _servers = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final p = await PreferencesService.instance();
+    if (!mounted) return;
+    setState(() {
+      _prefs = p;
+      _servers = List<String>.from(p.rnsBootstrapServers);
+    });
+  }
+
+  void _save() {
+    _prefs?.rnsBootstrapServers = _servers;
+  }
+
+  /// Split "host:port" into (host, port-string). Port defaults to "4242".
+  (String, String) _split(String entry) {
+    final s = entry.trim();
+    final i = s.lastIndexOf(':');
+    if (i <= 0 || i == s.length - 1) return (s, '4242');
+    return (s.substring(0, i), s.substring(i + 1));
+  }
+
+  Future<void> _addOrEdit({int? index}) async {
+    final initial = index == null ? ('', '4242') : _split(_servers[index]);
+    final hostCtl = TextEditingController(text: initial.$1);
+    final portCtl = TextEditingController(text: initial.$2);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Text(index == null ? 'Add server' : 'Edit server'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: hostCtl,
+                autofocus: true,
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: 'Host',
+                  hintText: 'rns.example.net',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: portCtl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Port',
+                  hintText: '4242',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final host = hostCtl.text.trim();
+                if (host.isEmpty) {
+                  Navigator.pop(ctx);
+                  return;
+                }
+                final port = int.tryParse(portCtl.text.trim()) ?? 4242;
+                Navigator.pop(ctx, '$host:$port');
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    if (result == null) return;
+    setState(() {
+      if (index == null) {
+        _servers.add(result);
+      } else {
+        _servers[index] = result;
+      }
+    });
+    _save();
+  }
+
+  void _remove(int index) {
+    setState(() => _servers.removeAt(index));
+    _save();
+  }
+
+  void _resetDefaults() {
+    setState(() {
+      _prefs?.rnsBootstrapServers = <String>[]; // clears → getter returns defaults
+      _servers = List<String>.from(_prefs?.rnsBootstrapServers ?? const []);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Reticulum servers'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.restore),
+            tooltip: 'Reset to defaults',
+            onPressed: _resetDefaults,
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _addOrEdit(),
+        icon: const Icon(Icons.add),
+        label: const Text('Add server'),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Text(
+              'Bootstrap hubs the node connects to, in priority order. It tries '
+              'each from the top until one answers with real Reticulum traffic. '
+              'Drag to reorder.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+            ),
+          ),
+          Expanded(
+            child: _servers.isEmpty
+                ? Center(
+                    child: Text('No servers — tap "Add server".',
+                        style: TextStyle(color: cs.onSurfaceVariant)),
+                  )
+                : ReorderableListView.builder(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 96),
+                    itemCount: _servers.length,
+                    onReorder: (oldI, newI) {
+                      setState(() {
+                        if (newI > oldI) newI -= 1;
+                        final item = _servers.removeAt(oldI);
+                        _servers.insert(newI, item);
+                      });
+                      _save();
+                    },
+                    itemBuilder: (context, i) {
+                      final entry = _servers[i];
+                      final hp = _split(entry);
+                      return Card(
+                        key: ValueKey('rns-srv-$i-$entry'),
+                        elevation: 0,
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          side:
+                              BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                        ),
+                        color: cs.surfaceContainerLow,
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            radius: 14,
+                            backgroundColor: cs.primaryContainer,
+                            child: Text('${i + 1}',
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    color: cs.onPrimaryContainer)),
+                          ),
+                          title: Text(hp.$1,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          subtitle: Text('port ${hp.$2}',
+                              style: TextStyle(color: cs.onSurfaceVariant)),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.edit),
+                                tooltip: 'Edit',
+                                onPressed: () => _addOrEdit(index: i),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline),
+                                tooltip: 'Remove',
+                                onPressed: () => _remove(i),
+                              ),
+                              ReorderableDragStartListener(
+                                index: i,
+                                child: const Padding(
+                                  padding: EdgeInsets.only(left: 4),
+                                  child: Icon(Icons.drag_handle),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 

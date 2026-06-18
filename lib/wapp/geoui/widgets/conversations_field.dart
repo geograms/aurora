@@ -1,10 +1,9 @@
 // ConversationsField — a generic, app-agnostic messenger primitive: a
-// conversation list plus a per-conversation chat view with an optional
-// pinned section. It renders a ConversationStore the wapp owns and reports
-// user intent back through callbacks; it has no domain knowledge (no groups,
-// callsigns, bulletins, distances — the wapp supplies titles/badges/icons as
-// plain data and decides what is pinned). Reuses ChatViewField for the chat
-// surface (bubbles + composer + scroll-hold).
+// conversation list plus a per-conversation chat view. It renders a
+// ConversationStore the wapp owns and reports user intent back through
+// callbacks; it has no domain knowledge (no groups, callsigns, bulletins,
+// distances — the wapp supplies titles/badges/icons as plain data). Reuses
+// ChatViewField for the chat surface (bubbles + composer + scroll-hold).
 
 import 'package:flutter/material.dart';
 
@@ -25,7 +24,11 @@ class ComposerToggle {
   final String name;
   final String label;
   final bool value;
-  const ComposerToggle(this.name, this.label, this.value);
+  /// Hidden in GLOBAL group rooms (ids ending in '*') — e.g. "Include my
+  /// location", which makes a post local and so is meaningless worldwide.
+  final bool localOnly;
+  const ComposerToggle(this.name, this.label, this.value,
+      {this.localOnly = false});
 }
 
 /// Map a generic icon name to a Material icon. Names are plain UI hints, not
@@ -84,8 +87,12 @@ class ConversationsField extends StatefulWidget {
   /// (empty if none).
   final void Function(String name, String openId) onAction;
 
-  /// Dismiss/act on a pinned item.
-  final void Function(String id, String key) onPinnedDismiss;
+  /// Long-press message actions (purely local on the host). Forward gives the
+  /// conversation id + the whole message; hide gives id + the message key;
+  /// block gives the sender callsign. Null disables that menu entry.
+  final void Function(String id, Map<String, dynamic> m)? onForward;
+  final void Function(String id, String key)? onHide;
+  final void Function(String from)? onBlock;
 
   /// Labelled checkboxes shown above the composer; toggling reports back.
   final List<ComposerToggle> toggles;
@@ -96,6 +103,10 @@ class ConversationsField extends StatefulWidget {
 
   /// Tapping a sender's name on an incoming bubble (e.g. open their profile).
   final void Function(String from)? onSenderTap;
+
+  /// Attach a file to the open conversation — returns a `file:<sha>.<ext>`
+  /// token to insert into the composer (host archives + advertises it).
+  final Future<String?> Function()? onAttach;
 
   /// Controlled mode: the host owns which conversation is open (so it can put
   /// the thread title + back arrow in its own AppBar). When [onOpenChanged]
@@ -115,14 +126,17 @@ class ConversationsField extends StatefulWidget {
     required this.onSelect,
     required this.onSend,
     required this.onAction,
-    required this.onPinnedDismiss,
     required this.onToggle,
+    this.onForward,
+    this.onHide,
+    this.onBlock,
     this.title = 'Conversations',
     this.listActions = const [],
     this.roomActions = const [],
     this.toggles = const [],
     this.onLocate,
     this.onSenderTap,
+    this.onAttach,
     this.openId,
     this.onOpenChanged,
     this.showRoomHeader = true,
@@ -347,7 +361,6 @@ class _ConversationsFieldState extends State<ConversationsField> {
     final cs = Theme.of(context).colorScheme;
     final it = widget.store.items[id];
     if (it == null) return _emptyRoom(context);
-    final pinned = it.pinned.entries.toList();
 
     return Column(
       children: [
@@ -396,7 +409,6 @@ class _ConversationsFieldState extends State<ConversationsField> {
             ],
           ),
         ),
-        if (pinned.isNotEmpty) _pinnedBar(context, id, pinned),
         Expanded(
           child: ChatViewField(
             key: ValueKey('conv_$id'),
@@ -404,18 +416,35 @@ class _ConversationsFieldState extends State<ConversationsField> {
             label: '',
             messages: it.messages,
             fill: true,
-            composerAccessory: widget.toggles.isEmpty ? null : _toggleBar(context),
+            composerAccessory: _toggleBar(context, id),
             onLocate: widget.onLocate,
             onSenderTap: widget.onSenderTap,
+            onAttach: widget.onAttach,
             onSend: (text) => widget.onSend(id, text),
+            onForward: widget.onForward == null
+                ? null
+                : (m) => widget.onForward!(id, m),
+            onHide: widget.onHide == null
+                ? null
+                : (m) => widget.onHide!(id, (m['key'] ?? '').toString()),
+            onBlock: widget.onBlock == null
+                ? null
+                : (m) => widget.onBlock!((m['from'] ?? '').toString()),
           ),
         ),
       ],
     );
   }
 
-  Widget _toggleBar(BuildContext context) {
+  Widget? _toggleBar(BuildContext context, String openId) {
     final cs = Theme.of(context).colorScheme;
+    // In a GLOBAL group room (#NAME*), drop local-only toggles (location).
+    final isGlobalGroup = openId.startsWith('#') && openId.endsWith('*');
+    final shown = [
+      for (final t in widget.toggles)
+        if (!(isGlobalGroup && t.localOnly)) t
+    ];
+    if (shown.isEmpty) return null;
     return Align(
       alignment: Alignment.centerLeft,   // keep the toggles on the left edge
       child: Padding(
@@ -423,7 +452,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
       child: Wrap(
         spacing: 4,
         children: [
-          for (final t in widget.toggles)
+          for (final t in shown)
             InkWell(
               onTap: () => widget.onToggle(t.name, !t.value),
               borderRadius: BorderRadius.circular(6),
@@ -449,52 +478,6 @@ class _ConversationsFieldState extends State<ConversationsField> {
       ),
       ),
     );
-  }
-
-  Widget _pinnedBar(BuildContext context, String id,
-      List<MapEntry<String, Map<String, dynamic>>> pinned) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      color: cs.primary.withAlpha(20),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final e in pinned)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 2),
-              child: Row(
-                children: [
-                  Icon(Icons.push_pin, size: 14, color: cs.primary),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _pinnedLine(e.value),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12.5),
-                    ),
-                  ),
-                  InkWell(
-                    onTap: () => widget.onPinnedDismiss(id, e.key),
-                    child: Icon(Icons.close,
-                        size: 16, color: cs.onSurfaceVariant),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  String _pinnedLine(Map<String, dynamic> m) {
-    final from = (m['from'] ?? '').toString();
-    final text = (m['text'] ?? '').toString();
-    final out = (m['dir'] ?? '') == 'out';
-    return from.isEmpty || out ? text : '$from: $text';
   }
 
   Widget _emptyRoom(BuildContext context) {

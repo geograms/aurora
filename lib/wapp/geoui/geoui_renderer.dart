@@ -333,7 +333,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
     final tip = _t(field.getString('tip'));
 
     return switch (type) {
-      'bool' => _renderBoolField(fieldName, label, tip),
+      'bool' => _renderBoolField(fieldName, label, tip, field.getString('apply')),
       'int' => _renderNumericField(fieldName, label, tip,
           isInt: true, block: field),
       'float' => _renderNumericField(fieldName, label, tip,
@@ -428,7 +428,8 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
     );
   }
 
-  Widget _renderBoolField(String name, String label, String? tip) {
+  Widget _renderBoolField(String name, String label, String? tip,
+      [String? apply]) {
     final cs = Theme.of(context).colorScheme;
     final val = widget.bindings.getValue(name) as bool? ?? false;
 
@@ -446,6 +447,9 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
         onChanged: (v) {
           widget.bindings.setValue(name, v);
           setState(() {});
+          // When the field declares an `apply` command, toggling takes effect
+          // immediately (no separate Apply button needed).
+          if (apply != null && apply.isNotEmpty) widget.onAction?.call(apply);
         },
       ),
     );
@@ -648,6 +652,8 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
     // URL/path lives per line.
     final multiline = field.getBool('multiline') ?? false;
     final lines = (field.getNumber('lines') ?? 6).toInt();
+    // Optional hard length cap (shows the live counter + enforces the limit).
+    final maxLen = field.getNumber('max')?.toInt();
     final val = widget.bindings.getValue(name)?.toString() ?? '';
     return TextField(
       decoration: InputDecoration(
@@ -660,6 +666,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       ),
       readOnly: readOnly,
+      maxLength: (maxLen != null && maxLen > 0) ? maxLen : null,
       maxLines: multiline ? lines : 1,
       minLines: multiline ? 3 : 1,
       keyboardType:
@@ -863,6 +870,11 @@ IconData geoUiResolveIcon(String name) {
       return Icons.delete;
     case 'info':
       return Icons.info_outline;
+    case 'link':
+      return Icons.link;
+    case 'content_copy':
+    case 'copy':
+      return Icons.content_copy;
     case 'help':
       return Icons.help_outline;
     case 'download':
@@ -877,6 +889,19 @@ IconData geoUiResolveIcon(String name) {
       return Icons.stop;
     case 'open':
       return Icons.folder_open;
+    case 'folder':
+      return Icons.folder;
+    case 'folder_shared':
+      return Icons.folder_shared;
+    case 'create_new_folder':
+      return Icons.create_new_folder;
+    case 'file':
+    case 'description':
+      return Icons.insert_drive_file;
+    case 'list':
+      return Icons.list;
+    case 'category':
+      return Icons.category;
     case 'close':
       return Icons.close;
     case 'check':

@@ -147,6 +147,13 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
     // "filled" reads as the suggestion (Follow), "outlined" as the current
     // state (Following) — matching the familiar social-app pattern.
     final filled = (it['actionStyle'] ?? 'outlined').toString() == 'filled';
+    // Optional per-row overflow ("...") menu: [{label, value}]. Selecting an
+    // entry fires onAction(value, id) — same path as the trailing button.
+    final menu = ((it['menu'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => m.cast<String, dynamic>())
+        .where((m) => (m['value'] ?? '').toString().isNotEmpty)
+        .toList();
 
     return InkWell(
       onTap: () => widget.onTap(id),
@@ -233,6 +240,19 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
                       child: Text(actionLabel),
                     ),
             ],
+            if (menu.isNotEmpty)
+              PopupMenuButton<String>(
+                icon: const Icon(Icons.more_vert),
+                tooltip: 'More',
+                onSelected: (v) => widget.onAction(v, id),
+                itemBuilder: (_) => [
+                  for (final m in menu)
+                    PopupMenuItem<String>(
+                      value: (m['value'] ?? '').toString(),
+                      child: Text((m['label'] ?? m['value'] ?? '').toString()),
+                    ),
+                ],
+              ),
           ],
         ),
       ),

@@ -171,11 +171,22 @@ class MediaArchive {
         'parent TEXT',
         'downloads INTEGER NOT NULL DEFAULT 0',
         'pinned INTEGER NOT NULL DEFAULT 1',
+        // Store-and-forward hosting: hosted=1 means we keep this blob on behalf
+        // of others (a third-party deposit), 0 = our own/downloaded. origin_pub
+        // is the depositing peer's pubkey (hex); tier is 0 self / 1 followed /
+        // 2 stranger, driving tier-aware eviction. received_at = when we accepted
+        // the hosted blob (ms). Our own/downloaded media stays pinned=1.
+        'hosted INTEGER NOT NULL DEFAULT 0',
+        'origin_pub TEXT',
+        'tier INTEGER NOT NULL DEFAULT 0',
+        'received_at INTEGER NOT NULL DEFAULT 0',
       ]) {
         try {
           db.execute('ALTER TABLE media ADD COLUMN $col;');
         } catch (_) {/* column already present */}
       }
+      db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_media_hosted ON media(hosted, tier, received_at);');
       db.execute(
           'CREATE INDEX IF NOT EXISTS idx_media_folder ON media(parent, folder);');
       // Full-text index for local search (works even when the RNS node is off).
@@ -330,6 +341,83 @@ class MediaArchive {
       debugPrint('MediaArchive: putBytes failed: $e2');
     }
     return token;
+  }
+
+  // ── Store-and-forward hosting (third-party blobs) ─────────────────────────
+
+  /// Store a blob we host ON BEHALF OF a peer (store-and-forward Blossom). Unlike
+  /// putBytes (our own/downloaded media, pinned), this records provenance
+  /// ([originPubHex] = depositor) and the retention [tier] (0 self / 1 followed /
+  /// 2 stranger) so the evictor can drop it under storage pressure. If we already
+  /// hold the bytes as our own (hosted=0), the row is left as our own. Returns the
+  /// sha256 token.
+  String putHosted(Uint8List data, String ext,
+      {required String originPubHex, required int tier, int? receivedAtMs}) {
+    final e = _normExt(ext);
+    final key = _b64u(crypto.sha256.convert(data).bytes);
+    final token = 'file:$key.$e';
+    final db = _ensureDb();
+    if (db == null) return token;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final rcv = receivedAtMs ?? now;
+    try {
+      final sha1b64 = _b64u(crypto.sha1.convert(data).bytes);
+      db.execute(
+        'INSERT OR IGNORE INTO media'
+        '(sha256,sha1,tlsh,name,ext,description,tags,'
+        ' first_seen,last_seen,size,screenshot,data,pinned,hosted,origin_pub,tier,received_at) '
+        'VALUES(?,?,NULL,NULL,?,NULL,NULL,?,?,?,NULL,?,0,1,?,?,?)',
+        [key, sha1b64, e, now, now, data.length, data, originPubHex, tier, rcv],
+      );
+      if (db.updatedRows == 0) {
+        // Already present: just bump last_seen (keep its existing ownership).
+        db.execute('UPDATE media SET last_seen=? WHERE sha256=?', [now, key]);
+      }
+      _syncFts(db, key);
+    } catch (e2) {
+      debugPrint('MediaArchive: putHosted failed: $e2');
+    }
+    return token;
+  }
+
+  /// Hosted-blob byte totals for the deposit admission gate: ({strangerBytes,
+  /// totalHostedBytes}). Our own/downloaded media (hosted=0) is excluded.
+  ({int strangerBytes, int totalHostedBytes}) hostedTotals() {
+    final db = _ensureDb();
+    if (db == null) return (strangerBytes: 0, totalHostedBytes: 0);
+    try {
+      final s = db.select(
+          'SELECT COALESCE(SUM(size),0) b FROM media WHERE hosted=1 AND tier=2')
+          .first['b'] as int;
+      final t = db.select(
+          'SELECT COALESCE(SUM(size),0) b FROM media WHERE hosted=1')
+          .first['b'] as int;
+      return (strangerBytes: s, totalHostedBytes: t);
+    } catch (_) {
+      return (strangerBytes: 0, totalHostedBytes: 0);
+    }
+  }
+
+  /// Inventory of hosted blobs for the eviction planner: each is media (a blob),
+  /// with its tier, size and accept time. Our own media (hosted=0) is never here.
+  List<({String sha, int tier, int bytes, int receivedAtMs})> hostedInventory() {
+    final db = _ensureDb();
+    if (db == null) return const [];
+    try {
+      final rows = db.select(
+          'SELECT sha256, tier, size, received_at FROM media WHERE hosted=1');
+      return [
+        for (final r in rows)
+          (
+            sha: r['sha256'] as String,
+            tier: (r['tier'] as int?) ?? 2,
+            bytes: (r['size'] as int?) ?? 0,
+            receivedAtMs: (r['received_at'] as int?) ?? 0,
+          )
+      ];
+    } catch (_) {
+      return const [];
+    }
   }
 
   /// The raw bytes for a token or bare hash (null when absent). A hit counts

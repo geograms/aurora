@@ -22,10 +22,6 @@ class ConversationItem {
   /// Normal messages, in arrival order. Each: {dir, from, text, time}.
   final List<Map<String, dynamic>> messages = [];
 
-  /// Pinned messages, keyed by an opaque key the wapp chooses (it decides
-  /// what to pin / dedup). Each value: {from, text, time, dir}.
-  final Map<String, Map<String, dynamic>> pinned = {};
-
   ConversationItem(
     this.id, {
     this.title = '',
@@ -45,7 +41,6 @@ class ConversationItem {
         'unread': unread,
         'activityTs': activityTs,
         'messages': messages,
-        'pinned': pinned,
       };
 
   factory ConversationItem.fromJson(Map<String, dynamic> j) {
@@ -63,14 +58,6 @@ class ConversationItem {
       for (final m in msgs) {
         if (m is Map) it.messages.add(m.map((k, v) => MapEntry(k.toString(), v)));
       }
-    }
-    final pins = j['pinned'];
-    if (pins is Map) {
-      pins.forEach((k, v) {
-        if (v is Map) {
-          it.pinned[k.toString()] = v.map((kk, vv) => MapEntry(kk.toString(), vv));
-        }
-      });
     }
     return it;
   }
@@ -163,37 +150,28 @@ class ConversationStore {
     _bump(id);
   }
 
-  void pin(Map d) {
+  /// Remove already-shown messages locally (hide / block — never network state).
+  /// Two forms: `{id, key}` drops one message from one conversation; `{from}`
+  /// drops every message by a sender across all conversations and removes a
+  /// direct conversation row with that callsign.
+  void remove(Map d) {
+    final from = (d['from'] ?? '').toString();
+    if (from.isNotEmpty) {
+      for (final it in items.values) {
+        it.messages.removeWhere((m) => (m['from'] ?? '').toString() == from);
+      }
+      // A 1:1 conversation with the blocked station goes away entirely; group
+      // rows stay (only that sender's messages were stripped).
+      if (items.containsKey(from)) {
+        items.remove(from);
+        order.remove(from);
+      }
+      return;
+    }
     final id = (d['id'] ?? '').toString();
     final key = (d['key'] ?? '').toString();
     if (id.isEmpty || key.isEmpty) return;
-    final it = _ensure(id);
-    // Promote: a message that becomes pinned must leave the normal flow so it
-    // is shown once (pinned), not duplicated.
-    it.messages.removeWhere((m) => (m['key'] ?? '') == key);
-    it.pinned[key] = {
-      'dir': (d['dir'] ?? 'in').toString(),
-      'from': (d['from'] ?? '').toString(),
-      'text': (d['text'] ?? '').toString(),
-      'time': (d['time'] ?? '').toString(),
-      'meta': (d['meta'] ?? '').toString(),
-      if ((d['via'] ?? '').toString().isNotEmpty) 'via': d['via'].toString(),
-      if ((d['mid'] ?? '').toString().isNotEmpty) 'mid': d['mid'].toString(),
-      if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
-      if ((d['auth'] ?? '').toString().isNotEmpty) 'auth': d['auth'].toString(),
-      if (d['enc'] == true) 'enc': true,
-      if (d['lat'] != null) 'lat': d['lat'],
-      if (d['lon'] != null) 'lon': d['lon'],
-    };
-    final mid = (d['mid'] ?? '').toString();
-    if (mid.isNotEmpty && reactions.containsKey(mid)) _applyReaction(mid);
-    if (d['bump'] == true) _bump(id);
-  }
-
-  void unpin(Map d) {
-    final id = (d['id'] ?? '').toString();
-    final key = (d['key'] ?? '').toString();
-    items[id]?.pinned.remove(key);
+    items[id]?.messages.removeWhere((m) => (m['key'] ?? '').toString() == key);
   }
 
   /// Record a reaction (like) on a message. [d]: `{mid, from, remove?, mine?}`.
@@ -227,12 +205,6 @@ class ConversationStore {
     final mine = r['mine'] == true;
     for (final it in items.values) {
       for (final m in it.messages) {
-        if ((m['mid'] ?? '') == mid) {
-          m['likes'] = count;
-          m['liked'] = mine;
-        }
-      }
-      for (final m in it.pinned.values) {
         if ((m['mid'] ?? '') == mid) {
           m['likes'] = count;
           m['liked'] = mine;

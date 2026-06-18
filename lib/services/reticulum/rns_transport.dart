@@ -69,6 +69,19 @@ class RnsTransport {
 
   final List<RnsInterface> _interfaces = [];
   final Map<String, RnsPathEntry> _paths = {};
+
+  /// LRU cap on the path table. A phone leaf attached to a full transport hub
+  /// hears the entire network's announces; without a cap the table grows
+  /// unbounded (the old out-of-memory). 2048 is far more than any one device
+  /// talks to while keeping memory bounded.
+  static const int _maxPaths = 2048;
+
+  // Per-second budget for verifying announces from *new* destinations, so the
+  // live network's announce flood can't saturate the UI isolate. Re-announces of
+  // known destinations are exempt (cheap, and keep active paths fresh).
+  static const int _annBudgetPerSec = 20;
+  int _annWindowStart = 0;
+  int _annCount = 0;
   final Set<String> _seenPackets = {};
   // Link table for transport forwarding: link_id hex -> the two interfaces the
   // link bridges (created when we forward a LINKREQUEST). Lets us route every
@@ -127,7 +140,32 @@ class RnsTransport {
     if (transportId != null && _maybeForward(p, via)) return null;
 
     if (p.packetType != RnsPacketType.announce) return null;
-    final ann = await validateAnnounce(p);
+
+    // Connected to a busy transport hub, a phone leaf hears the WHOLE network's
+    // announce stream — hundreds of new destinations a second. Verifying an
+    // Ed25519 signature for each on the UI isolate pegs a core and ANRs the app.
+    // So budget the verification of *new* destinations per second (the flood);
+    // re-announces of destinations we already track are cheap (see trustIf) and
+    // never throttled, so paths we actually use keep refreshing. A dropped new
+    // announce costs nothing — that destination re-announces periodically and
+    // outbound traffic reaches the hub regardless.
+    final destKey = _hex(p.destHash);
+    if (!_paths.containsKey(destKey)) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - _annWindowStart >= 1000) {
+        _annWindowStart = nowMs;
+        _annCount = 0;
+      }
+      if (_annCount >= _annBudgetPerSec) return null; // shed the flood
+      _annCount++;
+    }
+
+    // Skip re-verifying an unchanged re-announce of a destination we already
+    // verified (same key + app_data) — the common case once the table is warm.
+    final ann = await validateAnnounce(p, trustIf: (dh, pk, ad) {
+      final e = _paths[_hex(dh)];
+      return e != null && _eq(e.publicKey, pk) && _eq(e.appData, ad);
+    });
     if (ann == null) return null;
 
     final pathHops = p.hops + 1; // hop just taken to reach us
@@ -138,6 +176,10 @@ class RnsTransport {
     final key = _hex(ann.destHash);
     final existing = _paths[key];
     if (existing == null || pathHops <= existing.hops) {
+      // Re-insert at the tail so recently-heard destinations are youngest —
+      // the table is an LRU bounded by [_maxPaths] (below) so the network-wide
+      // announce flood can't grow it without bound (the old OOM).
+      _paths.remove(key);
       _paths[key] = RnsPathEntry(
         destHash: ann.destHash,
         identity: ann.identity,
@@ -148,8 +190,10 @@ class RnsTransport {
         nextHop: nextHop,
         updatedMs: DateTime.now().millisecondsSinceEpoch,
       );
-      log?.call(
-          'path ${_hex(ann.destHash)} via $via hops=$pathHops (${_paths.length} known)');
+      // Evict the oldest entries past the cap (insertion order = age).
+      while (_paths.length > _maxPaths) {
+        _paths.remove(_paths.keys.first);
+      }
     }
 
     _rebroadcast(p, ann, pathHops, via);

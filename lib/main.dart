@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'models/monitored_task.dart';
 import 'connections/builtin_connections.dart';
@@ -9,6 +10,7 @@ import 'wapp/host_event_bridge.dart';
 import 'wapp/background_wapp_manager.dart';
 import 'services/power_governor.dart';
 import 'services/i2p/i2p_background_service.dart';
+import 'services/reticulum/rns_autostart.dart';
 import 'services/update_service.dart';
 import 'services/notification_service.dart';
 import 'services/preferences_service.dart';
@@ -26,6 +28,11 @@ import 'launcher/launcher.dart';
 Future<void> main() async {
   // Required before any async work that touches platform channels.
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Lock to portrait — the UI is designed portrait-first and auto-rotation is
+  // disorienting on phones (the manifest also pins screenOrientation=portrait).
+  await SystemChrome.setPreferredOrientations(
+      const [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
 
   // Mirror everything the app prints into the in-memory log buffer so the
   // remote-control API can serve it over /api/log.
@@ -146,6 +153,21 @@ Future<void> main() async {
     mode: BootStart.sequential,
     init: () async {
       await upgradeBundledWapps();
+    },
+  );
+
+  BootOrchestrator.instance.register(
+    id: 'reticulum-autostart',
+    name: 'Reticulum node (always-on)',
+    description:
+        'Starts the Reticulum node automatically and keeps it running so '
+        'folder sharing, discovery-by-key, and file transfer work with no '
+        'manual step. Connects to a public testnet TCP bootstrap as a client '
+        '(host/port configurable). Fire-and-forget with background retry so '
+        'boot never blocks on the bootstrap connection.',
+    mode: BootStart.parallel,
+    init: () async {
+      startRnsAutostart();
     },
   );
 

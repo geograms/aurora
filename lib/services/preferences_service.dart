@@ -114,6 +114,37 @@ class PreferencesService {
   bool get fileServeOnCellular => _prefs.getBool('files.serveOnCellular') ?? false;
   set fileServeOnCellular(bool v) => _prefs.setBool('files.serveOnCellular', v);
 
+  // Store-and-forward hosting: act as a NOSTR relay + Blossom host for other
+  // nodes (notes and files), governed by a tier+quota system. Master switch on
+  // by default; capacity-gated so a phone only hosts when charging on Wi-Fi/
+  // Ethernet. All limits are tunable here with fair-use defaults.
+  bool get hostEnabled => _prefs.getBool('host.enabled') ?? true;
+  set hostEnabled(bool v) => _prefs.setBool('host.enabled', v);
+
+  bool get hostCapacityGated => _prefs.getBool('host.capacityGated') ?? true;
+  set hostCapacityGated(bool v) => _prefs.setBool('host.capacityGated', v);
+
+  // Whole-node hosting ceiling (everything we store for others), in GB.
+  int get hostCeilingGb => _prefs.getInt('host.ceilingGb') ?? 100;
+  set hostCeilingGb(int v) => _prefs.setInt('host.ceilingGb', v < 0 ? 0 : v);
+
+  // Strangers' (non-followed) slice of the ceiling, in GB.
+  int get hostStrangerSliceGb => _prefs.getInt('host.strangerSliceGb') ?? 100;
+  set hostStrangerSliceGb(int v) =>
+      _prefs.setInt('host.strangerSliceGb', v < 0 ? 0 : v);
+
+  // Strangers' text-note count cap per month.
+  int get hostStrangerNotesPerMonth =>
+      _prefs.getInt('host.strangerNotesPerMonth') ?? 1000;
+  set hostStrangerNotesPerMonth(int v) =>
+      _prefs.setInt('host.strangerNotesPerMonth', v < 0 ? 0 : v);
+
+  // Strangers' content is deletable after this age, in days (default 5 years).
+  int get hostStrangerRetentionDays =>
+      _prefs.getInt('host.strangerRetentionDays') ?? 1825;
+  set hostStrangerRetentionDays(int v) =>
+      _prefs.setInt('host.strangerRetentionDays', v < 0 ? 0 : v);
+
   // Per-wapp autostart: when on, the wapp runs as a background service
   // (started at boot) and keeps its engine ticking even while its UI page is
   // closed — e.g. APRS staying connected to BLE/APRS-IS to receive messages.
@@ -247,5 +278,54 @@ class PreferencesService {
             ? full.indexOf('-')
             : -1;
     return sep < 0 ? full.toLowerCase() : full.substring(0, sep).toLowerCase();
+  }
+
+  // ── Reticulum (RNS) auto-start ───────────────────────────────────
+  //
+  // The node is always-on by default: it auto-starts at boot and stays
+  // running so folder sharing/discovery and file transfer work without a
+  // manual step. The bootstrap is a public Reticulum testnet TCP hub the
+  // device connects to as a client; override host/port to point at your own.
+  bool get rnsAutoStart => _prefs.getBool('rns.autoStart') ?? true;
+  set rnsAutoStart(bool v) => _prefs.setBool('rns.autoStart', v);
+
+  String get rnsBootstrapHost =>
+      _prefs.getString('rns.bootstrapHost') ?? 'rns.beleth.net';
+  set rnsBootstrapHost(String v) => _prefs.setString('rns.bootstrapHost', v);
+
+  int get rnsBootstrapPort => _prefs.getInt('rns.bootstrapPort') ?? 4242;
+  set rnsBootstrapPort(int v) => _prefs.setInt('rns.bootstrapPort', v);
+
+  /// Auto-download referenced media (images) up to this many MB; larger files
+  /// show a size + "tap to download" instead. 0 = always require a tap.
+  int get mediaAutoMaxMb => _prefs.getInt('media.autoMaxMb') ?? 10;
+  set mediaAutoMaxMb(int v) => _prefs.setInt('media.autoMaxMb', v < 0 ? 0 : v);
+
+  /// Editable, ordered list of Reticulum TCP bootstrap hubs ("host:port"). The
+  /// node tries each in turn until one answers with real Reticulum traffic. The
+  /// defaults are public testnet hubs; users can edit the list in Settings.
+  // Verified-reachable community TCP hubs (TCPClientInterface, port 4242). The
+  // old *.connect.reticulum.network testnet is decommissioned (NXDOMAIN) and
+  // betweentheborders is a web server, so they're intentionally excluded.
+  static const List<String> _defaultRnsServers = [
+    'rns.beleth.net:4242',
+    'use.inertia.chat:4242',
+    'rns.wisco.network:4242',
+    'sydney.reticulum.au:4242',
+    'rns.birdsnet.com.br:4242',
+  ];
+
+  List<String> get rnsBootstrapServers {
+    final v = _prefs.getStringList('rns.bootstrapServers');
+    if (v == null || v.isEmpty) return List<String>.from(_defaultRnsServers);
+    return v;
+  }
+
+  set rnsBootstrapServers(List<String> v) {
+    final cleaned = [
+      for (final s in v)
+        if (s.trim().isNotEmpty) s.trim()
+    ];
+    _prefs.setStringList('rns.bootstrapServers', cleaned);
   }
 }

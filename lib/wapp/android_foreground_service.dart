@@ -27,6 +27,13 @@ class AndroidForegroundService {
   static const _channel = MethodChannel('com.geogram.aurora/bg_service');
   bool _running = false;
 
+  // Ref-counted holders. The native foreground service is started when the
+  // first holder appears and stopped only when the last one is released, so
+  // several subsystems (background wapps, the Reticulum node) can each keep the
+  // process alive independently without stomping on each other.
+  final Set<String> _holders = {};
+  String? _wappLabel; // label contributed by the 'wapps' holder
+
   bool get _supported => !kIsWeb && Platform.isAndroid;
   bool get isRunning => _running;
 
@@ -38,28 +45,55 @@ class AndroidForegroundService {
     return null;
   }
 
-  /// Start (or update the notification text of) the foreground service.
-  Future<void> start(List<String> wappNames) async {
-    if (!_supported) return;
-    final label = wappNames.isEmpty
+  String _composeLabel() {
+    final parts = <String>[];
+    if (_holders.contains('reticulum')) parts.add('Reticulum node');
+    if (_wappLabel != null && _wappLabel!.isNotEmpty) parts.add(_wappLabel!);
+    return parts.isEmpty
         ? 'Running in background'
-        : '${wappNames.join(', ')} running in background';
+        : '${parts.join(', ')} running in background';
+  }
+
+  Future<void> _sync() async {
+    if (!_supported) return;
     try {
-      await _channel.invokeMethod('start', {'text': label});
-      _running = true;
+      if (_holders.isNotEmpty) {
+        // 'start' both starts the service and updates the notification text.
+        await _channel.invokeMethod('start', {'text': _composeLabel()});
+        _running = true;
+      } else if (_running) {
+        await _channel.invokeMethod('stop');
+        _running = false;
+      }
     } catch (e) {
-      debugPrint('AndroidForegroundService: start failed: $e');
+      debugPrint('AndroidForegroundService: sync failed: $e');
     }
   }
 
+  /// Add a named holder; starts the service if it wasn't running.
+  Future<void> hold(String reason) async {
+    _holders.add(reason);
+    await _sync();
+  }
+
+  /// Release a named holder; stops the service when no holders remain.
+  Future<void> release(String reason) async {
+    _holders.remove(reason);
+    await _sync();
+  }
+
+  /// Background-wapp holder: start (or refresh the label of) the service for the
+  /// given running wapps. Releasing happens via [stop].
+  Future<void> start(List<String> wappNames) async {
+    _wappLabel = wappNames.isEmpty ? null : wappNames.join(', ');
+    await hold('wapps');
+  }
+
+  /// Release the background-wapp holder (the service stays up if e.g. the
+  /// Reticulum node still holds it).
   Future<void> stop() async {
-    if (!_supported || !_running) return;
-    try {
-      await _channel.invokeMethod('stop');
-    } catch (e) {
-      debugPrint('AndroidForegroundService: stop failed: $e');
-    }
-    _running = false;
+    _wappLabel = null;
+    await release('wapps');
   }
 
   /// Post a heads-up Android notification for a message/event. No-op off Android.

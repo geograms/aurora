@@ -295,6 +295,10 @@ class RemoteApiService {
               wappsDataStorage(prefs).getAbsolutePath('disk_folders.json');
           RnsService.instance.subscriptionsPath =
               wappsDataStorage(prefs).getAbsolutePath('folder_subscriptions.json');
+          RnsService.instance.serveStatsPath =
+              wappsDataStorage(prefs).getAbsolutePath('serve_stats.sqlite3');
+          RnsService.instance.identityPath =
+              wappsDataStorage(prefs).getAbsolutePath('rns_identity.key');
         }
         final ok = await RnsService.instance
             .start(mode: mode, host: host, port: port, announceName: name);
@@ -325,9 +329,16 @@ class RemoteApiService {
           return _json(res, {'ok': false, 'error': 'sha256 required'},
               status: HttpStatus.badRequest);
         }
-        final bytes = await RnsService.instance.dhtResolveFetch(shaB);
+        // Optional "from" callsign → fetch DIRECTLY from that known sender first
+        // (reliable cross-network), falling back to DHT discovery.
+        final from = '${data['from'] ?? ''}'.trim();
+        Uint8List? bytes;
+        if (from.isNotEmpty) {
+          bytes = await RnsService.instance.fetchFileFromCallsign(shaB, from);
+        }
+        bytes ??= await RnsService.instance.dhtResolveFetch(shaB);
         if (bytes == null) {
-          return _json(res, {'ok': false, 'error': 'not found via DHT'});
+          return _json(res, {'ok': false, 'error': 'not found'});
         }
         String? token;
         final arch = _mediaArchive();

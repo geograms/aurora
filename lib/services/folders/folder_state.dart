@@ -11,7 +11,7 @@
  * legitimately-signed edits remain.
  *
  * Conflict resolution: ops apply in created_at order (ties broken by event id);
- * files are keyed by sha (addFile upserts, rmFile deletes), folder name/desc are
+ * files are keyed by name (addFile upserts, rmFile deletes), folder name/desc are
  * last-writer-wins, links are keyed by target folderId.
  */
 import 'dart:convert';
@@ -23,7 +23,9 @@ class FolderState {
   final String folderId;
   String? name;
   String? desc;
-  final Map<String, FileEntry> files = {}; // sha -> entry
+  String? tags; // comma/space-separated label string (owner metadata)
+  String? owner; // owner's personal npub (for messaging the admin), if stamped
+  final Map<String, FileEntry> files = {}; // name (or sha if unnamed) -> entry
   final Map<String, LinkEntry> links = {}; // target folderId -> entry
   List<AdminEntry> admins = const [];
 
@@ -36,6 +38,8 @@ class FolderState {
         'folderId': folderId,
         if (name != null) 'name': name,
         if (desc != null) 'desc': desc,
+        if (tags != null) 'tags': tags,
+        if (owner != null) 'owner': owner,
         'files': [for (final f in fileList) f.toJson()],
         'links': [for (final l in linkList) l.toJson()],
         'admins': [for (final a in admins) a.toJson()],
@@ -96,7 +100,7 @@ FolderState reduceFolder(
       continue;
     }
     if (payload is! Map) continue;
-    _apply(state, payload);
+    _apply(state, payload, op.createdAt);
   }
   return state;
 }
@@ -108,27 +112,42 @@ bool _hasFolderTag(NostrEvent e, String folderId) {
   return false;
 }
 
-void _apply(FolderState s, Map payload) {
+void _apply(FolderState s, Map payload, int createdAt) {
   switch (payload['op']) {
     case 'addFile':
       final x = payload['x'];
       if (x is String && x.isNotEmpty) {
-        s.files[x] = FileEntry(
+        final nm = payload['name'] as String?;
+        // Key by name so two files with the same content (same sha) but
+        // different names both appear; fall back to sha when unnamed.
+        final key = (nm != null && nm.isNotEmpty) ? nm : x;
+        s.files[key] = FileEntry(
           x,
-          name: payload['name'] as String?,
+          name: nm,
           desc: payload['desc'] as String?,
           mime: payload['mime'] as String?,
           size: payload['size'] is int ? payload['size'] as int : null,
+          // File date: explicit mtime if the op carries one, else the time the
+          // file was added (the op's own timestamp).
+          ts: payload['ts'] is int ? payload['ts'] as int : createdAt,
         );
       }
       break;
     case 'rmFile':
-      final x = payload['x'];
-      if (x is String) s.files.remove(x);
+      final nm = payload['n'];
+      if (nm is String && nm.isNotEmpty) {
+        s.files.remove(nm);
+      } else {
+        // Legacy rmFile carried only the sha: drop any entry pointing at it.
+        final x = payload['x'];
+        if (x is String) s.files.removeWhere((k, e) => k == x || e.sha == x);
+      }
       break;
     case 'setMeta':
       if (payload.containsKey('name')) s.name = payload['name'] as String?;
       if (payload.containsKey('desc')) s.desc = payload['desc'] as String?;
+      if (payload.containsKey('tags')) s.tags = payload['tags'] as String?;
+      if (payload.containsKey('owner')) s.owner = payload['owner'] as String?;
       break;
     case 'link':
       final f = payload['f'];

@@ -5,7 +5,7 @@
  * It runs on backbone nodes (reliable / well-connected); edge clients query it
  * recursively via an entry node (see DhtNode.resolve). Keyspace is Reticulum's
  * native 128 bits: a node's id is its DHT destination hash
- * (RnsDestination.hash(identity, 'aurora', ['dht'])), and a file's routing key is
+ * (RnsDestination.hash(identity, 'geogram', ['dht'])), and a file's routing key is
  * the first 128 bits of its sha256. Distance is XOR; the k nodes closest to a
  * file key custody that file's provider records.
  */
@@ -13,7 +13,7 @@ import 'dart:typed_data';
 
 import '../../reticulum/rns_identity.dart';
 
-const String kDhtApp = 'aurora';
+const String kDhtApp = 'geogram';
 const List<String> kDhtAspects = ['dht'];
 const int kDhtIdLen = 16; // 128-bit ids (Reticulum destination-hash width)
 // Caps so a NODES/VALUE reply fits ONE link-encrypted packet (~450B plaintext;

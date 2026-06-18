@@ -642,10 +642,49 @@ class WappEngine {
     final halFolderBrowse = WasmFunction(
       (int idPtr, int idLen, int outPtr, int outCap) {
         if (idLen <= 0 || outCap <= 0) return 0;
-        return _writeStr(outPtr, outCap,
-            jsonEncode(RnsService.instance.folderBrowse(_readStr(idPtr, idLen))));
+        // Accept "folderId\tsubpath" to browse just one directory level (only
+        // the immediate subfolders + files at that path) — keeps the payload
+        // and the wapp's work flat regardless of how big the folder is. A bare
+        // id (no tab) returns the full state (back-compat).
+        final arg = _readStr(idPtr, idLen);
+        final tab = arg.indexOf('\t');
+        final Map<String, dynamic> out = tab >= 0
+            ? RnsService.instance
+                .folderBrowseLevel(arg.substring(0, tab), arg.substring(tab + 1))
+            : RnsService.instance.folderBrowse(arg);
+        return _writeStr(outPtr, outCap, jsonEncode(out));
       },
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Folder info + serve statistics (times served, over time) for the info
+    // panel → JSON {npub, name, fileCount, totalBytes, serves, last24h, ...}.
+    final halFolderStats = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (idLen <= 0 || outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderStats(_readStr(idPtr, idLen))));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Stop sharing an owned disk folder (files on disk are left untouched).
+    final halFolderRemove = WasmFunction(
+      (int idPtr, int idLen) {
+        if (idLen <= 0) return 0;
+        RnsService.instance.folderRemove(_readStr(idPtr, idLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Open an owned disk folder's directory in the OS file manager (edit on disk).
+    final halFolderOpenDir = WasmFunction(
+      (int idPtr, int idLen) {
+        if (idLen <= 0) return 0;
+        return RnsService.instance.folderOpenDir(_readStr(idPtr, idLen)) ? 1 : 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
     // ── Disk-backed owner folders + consumer downloads ──────────────────────
@@ -654,6 +693,7 @@ class WappEngine {
     final halFolderAddDisk = WasmFunction(
       (int pPtr, int pLen) {
         if (pLen <= 0) return 0;
+        if (!RnsService.instance.foldersReady) return 0; // node not running
         // ignore: discarded_futures
         RnsService.instance.folderAddFromDisk(_readStr(pPtr, pLen));
         return 1;
@@ -762,6 +802,29 @@ class WappEngine {
         return 1;
       },
       params: [ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // A sensible starting directory for the in-app browser: the user's primary
+    // storage on Android (/storage/emulated/0), else the home dir on desktop.
+    final halFsHome = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        var root = '/';
+        try {
+          if (Platform.isAndroid) {
+            for (final c in const ['/storage/emulated/0', '/sdcard']) {
+              if (Directory(c).existsSync()) { root = c; break; }
+            }
+          } else {
+            final h = Platform.environment['HOME'];
+            root = (h != null && h.isNotEmpty && Directory(h).existsSync())
+                ? h
+                : Directory.current.path;
+          }
+        } catch (_) {}
+        return _writeStr(outPtr, outCap, root);
+      },
+      params: [ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
     final halMediaDelete = WasmFunction(
@@ -1732,6 +1795,9 @@ class WappEngine {
       WasmImport('hal', 'folder_list', halFolderList),
       WasmImport('hal', 'folder_edit', halFolderEdit),
       WasmImport('hal', 'folder_browse', halFolderBrowse),
+      WasmImport('hal', 'folder_stats', halFolderStats),
+      WasmImport('hal', 'folder_remove', halFolderRemove),
+      WasmImport('hal', 'folder_opendir', halFolderOpenDir),
       WasmImport('hal', 'folder_add_disk', halFolderAddDisk),
       WasmImport('hal', 'folder_rescan', halFolderRescan),
       WasmImport('hal', 'folder_download', halFolderDownload),
@@ -1739,6 +1805,7 @@ class WappEngine {
       WasmImport('hal', 'folder_owned', halFolderOwned),
       WasmImport('hal', 'folder_subs', halFolderSubs),
       WasmImport('hal', 'fs_listdir', halFsListdir),
+      WasmImport('hal', 'fs_home', halFsHome),
       WasmImport('hal', 'storage_request', halStorageRequest),
       WasmImport('hal', 'media_fetch', halMediaFetch),
       WasmImport('hal', 'media_fetch_magnet', halMediaFetchMagnet),

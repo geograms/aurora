@@ -135,9 +135,30 @@ class DiskFolderManager {
     }
   }
 
+  // One sync per folder at a time. The periodic 60s sync timer and a manual
+  // rescan would otherwise both run scanAsync() on the same source — which
+  // mutates shared index state and yields between files — corrupting the diff so
+  // an addFile gets skipped (the op then never commits). Serialize per folder:
+  // if a run is in flight, chain after it so a "push file then rescan" still
+  // applies the new file, but two scans never interleave.
+  final Map<String, Future<void>> _inflight = {};
+
   /// Diff the directory against the published folder state and emit ops only for
   /// what changed; then (re)advertise providers for the folder and its files.
-  Future<void> sync(String folderId) async {
+  /// Serialized per folder (see [_inflight]).
+  Future<void> sync(String folderId) {
+    final running = _inflight[folderId];
+    final next = running == null
+        ? _syncOnce(folderId)
+        : running.then((_) => _syncOnce(folderId),
+            onError: (_) => _syncOnce(folderId));
+    _inflight[folderId] = next;
+    return next.whenComplete(() {
+      if (identical(_inflight[folderId], next)) _inflight.remove(folderId);
+    });
+  }
+
+  Future<void> _syncOnce(String folderId) async {
     final src = _sources[folderId];
     if (src == null) return;
     await src.scanAsync();
@@ -170,14 +191,31 @@ class DiskFolderManager {
         changed++;
       }
     }
+    if (changed > 0) log?.call('disk folder ${folderId.substring(0, 8)}: $changed change(s) synced');
 
     // Advertise ourselves as a provider of the folder and of each file's bytes.
-    await publishFolderProvider(folderId);
-    for (final f in desired.values) {
-      final b = _bytes(f.sha);
-      if (b != null) await publishFileProvider(b);
+    // BEST EFFORT — never awaited inline: each DHT publish does an iterative
+    // find + STORE and on a flaky link can take tens of seconds, which used to
+    // wedge sync() (and the /api/rns/folder/rescan call) for minutes after the
+    // signed ops had already committed. republishAll() re-advertises every
+    // ~30 min, so a missed/slow publish self-heals. Detach + time-bound it.
+    unawaited(_advertise(folderId, desired.values.toList()));
+  }
+
+  /// Fire-and-forget provider advertisements, each individually time-bounded so
+  /// a stuck DHT publish can't leak an unbounded pending future or block sync.
+  Future<void> _advertise(String folderId, List<DiskFile> files) async {
+    Future<void> bounded(Future<void> Function() op) async {
+      try {
+        await op().timeout(const Duration(seconds: 10));
+      } catch (_) {/* best effort; republishAll() retries */}
     }
-    if (changed > 0) log?.call('disk folder ${folderId.substring(0, 8)}: $changed change(s) synced');
+
+    await bounded(() => publishFolderProvider(folderId));
+    for (final f in files) {
+      final b = _bytes(f.sha);
+      if (b != null) await bounded(() => publishFileProvider(b));
+    }
   }
 
   bool owns(String folderId) => _sources.containsKey(folderId);

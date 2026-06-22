@@ -503,6 +503,7 @@ class RnsService {
         'inbox': _inbox.length,
         'provided': _files?.providedCount ?? 0,
         'dhtPeers': _files?.dhtRoutingSize ?? 0,
+        'dhtPeerIds': _files?.dhtPeerHexes ?? const <String>[],
         'lxmfDest': lxmfDeliveryHex,
         'lxmfPropDest': lxmfPropagationHex,
         'lxmfInbox': _lxmfInbox.length,
@@ -515,7 +516,353 @@ class RnsService {
         if (_relayStore != null) 'relayEvents': _relayStore!.count(),
         if (_relayStore != null) 'relayMailbox': _relayStore!.sfCount(),
         'relayIndexers': _relayDir.indexers().length,
+        'observed': _observed.length,
       };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Observed-node registry — the network as THIS node has heard it, fed by the
+  // inbound-announce path (_observeAnnounce, called from _onInbound). A "node" is
+  // an identity; one identity announces several service destinations (chat/files/
+  // dht/wapp/relay/lxmf/rv), so we accumulate the services per identity. This is
+  // a SAMPLED, capped, stale-swept view — never a hub's full client roster (a
+  // leaf cannot enumerate a hub's clients). The reticulum wapp visualizes it; the
+  // HAL exposes graphSnapshot()/hubsInfo() read-only (see hal_rns_nodes/_hubs).
+  // ─────────────────────────────────────────────────────────────────────────
+  static const int _observedCap = 4096;
+  static const int _observedStaleMs = 30 * 60 * 1000; // drop entries idle >30min
+  final Map<String, _ObservedNode> _observed = {};
+
+  // (serviceLabel, app, aspects) tuples. A destination hash binds an identity to
+  // a (app, aspects) name, so we classify an announce by recomputing the hash for
+  // the announcing identity and matching. Geogram software ⇔ announces any
+  // non-LXMF service here (generic Reticulum nodes announce only lxmf/*).
+  static final List<(String, String, List<String>)> _serviceTuples = [
+    ('chat', _app, _aspects),
+    ('files', _app, _aspectsFiles),
+    ('dht', _app, _aspectsDht),
+    ('wapp', _app, _aspectsWapp),
+    ('relay', kRelayApp, kRelayAspects),
+    ('lxmf', kLxmfApp, kLxmfDeliveryAspects),
+    ('lxmf-prop', kLxmfApp, kLxmfPropagationAspects),
+    ('rv', 'circles', ['rv']),
+  ];
+
+  /// Which service destination this announce is, or null if it's none we know.
+  String? _classifyAnnounce(RnsIdentity id, Uint8List destHash) {
+    for (final (label, app, aspects) in _serviceTuples) {
+      if (RnsCrypto.constantTimeEquals(
+          destHash, RnsDestination.hash(id, app, aspects))) {
+        return label;
+      }
+    }
+    return null;
+  }
+
+  /// Fold one inbound announce into the observed registry. [wireHops] is the
+  /// packet's hop count (RNS convention: +1 for the stored path hops). [via] is
+  /// the interface label. Skips our own announces.
+  void _observeAnnounce(RnsAnnounce ann, int wireHops, String via) {
+    if (_id != null &&
+        RnsCrypto.constantTimeEquals(ann.identity.hash, _id!.hash)) {
+      return;
+    }
+    final key = ann.identity.hexHash;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final svc = _classifyAnnounce(ann.identity, ann.destHash);
+    // The relayer (transport node) we reach this destination through, if any.
+    final relayer = _transport?.pathFor(ann.destHash)?.nextHop;
+    var n = _observed[key];
+    if (n == null) {
+      if (_observed.length >= _observedCap) _evictOldestObserved();
+      n = _ObservedNode(
+        identityHex: key,
+        publicKeyHex: _hex(ann.publicKey),
+        firstSeenMs: now,
+      );
+      _observed[key] = n;
+    }
+    n.lastSeenMs = now;
+    n.hops = wireHops + 1;
+    n.via = via;
+    n.relayerHex = relayer == null ? null : _hex(relayer);
+    if (svc != null) {
+      n.services.add(svc);
+      if (svc == 'chat') {
+        final cs = utf8.decode(ann.appData, allowMalformed: true).trim();
+        if (cs.isNotEmpty && cs.length <= 20 && !cs.contains(' ')) {
+          n.callsign = cs;
+        }
+      }
+    }
+  }
+
+  void _evictOldestObserved() {
+    String? oldestKey;
+    var oldest = 1 << 62;
+    _observed.forEach((k, v) {
+      if (v.lastSeenMs < oldest) {
+        oldest = v.lastSeenMs;
+        oldestKey = k;
+      }
+    });
+    if (oldestKey != null) _observed.remove(oldestKey);
+  }
+
+  /// Drop nodes not heard for [_observedStaleMs]. Called on a slow periodic
+  /// sweep (rns_autostart) and at the head of graphSnapshot so a stale view is
+  /// never returned.
+  void sweepObserved() {
+    final cutoff = DateTime.now().millisecondsSinceEpoch - _observedStaleMs;
+    _observed.removeWhere((_, v) => v.lastSeenMs < cutoff);
+  }
+
+  static const List<(int, String)> _capNames = [
+    (1 << 0, 'search'),
+    (1 << 1, 'firehose'),
+    (1 << 2, 'store-forward'),
+    (1 << 3, 'archive'),
+  ];
+
+  /// A snapshot of the observed network as a {nodes,edges} graph for the wapp's
+  /// webview. Topology is hub-centric: [self] in the centre, identified transport
+  /// nodes (the relayers other nodes are reached through) as hubs, and the
+  /// remaining nodes as leaves clustered under their relayer (or direct neighbours
+  /// of self). [service] filters to nodes announcing that service; [geogramOnly]
+  /// hides generic Reticulum nodes; [search] matches callsign/identity/service.
+  Map<String, dynamic> graphSnapshot({
+    String? service,
+    bool geogramOnly = false,
+    String? search,
+  }) {
+    sweepObserved();
+    final q = (search ?? '').trim().toLowerCase();
+    // Relay roles, keyed by identity hex, joined in for meta.role/caps.
+    final relayByHex = <String, RelayEntry>{};
+    for (final e in _relayDir.entries()) {
+      relayByHex[e.idHex] = e;
+    }
+    // Hub set = every identity that is a relayer for some other observed node.
+    final hubIds = <String>{};
+    for (final n in _observed.values) {
+      final r = n.relayerHex;
+      if (r != null && r.isNotEmpty) hubIds.add(r);
+    }
+
+    bool isGeogram(_ObservedNode n) =>
+        n.services.any((s) => s != 'lxmf' && s != 'lxmf-prop');
+    bool matchesFilters(_ObservedNode n) {
+      if (geogramOnly && !isGeogram(n)) return false;
+      if (service != null &&
+          service.isNotEmpty &&
+          !n.services.contains(service)) {
+        return false;
+      }
+      if (q.isNotEmpty) {
+        final hay =
+            '${n.callsign ?? ''} ${n.identityHex} ${n.services.join(' ')}'
+                .toLowerCase();
+        if (!hay.contains(q)) return false;
+      }
+      return true;
+    }
+
+    final nodes = <Map<String, dynamic>>[];
+    final edges = <Map<String, dynamic>>[];
+    final emitted = <String>{};
+    final childCount = <String, int>{};
+
+    String shortHex(String h) => h.length > 8 ? h.substring(0, 8) : h;
+    Map<String, dynamic> nodeJson(_ObservedNode n, String kind) {
+      final relay = relayByHex[n.identityHex];
+      final caps = <String>[];
+      if (relay != null) {
+        for (final (bit, name) in _capNames) {
+          if (relay.announcement.caps & bit != 0) caps.add(name);
+        }
+      }
+      return {
+        'id': n.identityHex,
+        'label': n.callsign ?? shortHex(n.identityHex),
+        'kind': kind,
+        'services': n.services.toList()..sort(),
+        'geogram': isGeogram(n),
+        'hops': n.hops,
+        'via': n.via,
+        'relayer': n.relayerHex ?? '',
+        'meta': {
+          'callsign': n.callsign ?? '',
+          'pubkey': n.publicKeyHex,
+          'role': relay?.announcement.role.name ?? '',
+          'caps': caps,
+          'capacity': relay?.announcement.capacity ?? 0,
+          'firstSeen': n.firstSeenMs,
+          'lastSeen': n.lastSeenMs,
+        },
+      };
+    }
+
+    void emit(_ObservedNode n, String kind) {
+      if (emitted.add(n.identityHex)) nodes.add(nodeJson(n, kind));
+    }
+
+    // Self node (centre).
+    nodes.add({
+      'id': identityHex ?? 'self',
+      'label': _announceText.isNotEmpty ? _announceText : 'this node',
+      'kind': 'self',
+      'services': const [],
+      'geogram': true,
+      'hops': 0,
+      'via': '',
+      'relayer': '',
+      'meta': {
+        'callsign': _announceText,
+        'pubkey': '',
+        'role': '',
+        'caps': const [],
+        'capacity': 0,
+        'firstSeen': 0,
+        'lastSeen': DateTime.now().millisecondsSinceEpoch,
+      },
+    });
+    emitted.add(identityHex ?? 'self');
+
+    // Pass 1: emit hubs (always shown — they're the structure) + count children.
+    for (final n in _observed.values) {
+      final r = n.relayerHex;
+      if (r != null && r.isNotEmpty) childCount[r] = (childCount[r] ?? 0) + 1;
+    }
+    for (final hubId in hubIds) {
+      final hub = _observed[hubId];
+      if (hub != null) {
+        emit(hub, 'hub');
+      } else {
+        // Relayer we route through but never heard announce directly — synth.
+        nodes.add({
+          'id': hubId,
+          'label': 'hub ${shortHex(hubId)}',
+          'kind': 'hub',
+          'services': const [],
+          'geogram': false,
+          'hops': 1,
+          'via': '',
+          'relayer': '',
+          'meta': {'callsign': '', 'pubkey': '', 'role': '', 'caps': const [], 'capacity': 0, 'firstSeen': 0, 'lastSeen': 0},
+        });
+        emitted.add(hubId);
+      }
+      edges.add({'from': identityHex ?? 'self', 'to': hubId, 'kind': 'uplink'});
+    }
+    // Annotate hub child counts (the "≈N heard (sample)" badge).
+    for (final node in nodes) {
+      if (node['kind'] == 'hub') {
+        (node['meta'] as Map)['children'] = childCount[node['id']] ?? 0;
+      }
+    }
+
+    // Pass 2: emit the filtered leaves / direct neighbours and their edges.
+    for (final n in _observed.values) {
+      if (hubIds.contains(n.identityHex)) continue; // already a hub
+      if (!matchesFilters(n)) continue;
+      final r = n.relayerHex;
+      if (r != null && r.isNotEmpty) {
+        emit(n, 'leaf');
+        edges.add({'from': r, 'to': n.identityHex, 'kind': 'relay'});
+      } else {
+        emit(n, 'leaf');
+        edges.add({
+          'from': identityHex ?? 'self',
+          'to': n.identityHex,
+          'kind': 'direct'
+        });
+      }
+    }
+
+    return {
+      'nodes': nodes,
+      'edges': edges,
+      'sample': true, // honest: this is what we heard, not a full roster
+      'observed': _observed.length,
+      'passive': _transport?.passive ?? false,
+    };
+  }
+
+  /// The configured bootstrap hubs (PreferencesService.rnsBootstrapServers)
+  /// joined with which we currently hold an uplink to. Drives the Hubs screen.
+  List<Map<String, dynamic>> hubsInfo() {
+    final prefs = PreferencesService.instanceSync;
+    final servers = prefs?.rnsBootstrapServers ?? const <String>[];
+    final out = <Map<String, dynamic>>[];
+    for (final s in servers) {
+      final t = s.trim();
+      if (t.isEmpty) continue;
+      out.add({'endpoint': t, 'connected': _connectedHubs.contains(t)});
+    }
+    return out;
+  }
+
+  /// Add a bootstrap hub: persist it (if new) and dial an uplink immediately.
+  /// [endpoint] is "host:port". Returns true if an uplink is now held.
+  Future<bool> addBootstrap(String endpoint) async {
+    final (host, port) = _parseEndpoint(endpoint);
+    if (host == null) return false;
+    final ep = '$host:$port';
+    final prefs = PreferencesService.instanceSync;
+    if (prefs != null) {
+      final list = List<String>.from(prefs.rnsBootstrapServers);
+      if (!list.contains(ep)) {
+        list.add(ep);
+        prefs.rnsBootstrapServers = list;
+      }
+    }
+    return connectUplink(host, port);
+  }
+
+  /// Remove a bootstrap hub: drop any uplink and forget it from preferences.
+  void removeBootstrap(String endpoint) {
+    final (host, port) = _parseEndpoint(endpoint);
+    final ep = host == null ? endpoint.trim() : '$host:$port';
+    final prefs = PreferencesService.instanceSync;
+    if (prefs != null) {
+      prefs.rnsBootstrapServers = [
+        for (final s in prefs.rnsBootstrapServers)
+          if (s.trim() != ep) s
+      ];
+    }
+    if (host != null) disconnectUplink(host, port);
+  }
+
+  /// Drop the live uplink to [host]:[port] without forgetting the bootstrap
+  /// entry (so a later connect re-dials it).
+  void disconnectUplink(String host, int port) {
+    final ep = '$host:$port';
+    for (final c in List.of(_clients)) {
+      if ('${c.host}:${c.port}' == ep) {
+        LogService.instance.add('RNS: disconnecting uplink $ep (user)');
+        _dropClient(c);
+      }
+    }
+  }
+
+  /// Connect (idempotently) to an already-known bootstrap endpoint.
+  Future<bool> connectBootstrap(String endpoint) async {
+    final (host, port) = _parseEndpoint(endpoint);
+    if (host == null) return false;
+    return connectUplink(host, port);
+  }
+
+  /// Pin passive (relay-shedding) mode on/off. Passive still meshes and carries
+  /// our own traffic; it just stops doing relay work for others.
+  void setPassive(bool value) => _transport?.setPassive(value);
+
+  static (String?, int) _parseEndpoint(String endpoint) {
+    final t = endpoint.trim();
+    final i = t.lastIndexOf(':');
+    if (i <= 0) return (t.isEmpty ? null : t, 4242);
+    final host = t.substring(0, i).trim();
+    final port = int.tryParse(t.substring(i + 1).trim()) ?? 4242;
+    return (host.isEmpty ? null : host, port);
+  }
 
   /// Start the node. [mode] is 'tcpserver' (LAN hub), 'tcpclient' (connect to a
   /// hub at host:port), or 'ble' (connectionless broadcast). [announceName] is
@@ -569,6 +916,11 @@ class RnsService {
         log: (m) => LogService.instance.add('RNS/files: $m'),
         enableDht: true,
         nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
+        // Pull a path to a peer we know by identity but have no cached route to
+        // (its announce was never flooded to us) so DHT resolve + file fetch
+        // links are routable — the fix that makes device-to-device folder
+        // discovery work on busy/asymmetric public hubs.
+        requestPath: (h) => _transport?.requestPath(h),
         // Count a download whenever we serve a file's manifest to another node.
         // Both the media-archive metric (for archived files) and the serve-stats
         // store (works for disk-folder files too — they're never in the archive).
@@ -678,6 +1030,7 @@ class RnsService {
           store: _relayStore!,
           send: (raw) => _transport?.sendOnAll(raw),
           nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
+          requestPath: (h) => _transport?.requestPath(h),
           spam: SpamPolicy.lenient(),
           log: (m) => LogService.instance.add('RNS/relay: $m'),
           // Always answer relay queries when hosting isn't disabled, so peers can
@@ -1274,6 +1627,10 @@ class RnsService {
         RnsCrypto.constantTimeEquals(ann.identity.hash, _id!.hash)) {
       return;
     }
+    // Fold every (non-self) announce into the observed-node registry so the
+    // reticulum wapp can visualize the network we've heard. Done BEFORE the
+    // wapp-channel early-return below so wapp/rv destinations are observed too.
+    _observeAnnounce(ann, p.hops, via);
     // Wapp datagram channel: a datagram arrives as an announce of the sender's
     // "geogram/wapp" destination carrying RAW app_data [tagLen:1][tag][payload].
     // Route it to the matching per-tag queue and stop — not a chat/route announce.
@@ -1302,18 +1659,22 @@ class RnsService {
       } catch (_) {}
       return;
     }
-    // Learn the peer as a DHT contact ONLY from its DHT-destination announce.
-    // Aurora is (currently) the only overlay running a DHT on Reticulum, so the
-    // hub is full of Sideband/NomadNet/rnsd identities that do NOT run it. We
-    // identify the ones that DO purely from the wire: an Aurora node announces a
-    // destination named "aurora/dht" (see _announceServiceDests), and the signed
-    // announce's destHash cryptographically binds that name to the announcing
-    // identity. So a destHash that equals hash(identity, "aurora", ["dht"]) is
-    // proof the peer runs our DHT — no guessing, no probing dead nodes. Other
-    // identities are simply never added, so lookups don't waste rounds timing
-    // out on nodes that can't answer.
+    // Learn the peer as a DHT contact from ANY of its Aurora-app announces (dht
+    // OR files; the chat announce below adds it too). Every Aurora node runs the
+    // DHT, and a contact's DHT id is derived from its IDENTITY regardless of
+    // which aspect we heard — so keying overlay membership off ONLY the dedicated
+    // "geogram/dht" announce was fragile: the public hubs rate-limit announce
+    // propagation, and that single announce is frequently dropped while the same
+    // node's files/chat announces get through (observed live: a peer's chat
+    // announce arrived but its dht announce never did, so it never joined the
+    // overlay and folder discovery failed). Matching any "geogram" dest is still
+    // a cryptographic identity↔name proof, so non-Aurora identities
+    // (Sideband/NomadNet/rnsd) — which never announce a "geogram" dest — are
+    // still never added; lookups don't waste rounds on nodes that can't answer.
     final dhtHash = RnsDestination.hash(ann.identity, _app, _aspectsDht);
-    if (RnsCrypto.constantTimeEquals(ann.destHash, dhtHash)) {
+    final filesHash = RnsDestination.hash(ann.identity, _app, _aspectsFiles);
+    if (RnsCrypto.constantTimeEquals(ann.destHash, dhtHash) ||
+        RnsCrypto.constantTimeEquals(ann.destHash, filesHash)) {
       _files?.addPeerFromAnnounce(ann.identity);
     }
     // Relay directory: record a peer's relay role announcement.
@@ -1342,6 +1703,11 @@ class RnsService {
     // XOR-closest provider nodes are reference nodes that ignore our overlay).
     final chatHash = RnsDestination.hash(ann.identity, _app, _aspects);
     if (RnsCrypto.constantTimeEquals(ann.destHash, chatHash)) {
+      // A chat announce is also proof of an Aurora node → DHT overlay member
+      // (its dedicated dht announce may have been dropped in the hubs' announce
+      // budget). This is the announce most reliably propagated, so it is the key
+      // one for overlay convergence.
+      _files?.addPeerFromAnnounce(ann.identity);
       final cs = text.trim();
       if (cs.isNotEmpty && cs.length <= 20 && !cs.contains(' ')) {
         _callsignDest[cs] = _hex(ann.destHash);
@@ -2811,4 +3177,27 @@ class RnsService {
     }
     return out;
   }
+}
+
+/// One node the local RNS stack has heard announce(s) from. Accumulated per
+/// identity (a node announces several service destinations). Lives only in
+/// memory; capped and stale-swept by RnsService. See [RnsService.graphSnapshot].
+class _ObservedNode {
+  final String identityHex;
+  final String publicKeyHex;
+  final int firstSeenMs;
+  int lastSeenMs;
+  String? callsign;
+  final Set<String> services = {};
+  int hops = 0;
+  String via = '';
+  // Transport-id (hex) of the relayer we reach this node through; null = direct
+  // neighbour of ours. Other nodes' relayer == a hub's identity.
+  String? relayerHex;
+
+  _ObservedNode({
+    required this.identityHex,
+    required this.publicKeyHex,
+    required this.firstSeenMs,
+  }) : lastSeenMs = firstSeenMs;
 }

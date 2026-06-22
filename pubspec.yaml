@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.3-beta.4+105
+version: 1.0.3-beta.4+10044
 
 environment:
   sdk: ^3.10.0
@@ -40,6 +40,7 @@ dependencies:
   highlighting: ^0.9.0+11.8.0            # Dart port of highlight.js
   flutter_highlighting: ^0.9.0+11.8.0    # Flutter themes for highlighting
   flutter_svg: ^2.0.10+1                 # SVG rendering for wapp icons
+  qr_flutter: ^4.1.0                     # QR code rendering for the GeoUI "qr" field
   file_selector: ^1.0.3                  # Native file picker (Linux: GTK)
   crypto: ^3.0.3                         # SHA256 for NOSTR event ids + wapp hashing
   pointycastle: ^3.9.1                   # secp256k1 / BIP-340 Schnorr
@@ -56,6 +57,7 @@ dependencies:
   # (tens of MB of native libs per ABI). The media.video capability is a
   # pluggable backend (see lib/wapp/native/media_capability.dart); a media
   # backend is added as an optional feature rather than shipped in the base app.
+  flutter_pcm_sound: ^3.3.3            # raw PCM speaker sink (Android/iOS/macOS) for wasm-decoded audio
   path_provider: ^2.1.4                   # Writable app data dir on Android/iOS (no $HOME there)
   permission_handler: ^11.3.1             # Runtime permission requests (Android BLE/location/notify)
   geolocator: ^12.0.0                      # Device GPS for the hal_sensor_gps_* HAL (real phone position)
@@ -68,6 +70,8 @@ dependencies:
   dtorrent_task_v2: ^0.5.4
   b_encode_decode: ^1.0.5
   events_emitter2: ^1.0.4
+  reticulum:
+    path: ../reticulum-dart
 
 dev_dependencies:
   flutter_test:

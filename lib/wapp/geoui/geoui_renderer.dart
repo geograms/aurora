@@ -1,6 +1,8 @@
 /// GeoUI Flutter renderer — turns AST blocks into Material 3 widgets.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../i18n_context.dart';
 import 'geoui_ast.dart';
@@ -33,12 +35,18 @@ class GeoUiScreenRenderer extends StatefulWidget {
   /// everything passes through as-is.
   final I18nContext? i18n;
 
+  /// Resolves a `$type:"image"` field's value (a media token / data: URI /
+  /// path) to an [ImageProvider] for display. Null → images show a placeholder.
+  /// Supplied by the host (wapp_page) which owns the MediaArchive.
+  final ImageProvider? Function(String value)? resolveImage;
+
   const GeoUiScreenRenderer({
     super.key,
     required this.screen,
     required this.bindings,
     this.onAction,
     this.i18n,
+    this.resolveImage,
   });
 
   @override
@@ -343,8 +351,118 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       'log' => _renderLogField(fieldName, label, tip, field),
       'chat' => _renderChatField(fieldName, label, tip, field),
       'icon' => _renderIconField(fieldName, label, tip, field),
+      'qr' => _renderQrField(fieldName, label, tip, field),
+      'image' => _renderImageField(fieldName, label, tip, field),
       _ => _renderStringField(fieldName, label, tip, field),
     };
+  }
+
+  /// `$type:"qr"` — render a QR code of the field's string value (e.g. a circle
+  /// id to share). Read-only; the value is set by the wapp via ui.field.set.
+  Widget _renderQrField(String name, String label, String? tip, GeoUiBlock field) {
+    final cs = Theme.of(context).colorScheme;
+    final data = widget.bindings.getValue(name)?.toString() ?? '';
+    final size = field.getNumber('size')?.toDouble() ?? 220.0;
+    // Only show a heading if the wapp set an explicit label — don't fall back to
+    // the raw field name (which rendered as "share_qr").
+    final heading = _t(field.getString('label'));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        if (heading != null && heading.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(heading, style: Theme.of(context).textTheme.titleSmall),
+          ),
+        if (data.isEmpty)
+          Text('Nothing to share yet',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: cs.onSurfaceVariant))
+        else
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: QrImageView(
+              data: data,
+              size: size,
+              backgroundColor: Colors.white,
+              // ignore: deprecated_member_use
+              foregroundColor: Colors.black,
+            ),
+          ),
+        if (tip != null && tip.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(tip,
+                textAlign: TextAlign.center,
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: cs.onSurfaceVariant)),
+          ),
+      ],
+    );
+  }
+
+  /// `$type:"image"` — show the picture resolved from the field value and a
+  /// "Choose…" button. Picking is delegated to the host: the button fires the
+  /// `<name>__pickimage` action, which the host handles (native picker → store
+  /// in the content-addressed archive → set the field value to the token).
+  Widget _renderImageField(
+      String name, String label, String? tip, GeoUiBlock field) {
+    final cs = Theme.of(context).colorScheme;
+    final value = widget.bindings.getValue(name)?.toString() ?? '';
+    final provider =
+        value.isEmpty ? null : widget.resolveImage?.call(value);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (label.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(label, style: Theme.of(context).textTheme.titleSmall),
+          ),
+        Center(
+          child: Container(
+            width: 120,
+            height: 120,
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              shape: BoxShape.circle,
+              image: provider == null
+                  ? null
+                  : DecorationImage(image: provider, fit: BoxFit.cover),
+            ),
+            child: provider == null
+                ? Icon(Icons.photo_camera_outlined,
+                    size: 40, color: cs.onSurfaceVariant)
+                : null,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Center(
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.image_outlined, size: 18),
+            label: Text(value.isEmpty ? 'Choose picture' : 'Change picture'),
+            onPressed: () => widget.onAction?.call('${name}__pickimage'),
+          ),
+        ),
+        if (tip != null && tip.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(tip,
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: cs.onSurfaceVariant)),
+          ),
+      ],
+    );
   }
 
   Widget _renderChatField(
@@ -654,6 +772,8 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
     final lines = (field.getNumber('lines') ?? 6).toInt();
     // Optional hard length cap (shows the live counter + enforces the limit).
     final maxLen = field.getNumber('max')?.toInt();
+    // Optional copy-to-clipboard affordance (handy for read-only ids/links).
+    final canCopy = field.getBool('copy') ?? false;
     final val = widget.bindings.getValue(name)?.toString() ?? '';
     return TextField(
       decoration: InputDecoration(
@@ -663,6 +783,19 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
         hintText: hint,
         alignLabelWithHint: multiline,
         filled: true,
+        suffixIcon: canCopy
+            ? IconButton(
+                icon: const Icon(Icons.copy, size: 18),
+                tooltip: 'Copy',
+                onPressed: () {
+                  final v = widget.bindings.getValue(name)?.toString() ?? '';
+                  Clipboard.setData(ClipboardData(text: v));
+                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                    const SnackBar(content: Text('Copied')),
+                  );
+                },
+              )
+            : null,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       ),
       readOnly: readOnly,
@@ -930,6 +1063,43 @@ IconData geoUiResolveIcon(String name) {
       return Icons.forum_outlined;
     case 'visibility':
       return Icons.visibility;
+    case 'lock':
+      return Icons.lock_outline;
+    case 'upgrade':
+    case 'update':
+      return Icons.upgrade;
+    case 'cloud':
+      return Icons.cloud_outlined;
+    case 'storefront':
+    case 'store':
+      return Icons.storefront_outlined;
+    case 'grid_view':
+    case 'grid':
+      return Icons.grid_view;
+    case 'view_list':
+      return Icons.view_list;
+    case 'library_music':
+    case 'music':
+    case 'queue_music':
+      return Icons.library_music;
+    case 'audiotrack':
+    case 'music_note':
+      return Icons.music_note;
+    case 'movie':
+    case 'film':
+    case 'video':
+    case 'movie_outlined':
+      return Icons.movie_outlined;
+    case 'radio':
+      return Icons.radio;
+    case 'skip_next':
+      return Icons.skip_next;
+    case 'skip_previous':
+      return Icons.skip_previous;
+    case 'shuffle':
+      return Icons.shuffle;
+    case 'repeat':
+      return Icons.repeat;
     default:
       return Icons.menu;
   }

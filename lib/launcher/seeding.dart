@@ -4,7 +4,7 @@ part of 'launcher.dart';
 
 /// Folder names always auto-installed on first run, on top of every
 /// `kind: "system"` wapp. Keeps the default set in one place.
-const _kDefaultSeedNames = {'install', 'maps', 'aprs'};
+const _kDefaultSeedNames = {'install', 'aprs', 'mp4player', 'circles'};
 
 /// First-run bootstrap, run as a boot task BEFORE the UI so the launcher
 /// never renders an empty grid mid-seed. Installs the curated default
@@ -152,5 +152,73 @@ Future<int> _seedDefaultsFromFilesystem() async {
     break; // first existing library dir wins
   }
   return count;
+}
+
+/// Default wapps added AFTER the first seeding shipped. A profile seeded before
+/// these existed would never receive them — seeding runs once per profile, and
+/// the upgrade pass only touches already-installed wapps. So backfill each of
+/// these exactly ONCE per profile, recorded in `.seeded.json['offered']` so a
+/// wapp the user later uninstalls is never resurrected.
+const _kBackfillDefaults = {'mp4player', 'circles'};
+
+/// Install any [_kBackfillDefaults] not yet offered to this profile. Runs every
+/// launch (cheap: a marker read + a set check). Returns the count installed.
+Future<int> ensureNewDefaultWapps() async {
+  if (ProfileService.instance.activeProfile == null) return 0;
+  final profileRoot = activeProfileRoot();
+  final marker = await profileRoot.readJson('.seeded.json');
+  // Never seeded yet — ensureProfileSeeded() installs the full default set
+  // (which already includes these). Nothing to backfill.
+  if (marker == null) return 0;
+
+  final offered = <String>{
+    for (final e in (marker['offered'] as List? ?? const [])) e.toString(),
+  };
+  final installed = installedAppsStorage();
+  var added = 0;
+  var changed = false;
+  for (final name in _kBackfillDefaults) {
+    if (offered.contains(name)) continue; // offered before — respect the user
+    final has = await installed.readJson('$name/manifest.json');
+    if (has != null) {
+      offered.add(name); // already present — record so we don't re-offer
+      changed = true;
+      continue;
+    }
+    if (await _installDefaultWapp(name)) {
+      offered.add(name);
+      added++;
+      changed = true;
+      debugPrint('ensureNewDefaultWapps: installed $name');
+    }
+    // install failed → leave unoffered so a later launch retries.
+  }
+  if (changed) {
+    await profileRoot
+        .writeJson('.seeded.json', {...marker, 'offered': offered.toList()});
+  }
+  return added;
+}
+
+/// Install one wapp by [name] from the in-repo ../wapps library (desktop run
+/// from source) or, failing that, the bundled `assets/wapps/[name].wapp`.
+Future<bool> _installDefaultWapp(String name) async {
+  final cwd = platform.currentDirectory();
+  for (final dir in ['$cwd/../wapps/$name', '$cwd/../../wapps/$name']) {
+    final pkg = wappPackageStorage(dir);
+    if (await pkg.exists('manifest.json')) {
+      final res = await WappInstallerService.instance
+          .installFromPath(wappId: name, sourceDir: dir);
+      if (res.ok) return true;
+    }
+  }
+  try {
+    final data = await rootBundle.load('assets/wapps/$name.wapp');
+    final res = await WappInstallerService.instance
+        .installFromBytes(wappId: name, zipBytes: data.buffer.asUint8List());
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
 }
 

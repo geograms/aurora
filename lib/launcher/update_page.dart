@@ -35,29 +35,33 @@ class _UpdatePageState extends State<UpdatePage> {
     if (_svc.supported) _svc.checkForUpdates();
   }
 
-  /// Prompt for a new update feed base URL, persist it, and re-check the
-  /// feed. Blank resets to the default (geogram.radio).
-  Future<void> _editFeedUrl() async {
-    final controller = TextEditingController(text: _svc.feedUrl);
+  /// Prompt for a channel's signed-folder address (npub or hex folderId),
+  /// persist it, and re-check. Blank resets to the built-in pin.
+  Future<void> _editFolder({
+    required String title,
+    required String current,
+    required Future<String> Function(String) save,
+  }) async {
+    final controller = TextEditingController(text: current);
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Release source'),
+        title: Text(title),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-                'Base URL of the update feed — the folder holding '
-                'stable.json and beta.json. Leave blank to reset to the '
-                'default (${UpdateService.defaultFeedUrl}).'),
+                'Reticulum address of the signed update folder for this '
+                'channel (npub… or hex folder id). Only the folder owner can '
+                'publish binaries; every download is verified by sha256. Leave '
+                'blank to reset to the built-in default.'),
             const SizedBox(height: 12),
             TextField(
               controller: controller,
               autofocus: true,
-              keyboardType: TextInputType.url,
               decoration: const InputDecoration(
-                hintText: 'https://geogram.radio/updates',
+                hintText: 'npub1…',
                 border: OutlineInputBorder(),
               ),
               onSubmitted: (v) => Navigator.pop(ctx, v),
@@ -74,10 +78,12 @@ class _UpdatePageState extends State<UpdatePage> {
       ),
     );
     if (result == null) return; // cancelled
-    await _svc.setFeedUrl(result);
+    await save(result);
     if (mounted) setState(() {});
     _svc.checkForUpdates();
   }
+
+  String _folderLabel(String v) => v.isEmpty ? 'Not configured' : v;
 
   @override
   Widget build(BuildContext context) {
@@ -132,19 +138,43 @@ class _UpdatePageState extends State<UpdatePage> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                // Release source (feed URL) — editable so a future
-                // deployment can point the updater at another host.
+                // Release source — the two signed Reticulum folders (one per
+                // channel). Editable so self-hosters can point at their own.
                 Card(
                   elevation: 0,
                   color: cs.surfaceContainerLow,
                   child: ListTile(
-                    leading: const Icon(Icons.cloud_outlined),
-                    title: const Text('Release source'),
-                    subtitle: Text(_svc.feedUrl),
+                    leading: const Icon(Icons.folder_shared_outlined),
+                    title: const Text('Stable folder'),
+                    subtitle: Text(_folderLabel(_svc.stableFolder),
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
                     trailing: IconButton(
                       icon: const Icon(Icons.edit_outlined),
-                      tooltip: 'Change release source',
-                      onPressed: _editFeedUrl,
+                      tooltip: 'Change stable folder',
+                      onPressed: () => _editFolder(
+                        title: 'Stable folder',
+                        current: _svc.stableFolder,
+                        save: _svc.setStableFolder,
+                      ),
+                    ),
+                  ),
+                ),
+                Card(
+                  elevation: 0,
+                  color: cs.surfaceContainerLow,
+                  child: ListTile(
+                    leading: const Icon(Icons.folder_shared_outlined),
+                    title: const Text('Beta folder'),
+                    subtitle: Text(_folderLabel(_svc.betaFolder),
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.edit_outlined),
+                      tooltip: 'Change beta folder',
+                      onPressed: () => _editFolder(
+                        title: 'Beta folder',
+                        current: _svc.betaFolder,
+                        save: _svc.setBetaFolder,
+                      ),
                     ),
                   ),
                 ),

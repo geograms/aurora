@@ -22,7 +22,7 @@ void main() {
   (MediaArchive, Directory) freshArchive() {
     final dir = Directory.systemTemp.createTempSync('mediaarch_test_');
     temps.add(dir);
-    return (MediaArchive.forStorage(makeFilesystemStorage(dir.path)), dir);
+    return (MediaArchive.forDirectory(dir.path), dir);
   }
 
   tearDownAll(() {
@@ -162,7 +162,7 @@ void main() {
     a.setScreenshot(token, bytes('SHOT'));
     a.close();
 
-    final b = MediaArchive.forStorage(makeFilesystemStorage(dir.path));
+    final b = MediaArchive.forDirectory(dir.path);
     expect(b.get(token), data);
     final m = b.getMeta(token)!;
     expect(m.name, 'keep.png');
@@ -270,7 +270,7 @@ void main() {
     a.updateMeta(t, folder: 'Album', parent: 'Artist');
     a.incrementDownloads(t);
     a.close();
-    final b = MediaArchive.forStorage(makeFilesystemStorage(dir.path));
+    final b = MediaArchive.forDirectory(dir.path);
     final m = b.getMeta(t)!;
     expect(m.folder, 'Album');
     expect(m.parent, 'Artist');

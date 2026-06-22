@@ -44,6 +44,11 @@ class _SlippyMap extends StatefulWidget {
   /// places (countries, cities, villages…). The tile service supplies the
   /// zoom-appropriate level of detail.
   final String? labelUrl;
+
+  /// Deepest zoom at which the label layer actually carries labels. Beyond it
+  /// the labels are fetched from this zoom and scaled up ("overzoom") so place
+  /// names stay visible when the map is zoomed in past the layer's detail.
+  final int labelMaxZoom;
   final void Function(double lat, double lon, int zoom) onViewportChanged;
 
   /// Pins to overlay on the map. Each map is {id, lat, lon, label, color?,
@@ -101,6 +106,19 @@ class _SlippyMap extends StatefulWidget {
   /// host is steering the viewport somewhere specific (e.g. locate-on-map).
   final bool autoFitCircle;
 
+  /// Toggle the full-screen map. When set, a button is shown that calls this:
+  /// in the embedded map it opens the full-screen page; in the full-screen
+  /// page it pops back. Null hides the button.
+  final VoidCallback? onExpand;
+
+  /// True when this instance IS the full-screen page (picks the exit icon).
+  final bool isFullscreen;
+
+  /// Centre the coverage circle on the device's current GPS position. Wired
+  /// only where a fix is possible (mobile); returns true on success. Null hides
+  /// the "my location" button.
+  final Future<bool> Function()? onUseMyLocation;
+
   const _SlippyMap({
     required this.lat,
     required this.lon,
@@ -110,6 +128,7 @@ class _SlippyMap extends StatefulWidget {
     required this.maxZoom,
     required this.onViewportChanged,
     this.labelUrl,
+    this.labelMaxZoom = 13,
     this.markers = const [],
     this.onMarkerTap,
     this.radiusKm,
@@ -129,6 +148,9 @@ class _SlippyMap extends StatefulWidget {
     this.onChatOpenChanged,
     this.embedChat = true,
     this.autoFitCircle = false,
+    this.onExpand,
+    this.isFullscreen = false,
+    this.onUseMyLocation,
   });
 
   @override
@@ -163,6 +185,10 @@ class _SlippyMapState extends State<_SlippyMap>
   // Floating geo-chat visibility + active tab (0 = Live, 1 = Beacons).
   bool _showChat = true;
   int _geoTab = 0;
+
+  // True while a "centre on my GPS location" fetch is in flight (button shows a
+  // spinner so the user knows it's working — a fix can take a moment).
+  bool _locating = false;
 
   // Chat open/closed: parent-owned when provided (so the Map-tab unread badge
   // can react), else internal.
@@ -294,6 +320,33 @@ class _SlippyMapState extends State<_SlippyMap>
             ),
           ),
       ],
+    );
+  }
+
+  /// A dark, translucent square icon button matching the map overlay style
+  /// (used for the full-screen toggle).
+  Widget _mapIconButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.black.withAlpha(160),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: const BorderSide(color: Color(0xFF30363d)),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Tooltip(
+          message: tooltip,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Icon(icon, size: 22, color: Colors.white70),
+          ),
+        ),
+      ),
     );
   }
 
@@ -991,17 +1044,74 @@ class _SlippyMapState extends State<_SlippyMap>
         return out;
       }
 
+      // Place-name labels (countries/cities/villages) — a transparent reference
+      // layer over the imagery. When zoomed in past the layer's detail
+      // (labelMaxZoom), fetch the labels at that zoom and SCALE them up so place
+      // names don't just disappear (the satellite imagery keeps going much
+      // deeper than the labels do).
+      List<Widget> buildLabelTiles(String template) {
+        final src = widget.labelMaxZoom;
+        if (_zoom <= src) return buildTiles(template, transparent: true);
+        final scale = pow(2, _zoom - src).toDouble();
+        final tileWorld = _tileSize * scale; // px (at _zoom) of one source tile
+        final maxTileS = pow(2, src).toInt() - 1;
+        final txMin = (_pxX / tileWorld).floor();
+        final txMax = ((_pxX + w) / tileWorld).floor();
+        final tyMin = (_pxY / tileWorld).floor();
+        final tyMax = ((_pxY + h) / tileWorld).floor();
+        final out = <Widget>[];
+        for (var ty = tyMin; ty <= tyMax; ty++) {
+          if (ty < 0 || ty > maxTileS) continue;
+          for (var tx = txMin; tx <= txMax; tx++) {
+            final wrappedX =
+                ((tx % (maxTileS + 1)) + (maxTileS + 1)) % (maxTileS + 1);
+            final url = template
+                .replaceAll('{z}', '$src')
+                .replaceAll('{x}', '$wrappedX')
+                .replaceAll('{y}', '$ty');
+            out.add(Positioned(
+              left: tx * tileWorld - _pxX,
+              top: ty * tileWorld - _pxY,
+              width: tileWorld,
+              height: tileWorld,
+              child: Image(
+                image: tileImageProvider(url),
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            ));
+          }
+        }
+        return out;
+      }
+
       final tiles = buildTiles(widget.tileUrl, transparent: false);
-      // Place-name labels (countries/cities/villages) — a transparent
-      // reference layer over the imagery; the service scales detail by zoom.
       final labelTiles = (widget.labelUrl == null || widget.labelUrl!.isEmpty)
           ? const <Widget>[]
-          : buildTiles(widget.labelUrl!, transparent: true);
+          : buildLabelTiles(widget.labelUrl!);
 
       final centerLat = _px2lat(_pxY + h / 2, _zoom);
       final centerLon = _px2lon(_pxX + w / 2, _zoom);
 
       final mapStack = GestureDetector(
+        // Long-press anywhere on the map to recentre the coverage circle on
+        // that spot (an easier alternative to dragging the centre handle,
+        // especially on a phone). Only active when there IS a circle.
+        onLongPressStart: (d) {
+          if (widget.onCenterChanged == null || widget.radiusKm == null) return;
+          final lat = _px2lat(_pxY + d.localPosition.dy, _zoom);
+          final lon = _px2lon(_pxX + d.localPosition.dx, _zoom);
+          HapticFeedback.selectionClick();
+          setState(() {
+            _popupId = null;
+            _circleDrag = null;
+            _dragCenterLat = null;
+            _dragCenterLon = null;
+          });
+          widget.onCenterChanged!.call(lat, lon);
+        },
         onPanStart: (d) {
           _popupId = null; // any drag dismisses an open marker popup
           // The edge band resizes; anywhere else inside the circle moves it
@@ -1113,6 +1223,24 @@ class _SlippyMapState extends State<_SlippyMap>
               ..._buildHighlight(w, h),
               // Info popup for a tapped marker.
               ..._buildMarkerPopup(w, h),
+              // Full-screen toggle in the bottom-RIGHT corner. The coordinates
+              // sit bottom-left and the zoom control is higher up, so this
+              // corner is clear; when the geo-chat FAB is showing (plain map,
+              // chat minimised) we shift left of it so they don't overlap.
+              if (widget.onExpand != null)
+                Positioned(
+                  right: (widget.embedChat && !_chatVisible) ? 64 : 12,
+                  bottom: 12,
+                  child: _mapIconButton(
+                    icon: widget.isFullscreen
+                        ? Icons.fullscreen_exit
+                        : Icons.fullscreen,
+                    tooltip: widget.isFullscreen
+                        ? 'Exit full screen'
+                        : 'Full screen',
+                    onTap: widget.onExpand!,
+                  ),
+                ),
               // Search bar
               Positioned(
                 top: 12,
@@ -1235,11 +1363,10 @@ class _SlippyMapState extends State<_SlippyMap>
                   top: h / 2 - 44,
                   child: _buildZoomControl(),
                 ),
-              // Coordinates. Portrait: bottom-left, clear of the zoom + chat
-              // FAB stacked on the right. Landscape: bottom-right.
+              // Coordinates — always bottom-left, leaving the bottom-right
+              // corner for the full-screen toggle in both orientations.
               Positioned(
-                left: w < 600 ? 12 : null,
-                right: w < 600 ? null : 12,
+                left: 12,
                 bottom: 12,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -1278,6 +1405,7 @@ class _SlippyMapState extends State<_SlippyMap>
   /// A single unified zoom control (+ over −, split by a divider) — the
   /// familiar map widget, with a rounded translucent body and a shadow.
   Widget _buildZoomControl() {
+    final hasLocate = widget.onUseMyLocation != null;
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xF0161b22),
@@ -1290,14 +1418,69 @@ class _SlippyMapState extends State<_SlippyMap>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // "Centre on my location" — fetch the GPS fix and move the circle.
+          if (hasLocate) ...[
+            _locateBtn(
+                radius: const BorderRadius.vertical(top: Radius.circular(10))),
+            Container(width: 30, height: 1, color: const Color(0xFF30363d)),
+          ],
           _zoomBtn(Icons.add, () => _zoomBy(1),
-              radius: const BorderRadius.vertical(top: Radius.circular(10))),
+              radius: hasLocate
+                  ? BorderRadius.zero
+                  : const BorderRadius.vertical(top: Radius.circular(10))),
           Container(width: 30, height: 1, color: const Color(0xFF30363d)),
           _zoomBtn(Icons.remove, () => _zoomBy(-1),
               radius: const BorderRadius.vertical(bottom: Radius.circular(10))),
         ],
       ),
     );
+  }
+
+  /// The "centre on my GPS location" button (top of the zoom control). Shows a
+  /// spinner while acquiring a fix, and a snackbar if it can't get one.
+  Widget _locateBtn({required BorderRadius radius}) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: radius,
+        onTap: _locating ? null : _useMyLocation,
+        child: SizedBox(
+          width: 42,
+          height: 40,
+          child: Center(
+            child: _locating
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Color(0xFFE6EDF3)),
+                  )
+                : const Icon(Icons.my_location,
+                    size: 20, color: Color(0xFFE6EDF3)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _useMyLocation() async {
+    final cb = widget.onUseMyLocation;
+    if (cb == null || _locating) return;
+    setState(() => _locating = true);
+    bool ok = false;
+    try {
+      ok = await cb();
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not get your location (check GPS + permission)'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Widget _zoomBtn(IconData icon, VoidCallback onTap,
@@ -1327,27 +1510,23 @@ class _SearchResult {
 }
 
 extension _WappMaps on _WappPageState {
-  Widget _buildMapScreen(GeoUiBlock screen, GeoUiBlock mapGroup) {
-    // A screen that carries BOTH the map group and the `geochat` chat field
-    // renders as a vertical split: map (with radius/search) on top, the geo
-    // chat panel below, separated by a drag handle so the user balances how
-    // much of each they want. One tab = pick the area AND talk to it.
-    final geoChatField = screen.children
-        .where((c) =>
-            c.keyword == 'field' &&
-            c.type == 'chat' &&
-            (c.name ?? '') == 'geochat')
-        .firstOrNull;
-    final map = Column(
-      children: [
-        _buildMapRadiusBar(),
-        Expanded(
-          child: _SlippyMap(
+  /// Build the slippy map wired to all the host callbacks. Shared by the
+  /// embedded map (inside the map screen) and the full-screen map page so both
+  /// drive the exact same state and behaviour. [onExpand]/[isFullscreen]
+  /// control the full-screen toggle button.
+  Widget _buildSlippyMap(
+    GeoUiBlock mapGroup, {
+    required bool embedChat,
+    VoidCallback? onExpand,
+    bool isFullscreen = false,
+  }) {
+    return _SlippyMap(
       lat: _mapLat,
       lon: _mapLon,
       zoom: _mapZoom,
       tileUrl: _tileUrl,
       labelUrl: mapGroup.getString('label-url'),
+      labelMaxZoom: mapGroup.getNumber('label-max-zoom')?.toInt() ?? 13,
       minZoom: mapGroup.getNumber('min-zoom')?.toInt() ?? 2,
       maxZoom: mapGroup.getNumber('max-zoom')?.toInt() ?? 18,
       markers: _mapMarkers.values.toList(),
@@ -1380,6 +1559,7 @@ extension _WappMaps on _WappPageState {
         _fieldValues['map_radius'] = km.round().toString();
         _fieldValues['radius_km'] = km.round().toString();
         _sendCommand('set_radius');
+        _persistMapLocation(); // remember it across restarts
         if (mounted) setState(() {});
       },
       onCenterChanged: (lat, lon) {
@@ -1390,6 +1570,7 @@ extension _WappMaps on _WappPageState {
         _fieldValues['my_lat'] = lat.toStringAsFixed(5);
         _fieldValues['my_lon'] = lon.toStringAsFixed(5);
         _sendCommand('set_radius');
+        _persistMapLocation(); // remember the chosen pin across restarts
         if (mounted) setState(() {});
       },
       chatLive: _geoLive,
@@ -1417,14 +1598,107 @@ extension _WappMaps on _WappPageState {
       highlightLon: _locateLon,
       // With the chat panel below the map there's no need for the floating
       // overlay; a plain map screen (no geochat field) keeps the old overlay.
-      embedChat: geoChatField == null,
+      embedChat: embedChat,
       autoFitCircle: _mapAutoFit,
+      onExpand: onExpand,
+      isFullscreen: isFullscreen,
+      // "Centre on my location" — only where the device actually has GPS
+      // (mobile). Fetches a fresh fix, recentres the coverage circle on it,
+      // pans the map there, and re-filters (set_radius).
+      onUseMyLocation: _gpsCenterAvailable
+          ? () async {
+              final pos = await LocationService.instance.currentPosition();
+              if (pos == null) return false;
+              setState(() {
+                _mapCenterLat = pos.lat;
+                _mapCenterLon = pos.lon;
+                _mapLat = pos.lat;
+                _mapLon = pos.lon;
+                // Frame at a city-level zoom where place labels are richest
+                // (the reference layer carries city/town names around z11–12;
+                // zoomed further in they thin out). Keeps the user's town named.
+                _mapZoom = 12;
+                _mapAutoFit = false;
+              });
+              _fieldValues['my_lat'] = pos.lat.toStringAsFixed(5);
+              _fieldValues['my_lon'] = pos.lon.toStringAsFixed(5);
+              _sendCommand('set_radius');
+              _persistMapLocation(); // remember the GPS location across restarts
+              return true;
+            }
+          : null,
+    );
+  }
+
+  /// True only on platforms with a real GPS source (mobile). Desktop/web have
+  /// no fix, so the "my location" button is hidden there.
+  bool get _gpsCenterAvailable {
+    final p = platform.platformName();
+    return p == 'android' || p == 'ios';
+  }
+
+  /// Open the map as a dedicated full-screen page so it's easier to pan/zoom.
+  /// Map-focused (no chat overlay covering it — the chat stays in its normal
+  /// tab); the full-screen toggle becomes an "exit" button that pops back. The
+  /// page shares the host's map state, so panning here carries back on exit.
+  void _openFullScreenMap(GeoUiBlock mapGroup) {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (ctx) => Scaffold(
+        backgroundColor: const Color(0xFF0a0e14),
+        body: SafeArea(
+          child: _buildSlippyMap(
+            mapGroup,
+            embedChat: false,
+            isFullscreen: true,
+            onExpand: () => Navigator.of(ctx).maybePop(),
+          ),
+        ),
+      ),
+    ));
+  }
+
+  Widget _buildMapScreen(GeoUiBlock screen, GeoUiBlock mapGroup) {
+    // A screen that carries BOTH the map group and the `geochat` chat field
+    // renders as a vertical split: map (with radius/search) on top, the geo
+    // chat panel below, separated by a drag handle so the user balances how
+    // much of each they want. One tab = pick the area AND talk to it.
+    final geoChatField = screen.children
+        .where((c) =>
+            c.keyword == 'field' &&
+            c.type == 'chat' &&
+            (c.name ?? '') == 'geochat')
+        .firstOrNull;
+    final map = Column(
+      children: [
+        _buildMapRadiusBar(),
+        Expanded(
+          child: _buildSlippyMap(
+            mapGroup,
+            embedChat: geoChatField == null,
+            onExpand: () => _openFullScreenMap(mapGroup),
           ),
         ),
       ],
     );
     if (geoChatField == null) return map;
     return LayoutBuilder(builder: (context, box) {
+      // Landscape (wide enough): map on the LEFT, chat on the RIGHT, with a
+      // movable vertical divider. Needs room for both columns; otherwise fall
+      // back to the vertical (top/bottom) split.
+      if (box.maxWidth > box.maxHeight && box.maxWidth >= 560) {
+        final totalW = box.maxWidth;
+        final chatW = (totalW * _geoSplitLand).clamp(240.0, totalW - 280.0);
+        return Row(
+          children: [
+            Expanded(child: map),
+            _geoSplitHandleH(totalW),
+            SizedBox(
+                width: chatW,
+                child: _buildGeoChatScreen(showStatus: false)),
+          ],
+        );
+      }
       final total = box.maxHeight;
       // Chat height from the user-set fraction, but never starve either side:
       // chat keeps at least its header+composer, map keeps room to pan.
@@ -1439,6 +1713,36 @@ extension _WappMaps on _WappPageState {
         ],
       );
     });
+  }
+
+  /// The vertical grab-bar between the map (left) and chat (right) in landscape
+  /// — drag horizontally to rebalance. [total] is the available width.
+  Widget _geoSplitHandleH(double total) {
+    final cs = Theme.of(context).colorScheme;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (d) => setState(() {
+          _geoSplitLand =
+              (_geoSplitLand - d.delta.dx / total).clamp(0.2, 0.7);
+        }),
+        child: Container(
+          width: 20,
+          height: double.infinity,
+          color: cs.surfaceContainerHighest.withAlpha(90),
+          alignment: Alignment.center,
+          child: Container(
+            width: 4,
+            height: 40,
+            decoration: BoxDecoration(
+              color: cs.onSurfaceVariant.withAlpha(140),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// The grab-bar between map and chat — drag to rebalance the split.

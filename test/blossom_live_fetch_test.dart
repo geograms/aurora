@@ -46,7 +46,7 @@ void main() {
     }
 
     final dir = Directory.systemTemp.createTempSync('blossomlive_');
-    final archive = MediaArchive.forStorage(makeFilesystemStorage(dir.path));
+    final archive = MediaArchive.forDirectory(dir.path);
     try {
       // A "phone outside the network" starts with only the announced source.
       archive.addSource(hex, 'blossom', origin);
@@ -66,7 +66,7 @@ void main() {
       final data = archive.get(hex)!;
       expect(data.length, greaterThan(0));
       // Now this station can itself provide the file (downloader -> provider).
-      expect(MediaArchive.forStorage(makeFilesystemStorage(dir.path)).has(hex),
+      expect(MediaArchive.forDirectory(dir.path).has(hex),
           isTrue);
     } finally {
       archive.close();

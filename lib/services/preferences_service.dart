@@ -148,19 +148,31 @@ class PreferencesService {
   // Per-wapp autostart: when on, the wapp runs as a background service
   // (started at boot) and keeps its engine ticking even while its UI page is
   // closed — e.g. APRS staying connected to BLE/APRS-IS to receive messages.
+  // The APRS wapp hosts the messaging (groups, direct messages, Activity feed,
+  // beacons), so it autostarts BY DEFAULT — it must keep receiving + notifying
+  // in the background even when its page (or the whole app) is closed. Other
+  // wapps default off. The user can still turn APRS autostart off explicitly.
+  static const String _commsWappId = 'aprs';
   bool getWappAutostart(String wappId) =>
-      _prefs.getBool('wapp.autostart.$wappId') ?? false;
+      _prefs.getBool('wapp.autostart.$wappId') ?? (wappId == _commsWappId);
   Future<void> setWappAutostart(String wappId, bool v) =>
       _prefs.setBool('wapp.autostart.$wappId', v);
 
-  /// Ids of all wapps the user enabled for autostart.
+  /// Ids of all wapps that should autostart (explicitly enabled, plus the comms
+  /// wapp by default unless the user turned it off).
   List<String> autostartWappIds() {
     const prefix = 'wapp.autostart.';
-    return _prefs
+    final ids = _prefs
         .getKeys()
         .where((k) => k.startsWith(prefix) && (_prefs.getBool(k) ?? false))
         .map((k) => k.substring(prefix.length))
-        .toList();
+        .toSet();
+    if (_prefs.getBool('$prefix$_commsWappId') ?? true) {
+      ids.add(_commsWappId);
+    } else {
+      ids.remove(_commsWappId);
+    }
+    return ids.toList();
   }
 
   // Whether the Android BootReceiver should auto-start the background service

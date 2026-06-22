@@ -1,39 +1,20 @@
 /*
- * Update models — release feed shapes for the in-app Update Center.
+ * Update models — release shapes for the in-app Update Center.
  *
- * The app pulls releases from a self-hosted feed at https://geogram.radio
- * (no github.com runtime dependency — app-store friendly): a stable channel
- * (updates/stable.json) and a beta channel (updates/beta.json). Each is a
- * single JSON object with version metadata + an `assets` array. Artifacts
- * follow the `aurora-*` naming the build pipeline produces.
- *
- * ReleaseInfo.fromGitHub is retained so a custom feed URL can still point at
- * the GitHub releases API if ever needed, but it is not used by default.
+ * Releases are published into signed Reticulum mutable folders (see
+ * update_service.dart): each per-platform binary is a content-addressed folder
+ * entry named `aurora-<version>-<platform>`. releasesFromFolder() turns a
+ * browsed folder's entries into the ReleaseInfo/ReleaseAsset shapes below;
+ * assetFor() then resolves the right artifact for the running platform exactly
+ * as before. Pure Dart on purpose (no Flutter) so the adapter is testable and
+ * reusable; the only platform-detection helper lives in update_platform.dart.
  */
-
-import 'package:flutter/foundation.dart';
 
 enum UpdateChannel { stable, beta }
 
 enum UpdatePlatform { android, linux, windows, macos, unknown }
 
-UpdatePlatform currentUpdatePlatform() {
-  if (kIsWeb) return UpdatePlatform.unknown;
-  switch (defaultTargetPlatform) {
-    case TargetPlatform.android:
-      return UpdatePlatform.android;
-    case TargetPlatform.linux:
-      return UpdatePlatform.linux;
-    case TargetPlatform.windows:
-      return UpdatePlatform.windows;
-    case TargetPlatform.macOS:
-      return UpdatePlatform.macos;
-    default:
-      return UpdatePlatform.unknown;
-  }
-}
-
-/// One downloadable file attached to a GitHub release.
+/// One downloadable file attached to a release.
 class ReleaseAsset {
   final String name;
   final String url; // browser_download_url
@@ -185,4 +166,67 @@ class ReleaseInfo {
         return null;
     }
   }
+}
+
+/// Known per-platform artifact suffixes, longest/most-specific first so the
+/// version can be split off the filename unambiguously.
+const List<String> _kArtifactSuffixes = [
+  '-linux-x64.tar.gz',
+  '-setup.exe',
+  '.apk',
+  '.tar.gz',
+  '.zip',
+  '.exe',
+  '.dmg',
+];
+
+/// Extract the semver version from an `aurora-<version>-<platform>` artifact
+/// name, or null when the name isn't a recognised aurora artifact. The version
+/// may itself contain '-' (e.g. `1.0.3-beta.4`), which is exactly the channel
+/// signal `isPrerelease` reads.
+String? versionFromAssetName(String name) {
+  const prefix = 'aurora-';
+  if (!name.startsWith(prefix)) return null;
+  var rest = name.substring(prefix.length);
+  for (final suf in _kArtifactSuffixes) {
+    if (rest.endsWith(suf) && rest.length > suf.length) {
+      return rest.substring(0, rest.length - suf.length);
+    }
+  }
+  return null;
+}
+
+/// Build the candidate releases from a browsed Reticulum update-folder state
+/// (FolderState.toJson). Each `files` entry `{x: sha256hex, name, size}` becomes
+/// a ReleaseAsset whose `url` holds the sha (the fetch handle); files are grouped
+/// by the version parsed from their name into one ReleaseInfo each. The existing
+/// `assetFor(platform)` (filename-based) and semver comparison then apply
+/// unchanged — only the transport differs from the HTTP feed.
+List<ReleaseInfo> releasesFromFolder(Map<String, dynamic> folderState) {
+  final files = folderState['files'];
+  if (files is! List) return const [];
+  final byVersion = <String, List<ReleaseAsset>>{};
+  for (final f in files) {
+    if (f is! Map) continue;
+    final sha = (f['x'] ?? '').toString();
+    final name = (f['name'] ?? '').toString();
+    if (sha.isEmpty || name.isEmpty) continue;
+    final version = versionFromAssetName(name);
+    if (version == null) continue;
+    (byVersion[version] ??= []).add(ReleaseAsset(
+      name: name,
+      url: sha, // the sha is the content-addressed fetch handle
+      size: (f['size'] as num?)?.toInt() ?? 0,
+    ));
+  }
+  final out = <ReleaseInfo>[];
+  byVersion.forEach((version, assets) {
+    out.add(ReleaseInfo(
+      version: version,
+      tagName: 'v$version',
+      isPrerelease: version.contains('-'),
+      assets: assets,
+    ));
+  });
+  return out;
 }

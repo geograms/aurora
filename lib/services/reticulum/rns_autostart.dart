@@ -26,59 +26,78 @@ import 'rns_service.dart';
 /// configured public testnet bootstrap as a TCP client. Safe to call repeatedly.
 Future<void> ensureRnsAutostart() async {
   final rns = RnsService.instance;
-  if (rns.isUp || rns.isStarting) return;
+  if (rns.isStarting) return;
 
   // Await the singleton: at boot time the sync accessor may still be null
   // (PreferencesService is fully initialized later in main()).
   final prefs = await PreferencesService.instance();
   if (!prefs.rnsAutoStart) return; // user opted out
 
-  // Serve the media we already hold (received files, imports, disk-folder
-  // bytes are added later by the DiskFolderManager into the composite source).
-  final ws = wappsDataStorage(prefs);
-  final arch = MediaArchive.forStorage(ws);
-  rns.fileServeSource = MediaFileSource(arch);
+  final servers = prefs.rnsBootstrapServers;
 
-  // Persist the social relay/index DB + folder key-store / disk-folder registry
-  // / subscriptions under the shared wapp-data root.
-  rns.relayStorePath = ws.getAbsolutePath('social.sqlite3');
-  rns.folderStorePath = ws.getAbsolutePath('folders.json');
-  rns.diskFoldersPath = ws.getAbsolutePath('disk_folders.json');
-  rns.subscriptionsPath = ws.getAbsolutePath('folder_subscriptions.json');
-  rns.serveStatsPath = ws.getAbsolutePath('serve_stats.sqlite3');
-  rns.identityPath = ws.getAbsolutePath('rns_identity.key');
-  rns.followsPath = ws.getAbsolutePath('host_follows.json');
-  rns.diskIndexPath = ws.getAbsolutePath('disk_index.sqlite3');
+  // 1) Bring the node up via the FIRST reachable hub (this also builds the local
+  //    services once). Skipped when already up — then we only top up the mesh.
+  if (!rns.isUp) {
+    // Serve the media we already hold (received files, imports; disk-folder
+    // bytes are added later by the DiskFolderManager into the composite source).
+    final ws = wappsDataStorage(prefs);
+    final arch = MediaArchive.forDirectory(ws.getAbsolutePath(''));
+    rns.fileServeSource = MediaFileSource(arch);
 
-  // Announce our callsign so peers/repeaters can show a human name (plaintext
-  // presence beacon, same as the manual start path).
-  final cs = (ProfileService.instance.activeProfile?.callsign ?? '').trim();
-  final name = cs.isNotEmpty ? cs : 'aurora';
+    // Persist the social relay/index DB + folder key-store / disk-folder
+    // registry / subscriptions under the shared wapp-data root.
+    rns.relayStorePath = ws.getAbsolutePath('social.sqlite3');
+    rns.folderStorePath = ws.getAbsolutePath('folders.json');
+    rns.diskFoldersPath = ws.getAbsolutePath('disk_folders.json');
+    rns.subscriptionsPath = ws.getAbsolutePath('folder_subscriptions.json');
+    rns.serveStatsPath = ws.getAbsolutePath('serve_stats.sqlite3');
+    rns.identityPath = ws.getAbsolutePath('rns_identity.key');
+    rns.followsPath = ws.getAbsolutePath('host_follows.json');
+    rns.diskIndexPath = ws.getAbsolutePath('disk_index.sqlite3');
 
-  // Try each configured bootstrap hub in turn until one answers with real
-  // Reticulum traffic (rns.start validates the link before returning true). The
-  // first attempt also builds the local services once; the rest just reconnect.
-  for (final entry in prefs.rnsBootstrapServers) {
-    final hp = _parseHostPort(entry);
-    if (hp == null) continue;
-    if (rns.isUp) break;
-    LogService.instance.add('RNS autostart: trying ${hp.$1}:${hp.$2}');
-    final ok = await rns.start(
-      mode: 'tcpclient',
-      host: hp.$1,
-      port: hp.$2,
-      announceName: name,
-    );
-    if (ok || rns.isUp) {
-      // Keep the process alive while the node is up so it goes on sharing /
-      // routing with the screen off or the app backgrounded (the holder is
-      // ref-counted, so it coexists with the background-wapp service).
-      await AndroidForegroundService.instance.hold('reticulum');
+    // Announce our callsign so peers/repeaters can show a human name (plaintext
+    // presence beacon, same as the manual start path).
+    final cs = (ProfileService.instance.activeProfile?.callsign ?? '').trim();
+    final name = cs.isNotEmpty ? cs : 'aurora';
+
+    for (final entry in servers) {
+      final hp = _parseHostPort(entry);
+      if (hp == null) continue;
+      if (rns.isUp) break;
+      LogService.instance.add('RNS autostart: trying ${hp.$1}:${hp.$2}');
+      final ok = await rns.start(
+        mode: 'tcpclient',
+        host: hp.$1,
+        port: hp.$2,
+        announceName: name,
+      );
+      if (ok || rns.isUp) {
+        // Keep the process alive while the node is up so it goes on sharing /
+        // routing with the screen off or backgrounded (ref-counted holder, so
+        // it coexists with the background-wapp service).
+        await AndroidForegroundService.instance.hold('reticulum');
+        break;
+      }
+    }
+    if (!rns.isUp) {
+      LogService.instance.add(
+          'RNS autostart: no bootstrap reachable yet (local folders still work)');
       return;
     }
   }
-  LogService.instance.add(
-      'RNS autostart: no bootstrap reachable yet (local folders still work)');
+
+  // 2) Mesh: connect to EVERY other configured hub we don't already hold an
+  //    uplink to. Different community hubs don't reliably bridge announces to
+  //    each other, so two devices that each reach a different subset would never
+  //    meet on a single first-wins hub. Holding all reachable hubs at once means
+  //    they share at least one. Idempotent — already-connected hubs are skipped,
+  //    and dropped ones are re-added on the next tick. Best-effort per hub.
+  for (final entry in servers) {
+    final hp = _parseHostPort(entry);
+    if (hp == null) continue;
+    if (rns.connectedHubs.contains('${hp.$1}:${hp.$2}')) continue;
+    await rns.connectUplink(hp.$1, hp.$2);
+  }
 }
 
 /// Parse "host:port" (port optional → 4242). Returns null for blank entries.
@@ -101,6 +120,17 @@ Timer? _retryTimer;
 void startRnsAutostart() {
   final prefs = PreferencesService.instanceSync;
   if (prefs != null && !prefs.rnsAutoStart) return;
+  // Reconnect immediately when the hub uplink drops (socket closed or the
+  // device's network changed and the watchdog noticed the silence) instead of
+  // waiting for the next periodic tick. RnsService has already torn the dead
+  // uplink down and set isUp=false, so ensureRnsAutostart re-dials the hub list
+  // from the current network. Idempotent via the _attempting guard.
+  RnsService.instance.onLinkDown = () {
+    final p = PreferencesService.instanceSync;
+    if (p != null && !p.rnsAutoStart) return;
+    LogService.instance.add('RNS autostart: uplink dropped — reconnecting now');
+    unawaited(_attempt());
+  };
   // Defer the first attempt so the UI paints first. Node startup does real
   // synchronous work on this isolate (identity, store open, indexing owned
   // disk folders); running it during boot froze the splash for a long time on
@@ -111,10 +141,13 @@ void startRnsAutostart() {
     if (p != null && !p.rnsAutoStart) return;
     unawaited(_attempt());
   });
+  // Periodic tick: brings the node up if it's down, AND tops up the hub mesh
+  // (re-adds any uplink that dropped, or hubs that were unreachable earlier).
+  // ensureRnsAutostart is idempotent, so this is safe to run while up.
   _retryTimer ??= Timer.periodic(const Duration(seconds: 30), (_) {
     final p = PreferencesService.instanceSync;
     if (p != null && !p.rnsAutoStart) return;
-    if (RnsService.instance.isUp || RnsService.instance.isStarting) return;
+    if (RnsService.instance.isStarting) return;
     unawaited(_attempt());
   });
 }

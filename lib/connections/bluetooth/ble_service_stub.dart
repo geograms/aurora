@@ -24,6 +24,7 @@ class BleService {
 
   bool get supported => false;
   bool get advertiseSupported => false;
+  bool get poweredOn => false;
 
   final _inbound = StreamController<BleInboundFrame>.broadcast();
   Stream<BleInboundFrame> get inbound => _inbound.stream;

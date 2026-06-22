@@ -33,6 +33,7 @@ import '../services/reticulum/rns_service.dart';
 import '../services/preferences_service.dart';
 import '../services/remote_api_service.dart';
 import '../services/android_permissions_service.dart';
+import '../services/update_service.dart';
 import '../version.dart';
 import 'update_page.dart';
 import '../profile/iwi_profile.dart';

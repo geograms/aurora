@@ -78,33 +78,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
     Navigator.of(context).pop(true);
   }
 
-  Future<void> _delete() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete profile?'),
-        content: Text(
-          'This removes ${_p.displayName} (${_p.callsign}) from this device. '
-          'Make sure you have backed up its secret key (nsec) if you want to '
-          'restore it later — this cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    await ProfileService.instance.delete(_p.id);
-    if (!mounted) return;
-    Navigator.of(context).pop(true);
-  }
 
   void _copy(String label, String value) {
     Clipboard.setData(ClipboardData(text: value));
@@ -120,9 +93,14 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
         title: const Text('Edit profile'),
         actions: [
           IconButton(
-            tooltip: 'Delete profile',
-            icon: const Icon(Icons.delete_outline),
-            onPressed: _saving ? null : _delete,
+            tooltip: 'Save',
+            icon: _saving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.save),
+            onPressed: _saving ? null : _save,
           ),
         ],
       ),
@@ -261,17 +239,6 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                 ],
               ),
             ),
-          ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            icon: _saving
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.save),
-            label: const Text('Save'),
-            onPressed: _saving ? null : _save,
           ),
         ],
       ),

@@ -9,4 +9,7 @@ class LocationService {
   /// Always unavailable.
   int? get latE7 => null;
   int? get lonE7 => null;
+
+  /// No device GPS on web — always null.
+  Future<({double lat, double lon})?> currentPosition() async => null;
 }

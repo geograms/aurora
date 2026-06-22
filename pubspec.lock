@@ -357,6 +357,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "6.0.0"
+  flutter_pcm_sound:
+    dependency: "direct main"
+    description:
+      name: flutter_pcm_sound
+      sha256: "15c6894da8195122001375084d51449bd77849579c93fca2800c00b615699dc0"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.3.3"
   flutter_rust_bridge:
     dependency: transitive
     description:
@@ -743,6 +751,29 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.16.0"
+  qr:
+    dependency: transitive
+    description:
+      name: qr
+      sha256: "5a1d2586170e172b8a8c8470bbbffd5eb0cd38a66c0d77155ea138d3af3a4445"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.2"
+  qr_flutter:
+    dependency: "direct main"
+    description:
+      name: qr_flutter
+      sha256: "5095f0fc6e3f71d08adef8feccc8cea4f12eec18a2e31c2e8d82cb6019f4b097"
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.1.0"
+  reticulum:
+    dependency: "direct main"
+    description:
+      path: "../reticulum-dart"
+      relative: true
+    source: path
+    version: "0.1.0"
   shared_preferences:
     dependency: "direct main"
     description:

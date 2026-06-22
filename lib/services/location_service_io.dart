@@ -57,6 +57,30 @@ class LocationService {
     }
   }
 
+  /// Fetch a fresh fix on demand (driving the permission prompt if needed).
+  /// Returns (lat, lon) or null on any failure — no GPS, denied permission, or
+  /// no location plugin on this platform (e.g. desktop Linux). Used by the map's
+  /// "centre on my location" button.
+  Future<({double lat, double lon})?> currentPosition() async {
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) return null;
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
+        return null;
+      }
+      final p = await Geolocator.getCurrentPosition();
+      _set(p);
+      return (lat: p.latitude, lon: p.longitude);
+    } catch (e) {
+      debugPrint('LocationService.currentPosition: $e');
+      return null;
+    }
+  }
+
   void _set(Position p) {
     _lat = p.latitude;
     _lon = p.longitude;

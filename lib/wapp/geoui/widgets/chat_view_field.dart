@@ -9,8 +9,8 @@
  * with the typed text (the renderer routes that to the wapp as a
  * `<field>_send` action carrying a `<field>_input` value).
  *
- * Colours mirror the reference APRS implementation: outgoing #2B5278,
- * incoming #1E2D3D.
+ * Colours follow the Telegram "Night" palette via [ChatPalette]: outgoing
+ * #2B5278, incoming #182533, on a #0E1621 chat background.
  */
 
 import 'package:flutter/material.dart';
@@ -18,6 +18,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart';
+import 'chat_palette.dart';
 import 'media_view.dart';
 
 /// Stable colour for a transport/channel label ("NET", "BLE", "LORA", …),
@@ -106,6 +107,12 @@ class _ChatViewFieldState extends State<ChatViewField> {
   final _scroll = ScrollController();
   int _lastCount = 0;
 
+  /// Attachments staged for the next send, shown as thumbnails above the
+  /// composer instead of pasting their raw `file:<hash>` token into the text.
+  /// [token] is the full string returned by onAttach (may carry a `sz:` size
+  /// hint) and is appended verbatim on send; [ref] drives the thumbnail.
+  final List<({String token, MediaRef ref})> _pending = [];
+
   /// Lookup of message-id -> message, rebuilt each frame, so a reply can show a
   /// quoted snippet of the message it answers (threading). Threading ids are
   /// opaque (the wapp sets `mid`/`parent`); the host only renders the relation.
@@ -128,8 +135,8 @@ class _ChatViewFieldState extends State<ChatViewField> {
   /// incoming traffic. Becomes true again once the user scrolls back down.
   bool _atBottom = true;
 
-  static const _outColor = Color(0xFF2B5278);
-  static const _inColor = Color(0xFF1E2D3D);
+  static const _outColor = ChatPalette.outBubble;
+  static const _inColor = ChatPalette.inBubble;
 
   @override
   void initState() {
@@ -158,7 +165,12 @@ class _ChatViewFieldState extends State<ChatViewField> {
   }
 
   void _send() {
-    final text = _input.text.trim();
+    var text = _input.text.trim();
+    // Append any staged attachment tokens so they travel with the message.
+    if (_pending.isNotEmpty) {
+      final tokens = _pending.map((p) => p.token).join(' ');
+      text = text.isEmpty ? tokens : '$text $tokens';
+    }
     if (text.isEmpty) return;
     // Reply target: an explicit pick, else — inside a focused thread — the
     // thread itself, so a plain post stays in the thread (4chan style).
@@ -168,6 +180,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final out = target.isNotEmpty ? '+$target $text' : text;
     widget.onSend(out);
     _input.clear();
+    _pending.clear();
     if (_replyingTo != null) setState(() => _replyingTo = null);
     _atBottom = true;
   }
@@ -339,13 +352,16 @@ class _ChatViewFieldState extends State<ChatViewField> {
     // Fill mode: fill the parent's bounded height with list + compose,
     // no min/max box or label/tip (used in the map's floating overlay).
     if (widget.fill) {
-      return Column(
-        children: [
-          Expanded(child: _messageList(cs, messages)),
-          const Divider(height: 1),
-          if (widget.composerAccessory != null) widget.composerAccessory!,
-          _composeBar(cs),
-        ],
+      return Container(
+        color: ChatPalette.chatBg,
+        child: Column(
+          children: [
+            Expanded(child: _messageList(cs, messages)),
+            const Divider(height: 1),
+            if (widget.composerAccessory != null) widget.composerAccessory!,
+            _composeBar(cs),
+          ],
+        ),
       );
     }
 
@@ -360,7 +376,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
               child: Text(
                 widget.label,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: cs.primary,
+                      color: ChatPalette.accent,
                       fontWeight: FontWeight.w600,
                     ),
               ),
@@ -368,7 +384,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
           Container(
             constraints: const BoxConstraints(minHeight: 200, maxHeight: 460),
             decoration: BoxDecoration(
-              color: const Color(0xFF0F1115),
+              color: ChatPalette.chatBg,
               borderRadius: BorderRadius.circular(10),
               border: Border.all(color: cs.outlineVariant.withAlpha(80)),
             ),
@@ -470,9 +486,9 @@ class _ChatViewFieldState extends State<ChatViewField> {
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        color: cs.primary.withAlpha(26),
+        color: ChatPalette.accent.withAlpha(26),
         border: Border(
-            bottom: BorderSide(color: cs.primary.withAlpha(90), width: 1)),
+            bottom: BorderSide(color: ChatPalette.accent.withAlpha(90), width: 1)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -483,11 +499,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(8, 8, 12, 2),
               child: Row(children: [
-                Icon(Icons.arrow_back, size: 18, color: cs.primary),
+                Icon(Icons.arrow_back, size: 18, color: ChatPalette.accent),
                 const SizedBox(width: 6),
                 Text('Back to chat',
                     style: TextStyle(
-                        color: cs.primary,
+                        color: ChatPalette.accent,
                         fontSize: 12,
                         fontWeight: FontWeight.w600)),
               ]),
@@ -504,7 +520,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
                       child: Text(from,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              color: Color(0xFF7FB0E0),
+                              color: ChatPalette.accent,
                               fontSize: 13,
                               fontWeight: FontWeight.bold)),
                     ),
@@ -565,18 +581,18 @@ class _ChatViewFieldState extends State<ChatViewField> {
       child: Container(
         padding: const EdgeInsets.fromLTRB(8, 8, 12, 8),
         decoration: BoxDecoration(
-          color: cs.primary.withAlpha(22),
+          color: ChatPalette.accent.withAlpha(22),
           border: Border(bottom: BorderSide(color: cs.outlineVariant.withAlpha(60))),
         ),
         child: Row(
           children: [
-            Icon(Icons.arrow_back, size: 18, color: cs.primary),
+            Icon(Icons.arrow_back, size: 18, color: ChatPalette.accent),
             const SizedBox(width: 8),
-            Icon(Icons.forum_outlined, size: 15, color: cs.primary),
+            Icon(Icons.forum_outlined, size: 15, color: ChatPalette.accent),
             const SizedBox(width: 6),
             Text('Thread · $count message${count == 1 ? '' : 's'}',
                 style: TextStyle(
-                    color: cs.primary, fontSize: 13, fontWeight: FontWeight.w600)),
+                    color: ChatPalette.accent, fontSize: 13, fontWeight: FontWeight.w600)),
             const Spacer(),
             Text('Back to chat',
                 style: TextStyle(color: Colors.white.withAlpha(120), fontSize: 11)),
@@ -657,7 +673,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
                           from,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              color: Color(0xFF7FB0E0),
+                              color: ChatPalette.accent,
                               fontSize: 11,
                               fontWeight: FontWeight.bold),
                         ),
@@ -734,11 +750,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
                     padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
                       Icon(Icons.forum_outlined,
-                          size: 12, color: const Color(0xFF7FB0E0)),
+                          size: 12, color: ChatPalette.accent),
                       const SizedBox(width: 3),
                       Text('$replies ${replies == 1 ? 'reply' : 'replies'}',
                           style: const TextStyle(
-                              color: Color(0xFF7FB0E0),
+                              color: ChatPalette.accent,
                               fontSize: 10,
                               fontWeight: FontWeight.w600)),
                     ]),
@@ -867,13 +883,13 @@ class _ChatViewFieldState extends State<ChatViewField> {
         color: Colors.white.withAlpha(18),
         borderRadius: BorderRadius.circular(6),
         border: Border(
-            left: BorderSide(color: const Color(0xFF7FB0E0), width: 2.5)),
+            left: BorderSide(color: ChatPalette.accent, width: 2.5)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.subdirectory_arrow_right,
-              size: 12, color: const Color(0xFF7FB0E0).withAlpha(200)),
+              size: 12, color: ChatPalette.accent.withAlpha(200)),
           const SizedBox(width: 4),
           Flexible(
             child: Text(
@@ -897,7 +913,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final tappable =
         widget.onLocate != null && m['lat'] != null && m['lon'] != null;
     final color = tappable
-        ? const Color(0xFF7FB0E0)
+        ? ChatPalette.accent
         : Colors.white.withAlpha(165);
     final row = Padding(
       padding: const EdgeInsets.only(top: 2),
@@ -956,10 +972,10 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final m = _replyingTo!;
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
-      color: Colors.white.withAlpha(12),
+      color: ChatPalette.windowBg,
       child: Row(
         children: [
-          Icon(Icons.reply, size: 14, color: cs.primary),
+          Icon(Icons.reply, size: 14, color: ChatPalette.accent),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -993,14 +1009,93 @@ class _ChatViewFieldState extends State<ChatViewField> {
   Future<void> _attach() async {
     final token = await widget.onAttach!();
     if (token == null || token.isEmpty) return;
-    final cur = _input.text;
-    _input.text = cur.isEmpty ? token : '$cur $token';
-    _input.selection = TextSelection.collapsed(offset: _input.text.length);
+    // Stage it as a thumbnail chip rather than dumping the raw file: token into
+    // the text box (which confused users). onAttach may return the token plus a
+    // trailing "sz:<bytes>" hint, so extract the media ref with findAll but keep
+    // the FULL string to append on send.
+    final refs = MediaRef.findAll(token);
+    if (refs.isNotEmpty) {
+      _pending.add((token: token, ref: refs.first));
+    } else {
+      // Not a media token — fall back to inlining it.
+      final cur = _input.text;
+      _input.text = cur.isEmpty ? token : '$cur $token';
+      _input.selection = TextSelection.collapsed(offset: _input.text.length);
+    }
     if (mounted) setState(() {});
   }
 
+  /// Thumbnails for staged attachments, shown above the composer. Images render
+  /// from the local archive; videos (and other non-images) show a typed icon —
+  /// no need to decode the file.
+  Widget _attachPreview(ColorScheme cs) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (var i = 0; i < _pending.length; i++)
+            _attachChip(cs, _pending[i].ref, i),
+        ],
+      ),
+    );
+  }
+
+  Widget _attachChip(ColorScheme cs, MediaRef ref, int index) {
+    Widget inner;
+    if (ref.kind == MediaKind.image) {
+      final bytes = sharedMediaArchive()?.get(ref.sha256);
+      inner = bytes != null
+          ? Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true)
+          : Container(
+              color: Colors.black26,
+              child: const Icon(Icons.image, color: Colors.white70, size: 22));
+    } else {
+      final icon = ref.kind == MediaKind.video
+          ? Icons.movie
+          : (ref.kind == MediaKind.audio ? Icons.audiotrack : Icons.insert_drive_file);
+      inner = Container(
+        color: Colors.black54,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: Colors.white, size: 22),
+            const SizedBox(height: 2),
+            Text(ref.ext.toUpperCase(),
+                style: const TextStyle(color: Colors.white70, fontSize: 8)),
+          ],
+        ),
+      );
+    }
+    return SizedBox(
+      width: 56,
+      height: 56,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ClipRRect(borderRadius: BorderRadius.circular(8), child: inner),
+          Positioned(
+            top: -6,
+            right: -6,
+            child: IconButton(
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              iconSize: 18,
+              icon: const Icon(Icons.cancel, color: Colors.white),
+              tooltip: 'Remove',
+              onPressed: () => setState(() => _pending.removeAt(index)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _composeRow(ColorScheme cs) {
-    return Padding(
+    final row = Container(
+      color: ChatPalette.windowBg,
       padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
       child: Row(
         children: [
@@ -1008,7 +1103,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
             IconButton(
               icon: const Icon(Icons.attach_file),
               tooltip: 'Attach a file',
-              color: cs.primary,
+              color: ChatPalette.accent,
               onPressed: _attach,
             ),
           Expanded(
@@ -1037,11 +1132,16 @@ class _ChatViewFieldState extends State<ChatViewField> {
           const SizedBox(width: 4),
           IconButton(
             icon: const Icon(Icons.send),
-            color: cs.primary,
+            color: ChatPalette.accent,
             onPressed: _send,
           ),
         ],
       ),
+    );
+    if (_pending.isEmpty) return row;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [_attachPreview(cs), row],
     );
   }
 }

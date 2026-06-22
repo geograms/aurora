@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show File;
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
@@ -10,6 +12,7 @@ import 'package:flutter/services.dart'
     show
         Clipboard,
         ClipboardData,
+        HapticFeedback,
         HardwareKeyboard,
         KeyDownEvent,
         LogicalKeyboardKey;
@@ -20,6 +23,8 @@ import '../connections/internet/http_transport.dart';
 import '../platform/platform.dart' as platform;
 
 import 'native/media_capability.dart';
+import 'native/wasm_audio_output.dart';
+import 'native/wasm_video_session.dart';
 
 import 'file_folder_picker.dart';
 import 'geoui/geoui_ast.dart';
@@ -27,23 +32,36 @@ import 'geoui/geoui_parser.dart';
 import 'geoui/geoui_renderer.dart';
 import '../editor/code_editor_field.dart';
 import 'geoui/widgets/log_view_field.dart';
+import 'geoui/widgets/chat_palette.dart';
 import 'geoui/widgets/chat_view_field.dart';
+import 'geoui/widgets/activity_feed.dart';
+import 'geoui/widgets/profile_route.dart';
+import 'geoui/widgets/media_view.dart' show sharedMediaArchive;
+import '../profile/profile_edit_page.dart';
+import '../util/media_ref.dart';
+import '../util/nostr_crypto.dart';
 import 'geoui/conversation_store.dart';
 import 'geoui/geo_chat_archive.dart';
+import 'geoui/activity_archive.dart';
 import 'geoui/widgets/conversations_field.dart';
 import 'geoui/widgets/people_view_field.dart';
 import 'shared_media_fetch.dart';
 import 'geoui/tile_cache.dart';
 import 'background_wapp_manager.dart';
+import 'android_foreground_service.dart';
 import '../profile/iwi_profile.dart';
 import '../models/monitored_task.dart';
 import '../services/event_bus.dart';
+import '../services/log_service.dart';
 import '../services/notification_service.dart';
+import '../services/location_service.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/wapp_unread_service.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
+import 'coin/coin_host_bridge.dart';
+import 'coin/atm_host_bridge.dart';
 import '../profile/storage_paths.dart';
 import 'i18n_context.dart';
 import '../services/task_monitor_service.dart';
@@ -84,6 +102,11 @@ class WappPage extends StatefulWidget {
   /// the per-wapp "Edit" menu.
   final String? editWappDir;
 
+  /// Optional command JSON delivered to the module right after init (same shape
+  /// as a GeoUI action: `{"command":"…", …}`). Used by deep links so e.g. the
+  /// circles wapp can jump straight to the "apply to join" flow.
+  final String? initialCommand;
+
   const WappPage({
     super.key,
     required this.wappDir,
@@ -91,13 +114,15 @@ class WappPage extends StatefulWidget {
     this.openFilePath,
     this.openFileMode = 'view',
     this.editWappDir,
+    this.initialCommand,
   });
 
   @override
   State<WappPage> createState() => _WappPageState();
 }
 
-class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
+class _WappPageState extends State<WappPage>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   final _engine = WappEngine();
   Timer? _tickTimer;
   String _status = 'Loading...';
@@ -134,6 +159,15 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   // cost is only paid by wapps that actually use it. Null when the
   // capability isn't installed/supported. Disposed in [dispose].
   MediaSession? _mediaSession;
+  // Speaker sink for PCM a wapp decodes in wasm (e.g. the Player wapp playing
+  // music). Wired unconditionally so audio-only playback is audible even when
+  // no video surface is mounted; video sessions read it as the A/V master clock.
+  WasmAudioOutput? _audioOut;
+
+  // Media-session state last reported by the wapp (Player music/radio). Drives
+  // background keep-alive and the Android lock-screen / notification controls.
+  bool _mediaActive = false; // playing or paused (something is loaded)
+  bool _bgKeepAlive = false; // this page's engine is ticking in the background
   String? _videoCurrentPath;
 
   /// Storage for installed wapps (extracted .wapp packages) — used by the
@@ -158,6 +192,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   // The menu screen currently shown as a full panel (null = normal tab view).
   GeoUiBlock? _panelScreen;
   String _panelName = '';
+  String? _panelTitle; // dynamic AppBar title for the open panel (e.g. folder name)
   TabController? _tabController;
 
   /// True when this wapp is the App Creator. Drives a navigation split
@@ -188,6 +223,27 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
 
   // Terminal output
   final _outputLines = <_OutputLine>[];
+  // Structured catalog cards pushed by a wapp via `ui.data` (target "catalog")
+  // — the Wapp Store's available-wapps list. Replace-semantics each push.
+  final _catalogItems = <Map<String, dynamic>>[];
+  // Real wapp icon SVGs carried in the catalog index.json, keyed by the .wapp
+  // leaf filename (which is the card `id` the store echoes back). Lets the store
+  // show each wapp's authored icon even before it is installed — the SVG bytes
+  // never cross into the wasm sandbox, only this host-side map.
+  final _catalogIcons = <String, Uint8List>{};
+  // Catalog metadata keyed by the stable wapp slug (the install directory name,
+  // e.g. "aprs"): the published version and the .wapp leaf filename. Lets the
+  // host decide Install / Update / Installed against what's actually installed
+  // on the device, and drive "Update all".
+  final _catalogMeta = <String, Map<String, String>>{};
+  // Installed wapp versions keyed by slug (install dir) — read from each
+  // installed manifest. Refreshed when the catalog loads and after installs.
+  final _installedVersions = <String, String>{};
+  // The Reticulum folder address the current catalog was fetched from, so
+  // "Update all" can re-install each outdated wapp directly.
+  String _catalogSourceAddr = '';
+  bool _updatingAll = false;
+  String _catalogLayout = 'list';
   final _cmdController = TextEditingController();
   final _tickIntervalController = TextEditingController(text: '5000');
   final _scrollController = ScrollController();
@@ -275,10 +331,12 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
 
   // Coverage/filter radius + its centre (my station), pushed by the wapp
   // via `ui.map.radius`. Defaults let the circle + slider show before the
-  // first connect; the wapp overrides them with the real position.
+  // first connect; the persisted location (or the wapp) overrides them.
+  // Default centre = Coimbra; the user's chosen/last location is restored from
+  // the wapp's persisted my_lat/my_lon on startup (see _applyPersistedFields).
   double? _mapRadiusKm = 100;
-  double? _mapCenterLat = 38.7223;
-  double? _mapCenterLon = -9.1393;
+  double? _mapCenterLat = 40.2056;
+  double? _mapCenterLon = -8.4196;
 
   // Geo-chat split into Live (manual) and Beacons (everything automated).
   // APRS has no flag for "human-typed", so we use a marker: a message whose
@@ -290,6 +348,31 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// Persistent, geo-queryable archive of Live geo-chat messages (generic —
   /// see geo_chat_archive.dart). Set once the wapp data dir is known.
   GeoChatArchive? _geoArchive;
+
+  /// Persistent Activity feed (shared with the background engine), so posts
+  /// received while the app was closed appear when the user opens Activity.
+  ActivityArchive? _activityArchive;
+  CoinHostBridge? _coinBridge;
+  AtmHostBridge? _atmBridge;
+
+  /// Bumped whenever the Activity archive changes, so an open (pushed) thread
+  /// page rebuilds with newly-arrived replies/likes.
+  final ValueNotifier<int> _activityRev = ValueNotifier<int>(0);
+
+  /// Periodic FEED backfill over Reticulum (complements APRS-IS, which loses
+  /// messages): asks peers for FEED notes since the last sweep.
+  Timer? _feedBackfillTimer;
+  // A faster sweep right after the wapp opens, so a device that just joined the
+  // network fetches older FEED posts as soon as RNS is up AND a relay peer has
+  // been discovered (the steady 3-min timer was too slow for a fresh join).
+  Timer? _fastBackfillTimer;
+  int _fastBackfillTicks = 0;
+  int _lastFeedBackfillSec = 0;
+
+  /// Callsigns we follow / have blocked (bridged from the APRS wapp), so the
+  /// profile UI shows the right Follow/Following + Block/Unblock controls.
+  final Set<String> _followedCalls = {};
+  final Set<String> _blockedCalls = {};
 
   // Transport/status indicators shown on the map, pushed by the wapp via
   // `ui.map.status` (e.g. APRS-IS connected, BLE active). Each {id,label,on}.
@@ -305,6 +388,11 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// Fraction of the Geochat tab's height given to the chat panel under the
   /// map (the rest is map). User-resizable via the drag handle between them.
   double _geoSplit = 0.45;
+
+  /// Landscape only: fraction of the Geochat tab's WIDTH given to the chat
+  /// column on the right (the rest is the map on the left). User-resizable via
+  /// the vertical drag handle between them.
+  double _geoSplitLand = 0.42;
 
   /// The conversation open in the conversations widget (host-owned so the
   /// AppBar can show the thread title + the single back arrow in portrait).
@@ -576,13 +664,112 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     }
   }
 
+  /// Override the seeded field defaults with values the user previously saved
+  /// (persisted to the wapp KV via the settings form / map interactions). Only
+  /// declared fields that actually have a stored value are touched, coerced to
+  /// the field's existing type. Run after the engine's KV is loaded
+  /// (setStorage). For the map this restores the last my_lat/my_lon centre +
+  /// radius so the geo-chat opens where the user left it, not the default.
+  void _applyPersistedFields() {
+    for (final name in _fieldValues.keys.toList()) {
+      final v = _engine.kvGet(name);
+      if (v == null) continue;
+      final cur = _fieldValues[name];
+      if (cur is bool) {
+        _fieldValues[name] = v == 'true';
+      } else if (cur is int) {
+        final n = int.tryParse(v);
+        if (n != null) _fieldValues[name] = n;
+      } else if (cur is num) {
+        final n = num.tryParse(v);
+        if (n != null) _fieldValues[name] = n;
+      } else {
+        _fieldValues[name] = v; // string (or untyped) — store verbatim
+      }
+    }
+    // Mirror a restored map centre/radius into the live map state so the map
+    // shows the saved location immediately (before the wapp pushes its own
+    // ui.map.radius). my_lat/my_lon are the established centre field names.
+    final la = double.tryParse('${_fieldValues['my_lat'] ?? ''}');
+    final lo = double.tryParse('${_fieldValues['my_lon'] ?? ''}');
+    if (la != null && lo != null && (la != 0 || lo != 0)) {
+      _mapCenterLat = la;
+      _mapCenterLon = lo;
+      _mapLat = la;
+      _mapLon = lo;
+    }
+    final km = double.tryParse('${_fieldValues['radius_km'] ??
+        _fieldValues['map_radius'] ??
+        _engine.kvGet('radius_km') ??
+        ''}');
+    if (km != null && km > 0) _mapRadiusKm = km;
+  }
+
+  /// Persist the map centre + radius to the wapp KV (the same store the settings
+  /// form writes to), so they survive a restart. Called whenever the user moves
+  /// the coverage circle (GPS, drag, long-press) or changes the radius.
+  void _persistMapLocation() {
+    final la = _mapCenterLat, lo = _mapCenterLon, km = _mapRadiusKm;
+    if (la != null && lo != null) {
+      _engine.kvSet('my_lat', la.toStringAsFixed(5));
+      _engine.kvSet('my_lon', lo.toStringAsFixed(5));
+    }
+    if (km != null) _engine.kvSet('radius_km', km.round().toString());
+  }
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Repaint the Activity stream when a followed peer's profile is fetched.
+    RnsService.instance.addProfileListener(_onProfilesChanged);
+    // Periodically recover FEED posts lost over APRS-IS from Reticulum peers.
+    _feedBackfillTimer = Timer.periodic(
+        const Duration(minutes: 3), (_) => unawaited(_backfillFeed()));
+    // Aggressive early sweep: a just-joined device often comes up before RNS is
+    // connected and before any relay peer is known, so the single 8s shot used
+    // to miss and then wait 3 minutes. Retry every 15s for the first ~5 minutes
+    // (until a sweep actually pulls notes), so older posts arrive promptly once
+    // the node connects and discovers a peer.
+    _fastBackfillTimer = Timer.periodic(
+        const Duration(seconds: 15), (_) => unawaited(_fastBackfillTick()));
     // If this wapp is running as a background service, hand it over to this
     // page so only one engine (and one BLE scan) is live while it's open.
     BackgroundWappManager.instance.suspend(_wappName);
     _loadWapp();
+  }
+
+  void _onProfilesChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      // Back in the foreground: this page owns the engine again — drop the
+      // background one, and refresh so anything it received while we were away
+      // (e.g. Activity posts) shows immediately.
+      if (_bgKeepAlive) {
+        BackgroundWappManager.instance.releasePage(_wappName);
+        _bgKeepAlive = false;
+      }
+      BackgroundWappManager.instance.suspend(_wappName);
+      if (mounted) setState(() {});
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      // App backgrounded while this page is still open. If audio is playing
+      // (Player music/radio), keep THIS page's engine ticking via the native
+      // heartbeat so playback continues uninterrupted (a fresh headless engine
+      // couldn't reproduce the live decoder/position). Otherwise hand off to the
+      // background manager (if the wapp autostarts) for receive/notify.
+      if (_mediaActive) {
+        _bgKeepAlive = true;
+        BackgroundWappManager.instance.keepPageAlive(_wappName, _bgTick);
+      } else {
+        unawaited(BackgroundWappManager.instance.resume(widget.wappDir));
+      }
+    }
   }
 
   /// Refresh [_i18n] from the wapp package using the currently-
@@ -660,9 +847,16 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _seedFieldDefaults(screen);
     }
 
-    // Partition screens into tab screens and menu (panel) screens.
+    // Partition screens into tab screens and menu (panel) screens. A screen
+    // flagged `"hidden": true` is neither a tab nor a corner-menu entry — it is
+    // an internal panel the wapp opens contextually via ui.screen.open (e.g. an
+    // editor reached from a row's action). It still lives in [_screens] so
+    // ui.screen.open can find it by name.
     _tabScreens.clear(); _tabNames.clear(); _menuScreens.clear(); _menuNames.clear();
     for (var i = 0; i < _screens.length; i++) {
+      if (_screens[i].getBool('hidden') == true) {
+        continue; // openable panel, but kept out of the tab bar and options menu
+      }
       if (_screens[i].getBool('menu') == true) {
         _menuScreens.add(_screens[i]); _menuNames.add(_screenNames[i]);
       } else {
@@ -694,7 +888,23 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     await wappData.createDirectory('');
     _wappData = wappData;
     _geoArchive = GeoChatArchive.forStorage(wappData);
+    _activityArchive = ActivityArchive.forStorage(wappData);
+    // Coin wallet bridge: backs the "wallet" wapp's coin.* messages. Lazy — the
+    // holdings DB is only opened when a coin operation actually runs.
+    _coinBridge = CoinHostBridge(wappData);
+    await _coinBridge!.init();
+    // ATM node bridge: backs the "atm" wapp (operate a coin's blockchain and
+    // distribute its faucet). Lazy like the coin bridge.
+    _atmBridge = AtmHostBridge(wappData);
+    await _atmBridge!.init();
     _engine.setStorage(wappData);
+    // Tag the per-wapp RNS datagram channel (hal_rns_*) with this wapp's id so
+    // two devices running the same wapp exchange datagrams and others don't.
+    _engine.setAppId(_wappName);
+    // Restore persisted settings (saved to the wapp KV) over the declared field
+    // defaults, so a wapp's saved settings — the map's my_lat/my_lon centre in
+    // particular — survive a restart instead of reverting to the default.
+    _applyPersistedFields();
     // Restore persisted Messenger conversations before the first build so the
     // history shows immediately when the tab opens.
     await _loadConversations();
@@ -745,6 +955,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
 
     try {
       await _engine.load(wasmBytes);
+      // Route PCM the wapp decodes straight to the speaker. Degrades to silence
+      // (never crashes) on platforms without the PCM plugin.
+      _audioOut = WasmAudioOutput();
+      _engine.onAudioPcm = _audioOut!.pushPcm;
       _engine.init();
       _drainOutbox();
 
@@ -766,6 +980,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         // the timer alive so resume just works.
         final task = TaskMonitorService.instance.getTask(_tickTaskId);
         if (task?.status == TaskStatus.paused) return;
+        // While backgrounded as the media owner the native heartbeat drives the
+        // engine; skip the (throttled) Dart timer so we don't double-tick.
+        if (_bgKeepAlive) return;
         TaskMonitorService.instance.reportStart(_tickTaskId);
         try {
           _engine.tick();
@@ -790,6 +1007,15 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           'path': openPath,
           'mode': widget.openFileMode,
         }));
+        _engine.handleEvent();
+        _drainOutbox();
+      }
+
+      // Deep-link / launch command: deliver one command to the module after
+      // init (e.g. a circles "apply_url" from a geogram.radio/circle link).
+      final initCmd = widget.initialCommand;
+      if (initCmd != null && initCmd.isNotEmpty) {
+        _engine.sendMessage(initCmd);
         _engine.handleEvent();
         _drainOutbox();
       }
@@ -833,6 +1059,25 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             item['level'] as String? ?? 'out',
           ));
           changed = true;
+        } else if (type == 'ui.data') {
+          // Structured cards (Wapp Store catalog). Replace the current set.
+          final target = data['target'] as String? ?? '';
+          if (target == 'catalog') {
+            final items = (data['items'] as List?) ?? const [];
+            _catalogItems
+              ..clear()
+              ..addAll(items
+                  .whereType<Map>()
+                  .map((e) => Map<String, dynamic>.from(e)));
+            changed = true;
+          }
+        } else if (type == 'ui.attr') {
+          // e.g. catalog layout list/grid toggle.
+          if ((data['target'] as String? ?? '') == 'catalog' &&
+              (data['attr'] as String? ?? '') == 'layout') {
+            _catalogLayout = '${data['value'] ?? 'list'}';
+            changed = true;
+          }
         } else if (type == 'store.sources') {
           // Install wapp push: the current source list straight out
           // of its KV store. Mirror it to _fieldValues['source'] as
@@ -955,6 +1200,12 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                 _fieldValues[fieldName] = buf;
               }
               buf.add(msg.map((k, v) => MapEntry(k.toString(), v)));
+              // Persist the Activity feed so background-received posts survive
+              // into the foreground (and across restarts).
+              if (fieldName == 'activity') {
+                _activityArchive?.add(msg);
+                _activityRev.value++; // refresh any open thread page
+              }
             }
             changed = true;
           }
@@ -965,6 +1216,18 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           final sections = data['sections'];
           if (sections is List) {
             _fieldValues[fieldName] = sections
+                .whereType<Map>()
+                .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+                .toList();
+            changed = true;
+          }
+        } else if (type == 'ui.rail.set') {
+          // Replace a $type:"rail" field's items (the folder navigation rail:
+          // [{id,name,icon}]). Tapping one fires `<field>_tap` with `<field>_id`.
+          final fieldName = data['field'] as String? ?? 'rail';
+          final items = data['items'];
+          if (items is List) {
+            _fieldValues[fieldName] = items
                 .whereType<Map>()
                 .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
                 .toList();
@@ -1036,10 +1299,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           // panel (e.g. a per-folder Stats / Edit panel reached from a row
           // menu). Matched by screen name; no-op if unknown.
           final want = (data['name'] as String? ?? '').trim();
+          // Optional dynamic title (e.g. the open folder's name instead of the
+          // static screen name).
+          final title = (data['title'] as String? ?? '').trim();
           for (var i = 0; i < _screens.length; i++) {
             if (_screenNames[i] == want) {
               _panelScreen = _screens[i];
               _panelName = _screenNames[i];
+              _panelTitle = title.isNotEmpty ? title : null;
               changed = true;
               break;
             }
@@ -1047,6 +1314,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         } else if (type == 'ui.screen.close') {
           if (_panelScreen != null) {
             _panelScreen = null;
+            _panelTitle = null;
             changed = true;
           }
         } else if (type == 'ui.field.set') {
@@ -1055,6 +1323,17 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           final f = data['field'] as String?;
           if (f != null && f.isNotEmpty) {
             _fieldValues[f] = data['value'];
+            changed = true;
+          }
+        } else if (type.startsWith('coin.') || type.startsWith('atm.')) {
+          // Wallet + ATM wapp bridges over the participation-coin library
+          // (package:reticulum). coin.* manages held coins; atm.* operates a
+          // coin's blockchain and faucet. Both return UI field updates.
+          final updates = type.startsWith('atm.')
+              ? _atmBridge?.handle(type, data)
+              : _coinBridge?.handle(type, data);
+          if (updates != null) {
+            updates.forEach((field, value) => _fieldValues[field] = value);
             changed = true;
           }
         } else if (type == 'social.follow' || type == 'social.unfollow') {
@@ -1070,15 +1349,55 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
               RnsService.instance.unfollowPubkey(key);
             }
           }
+        } else if (type == 'social.identity') {
+          // The APRS wapp tells the host a callsign's NOSTR pubkey (learned from
+          // its key beacon), so the Activity feed + profile can show the npub.
+          final call = (data['callsign'] ?? '').toString();
+          final key = (data['pubkey'] ?? '').toString();
+          if (call.isNotEmpty && key.isNotEmpty) {
+            RnsService.instance.recordCallsignPubkey(call, key);
+          }
+        } else if (type == 'social.followstate' ||
+            type == 'social.blockstate') {
+          // The APRS wapp tells the host whether we follow / have blocked a
+          // callsign, so the profile UI shows the right buttons.
+          final call = (data['callsign'] ?? '').toString().trim().toUpperCase();
+          final on = data['on'] == true;
+          if (call.isNotEmpty) {
+            final set =
+                type == 'social.followstate' ? _followedCalls : _blockedCalls;
+            if (on) {
+              set.add(call);
+            } else {
+              set.remove(call);
+            }
+            // Let the RNS service keep (re)fetching followed profiles in the
+            // background, retrying ones that failed earlier.
+            if (type == 'social.followstate') {
+              RnsService.instance.setFollowedCallsigns(_followedCalls);
+            }
+          }
+        } else if (type == 'ui.activity.react') {
+          // A like vote on an Activity post (by mid). Tally it in the archive.
+          final mid = (data['mid'] ?? '').toString();
+          final from = (data['from'] ?? '').toString();
+          if (mid.isNotEmpty && from.isNotEmpty) {
+            _activityArchive?.setReaction(
+                mid, from, data['like'] == true, data['mine'] == true);
+            _activityRev.value++; // refresh any open thread page
+            changed = true;
+          }
         } else if (type == 'social.note') {
           // A wapp (APRS) tells the host to store one of OUR posts (a group
           // bulletin or Activity message) as a signed NOSTR note, so peers can
           // request our posts later. Generic on the host side.
           final text = (data['text'] ?? '').toString();
           final topic = (data['topic'] ?? '').toString();
+          final parent = (data['parent'] ?? '').toString();
           if (text.isNotEmpty) {
-            unawaited(RnsService.instance
-                .publishNote(text, topic: topic.isEmpty ? null : topic));
+            unawaited(RnsService.instance.publishNote(text,
+                topic: topic.isEmpty ? null : topic,
+                parent: parent.isEmpty ? null : parent));
           }
         } else if (type == 'ui.toast') {
           // Legacy message shape — route through the unified service
@@ -1165,6 +1484,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           // pick_video / pick_subtitle). Show the native picker and
           // deliver the result back as a file.open message.
           unawaited(_handleFilePick(data));
+        } else if (type == 'media.session') {
+          _handleMediaSession(data);
         } else if (type == 'fs.pick') {
           // A wapp wants the user to browse and pick a file OR folder (Files
           // wapp "Add / Share"). Show the file/folder navigator; deliver the
@@ -1182,7 +1503,12 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             type == 'video.skip') {
           _handleVideoCommand(type, data);
         }
-      } catch (_) {}
+      } catch (e) {
+        // A wapp emitted a message the host couldn't parse — log it (it used to
+        // be swallowed silently, which hid a malformed-JSON catalog for ages).
+        LogService.instance.add(
+            'wapp/$_wappName: dropped unparseable message ($e, ${raw.length}B)');
+      }
     }
     if (changed && mounted) {
       _syncAppBadge();
@@ -1207,6 +1533,15 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   Future<void> _handleFetchIndex(Map<String, dynamic> data) async {
     final source = data['source'] as String? ?? '';
     if (source.isEmpty) return;
+
+    // A signed Reticulum folder source (npub… / hex folder id / rns: scheme):
+    // browse the folder over Reticulum and build the catalog from it. Same
+    // decentralized, signature-verified delivery as the app updater — the wapp
+    // store can be shared peer-to-peer with no central web host.
+    if (_isRnsFolderSource(source)) {
+      await _fetchIndexFromRns(_rnsFolderAddr(source));
+      return;
+    }
 
     // Resolve the source into (dir, file) and wrap the dir in a transient
     // ProfileStorage. The source may be either a directory (implicit
@@ -1253,6 +1588,182 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       if (mounted) setState(() {});
     } catch (e) {
       _outputLines.add(_OutputLine('Failed to read index: $e', 'err'));
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// True when a wapp-store source points at a signed Reticulum folder rather
+  /// than an HTTP catalog or a local path: an `npub1…` address, a 64-hex folder
+  /// id, or an explicit `rns:` / `reticulum:` scheme.
+  static bool _isRnsFolderSource(String s) {
+    final t = s.trim();
+    final lower = t.toLowerCase();
+    if (lower.startsWith('rns:') || lower.startsWith('reticulum:')) return true;
+    if (lower.startsWith('npub1')) return true;
+    return RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(t);
+  }
+
+  /// Strip any `rns:` / `reticulum:` (optionally `//`) scheme, leaving the bare
+  /// folder address (npub or hex) that RnsService.folder* accepts.
+  static String _rnsFolderAddr(String s) {
+    var t = s.trim();
+    final lower = t.toLowerCase();
+    if (lower.startsWith('reticulum://')) {
+      t = t.substring(12);
+    } else if (lower.startsWith('reticulum:')) {
+      t = t.substring(10);
+    } else if (lower.startsWith('rns://')) {
+      t = t.substring(6);
+    } else if (lower.startsWith('rns:')) {
+      t = t.substring(4);
+    }
+    return t.trim();
+  }
+
+  /// The publisher npub of a browsed folder: the folder's owner key (folderId
+  /// is the owner's secp256k1 public key) encoded as an npub, so the store card
+  /// shows the verified publisher. Falls back to [addr] when it's already an
+  /// npub and the state carries no folderId.
+  static String _rnsOwnerNpub(Map<String, dynamic> state, String addr) {
+    final fid = (state['folderId'] as String? ?? '').trim();
+    if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(fid)) {
+      try {
+        return NostrCrypto.encodeNpub(fid.toLowerCase());
+      } catch (_) {}
+    }
+    return addr.toLowerCase().startsWith('npub1') ? addr.trim() : '';
+  }
+
+  /// Build the store catalog from a signed Reticulum folder and hand it to the
+  /// store wapp as a `wapp.index` message — the Reticulum equivalent of
+  /// fetching `index.json` over HTTP. The folder is expected to hold the .wapp
+  /// binaries plus (ideally) an `index.json` catalog with the same shape as the
+  /// HTTP store; when present we reuse it verbatim and only rewrite each entry's
+  /// `file` to the content sha (the fetch handle) so install can pull it by
+  /// hash. With no index.json we synthesise a catalog from the `<id>-<ver>.wapp`
+  /// filenames. Every entry is stamped with the folder owner's npub.
+  Future<void> _fetchIndexFromRns(String addr) async {
+    try {
+      // Fast path: the local/cached folder reduction — instant when we own the
+      // folder or already mirrored/cached it (e.g. the host's own catalog). Only
+      // fall back to a (slow) network browse when we have nothing cached yet, so
+      // the store never blocks on DHT round-trips for a folder it already holds.
+      var state = RnsService.instance.folderBrowse(addr);
+      var files = (state['files'] as List?) ?? const [];
+      if (files.isEmpty) {
+        state = await RnsService.instance.folderBrowseAsync(addr);
+        files = (state['files'] as List?) ?? const [];
+      }
+      final ownerNpub = _rnsOwnerNpub(state, addr);
+
+      // Index the folder by leaf filename -> {sha, size}.
+      final byBasename = <String, Map<String, dynamic>>{};
+      String? indexSha;
+      for (final f in files) {
+        if (f is! Map) continue;
+        final name = (f['name'] ?? '').toString();
+        final sha = (f['x'] ?? '').toString();
+        if (name.isEmpty || sha.isEmpty) continue;
+        final base = name.split('/').last;
+        byBasename[base] = {'sha': sha, 'size': f['size']};
+        if (base == 'index.json') indexSha = sha;
+      }
+
+      List<dynamic> catalog;
+      if (indexSha != null) {
+        final bytes =
+            await RnsService.instance.folderFetchBytes(addr, indexSha);
+        if (bytes == null) {
+          _outputLines.add(_OutputLine(
+              'Could not fetch index.json from the Reticulum folder '
+              '(no provider online yet)', 'err'));
+          if (mounted) setState(() {});
+          return;
+        }
+        final decoded = jsonDecode(utf8.decode(bytes));
+        if (decoded is List) {
+          catalog = decoded;
+        } else if (decoded is Map && decoded['wapps'] is List) {
+          catalog = decoded['wapps'] as List;
+        } else {
+          catalog = const [];
+        }
+      } else {
+        // Synthesise from `<id>-<version>.wapp` filenames.
+        catalog = [];
+        final re = RegExp(r'^(.+)-(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.]+)?)\.wapp$');
+        for (final base in byBasename.keys) {
+          if (!base.endsWith('.wapp')) continue;
+          final m = re.firstMatch(base);
+          final id = m != null ? m.group(1)! : base.substring(0, base.length - 5);
+          final ver = m != null ? m.group(2)! : '1.0.0';
+          catalog.add(<String, dynamic>{
+            'name': id,
+            'version': ver,
+            'file': base,
+            'description': id,
+          });
+        }
+      }
+
+      // Rewrite each entry's `file` to the content sha so do_install can fetch
+      // by hash, and stamp the verified publisher.
+      _catalogIcons.clear();
+      _catalogMeta.clear();
+      _catalogSourceAddr = addr;
+      final enriched = <dynamic>[];
+      for (final raw in catalog) {
+        if (raw is! Map) {
+          enriched.add(raw);
+          continue;
+        }
+        final entry = Map<String, dynamic>.from(raw.cast<String, dynamic>());
+        // Keep `file` as the leaf FILENAME (e.g. "aprs-0.2.60.wapp") — the store
+        // derives the wapp slug/name from it, and _installWappFromRns resolves
+        // the filename back to its content sha at install time. (Rewriting it to
+        // the sha here made every card's name show the hash.) Just fill size.
+        final fileField = (entry['file'] ?? '').toString();
+        final leaf = fileField.split('/').last;
+        final hit = byBasename[leaf];
+        if (hit != null && entry['size'] == null && hit['size'] != null) {
+          entry['size'] = hit['size'];
+        }
+        if (ownerNpub.isNotEmpty) entry['publisher_npub'] = ownerNpub;
+        // Lift the inline SVG icon into the host-side map (keyed by the leaf
+        // filename, which is the card id the store echoes back) and strip it
+        // from the entry so the wasm payload stays small.
+        final iconStr = (entry['icon'] ?? '').toString();
+        if (iconStr.isNotEmpty && leaf.isNotEmpty) {
+          try {
+            _catalogIcons[leaf] = Uint8List.fromList(utf8.encode(iconStr));
+          } catch (_) {}
+          entry.remove('icon');
+        }
+        // Record version + leaf by slug so the host can decide install/update
+        // state and drive "Update all".
+        if (leaf.isNotEmpty) {
+          _catalogMeta[_wappSlug(leaf)] = {
+            'version': (entry['version'] ?? '').toString(),
+            'file': leaf,
+          };
+        }
+        enriched.add(entry);
+      }
+
+      await _refreshInstalledVersions();
+      _engine.sendMessage(jsonEncode({'type': 'wapp.index', 'data': enriched}));
+      // Pump until the wapp has consumed every queued message — it handles one
+      // per call, so a single handleEvent() could process a stale message ahead
+      // of ours and leave wapp.index unprocessed.
+      var guard = 0;
+      while (_engine.inboxLength > 0 && guard++ < 64) {
+        _engine.handleEvent();
+      }
+      _drainOutbox();
+      if (mounted) setState(() {});
+    } catch (e) {
+      _outputLines
+          .add(_OutputLine('Failed to read Reticulum folder: $e', 'err'));
       if (mounted) setState(() {});
     }
   }
@@ -1316,6 +1827,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final version = data['version'] as String? ?? '';
     if (source.isEmpty || filePath.isEmpty || name.isEmpty) return;
 
+    // Signed Reticulum folder source: fetch the .wapp bytes by content sha over
+    // Reticulum (the enriched catalog put the sha in `file`), verify-on-fetch,
+    // and install. Records an `rns` reload source so Reload re-fetches P2P.
+    if (_isRnsFolderSource(source)) {
+      await _installWappFromRns(_rnsFolderAddr(source), filePath, name, version);
+      return;
+    }
+
     // Resolve the source dir (may be a .json path or a plain directory).
     var baseDir = source;
     if (baseDir.endsWith('.json')) {
@@ -1345,7 +1864,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             ? baseDir.substring(0, baseDir.length - 1)
             : baseDir;
         result = await WappInstallerService.instance.installFromUrl(
-          wappId: name,
+          wappId: _wappSlug(name),
           url: '$base/$filePath',
         );
       } else {
@@ -1364,7 +1883,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           return;
         }
         result = await WappInstallerService.instance.installFromBytes(
-          wappId: name,
+          wappId: _wappSlug(name),
           zipBytes: Uint8List.fromList(archiveBytes),
           source: WappSource.file('$baseDir/$filePath'),
         );
@@ -1385,7 +1904,74 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _engine.sendMessage(confirmMsg);
       _engine.handleEvent();
       _drainOutbox();
+      await _refreshInstalledVersions();
 
+      _outputLines.add(_OutputLine('$name v$version installed', 'info'));
+      if (mounted) setState(() {});
+    } catch (e) {
+      _outputLines.add(_OutputLine('Install failed: $e', 'err'));
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// Install a wapp from a signed Reticulum folder. [fileRef] is the content
+  /// sha (set by the enriched catalog); if it isn't a bare sha we resolve it by
+  /// leaf filename against a fresh browse. The bytes are fetched + content-
+  /// verified by RnsService.folderFetchBytes; the device then re-seeds the
+  /// .wapp so the store works peer-to-peer.
+  Future<void> _installWappFromRns(
+      String addr, String fileRef, String name, String version) async {
+    try {
+      var sha = fileRef.trim();
+      if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(sha)) {
+        // Resolve a filename back to its sha via a fresh browse.
+        final state = await RnsService.instance.folderBrowseAsync(addr);
+        final base = sha.split('/').last;
+        sha = '';
+        for (final f in (state['files'] as List?) ?? const []) {
+          if (f is! Map) continue;
+          if ((f['name'] ?? '').toString().split('/').last == base) {
+            sha = (f['x'] ?? '').toString();
+            break;
+          }
+        }
+      }
+      if (sha.isEmpty) {
+        _outputLines
+            .add(_OutputLine('Not found in folder: $fileRef', 'err'));
+        if (mounted) setState(() {});
+        return;
+      }
+      final bytes =
+          await RnsService.instance.folderFetchBytes(addr, sha, ext: '.wapp');
+      if (bytes == null) {
+        _outputLines.add(_OutputLine(
+            'Could not fetch $name over Reticulum (no provider online yet)',
+            'err'));
+        if (mounted) setState(() {});
+        return;
+      }
+      final result = await WappInstallerService.instance.installFromBytes(
+        // Install under the stable slug so it overwrites the bundled wapp
+        // (a real update) instead of creating a versioned junk directory.
+        wappId: _wappSlug(name),
+        zipBytes: bytes,
+        source: WappSource.rns(addr, sha),
+      );
+      if (!result.ok) {
+        _outputLines
+            .add(_OutputLine(result.error ?? 'Install failed', 'err'));
+        if (mounted) setState(() {});
+        return;
+      }
+      _engine.sendMessage(jsonEncode({
+        'type': 'wapp.installed',
+        'name': name,
+        'version': version,
+      }));
+      _engine.handleEvent();
+      _drainOutbox();
+      await _refreshInstalledVersions();
       _outputLines.add(_OutputLine('$name v$version installed', 'info'));
       if (mounted) setState(() {});
     } catch (e) {
@@ -1404,13 +1990,78 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     if (mounted) setState(() {});
   }
 
+  // ── Media session (Player music/radio: background + lock-screen) ─────
+  /// The wapp reported its playback state. Forward it to the native
+  /// MediaSession (lock-screen / notification controls) and track whether
+  /// audio is active so we keep this page's engine alive in the background.
+  void _handleMediaSession(Map<String, dynamic> data) {
+    final state = (data['state'] as String? ?? 'stopped');
+    final active = state == 'playing' || state == 'paused';
+    _mediaActive = active;
+    if (active) {
+      // Make sure the OS routes transport buttons back to this page.
+      AndroidForegroundService.instance.onMediaAction = _onMediaAction;
+      unawaited(AndroidForegroundService.instance.mediaUpdate({
+        'state': state,
+        'title': data['title']?.toString() ?? '',
+        'artist': data['artist']?.toString() ?? '',
+        'durationMs': (data['durationMs'] as num?)?.toInt() ?? 0,
+        'positionMs': (data['positionMs'] as num?)?.toInt() ?? 0,
+        'canNext': data['canNext'] == true,
+        'canPrev': data['canPrev'] == true,
+      }));
+    } else {
+      unawaited(AndroidForegroundService.instance.mediaStop());
+    }
+  }
+
+  /// A lock-screen / notification transport button was pressed. Forward it to
+  /// the wapp as the matching command (the Player handles these already).
+  void _onMediaAction(String action) {
+    final cmd = switch (action) {
+      'play' || 'pause' => 'playpause',
+      'next' => 'next',
+      'previous' || 'prev' => 'prev',
+      'stop' => 'playpause',
+      _ => '',
+    };
+    if (cmd.isEmpty) return;
+    _sendCommand(cmd);
+    _engine.handleEvent();
+    _drainOutbox();
+  }
+
+  /// One engine tick driven by the native heartbeat while this page is the
+  /// background media owner (keeps decoding + feeding the speaker, screen off).
+  void _bgTick() {
+    try {
+      _engine.tick();
+      _drainOutbox();
+    } catch (_) {}
+  }
+
   // ── Video bridge (movies wapp `$type:"video"` group) ────────────────
 
   /// Lazily create a [MediaSession] from the active media.video backend
   /// the first time the wapp asks to load a video. No-op (stays null)
   /// when the mediapack capability isn't installed/supported.
   void _ensureVideoStack() {
-    _mediaSession ??= MediaCapabilities.newSession();
+    if (_mediaSession != null) return;
+    final session = MediaCapabilities.newSession();
+    if (session == null) return;
+    _mediaSession = session;
+    // Wire THIS wapp's wasm decoder to the render session. The frame-sink
+    // imports forward decoded RGBA/PCM from _engine to the session; both
+    // live in this State, so routing is 1:1 (no global session registry).
+    if (session is WasmVideoSession) {
+      _engine.onVideoConfig = session.configure;
+      _engine.onVideoFrame = session.pushFrame;
+      _engine.onVideoEnd = session.markEnded;
+      // Audio stays on _audioOut (wired at load); the session uses it as the
+      // A/V master clock so video tracks its real playback position.
+      session.masterClock =
+          () => _audioOut?.active == true ? _audioOut!.playedPosition : null;
+    }
   }
 
   /// {type:"video.load","path":"…","autoplay":true} — open a local file.
@@ -1699,7 +2350,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     final roomActions = <ConvAction>[];
     for (final a in group.childrenOf('action')) {
       final ca = ConvAction(a.name ?? '', a.getString('icon') ?? 'add',
-          a.getString('tip') ?? a.name ?? '');
+          a.getString('tip') ?? a.name ?? '',
+          label: a.getString('label') ?? '');
       if ((a.getString('slot') ?? 'list') == 'room') {
         roomActions.add(ca);
       } else {
@@ -1730,6 +2382,18 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       openId: _convOpenId,
       onOpenChanged: (id) => setState(() => _convOpenId = id),
       showRoomHeader: false,
+      // Sub-folder rail shown by default inside an open conversation; the wapp
+      // pushes it (ui.rail.set field "conv_rail") when a conversation opens.
+      roomRail: (_fieldValues['conv_rail'] is List)
+          ? (_fieldValues['conv_rail'] as List)
+              .whereType<Map>()
+              .map((m) => m.cast<String, dynamic>())
+              .toList()
+          : const <Map<String, dynamic>>[],
+      onRoomRailTap: (id) {
+        _fieldValues['conv_rail_id'] = id;
+        _sendCommand('conv_rail_tap');
+      },
       onToggle: (name, value) => setState(() => _fieldValues[name] = value),
       onLocate: _locateFromMessage,
       onSenderTap: _showProfile,
@@ -1737,6 +2401,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       onSelect: (id) {
         setState(() => store.clearUnread(id));
         _syncAppBadge();
+        // Tell the wapp a conversation opened so it can populate the folder rail.
+        _fieldValues['${field}_convo'] = id;
+        _sendCommand('${field}_open');
       },
       onSend: (id, text) {
         _fieldValues['${field}_convo'] = id;
@@ -1757,6 +2424,22 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         if (from.isEmpty) return;
         _fieldValues['${field}_blockcall'] = from;
         _sendCommand('${field}_block');
+      },
+      onMute: (id, muted) {
+        setState(() => store.setMuted(id, muted));
+        _scheduleConvoSave(field);
+        _syncAppBadge(); // muting drops it from the app-wide badge
+      },
+      onClose: (id) {
+        setState(() {
+          store.setClosed(id, true);
+          if (_convOpenId == id) _convOpenId = null;
+        });
+        // Tell the wapp to unsubscribe so we stop receiving the group entirely.
+        _fieldValues['${field}_convo'] = id;
+        _sendCommand('${field}_close');
+        _scheduleConvoSave(field);
+        _syncAppBadge();
       },
     );
   }
@@ -1869,7 +2552,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
 
     final controller =
         TextEditingController(text: (input?['value'] ?? '').toString());
+    // Selection + toggle state live in the method scope so they persist across
+    // StatefulBuilder rebuilds and are shared by the dialog and full-screen
+    // renderers below.
+    String selected = '';
     bool toggleOn = (toggle?['default'] == true);
+    // A wapp can request a full-screen panel (vs the compact centred dialog)
+    // for prompts that deserve more room — e.g. the "Add a group" picker.
+    final fullscreen = data['fullscreen'] == true;
     void result(String value, String text) {
       _fieldValues['prompt_id'] = id;
       _fieldValues['prompt_value'] = value;
@@ -1878,144 +2568,179 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       _sendCommand('prompt');
     }
 
+    void confirm(BuildContext ctx) {
+      final t = controller.text.trim();
+      if (t.isEmpty && selected.isEmpty) return;
+      Navigator.pop(ctx);
+      result(selected, t);
+    }
+
+    // The prompt body, shared by both renderers. The toggle (e.g. a Local/
+    // Global scope switch) is rendered FIRST — on top — so the scope choice is
+    // the first thing the user sees and sets.
+    Widget content(BuildContext ctx, void Function(VoidCallback) setLocal) {
+      final cs = Theme.of(ctx).colorScheme;
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (toggleLabel.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(toggleLabel,
+                    style: const TextStyle(fontSize: 14)),
+                value: toggleOn,
+                onChanged: (v) => setLocal(() => toggleOn = v),
+              ),
+            ),
+          if (body.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: SelectableText(body,
+                  style:
+                      TextStyle(color: cs.onSurfaceVariant, fontSize: 12.5)),
+            ),
+          if (copyText.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.copy, size: 16),
+                label: const Text('Copy'),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: copyText));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Copied to clipboard'),
+                      duration: Duration(seconds: 1),
+                    ),
+                  );
+                },
+              ),
+            ),
+          if (chips.isNotEmpty)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final c in chips)
+                  instant
+                      ? ActionChip(
+                          label: Text(c.key),
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            result(c.value, '');
+                          },
+                        )
+                      : ChoiceChip(
+                          label: Text(c.key),
+                          selected: selected == c.value,
+                          onSelected: (_) =>
+                              setLocal(() => selected = c.value),
+                        ),
+              ],
+            ),
+          if (input != null) ...[
+            const SizedBox(height: 14),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              maxLength: (input['max'] as num?)?.toInt(),
+              textCapitalization: TextCapitalization.sentences,
+              decoration: InputDecoration(
+                hintText: (input['hint'] ?? '').toString(),
+                prefixText: (input['prefix'] ?? '').toString(),
+                border: const OutlineInputBorder(),
+                isDense: true,
+                counterText: '',
+              ),
+              onSubmitted: (_) => confirm(ctx),
+            ),
+          ],
+        ],
+      );
+    }
+
+    if (fullscreen) {
+      // A dedicated full-screen panel: roomy, with the title + actions in an
+      // app bar so the picker isn't cramped.
+      showDialog<void>(
+        context: context,
+        useSafeArea: false,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setLocal) => Dialog.fullscreen(
+            child: Scaffold(
+              appBar: AppBar(
+                leading: IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+                title: Text(title),
+                actions: [
+                  if (confirmLabel.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: FilledButton(
+                        onPressed: () => confirm(ctx),
+                        child: Text(confirmLabel),
+                      ),
+                    ),
+                ],
+              ),
+              body: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: content(ctx, setLocal),
+              ),
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+
     showDialog<void>(
       context: context,
-      builder: (ctx) {
-        String selected = '';
-        return StatefulBuilder(
-          builder: (ctx, setLocal) {
-            final cs = Theme.of(ctx).colorScheme;
-            final mq = MediaQuery.of(ctx).size;
-            return AlertDialog(
-              title: Text(title),
-              // A roomy, easily-scrollable panel — nearly full width and up to
-              // 70% of the screen height — so a long chip list (e.g. the group
-              // picker) scrolls comfortably instead of a cramped little dialog.
-              insetPadding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-              content: SizedBox(
-                width: mq.width,
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(maxHeight: mq.height * 0.7),
-                  child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (body.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: SelectableText(body,
-                            style: TextStyle(
-                                color: cs.onSurfaceVariant, fontSize: 12.5)),
-                      ),
-                    if (copyText.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: OutlinedButton.icon(
-                          icon: const Icon(Icons.copy, size: 16),
-                          label: const Text('Copy'),
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(text: copyText));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Copied to clipboard'),
-                                duration: Duration(seconds: 1),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    if (chips.isNotEmpty)
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final c in chips)
-                            instant
-                                ? ActionChip(
-                                    label: Text(c.key),
-                                    onPressed: () {
-                                      Navigator.pop(ctx);
-                                      result(c.value, '');
-                                    },
-                                  )
-                                : ChoiceChip(
-                                    label: Text(c.key),
-                                    selected: selected == c.value,
-                                    onSelected: (_) =>
-                                        setLocal(() => selected = c.value),
-                                  ),
-                        ],
-                      ),
-                    if (input != null) ...[
-                      const SizedBox(height: 14),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: controller,
-                              autofocus: true,
-                              maxLength: (input['max'] as num?)?.toInt(),
-                              textCapitalization: TextCapitalization.sentences,
-                              decoration: InputDecoration(
-                                hintText: (input['hint'] ?? '').toString(),
-                                prefixText: (input['prefix'] ?? '').toString(),
-                                border: const OutlineInputBorder(),
-                                isDense: true,
-                                counterText: '',
-                              ),
-                              onSubmitted: (t) {
-                                if (t.trim().isEmpty && selected.isEmpty) return;
-                                Navigator.pop(ctx);
-                                result(selected, t.trim());
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                    if (toggleLabel.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          dense: true,
-                          title: Text(toggleLabel,
-                              style: const TextStyle(fontSize: 13)),
-                          value: toggleOn,
-                          onChanged: (v) => setLocal(() => toggleOn = v),
-                        ),
-                      ),
-                  ],
-                ),
-                ),
-                ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          final mq = MediaQuery.of(ctx).size;
+          return AlertDialog(
+            title: Text(title),
+            // A roomy, easily-scrollable panel — nearly full width and up to
+            // 70% of the screen height — so a long chip list scrolls
+            // comfortably instead of a cramped little dialog.
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+            content: SizedBox(
+              width: mq.width,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: mq.height * 0.7),
+                child: SingleChildScrollView(child: content(ctx, setLocal)),
               ),
-              actions: [
-                TextButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    child: const Text('Cancel')),
-                if (confirmLabel.isNotEmpty)
-                  FilledButton(
-                    onPressed: () {
-                      final t = controller.text.trim();
-                      if (t.isEmpty && selected.isEmpty) return;
-                      Navigator.pop(ctx);
-                      result(selected, t);
-                    },
-                    child: Text(confirmLabel),
-                  ),
-              ],
-            );
-          },
-        );
-      },
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel')),
+              if (confirmLabel.isNotEmpty)
+                FilledButton(
+                  onPressed: () => confirm(ctx),
+                  child: Text(confirmLabel),
+                ),
+            ],
+          );
+        },
+      ),
     );
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    RnsService.instance.removeProfileListener(_onProfilesChanged);
+    _feedBackfillTimer?.cancel();
+    _fastBackfillTimer?.cancel();
     _tickTimer?.cancel();
     // Flush any pending conversation writes so the latest messages aren't lost.
     _convSaveTimer?.cancel();
@@ -2023,9 +2748,32 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     TaskMonitorService.instance.unregister(_tickTaskId);
     EventBus().fire(WappUnloadedEvent(wappId: _wappName, wappName: _wappName));
     _localeSub?.cancel();
-    // Tear down the media session if the video group was used.
+    // Tear down the media session if the video group was used. Drop the
+    // engine's frame-sink callbacks first so a late frame can't touch a
+    // disposed session.
+    _engine.onVideoConfig = null;
+    _engine.onVideoFrame = null;
+    _engine.onAudioPcm = null;
+    _engine.onVideoEnd = null;
     _mediaSession?.dispose();
     _mediaSession = null;
+    // Tear down media keep-alive + the lock-screen notification.
+    if (_bgKeepAlive) {
+      BackgroundWappManager.instance.releasePage(_wappName);
+      _bgKeepAlive = false;
+    }
+    if (_mediaActive) {
+      AndroidForegroundService.instance.onMediaAction = null;
+      unawaited(AndroidForegroundService.instance.mediaStop());
+      _mediaActive = false;
+    }
+    _audioOut?.dispose();
+    _audioOut = null;
+    _searchDebounce?.cancel();
+    for (final c in _searchCtl.values) {
+      c.dispose();
+    }
+    _searchCtl.clear();
     _videoCurrentPath = null;
     _engine.dispose();
     // Page closed: restart the background service if the user enabled autostart
@@ -2066,6 +2814,16 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     // A menu screen opened as a full panel: shares this state (so live updates
     // still flow) and has a back arrow that returns to the tab view.
     if (_panelScreen != null) {
+      // Management actions on a folder-view panel (rail + chat) collapse into a
+      // single top-right gear menu. Settings-form panels render their own action
+      // buttons inline, so they don't get the gear (avoids duplicates).
+      final isFolderView = _panelScreen!.children
+          .any((c) => c.keyword == 'field' && c.type == 'rail');
+      final panelActions = isFolderView
+          ? _panelScreen!.children
+              .where((c) => c.keyword == 'action' && (c.name ?? '').isNotEmpty)
+              .toList()
+          : const <GeoUiBlock>[];
       return PopScope(
         canPop: false,
         onPopInvoked: (didPop) {
@@ -2078,7 +2836,27 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
               tooltip: 'Back',
               onPressed: () => setState(() => _panelScreen = null),
             ),
-            title: Text(_panelName),
+            title: Text(_panelTitle ?? _panelName),
+            actions: [
+              if (panelActions.isNotEmpty)
+                PopupMenuButton<String>(
+                  icon: const Icon(Icons.settings_outlined),
+                  tooltip: 'Settings',
+                  onSelected: _sendCommand,
+                  itemBuilder: (_) => [
+                    for (final a in panelActions)
+                      PopupMenuItem<String>(
+                        value: a.name!,
+                        child: Row(children: [
+                          Icon(geoUiResolveIcon(a.getString('icon') ?? 'settings'),
+                              size: 20),
+                          const SizedBox(width: 10),
+                          Text(_i18n.resolve(a.getString('label') ?? a.name!)),
+                        ]),
+                      ),
+                  ],
+                ),
+            ],
           ),
           body: _buildScreen(_panelScreen!),
         ),
@@ -2133,7 +2911,10 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         }
       },
       child: Scaffold(
+        backgroundColor: ChatPalette.windowBg,
         appBar: AppBar(
+          backgroundColor: ChatPalette.windowBg,
+          foregroundColor: ChatPalette.text,
           leading: thread != null
               ? IconButton(
                   icon: const Icon(Icons.arrow_back),
@@ -2169,6 +2950,9 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
           bottom: (showTabs && thread == null)
               ? TabBar(
                   controller: _tabController,
+                  labelColor: ChatPalette.accent,
+                  indicatorColor: ChatPalette.accent,
+                  unselectedLabelColor: ChatPalette.secondary,
                   isScrollable: _tabScreens.length > 4,
                   tabAlignment:
                       _tabScreens.length > 4 ? TabAlignment.start : TabAlignment.fill,
@@ -2193,19 +2977,38 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
                 )
               : null,
           actions: [
-            // The thread's room actions (e.g. recurring bulletin) move up
-            // here while the in-panel header is hidden.
+            // The thread's room actions collapse into a single top-right gear
+            // menu (instead of a row of always-visible icons).
             if (thread != null && convGroup != null)
-              for (final a in convGroup.childrenOf('action'))
-                if ((a.getString('slot') ?? 'list') == 'room')
-                  IconButton(
-                    tooltip: a.getString('tip') ?? a.name ?? '',
-                    icon: Icon(convIcon(a.getString('icon') ?? 'add')),
-                    onPressed: () {
+              ...(() {
+                final roomActs = convGroup
+                    .childrenOf('action')
+                    .where((a) => (a.getString('slot') ?? 'list') == 'room')
+                    .toList();
+                if (roomActs.isEmpty) return const <Widget>[];
+                return <Widget>[
+                  PopupMenuButton<String>(
+                    icon: const Icon(Icons.settings_outlined),
+                    tooltip: 'Settings',
+                    onSelected: (name) {
                       _fieldValues['${convField}_convo'] = _convOpenId;
-                      _sendCommand(a.name ?? '');
+                      _sendCommand(name);
                     },
+                    itemBuilder: (_) => [
+                      for (final a in roomActs)
+                        PopupMenuItem<String>(
+                          value: a.name ?? '',
+                          child: Row(children: [
+                            Icon(convIcon(a.getString('icon') ?? 'settings'),
+                                size: 20),
+                            const SizedBox(width: 10),
+                            Text(_i18n.resolve(a.getString('label') ?? a.name ?? '')),
+                          ]),
+                        ),
+                    ],
                   ),
+                ];
+              })(),
             ..._channelIndicators(),
             _buildWappOptionsMenu(),
           ],
@@ -2255,9 +3058,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// geo-chat counter; a Messages (conversations) tab uses the summed unread of
   /// its conversations.
   Widget _railIcon(int i, {required bool selected}) {
-    final cs = Theme.of(context).colorScheme;
     final icon = Icon(_tabIcon(i),
-        color: selected ? cs.onPrimaryContainer : null);
+        color: selected ? ChatPalette.accent : ChatPalette.secondary);
     final count = _isGeoChatScreen(_tabScreens[i]) ? _geoUnread : _tabUnread(i);
     if (count <= 0) return icon;
     return Badge(
@@ -2418,6 +3220,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         .firstOrNull;
     if (convoGroup != null) return _buildConversationsScreen(screen, convoGroup);
 
+    // Folder view — a `$type:"rail"` field renders a left navigation rail of
+    // (permitted) sub-folders alongside the active area (a chat field). Generic:
+    // the wapp pushes rail items via ui.rail.set and the chat via ui.chat.*.
+    final railField = screen.children
+        .where((c) => c.keyword == 'field' && c.type == 'rail')
+        .firstOrNull;
+    if (railField != null) return _buildFolderView(screen, railField);
+
     // Video group (movies wapp) — host renders the media_kit surface
     // with the screen's other children (the header-actions menu) as an
     // overlay so pick_video / pick_subtitle stay reachable.
@@ -2447,6 +3257,15 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         c.keyword == 'group' && c.type == 'output');
     if (hasOutputGroup) {
       return _buildOutputScreen();
+    }
+
+    // Cards screen (Wapp Store catalog) — the wapp pushes structured cards via
+    // `ui.data` (target "catalog") and the host renders + drives their actions.
+    final cardsGroup = screen.children
+        .where((c) => c.keyword == 'group' && c.type == 'cards')
+        .firstOrNull;
+    if (cardsGroup != null) {
+      return _buildCardsScreen(screen, cardsGroup);
     }
 
     // Functionalities browser — system wapp that lists all registered
@@ -2563,8 +3382,14 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     _sendCommand('profile');
   }
 
-  /// A full-height people list (Following / Followers, tags, row actions),
-  /// with the screen's action buttons as a compact header row.
+  /// A full-height people list (Following / Followers, tags, row actions).
+  ///
+  /// Two optional headers render above the list:
+  ///  • a `<group $type="player">` → a now-playing + transport bar (the Player
+  ///    wapp's music controls; stateful icons driven by np_* field values);
+  ///  • when the screen sets `"toolbar": true`, its top-level `<action>`s render
+  ///    as a button row at the top (so a list panel can carry an "Add" button
+  ///    without an options menu). Otherwise actions stay in the ⋮ options menu.
   Widget _buildPeopleScreen(GeoUiBlock screen, GeoUiBlock field) {
     final name = field.name ?? 'people';
     final stored = _fieldValues[name];
@@ -2574,16 +3399,37 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
             .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
             .toList()
         : const <Map<String, dynamic>>[];
-    // Screen-level actions are surfaced in the wapp's existing top-right
-    // options menu (see [_buildWappOptionsMenu]) — a people screen fills the
-    // body, so a second in-panel menu would be redundant.
+    final playerGroup = screen.children
+        .where((c) => c.keyword == 'group' && c.type == 'player')
+        .firstOrNull;
+    final showToolbar = screen.getBool('toolbar') == true;
+    final toolbarActions = showToolbar
+        ? screen.children
+            .where((c) => c.keyword == 'action' && (c.name ?? '').isNotEmpty)
+            .toList()
+        : const <GeoUiBlock>[];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (playerGroup != null) _buildPlayerBar(),
+        if (toolbarActions.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final a in toolbarActions)
+                  _toolbarButton(a),
+              ],
+            ),
+          ),
+        if (screen.getBool('search') == true) _buildSearchBar(name),
         Expanded(
           child: PeopleViewField(
             fieldName: name,
             sections: sections,
+            emptyText: field.getString('empty'),
             onTap: (id) {
               _fieldValues['${name}_id'] = id;
               _sendCommand('${name}_tap');
@@ -2598,11 +3444,298 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     );
   }
 
+  Widget _toolbarButton(GeoUiBlock a) {
+    final name = a.name!;
+    final label = _i18n.resolve(a.getString('label') ?? name);
+    final icon = a.getString('icon');
+    final primary = (a.getString('style') ?? '') == 'primary';
+    final ico = icon != null ? Icon(geoUiResolveIcon(icon), size: 18) : null;
+    void onTap() => _sendCommand(name);
+    if (primary) {
+      return ico != null
+          ? FilledButton.icon(onPressed: onTap, icon: ico, label: Text(label))
+          : FilledButton(onPressed: onTap, child: Text(label));
+    }
+    return ico != null
+        ? OutlinedButton.icon(onPressed: onTap, icon: ico, label: Text(label))
+        : OutlinedButton(onPressed: onTap, child: Text(label));
+  }
+
+  // Per-field search controllers + a debounce so live typing doesn't fire a
+  // command on every keystroke.
+  final Map<String, TextEditingController> _searchCtl = {};
+  Timer? _searchDebounce;
+
+  /// A persistent search box above a people list. As the user types it sends
+  /// `<field>_search` with the query in `<field>_query`; the wapp filters and
+  /// re-renders the list. Empty query restores the normal view.
+  Widget _buildSearchBar(String field) {
+    final ctl = _searchCtl.putIfAbsent(field, () => TextEditingController());
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+      child: TextField(
+        controller: ctl,
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          isDense: true,
+          filled: true,
+          hintText: 'Search',
+          prefixIcon: const Icon(Icons.search, size: 20),
+          suffixIcon: ctl.text.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.close, size: 18),
+                  tooltip: 'Clear',
+                  onPressed: () {
+                    ctl.clear();
+                    _runSearch(field, '');
+                    setState(() {});
+                  },
+                ),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        ),
+        onChanged: (q) {
+          setState(() {}); // refresh the clear button
+          _searchDebounce?.cancel();
+          _searchDebounce =
+              Timer(const Duration(milliseconds: 250), () => _runSearch(field, q));
+        },
+        onSubmitted: (q) => _runSearch(field, q),
+      ),
+    );
+  }
+
+  void _runSearch(String field, String query) {
+    _fieldValues['${field}_query'] = query;
+    _sendCommand('${field}_search');
+  }
+
+  /// Now-playing + transport bar for the Player wapp's music mode. Reads the
+  /// wapp's np_* field values (set via ui.field.set) so the play/pause, shuffle
+  /// and repeat icons reflect live state; each control sends its command.
+  Widget _buildPlayerBar() {
+    final cs = Theme.of(context).colorScheme;
+    String fv(String k) => _fieldValues[k]?.toString() ?? '';
+    bool fb(String k) => fv(k) == 'true' || fv(k) == '1';
+    final rawTitle = fv('np_title');
+    final title = rawTitle.isEmpty ? 'Nothing playing' : rawTitle;
+    final time = fv('np_time');
+    final playing = fb('np_playing');
+    final shuffle = fb('np_shuffle');
+    final repeat = fb('np_repeat');
+    final progress = (double.tryParse(fv('np_progress')) ?? 0) / 1000.0;
+    Widget ctl(IconData i, String cmd,
+            {bool active = false, double size = 24, bool filled = false}) =>
+        filled
+            ? IconButton.filled(
+                iconSize: size,
+                icon: Icon(i),
+                onPressed: () => _sendCommand(cmd),
+              )
+            : IconButton(
+                iconSize: size,
+                icon: Icon(i),
+                color: active ? cs.primary : cs.onSurfaceVariant,
+                onPressed: () => _sendCommand(cmd),
+              );
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              // Always determinate (empty when position/duration unknown) — an
+              // indeterminate bar would imply buffering, which it isn't.
+              value: progress.isFinite ? progress.clamp(0.0, 1.0) : 0.0,
+              minHeight: 4,
+              backgroundColor: cs.surfaceContainer,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(time.isEmpty ? ' ' : time,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              ctl(Icons.shuffle, 'shuffle', active: shuffle, size: 22),
+              ctl(Icons.skip_previous, 'prev', size: 30),
+              ctl(playing ? Icons.pause : Icons.play_arrow, 'playpause',
+                  size: 30, filled: true),
+              ctl(Icons.skip_next, 'next', size: 30),
+              ctl(Icons.repeat, 'repeat', active: repeat, size: 22),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Folder view: a left navigation rail of sub-folders + the active area (the
+  /// folder's chat). The rail is data-driven (ui.rail.set); tapping an item
+  /// fires `<rail>_tap` with `<rail>_id`. The chat shows the folder's messages
+  /// when `<chat>_active` is true, else a "select a folder" placeholder.
+  Widget _buildFolderView(GeoUiBlock screen, GeoUiBlock railField) {
+    final cs = Theme.of(context).colorScheme;
+    final railName = railField.name ?? 'folderrail';
+    final stored = _fieldValues[railName];
+    final items = stored is List
+        ? stored.whereType<Map>().map((m) => m.cast<String, dynamic>()).toList()
+        : const <Map<String, dynamic>>[];
+    final selId = (_fieldValues['${railName}_sel'] ?? '').toString();
+
+    final rail = Container(
+      width: 96,
+      color: cs.surfaceContainerHigh,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          for (final it in items)
+            _railItem(cs, railName, it, (it['id'] ?? '').toString() == selId),
+        ],
+      ),
+    );
+
+    final chatField = screen.children
+        .where((c) => c.keyword == 'field' && c.type == 'chat')
+        .firstOrNull;
+    Widget detail;
+    if (chatField != null) {
+      final cname = chatField.name ?? 'folderchat';
+      final active = _fieldValues['${cname}_active'] == true;
+      if (!active) {
+        detail = Center(
+          child: Text('Select a folder',
+              style: TextStyle(color: cs.onSurfaceVariant)),
+        );
+      } else {
+        final cm = _fieldValues[cname];
+        final msgs = cm is List
+            ? cm.whereType<Map>().map((m) => m.cast<String, dynamic>()).toList()
+            : const <Map<String, dynamic>>[];
+        detail = ChatViewField(
+          fieldName: cname,
+          label: '',
+          hint: chatField.getString('hint') ?? 'Message…',
+          fill: true,
+          messages: msgs,
+          onSenderTap: _showProfile,
+          onAttach: _attachFileToChat,
+          onSend: (text) {
+            _fieldValues['${cname}_input'] = text;
+            _sendCommand('${cname}_send');
+          },
+        );
+      }
+    } else {
+      detail = const SizedBox.shrink();
+    }
+
+    // No sub-folders to navigate → don't show an empty left column at all.
+    if (items.isEmpty) return detail;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        rail,
+        const VerticalDivider(width: 1),
+        Expanded(child: detail),
+      ],
+    );
+  }
+
+  Widget _railItem(
+      ColorScheme cs, String field, Map<String, dynamic> it, bool selected) {
+    final id = (it['id'] ?? '').toString();
+    final name = (it['name'] ?? '').toString();
+    final icon = (it['icon'] ?? '').toString();
+    final fg = selected ? cs.onSecondaryContainer : cs.onSurfaceVariant;
+    return InkWell(
+      onTap: () {
+        _fieldValues['${field}_id'] = id;
+        _sendCommand('${field}_tap');
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+        color: selected ? cs.secondaryContainer : null,
+        child: Column(
+          children: [
+            railIconFor(id, icon, fg),
+            const SizedBox(height: 4),
+            Text(name,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: fg)),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// A full-height chat feed (the chat field fills the tab; the composer sits
   /// at the bottom). Used for screens that are just a `$type:"chat"` field.
   Widget _buildChatFeedScreen(GeoUiBlock chat) {
     final name = chat.name ?? 'activity';
     final hint = chat.getString('hint') ?? 'Message…';
+    // The Activity feed gets a Twitter-style layout (compose on top, centered
+    // post stream) and renders from the PERSISTED archive, so posts received in
+    // the background (app closed) appear alongside live ones.
+    if (name == 'activity') {
+      final posts = _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
+      return ActivityFeed(
+        posts: posts,
+        onAttach: _attachImageOrVideoToChat,
+        onItemTap: _openConvoFromFeed,
+        onSenderTap: _openProfile,
+        npubFor: (c) => RnsService.instance.npubForCallsign(c),
+        followedCalls: _followedCalls,
+        likeInfo: (mid) =>
+            _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false),
+        isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
+        savedPosts: () =>
+            _activityArchive?.savedPosts() ?? const <Map<String, dynamic>>[],
+        onLike: (mid, like) {
+          // Reuse the group like-vote wire: the wapp sends "<mid>:like/unlike"
+          // to the FEED group and echoes a ui.activity.react (mine=true), which
+          // the outbox loop tallies + repaints.
+          _fieldValues['activity_mid'] = mid;
+          _fieldValues['activity_unlike'] = !like;
+          _sendCommand('activity_like');
+        },
+        onSave: (post) {
+          _activityArchive?.toggleSaved(post);
+          setState(() {});
+        },
+        onSelfTap: () {
+          final self = ProfileService.instance.activeProfile;
+          if (self != null) _openProfile(self.callsign);
+        },
+        selfAvatar: _loadSelfProfile().avatar,
+        profileFor: _streamProfileFor,
+        replyCount: (mid) => _activityArchive?.replyCount(mid) ?? 0,
+        onOpenThread: _openActivityThread,
+        onSend: (text) {
+          _fieldValues['${name}_input'] = text;
+          _sendCommand('${name}_send');
+        },
+      );
+    }
     final stored = _fieldValues[name];
     final messages = stored is List
         ? stored.whereType<Map>().map((m) => m.cast<String, dynamic>()).toList()
@@ -2623,6 +3756,37 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         _sendCommand('${name}_send');
       },
     );
+  }
+
+  /// Pick an image for a `$type:"image"` field: store it content-addressed,
+  /// set the field to its `file:<sha>.<ext>` token, and forward [action] so the
+  /// wapp persists the new picture.
+  Future<void> _pickImageForField(String field, String action) async {
+    final token = await _attachImageOnly();
+    if (token == null) return;
+    _fieldValues[field] = token;
+    if (mounted) setState(() {});
+    _sendCommand(action);
+  }
+
+  /// Pick an image only (no video), archive it content-addressed, and return the
+  /// `file:<sha>.<ext>` token.
+  Future<String?> _attachImageOnly() async {
+    try {
+      const images = XTypeGroup(
+        label: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'heic'],
+      );
+      final file = await openFile(acceptedTypeGroups: const [images]);
+      if (file == null) return null;
+      final bytes = await file.readAsBytes();
+      if (bytes.isEmpty) return null;
+      final dot = file.name.lastIndexOf('.');
+      final ext = dot >= 0 ? file.name.substring(dot + 1).toLowerCase() : 'png';
+      return attachMediaFile(bytes, ext, name: file.name);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Attach an image or video (only) to a composer: pick, archive, advertise on
@@ -2653,8 +3817,141 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   // so the user can continue it. The item carries a `convo` ("#GROUP" or a
   // callsign); we switch to the conversations tab and open that room (creating
   // the row if it doesn't exist yet, e.g. a brand-new BLE contact).
-  void _openConvoFromFeed(Map<String, dynamic> m) {
-    final convo = (m['convo'] ?? '').toString().trim();
+  void _openConvoFromFeed(Map<String, dynamic> m) =>
+      _openConvoById((m['convo'] ?? '').toString().trim());
+
+  /// Recover FEED posts that were lost over APRS-IS by asking peers on Reticulum
+  /// for FEED notes since the last sweep (NOSTR kind-1), reconstructing each as a
+  /// feed entry (the callsign is derived from the note's pubkey) and archiving
+  /// any we don't already have. APRS-IS stays the primary path; this fills gaps.
+  /// One aggressive early backfill attempt; stops the fast timer once it pulls
+  /// notes (connected + a peer found) or after ~5 minutes of trying.
+  Future<void> _fastBackfillTick() async {
+    _fastBackfillTicks++;
+    final added = await _backfillFeed();
+    if (added > 0 || _fastBackfillTicks >= 20) {
+      _fastBackfillTimer?.cancel();
+      _fastBackfillTimer = null;
+    }
+  }
+
+  bool _backfillRunning = false;
+
+  Future<int> _backfillFeed() async {
+    final arch = _activityArchive;
+    if (arch == null || !RnsService.instance.isUp) return 0;
+    // Never let backfills overlap: each may query several peers, and the fast
+    // timer fires every 15s — without this guard they pile up into many
+    // concurrent relay queries and swamp the node.
+    if (_backfillRunning) return 0;
+    _backfillRunning = true;
+    try {
+      return await _backfillFeedInner(arch);
+    } finally {
+      _backfillRunning = false;
+    }
+  }
+
+  Future<int> _backfillFeedInner(ActivityArchive arch) async {
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final since = _lastFeedBackfillSec == 0
+        ? nowSec - 7 * 24 * 3600 // first run: last week
+        : _lastFeedBackfillSec - 300; // small overlap so nothing slips through
+    List<Map<String, dynamic>> notes;
+    try {
+      notes = await RnsService.instance.fetchFeedBackfill(since);
+    } catch (_) {
+      return 0;
+    }
+    if (!mounted) return 0;
+    final selfPub = RnsService.instance.selfPubHex;
+    var added = 0;
+    for (final n in notes) {
+      final pub = (n['pub'] ?? '').toString();
+      final text = (n['text'] ?? '').toString();
+      if (pub.isEmpty || text.isEmpty) continue;
+      if (selfPub != null && pub.toLowerCase() == selfPub) {
+        continue; // our own posts aren't "missed" — we already have them
+      }
+      String from;
+      try {
+        from = 'X1${NostrCrypto.deriveCallsign(pub)}';
+      } catch (_) {
+        continue;
+      }
+      // Dedup on content (old rows may lack a stored mid).
+      if (arch.hasContent(from, text)) continue;
+      final mid = activityMid(from, text);
+      final ts = (n['ts'] as int?) ?? nowSec;
+      final dt = DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+      final hhmm =
+          '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+      arch.add({
+        'dir': 'in',
+        'from': from,
+        'text': text,
+        'time': hhmm,
+        'via': 'RNS',
+        'mid': mid,
+        'parent': (n['parent'] ?? '').toString(),
+        't': ts * 1000,
+      });
+      // Older posts can reference media (file:<sha>). Kick off the fetch from
+      // the poster (by callsign) just like live posts do, so a joining device
+      // downloads the images/videos of the history it just pulled, not only the
+      // text.
+      _maybeFetchSharedMedia(text, 'in', from);
+      added++;
+    }
+    _lastFeedBackfillSec = nowSec;
+    if (added > 0) {
+      _activityRev.value++;
+      if (mounted) setState(() {});
+    }
+    return added;
+  }
+
+  /// Open a publication's full-screen forum thread (the post + its replies).
+  /// Replies post via the same `activity_reply` wire (the wapp wraps them as
+  /// "+<mid> text"). The thread refreshes live via [_activityRev].
+  void _openActivityThread(Map<String, dynamic> post) {
+    final mid = (post['mid'] ?? '').toString();
+    if (mid.isEmpty) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ActivityThreadPage(
+        root: post,
+        revision: _activityRev,
+        loadThread: (rootMid) =>
+            _activityArchive?.threadReplies(rootMid) ??
+            const <Map<String, dynamic>>[],
+        replyCount: (m) => _activityArchive?.replyCount(m) ?? 0,
+        likeInfo: (m) =>
+            _activityArchive?.likeInfo(m) ?? (count: 0, mine: false),
+        onLike: (m, like) {
+          _fieldValues['activity_mid'] = m;
+          _fieldValues['activity_unlike'] = !like;
+          _sendCommand('activity_like');
+        },
+        isSaved: (m) => _activityArchive?.isSaved(m) ?? false,
+        onSave: (p) {
+          _activityArchive?.toggleSaved(p);
+          _activityRev.value++;
+        },
+        onReply: (parentMid, text) {
+          if (text.trim().isEmpty) return;
+          _fieldValues['activity_target_mid'] = parentMid;
+          _fieldValues['activity_input'] = text.trim();
+          _sendCommand('activity_reply');
+        },
+        onSenderTap: _openProfile,
+        profileFor: _streamProfileFor,
+        npubFor: (c) => RnsService.instance.npubForCallsign(c),
+        onAttach: _attachImageOrVideoToChat,
+      ),
+    ));
+  }
+
+  void _openConvoById(String convo) {
     if (convo.isEmpty) return;
     final idx = _tabScreens.indexWhere((s) => s.children
         .any((c) => c.keyword == 'group' && c.type == 'conversations'));
@@ -2671,6 +3968,207 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       }
     });
     _syncAppBadge();
+  }
+
+  /// Open a full, Twitter-style profile page for [callsign]: identity details
+  /// (npub, first seen, post count) + the posts they've written.
+  void _openProfile(String callsign) {
+    final c = callsign.trim();
+    if (c.isEmpty) return;
+    final arch = _activityArchive;
+    final self = ProfileService.instance.activeProfile;
+    final isSelf =
+        self != null && c.toUpperCase() == self.callsign.toUpperCase();
+    // For our own profile, prefer the local identity's npub (we may not have a
+    // learned callsign->key mapping for ourselves).
+    final npub = isSelf
+        ? (self.npub.isNotEmpty ? self.npub : null)
+        : RnsService.instance.npubForCallsign(c);
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ProfileRoute(
+        callsign: c,
+        npub: npub,
+        isSelf: isSelf,
+        firstSeenMs: arch?.firstSeenMs(c),
+        postCount: arch?.postCount(c) ?? 0,
+        posts: arch?.byAuthor(c) ?? const [],
+        onPostTap: (post) {
+          Navigator.of(context).pop();
+          _openConvoFromFeed(post);
+        },
+        onMessage: isSelf
+            ? null
+            : () {
+                Navigator.of(context).pop();
+                _openConvoById(c);
+              },
+        following: _followedCalls.contains(c.toUpperCase()),
+        blocked: _blockedCalls.contains(c.toUpperCase()),
+        onSetFollow: isSelf
+            ? null
+            : (follow) {
+                final uc = c.toUpperCase();
+                if (follow) {
+                  _followedCalls.add(uc);
+                } else {
+                  _followedCalls.remove(uc);
+                }
+                _fieldValues['profile_target'] = c;
+                _sendCommand(follow ? 'profile_follow' : 'profile_unfollow');
+              },
+        onSetBlock: isSelf
+            ? null
+            : (block) {
+                final uc = c.toUpperCase();
+                if (block) {
+                  _blockedCalls.add(uc);
+                } else {
+                  _blockedCalls.remove(uc);
+                }
+                _fieldValues['profile_target'] = c;
+                _sendCommand(block ? 'profile_block' : 'profile_unblock');
+              },
+        loadSelf: isSelf ? _loadSelfProfile : null,
+        onEdit: isSelf ? _editOwnProfile : null,
+        fetchMetadata: isSelf || npub == null
+            ? null
+            : () => RnsService.instance.fetchProfileMetadata(npub),
+        resolveAvatar: _imageForPicture,
+      ),
+    ));
+  }
+
+  /// Resolve a stream post author's callsign to its display name + avatar. Our
+  /// own callsign uses the local identity; others use the auto-fetched NOSTR
+  /// profile cache (populated only for people we follow).
+  ({String? name, ImageProvider? avatar}) _streamProfileFor(String callsign) {
+    final self = ProfileService.instance.activeProfile;
+    if (self != null &&
+        callsign.toUpperCase() == self.callsign.toUpperCase()) {
+      return (
+        name: self.nickname.trim().isEmpty ? null : self.nickname.trim(),
+        avatar: _loadSelfProfile().avatar
+      );
+    }
+    final meta = RnsService.instance.profileMetaFor(callsign);
+    if (meta == null) {
+      // Not cached yet — if we follow this callsign, auto-fetch its NOSTR
+      // profile (deduped + TTL-gated in the service; repaints via the listener).
+      if (_followedCalls.contains(callsign.trim().toUpperCase())) {
+        RnsService.instance.fetchFollowedProfile(callsign);
+      }
+      return (name: null, avatar: null);
+    }
+    final name = (meta['name'] ?? meta['display_name'] ?? '').toString().trim();
+    final pic = (meta['picture'] ?? '').toString();
+    return (
+      name: name.isEmpty ? null : name,
+      avatar: pic.isEmpty ? null : _imageForPicture(pic),
+    );
+  }
+
+  /// Read our own profile (nickname/description/avatar) for the profile view.
+  SelfData _loadSelfProfile() {
+    final p = ProfileService.instance.activeProfile;
+    if (p == null) return (name: null, about: null, avatar: null);
+    ImageProvider? avatar;
+    if (p.avatar.isNotEmpty) {
+      try {
+        final path =
+            ProfileService.instance.storageForProfile(p.id).getAbsolutePath(p.avatar);
+        final f = File(path);
+        if (f.existsSync()) avatar = FileImage(f);
+      } catch (_) {}
+    }
+    return (name: p.nickname, about: p.description, avatar: avatar);
+  }
+
+  /// Open the profile editor, then publish the updated profile as a NOSTR
+  /// kind-0 note so peers can fetch it by npub.
+  Future<void> _editOwnProfile() async {
+    final p = ProfileService.instance.activeProfile;
+    if (p == null) return;
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => ProfileEditPage(profile: p)),
+    );
+    if (saved != true) return;
+    // The avatar lives at a fixed path ('avatar.png'); evict the cached image so
+    // a freshly-picked picture re-decodes instead of showing the old one.
+    final edited = ProfileService.instance.activeProfile;
+    if (edited != null && edited.avatar.isNotEmpty) {
+      try {
+        final path = ProfileService.instance
+            .storageForProfile(edited.id)
+            .getAbsolutePath(edited.avatar);
+        await FileImage(File(path)).evict();
+      } catch (_) {}
+    }
+    await _publishOwnProfileMetadata();
+  }
+
+  /// Build the signed kind-0 metadata note from the active profile: nickname →
+  /// name, description → about, avatar → a small inline `data:` PNG so the
+  /// picture travels WITH the note over the relay (reliable between peers; no
+  /// dependency on the media swarm / public hosts).
+  Future<void> _publishOwnProfileMetadata() async {
+    final p = ProfileService.instance.activeProfile;
+    if (p == null) return;
+    String? picture;
+    if (p.avatar.isNotEmpty) {
+      try {
+        final path = ProfileService.instance
+            .storageForProfile(p.id)
+            .getAbsolutePath(p.avatar);
+        final f = File(path);
+        if (await f.exists()) {
+          final bytes = await f.readAsBytes();
+          final thumb = await _thumbnailPng(bytes, 96);
+          if (thumb != null) {
+            picture = 'data:image/png;base64,${base64Encode(thumb)}';
+          }
+        }
+      } catch (_) {}
+    }
+    await RnsService.instance.publishMetadata(
+        name: p.nickname, about: p.description, picture: picture);
+  }
+
+  /// Downscale [src] image bytes to a square-ish PNG at most [size] px wide, for
+  /// embedding in a profile note. Null on decode failure.
+  Future<Uint8List?> _thumbnailPng(Uint8List src, int size) async {
+    try {
+      final codec = await ui.instantiateImageCodec(src, targetWidth: size);
+      final frame = await codec.getNextFrame();
+      final data =
+          await frame.image.toByteData(format: ui.ImageByteFormat.png);
+      return data?.buffer.asUint8List();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Resolve a profile `picture` field to an avatar image: an inline `data:` URI
+  /// (preferred — bytes are right there) or a `file:<sha>` media token resolved
+  /// from the local media archive (swarm fetch kicked off if missing).
+  ImageProvider? _imageForPicture(String picture) {
+    final pic = picture.trim();
+    if (pic.isEmpty) return null;
+    if (pic.startsWith('data:')) {
+      final comma = pic.indexOf(',');
+      if (comma < 0) return null;
+      try {
+        return MemoryImage(base64Decode(pic.substring(comma + 1)));
+      } catch (_) {
+        return null;
+      }
+    }
+    final refs = MediaRef.findAll(pic);
+    if (refs.isEmpty) return null;
+    final ref = refs.first;
+    final bytes = sharedMediaArchive()?.get(ref.sha256);
+    if (bytes != null) return MemoryImage(bytes);
+    maybeFetchSharedMedia(ref.token, 'in');
+    return null;
   }
 
   // ── Tasks viewer ──────────────────────────────────────────────────
@@ -3318,6 +4816,346 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       return parsed is List;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// Wapp Store catalog: render the structured cards a wapp pushed via
+  /// `ui.data` (target "catalog"), plus the screen's header-actions menu (the
+  /// top-right ⋮). Tapping a card's action dispatches it back to the wapp (e.g.
+  /// "install:<slug>" → the store's do_install), so the store stays in control.
+  Widget _buildCardsScreen(GeoUiBlock screen, GeoUiBlock cardsGroup) {
+    final cs = Theme.of(context).colorScheme;
+    final updates = _catalogUpdateSlugs();
+
+    void dispatch(String name) {
+      if (name.isEmpty) return;
+      _engine.sendMessage(jsonEncode({'type': 'action', 'action': name}));
+      _engine.handleEvent();
+      _drainOutbox();
+    }
+
+    // Collect the header-actions menu items (the top-right ⋮).
+    final menuItems = <GeoUiBlock>[];
+    for (final g in screen.children
+        .where((c) => c.keyword == 'group' && c.type == 'header-actions')) {
+      for (final m in
+          g.children.where((c) => c.keyword == 'group' && c.type == 'menu')) {
+        menuItems.addAll(m.children.where((c) => c.keyword == 'action'));
+      }
+      menuItems.addAll(g.children.where((c) => c.keyword == 'action'));
+    }
+
+    final tip = _i18n.resolve(screen.getString('tip') ?? '');
+    final empty =
+        _i18n.resolve(cardsGroup.getString('empty') ?? 'No wapps found yet.');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 6, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: tip.isEmpty
+                    ? const SizedBox.shrink()
+                    : Text(tip,
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodyMedium
+                            ?.copyWith(color: cs.onSurfaceVariant)),
+              ),
+              if (updates.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: Badge(
+                    label: Text('${updates.length}'),
+                    child: Icon(Icons.system_update,
+                        color: cs.onSurfaceVariant, size: 22),
+                  ),
+                ),
+              if (menuItems.isNotEmpty)
+                PopupMenuButton<String>(
+                  icon: const Icon(Icons.more_vert),
+                  tooltip: 'Options',
+                  onSelected: dispatch,
+                  itemBuilder: (_) => [
+                    for (final a in menuItems)
+                      PopupMenuItem<String>(
+                        value: a.name ?? '',
+                        child: Row(children: [
+                          Icon(geoUiResolveIcon(a.getString('icon') ?? 'tune'),
+                              size: 20),
+                          const SizedBox(width: 10),
+                          Text(_i18n.resolve(a.getString('label') ?? a.name ?? '')),
+                        ]),
+                      ),
+                  ],
+                ),
+            ],
+          ),
+        ),
+        if (updates.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Material(
+              color: cs.tertiaryContainer,
+              borderRadius: BorderRadius.circular(12),
+              child: Padding(
+                padding:
+                    const EdgeInsets.fromLTRB(14, 8, 8, 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.system_update,
+                        color: cs.onTertiaryContainer, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        updates.length == 1
+                            ? '1 update available'
+                            : '${updates.length} updates available',
+                        style: TextStyle(
+                            color: cs.onTertiaryContainer,
+                            fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    FilledButton.icon(
+                      onPressed: _updatingAll ? null : () => _updateAll(),
+                      icon: _updatingAll
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.upgrade, size: 16),
+                      label: Text(_updatingAll ? 'Updating...' : 'Update all'),
+                      style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        Expanded(
+          child: _catalogItems.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Text(empty,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: cs.onSurfaceVariant)),
+                  ),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+                  itemCount: _catalogItems.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 10),
+                  itemBuilder: (_, i) =>
+                      _catalogCard(_catalogItems[i], cs, dispatch),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _catalogCard(Map<String, dynamic> item, ColorScheme cs,
+      void Function(String) dispatch) {
+    final id = '${item['id'] ?? ''}';
+    final title = '${item['title'] ?? (id.isEmpty ? 'Wapp' : id)}';
+    final subtitle = '${item['subtitle'] ?? ''}';
+    final desc = '${item['description'] ?? ''}';
+    final chips = (item['chips'] as List?) ?? const [];
+    final actions = (item['actions'] as List?) ?? const [];
+    final action = actions.isNotEmpty && actions.first is Map
+        ? Map<String, dynamic>.from(actions.first as Map)
+        : null;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: cs.primaryContainer,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: _storeIconWidget(id,
+                  size: 26, color: cs.onPrimaryContainer),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 15)),
+                  if (subtitle.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(subtitle,
+                          style: TextStyle(
+                              fontSize: 12, color: cs.onSurfaceVariant)),
+                    ),
+                  if (desc.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(desc,
+                          style: const TextStyle(fontSize: 13),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                  if (chips.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final c in chips.whereType<Map>())
+                            _catalogChip('${c['label'] ?? ''}',
+                                '${c['icon'] ?? ''}', cs),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            _catalogTrailing(_wappSlug(id), title, action, cs, dispatch),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The trailing controls of a catalog card: the Install/Update/Installed
+  /// button, plus an Uninstall (delete) button for anything installed on this
+  /// device — except the store itself, which can't remove itself while running.
+  Widget _catalogTrailing(String slug, String title, Map<String, dynamic>? action,
+      ColorScheme cs, void Function(String) dispatch) {
+    final btn = action != null
+        ? _catalogActionButton(slug, action, cs, dispatch)
+        : const SizedBox.shrink();
+    final installed = _catalogState(slug) != 'install';
+    final canUninstall = installed && slug != 'install' && slug != _wappName;
+    if (!canUninstall) return btn;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        btn,
+        IconButton(
+          icon: const Icon(Icons.delete_outline, size: 20),
+          tooltip: 'Uninstall',
+          visualDensity: VisualDensity.compact,
+          color: cs.error,
+          onPressed: () => _confirmUninstallFromStore(slug, title),
+        ),
+      ],
+    );
+  }
+
+  /// Confirm, then remove an installed wapp from this device. The folder/catalog
+  /// is untouched, so the card flips back to "Install" and the wapp can be
+  /// reinstalled anytime.
+  Future<void> _confirmUninstallFromStore(String slug, String title) async {
+    final name = title.isEmpty ? slug : title;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final dcs = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          title: Text('Uninstall $name?'),
+          content: const Text(
+              'This removes the wapp from this device. You can reinstall it '
+              'anytime from the store.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                  backgroundColor: dcs.error, foregroundColor: dcs.onError),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Uninstall'),
+            ),
+          ],
+        );
+      },
+    );
+    if (ok != true) return;
+    final result = await WappInstallerService.instance.uninstall(slug);
+    if (!result.ok) {
+      _outputLines
+          .add(_OutputLine(result.error ?? 'Uninstall failed', 'err'));
+    } else {
+      _outputLines.add(_OutputLine('$name uninstalled', 'info'));
+    }
+    await _refreshInstalledVersions();
+    if (mounted) setState(() {});
+  }
+
+  Widget _catalogChip(String label, String icon, ColorScheme cs) {
+    if (label.isEmpty) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: cs.onSurfaceVariant.withAlpha(28),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon.isNotEmpty) ...[
+            Icon(geoUiResolveIcon(icon), size: 13, color: cs.onSurfaceVariant),
+            const SizedBox(width: 4),
+          ],
+          Text(label,
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+        ],
+      ),
+    );
+  }
+
+  /// Render a catalog card's button from the host-computed install state for
+  /// [slug] (authoritative — based on what's actually installed on the device),
+  /// not the label the store guessed. The action name is still the store's
+  /// (e.g. "install:<file>") so the dispatch reaches do_install.
+  Widget _catalogActionButton(String slug, Map<String, dynamic> a,
+      ColorScheme cs, void Function(String) dispatch) {
+    final name = '${a['name'] ?? 'install:$slug'}';
+    switch (_catalogState(slug)) {
+      case 'installed':
+        return OutlinedButton.icon(
+          onPressed: null,
+          icon: const Icon(Icons.check, size: 16),
+          label: const Text('Installed'),
+          style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
+        );
+      case 'update':
+        return FilledButton.icon(
+          onPressed: () => dispatch(name),
+          icon: const Icon(Icons.upgrade, size: 16),
+          label: const Text('Update'),
+          style: FilledButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            backgroundColor: cs.tertiary,
+            foregroundColor: cs.onTertiary,
+          ),
+        );
+      default:
+        return FilledButton.icon(
+          onPressed: () => dispatch(name),
+          icon: const Icon(Icons.download, size: 16),
+          label: const Text('Install'),
+          style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
+        );
     }
   }
 
@@ -4335,7 +6173,104 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// a `File(path).existsSync()` lookup means the web fetch-based
   /// [MemoryProfileStorage] resolves identically to the desktop
   /// [FilesystemProfileStorage].
+  /// Reduce a .wapp leaf filename to its stable slug — the install directory
+  /// name. "aprs-0.2.60.wapp" -> "aprs", "app-creator-0.3.4.wapp" ->
+  /// "app-creator", "widget_demo-1.0.1.wapp" -> "widget_demo". The slug matches
+  /// both the bundled wapp folders and what the catalog card echoes back, so it
+  /// is the single key for install/update/installed state.
+  static String _wappSlug(String fileOrId) {
+    var s = fileOrId.split('/').last;
+    if (s.toLowerCase().endsWith('.wapp')) s = s.substring(0, s.length - 5);
+    final m = RegExp(r'^(.+)-(\d+\.\d+(?:\.\d+)?(?:[-.][0-9A-Za-z.]+)?)$')
+        .firstMatch(s);
+    return m != null ? m.group(1)! : s;
+  }
+
+  /// Compare two dotted version strings numerically. Returns >0 when [a] is
+  /// newer than [b], 0 when equal, <0 when older. Non-numeric suffixes
+  /// (e.g. "-beta.4") are reduced to their leading integer per segment.
+  static int _versionCmp(String a, String b) {
+    List<int> parts(String v) => v
+        .split(RegExp(r'[.\-+]'))
+        .map((s) {
+          final m = RegExp(r'^\d+').firstMatch(s);
+          return m != null ? int.parse(m.group(0)!) : 0;
+        })
+        .toList();
+    final pa = parts(a), pb = parts(b);
+    for (var i = 0; i < pa.length || i < pb.length; i++) {
+      final x = i < pa.length ? pa[i] : 0;
+      final y = i < pb.length ? pb[i] : 0;
+      if (x != y) return x.compareTo(y);
+    }
+    return 0;
+  }
+
+  /// Re-read the version of every installed wapp (keyed by its folder slug) so
+  /// the store can show Install / Update / Installed and an update counter.
+  Future<void> _refreshInstalledVersions() async {
+    final next = <String, String>{};
+    try {
+      if (await _installed.directoryExists('')) {
+        for (final e in await _installed.listDirectory('')) {
+          if (!e.isDirectory) continue;
+          try {
+            final m = await wappPackageStorage(_installed.getAbsolutePath(e.path))
+                .readJson('manifest.json');
+            final ver = (m?['version'] ?? '').toString();
+            if (ver.isNotEmpty) next[e.name] = ver;
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    _installedVersions
+      ..clear()
+      ..addAll(next);
+  }
+
+  /// The install state of a catalog card by its slug: 'install' (not present),
+  /// 'update' (installed, catalog is newer), or 'installed' (up to date).
+  String _catalogState(String slug) {
+    final inst = _installedVersions[slug];
+    if (inst == null) return 'install';
+    final cat = _catalogMeta[slug]?['version'] ?? '';
+    if (cat.isEmpty) return 'installed';
+    return _versionCmp(cat, inst) > 0 ? 'update' : 'installed';
+  }
+
+  /// Slugs that have a newer version available in the catalog.
+  List<String> _catalogUpdateSlugs() => _catalogMeta.keys
+      .where((slug) => _catalogState(slug) == 'update')
+      .toList();
+
+  /// Re-install every wapp that has a newer version in the catalog, in turn,
+  /// straight from the signed Reticulum folder the catalog came from.
+  Future<void> _updateAll() async {
+    if (_updatingAll) return;
+    final slugs = _catalogUpdateSlugs();
+    if (slugs.isEmpty || _catalogSourceAddr.isEmpty) return;
+    setState(() => _updatingAll = true);
+    try {
+      for (final slug in slugs) {
+        final meta = _catalogMeta[slug];
+        final file = meta?['file'] ?? '';
+        final version = meta?['version'] ?? '';
+        if (file.isEmpty) continue;
+        // _installWappFromRns fetches by content sha, installs under the slug,
+        // and refreshes _installedVersions on success.
+        await _installWappFromRns(_catalogSourceAddr, file, slug, version);
+      }
+    } finally {
+      await _refreshInstalledVersions();
+      if (mounted) setState(() => _updatingAll = false);
+    }
+  }
+
   Uint8List? _storeSvgBytesFor(String name) {
+    // 0. A catalog icon shipped inline in the folder's index.json (so a wapp
+    //    that isn't installed yet still shows its authored icon in the store).
+    final catalog = _catalogIcons[name];
+    if (catalog != null && catalog.isNotEmpty) return catalog;
     // Try multiple sources for the wapp's manifest + icon:
     // 1. Current running wapp (if name matches)
     // 2. Installed copy under the profile
@@ -4372,8 +6307,8 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
   /// SVGs pass through a srcIn white colour filter so wapps whose
   /// icons are authored in dark strokes still read cleanly on the
   /// coloured tile.
-  Widget _storeIconWidget(String name, {required double size}) {
-    const whiteFilter = ColorFilter.mode(Colors.white, BlendMode.srcIn);
+  Widget _storeIconWidget(String name,
+      {required double size, Color color = Colors.white}) {
     final svgBytes = _storeSvgBytesFor(name);
     if (svgBytes != null) {
       return Padding(
@@ -4381,16 +6316,16 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
         child: SvgPicture.memory(
           svgBytes,
           fit: BoxFit.contain,
-          theme: const SvgTheme(currentColor: Colors.white),
+          theme: SvgTheme(currentColor: color),
           placeholderBuilder: (_) => Icon(
             wappIconFor(name),
             size: size,
-            color: Colors.white,
+            color: color,
           ),
         ),
       );
     }
-    return Icon(wappIconFor(name), size: size, color: Colors.white);
+    return Icon(wappIconFor(name), size: size, color: color);
   }
 
   /// Small pill-shaped chip used on store cards to show origin and
@@ -5228,7 +7163,18 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
       screen: screen,
       bindings: _WappFieldBindings(_engine, _fieldValues, () => setState(() {})),
       i18n: _i18n,
+      resolveImage: _imageForPicture,
       onAction: (action) {
+        // A `$type:"image"` field's Choose button fires `<field>__pickimage`.
+        // The host owns the native picker + the content-addressed archive, so it
+        // handles the pick here: store the image, set the field to its token, and
+        // forward the command so the wapp persists the new picture.
+        if (action.endsWith('__pickimage')) {
+          final base =
+              action.substring(0, action.length - '__pickimage'.length);
+          _pickImageForField(base, action);
+          return;
+        }
         if (action == 'save') {
           _engine.sendMessage(jsonEncode({
             'type': 'action',
@@ -5281,6 +7227,7 @@ class _WappPageState extends State<WappPage> with TickerProviderStateMixin {
     'ble': 'Bluetooth LE',
     'sensor': 'Sensors',
     'display': 'Display/screen',
+    'video': 'Codec-free A/V sink',
     'gpio': 'GPIO pins',
   };
 

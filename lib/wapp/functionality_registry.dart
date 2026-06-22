@@ -186,6 +186,71 @@ class FunctionalityRegistry {
         ParamDef('handle', 'int'),
       ], ReturnDef('void')),
     ]),
+    'hal.sqlite': FunctionalityDef(
+        'hal.sqlite', 'SQLite databases (scoped per module)', [
+      EndpointDef('hal_sqlite_open', 'Open/create a database under the wapp data dir', [
+        ParamDef('path', 'string', 'Relative path (no leading / or ..)'),
+      ], ReturnDef('int', 'Handle (>=0) or -1 on error')),
+      EndpointDef('hal_sqlite_exec', 'Run a non-SELECT statement', [
+        ParamDef('handle', 'int'),
+        ParamDef('sql', 'string'),
+        ParamDef('params', 'string', 'Optional JSON array bound to ? placeholders'),
+      ], ReturnDef('int', '0 on success, -1 on error')),
+      EndpointDef('hal_sqlite_query', 'Run a SELECT; rows as a JSON array', [
+        ParamDef('handle', 'int'),
+        ParamDef('sql', 'string'),
+        ParamDef('params', 'string', 'Optional JSON array bound to ? placeholders'),
+      ], ReturnDef('int', 'Bytes written, -1 on error, -2 if buffer too small')),
+      EndpointDef('hal_sqlite_error', 'Read the last error for a handle', [
+        ParamDef('handle', 'int'),
+      ], ReturnDef('uint32', 'Bytes written')),
+      EndpointDef('hal_sqlite_close', 'Close a database handle', [
+        ParamDef('handle', 'int'),
+      ], ReturnDef('void')),
+    ]),
+    'hal.crypto': FunctionalityDef(
+        'hal.crypto', 'Generic crypto with caller-supplied keys', [
+      EndpointDef('hal_crypto_keygen', 'Generate a secp256k1 keypair', [],
+          ReturnDef('uint32', 'Bytes written: JSON {priv,pub} hex')),
+      EndpointDef('hal_crypto_sign', 'Sign a message (SHA-256 then BIP-340)', [
+        ParamDef('priv', 'string', 'Private key hex'),
+        ParamDef('msg', 'bytes'),
+      ], ReturnDef('uint32', 'Bytes written: signature hex, 0 on error')),
+      EndpointDef('hal_crypto_verify', 'Verify a signature', [
+        ParamDef('pub', 'string', 'x-only public key hex'),
+        ParamDef('sig', 'string', 'Signature hex'),
+        ParamDef('msg', 'bytes'),
+      ], ReturnDef('int', '1 if valid, 0 otherwise')),
+      EndpointDef('hal_crypto_random', 'Fill a buffer with random bytes', [
+        ParamDef('len', 'int'),
+      ], ReturnDef('uint32', 'Bytes written')),
+      EndpointDef('hal_crypto_aes_encrypt', 'AES-256-CBC encrypt (IV prepended)', [
+        ParamDef('key', 'bytes', '32 bytes'),
+        ParamDef('data', 'bytes'),
+      ], ReturnDef('uint32', 'Bytes written, 0 on error')),
+      EndpointDef('hal_crypto_aes_decrypt', 'AES-256-CBC decrypt (IV||ciphertext)', [
+        ParamDef('key', 'bytes', '32 bytes'),
+        ParamDef('data', 'bytes'),
+      ], ReturnDef('uint32', 'Bytes written, 0 on error')),
+    ]),
+    'hal.rns': FunctionalityDef(
+        'hal.rns', 'Reticulum peer-to-peer datagrams (scoped per wapp)', [
+      EndpointDef('hal_rns_identity', 'This device RNS destination hex', [],
+          ReturnDef('uint32', 'Bytes written, 0 if node down')),
+      EndpointDef('hal_rns_broadcast', 'Broadcast a datagram to peers running this wapp', [
+        ParamDef('payload', 'bytes'),
+      ], ReturnDef('int', '1 if queued, -1 on error')),
+      EndpointDef('hal_rns_available', 'Size of next inbound datagram', [],
+          ReturnDef('uint32', '0 if none')),
+      EndpointDef('hal_rns_recv', 'Read next inbound datagram (JSON {from,payload,ts})', [],
+          ReturnDef('uint32', 'Bytes written, 0 if none')),
+    ]),
+    'hal.contacts': FunctionalityDef(
+        'hal.contacts', 'Known people (reusable contact picker source)', [
+      EndpointDef('hal_contacts_query', 'List known contacts (APRS-seen + follows)', [
+        ParamDef('query', 'string', 'Filter over npub/callsign/nick (empty = all)'),
+      ], ReturnDef('int', 'Bytes of JSON [{npub,callsign,nick}], -1 error, -2 too small')),
+    ]),
     // hal.http / hal.lora / hal.ble — the transport HAL — are defined in
     // lib/connections/, the single home for connection code, and spread in
     // here so the registry still advertises them as core functionalities.
@@ -286,6 +351,32 @@ class FunctionalityRegistry {
         ParamDef('color', 'int'),
       ], ReturnDef('void')),
       EndpointDef('hal_display_flush', 'Flush buffer to physical display', [],
+          ReturnDef('void')),
+    ]),
+    'hal.video': FunctionalityDef(
+        'hal.video', 'Codec-free A/V sink (push decoded frames/PCM)', [
+      EndpointDef('hal_video_config', 'Announce video geometry', [
+        ParamDef('width', 'int'),
+        ParamDef('height', 'int'),
+        ParamDef('pixfmt', 'int', '0=RGBA8888'),
+      ], ReturnDef('void')),
+      EndpointDef('hal_video_frame', 'Submit one decoded RGBA frame', [
+        ParamDef('data', 'ptr'),
+        ParamDef('len', 'uint32'),
+        ParamDef('width', 'int'),
+        ParamDef('height', 'int'),
+        ParamDef('pixfmt', 'int'),
+        ParamDef('pts_ms', 'int'),
+      ], ReturnDef('void')),
+      EndpointDef('hal_audio_pcm', 'Submit one block of decoded PCM', [
+        ParamDef('data', 'ptr'),
+        ParamDef('len', 'uint32'),
+        ParamDef('sample_rate', 'int'),
+        ParamDef('channels', 'int'),
+        ParamDef('sampfmt', 'int', '0=s16, 1=f32'),
+        ParamDef('pts_ms', 'int'),
+      ], ReturnDef('void')),
+      EndpointDef('hal_video_end', 'Signal end of stream', [],
           ReturnDef('void')),
     ]),
     'hal.gpio':

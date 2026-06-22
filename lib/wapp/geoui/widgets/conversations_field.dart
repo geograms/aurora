@@ -6,16 +6,46 @@
 // ChatViewField for the chat surface (bubbles + composer + scroll-hold).
 
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../conversation_store.dart';
+import 'chat_palette.dart';
 import 'chat_view_field.dart';
+
+/// Render a folder/rail icon the way it is actually stored: a built-in control
+/// id ("__up"/"__add"/"__edit"/"__access") → a real Material icon; an inline
+/// "svg:<xml>" → the SVG; any other non-empty value → it is treated as an emoji/
+/// glyph and shown as text; empty → a default folder icon. (The GeoUI icon
+/// picker stores emoji or inline SVG, never Material names — so we must not run
+/// these through a name→IconData lookup.)
+Widget railIconFor(String id, String icon, Color color, {double size = 24}) {
+  IconData? mat;
+  switch (id) {
+    case '__up': mat = Icons.arrow_upward; break;
+    case '__add': mat = Icons.add; break;
+    case '__edit': mat = Icons.edit_outlined; break;
+    case '__access': mat = Icons.lock_outline; break;
+  }
+  if (mat != null) return Icon(mat, color: color, size: size);
+  if (icon.startsWith('svg:')) {
+    return SizedBox(
+      width: size, height: size,
+      child: SvgPicture.string(icon.substring(4), fit: BoxFit.contain),
+    );
+  }
+  if (icon.isNotEmpty) {
+    return Text(icon, style: TextStyle(fontSize: size - 2, color: color));
+  }
+  return Icon(Icons.folder_outlined, color: color, size: size);
+}
 
 /// A generic header/room action button the wapp declares (e.g. "new chat").
 class ConvAction {
   final String name; // command/event name fired back to the wapp
   final String icon; // generic icon name
   final String tooltip;
-  const ConvAction(this.name, this.icon, this.tooltip);
+  final String label; // menu label (falls back to tooltip)
+  const ConvAction(this.name, this.icon, this.tooltip, {this.label = ''});
 }
 
 /// A generic labelled checkbox shown above the composer. The wapp declares it
@@ -56,7 +86,22 @@ IconData convIcon(String name) {
     case 'repeat':
       return Icons.repeat;
     case 'delete':
-      return Icons.delete_sweep;
+      return Icons.delete_outline;
+    case 'people':
+      return Icons.groups_2_outlined;
+    case 'share':
+      return Icons.ios_share;
+    case 'qr':
+    case 'qr_code':
+      return Icons.qr_code_2;
+    case 'settings':
+      return Icons.settings_outlined;
+    case 'tune':
+      return Icons.tune;
+    case 'person_add':
+      return Icons.person_add_alt;
+    case 'folder':
+      return Icons.folder_outlined;
     default:
       return Icons.chat_bubble_outline;
   }
@@ -94,6 +139,11 @@ class ConversationsField extends StatefulWidget {
   final void Function(String id, String key)? onHide;
   final void Function(String from)? onBlock;
 
+  /// Per-conversation "…" menu actions. Mute toggles app-wide attention for the
+  /// row; Close removes it from the list. Null disables the menu.
+  final void Function(String id, bool muted)? onMute;
+  final void Function(String id)? onClose;
+
   /// Labelled checkboxes shown above the composer; toggling reports back.
   final List<ComposerToggle> toggles;
   final void Function(String name, bool value) onToggle;
@@ -120,6 +170,11 @@ class ConversationsField extends StatefulWidget {
   /// wide (side-by-side) layout always keeps the header.
   final bool showRoomHeader;
 
+  /// Optional left rail shown inside an open conversation — e.g. a circle's
+  /// sub-folders. Each item: {id, name, icon}. Tapping fires [onRoomRailTap].
+  final List<Map<String, dynamic>> roomRail;
+  final void Function(String id)? onRoomRailTap;
+
   const ConversationsField({
     super.key,
     required this.store,
@@ -130,6 +185,8 @@ class ConversationsField extends StatefulWidget {
     this.onForward,
     this.onHide,
     this.onBlock,
+    this.onMute,
+    this.onClose,
     this.title = 'Conversations',
     this.listActions = const [],
     this.roomActions = const [],
@@ -140,6 +197,8 @@ class ConversationsField extends StatefulWidget {
     this.openId,
     this.onOpenChanged,
     this.showRoomHeader = true,
+    this.roomRail = const [],
+    this.onRoomRailTap,
   });
 
   @override
@@ -204,9 +263,10 @@ class _ConversationsFieldState extends State<ConversationsField> {
 
   // ── list ───────────────────────────────────────────────────────────
   Widget _list(BuildContext context, {required bool wide}) {
-    final cs = Theme.of(context).colorScheme;
     final items = widget.store.ordered();
-    return Column(
+    return Container(
+      color: ChatPalette.windowBg,
+      child: Column(
       children: [
         Container(
           padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
@@ -227,7 +287,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
                 IconButton(
                   tooltip: a.tooltip,
                   icon: Icon(convIcon(a.icon), size: 22),
-                  color: cs.primary,
+                  color: ChatPalette.accent,
                   onPressed: () => widget.onAction(a.name, _openId ?? ''),
                 ),
             ],
@@ -245,6 +305,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
                 ),
         ),
       ],
+      ),
     );
   }
 
@@ -291,7 +352,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
     final cs = Theme.of(context).colorScheme;
     final selected = it.id == _openId;
     return Material(
-      color: selected ? cs.primary.withAlpha(28) : Colors.transparent,
+      color: selected ? ChatPalette.outBubble : Colors.transparent,
       child: InkWell(
         onTap: () => _select(it.id),
         child: Padding(
@@ -308,7 +369,9 @@ class _ConversationsFieldState extends State<ConversationsField> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                            fontWeight: FontWeight.w600, fontSize: 14)),
+                            color: ChatPalette.text,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14)),
                     const SizedBox(height: 2),
                     Row(
                       children: [
@@ -318,7 +381,10 @@ class _ConversationsFieldState extends State<ConversationsField> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                                color: cs.onSurfaceVariant, fontSize: 12.5),
+                                color: selected
+                                    ? Colors.white70
+                                    : ChatPalette.secondary,
+                                fontSize: 12.5),
                           ),
                         ),
                         if (it.badge.isNotEmpty)
@@ -326,9 +392,17 @@ class _ConversationsFieldState extends State<ConversationsField> {
                             padding: const EdgeInsets.only(left: 6),
                             child: Text(it.badge,
                                 style: TextStyle(
-                                    color: cs.primary,
+                                    color: selected
+                                        ? Colors.white
+                                        : ChatPalette.accent,
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600)),
+                          ),
+                        if (it.muted)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 6),
+                            child: Icon(Icons.notifications_off,
+                                size: 14, color: cs.onSurfaceVariant),
                           ),
                         if (it.unread > 0)
                           Container(
@@ -336,7 +410,10 @@ class _ConversationsFieldState extends State<ConversationsField> {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 6, vertical: 1),
                             decoration: BoxDecoration(
-                                color: cs.primary,
+                                // Muted rows show a grey count (no attention).
+                                color: it.muted
+                                    ? ChatPalette.secondary
+                                    : ChatPalette.accent,
                                 borderRadius: BorderRadius.circular(10)),
                             child: Text('${it.unread}',
                                 style: const TextStyle(
@@ -349,10 +426,72 @@ class _ConversationsFieldState extends State<ConversationsField> {
                   ],
                 ),
               ),
+              if (widget.onMute != null ||
+                  widget.onClose != null ||
+                  widget.roomActions.isNotEmpty)
+                _convMenu(context, it),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// The per-conversation "…" menu — the wapp's room actions (e.g. Edit, People,
+  /// Share) followed by the built-in Mute/Unmute and Close.
+  Widget _convMenu(BuildContext context, ConversationItem it) {
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_vert, size: 20),
+      tooltip: 'Options',
+      onSelected: (v) {
+        if (v == 'mute') {
+          widget.onMute?.call(it.id, !it.muted);
+        } else if (v == 'close') {
+          widget.onClose?.call(it.id);
+        } else if (v.startsWith('action:')) {
+          widget.onAction(v.substring(7), it.id);
+        }
+      },
+      itemBuilder: (_) => [
+        for (final a in widget.roomActions)
+          PopupMenuItem(
+            value: 'action:${a.name}',
+            child: Row(
+              children: [
+                Icon(convIcon(a.icon)),
+                const SizedBox(width: 10),
+                Text(a.label.isNotEmpty ? a.label : a.tooltip),
+              ],
+            ),
+          ),
+        if (widget.roomActions.isNotEmpty &&
+            (widget.onMute != null || widget.onClose != null))
+          const PopupMenuDivider(),
+        if (widget.onMute != null)
+          PopupMenuItem(
+            value: 'mute',
+            child: Row(
+              children: [
+                Icon(it.muted
+                    ? Icons.notifications_active_outlined
+                    : Icons.notifications_off_outlined),
+                const SizedBox(width: 10),
+                Text(it.muted ? 'Unmute' : 'Mute'),
+              ],
+            ),
+          ),
+        if (widget.onClose != null)
+          const PopupMenuItem(
+            value: 'close',
+            child: Row(
+              children: [
+                Icon(Icons.close),
+                SizedBox(width: 10),
+                Text('Close'),
+              ],
+            ),
+          ),
+      ],
     );
   }
 
@@ -362,7 +501,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
     final it = widget.store.items[id];
     if (it == null) return _emptyRoom(context);
 
-    return Column(
+    final content = Column(
       children: [
         // Narrow + host-chrome: the AppBar shows the back arrow + title, so
         // skip the internal header entirely (one back arrow per screen).
@@ -370,6 +509,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
         Container(
           padding: const EdgeInsets.fromLTRB(6, 8, 6, 8),
           decoration: BoxDecoration(
+            color: ChatPalette.windowBg,
             border: Border(
                 bottom: BorderSide(color: cs.outlineVariant.withAlpha(80))),
           ),
@@ -400,12 +540,8 @@ class _ConversationsFieldState extends State<ConversationsField> {
                   ],
                 ),
               ),
-              for (final a in widget.roomActions)
-                IconButton(
-                  tooltip: a.tooltip,
-                  icon: Icon(convIcon(a.icon), size: 20),
-                  onPressed: () => widget.onAction(a.name, id),
-                ),
+              // Room actions live in each conversation's "…" menu (with
+              // Mute/Close), not as header icons.
             ],
           ),
         ),
@@ -433,6 +569,52 @@ class _ConversationsFieldState extends State<ConversationsField> {
           ),
         ),
       ],
+    );
+    if (widget.roomRail.isEmpty) return content;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _roomRail(context),
+        const VerticalDivider(width: 1),
+        Expanded(child: content),
+      ],
+    );
+  }
+
+  /// The sub-folder rail shown on the left of an open conversation.
+  Widget _roomRail(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: 84,
+      color: cs.surfaceContainerHigh,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          for (final it in widget.roomRail)
+            _roomRailItem(cs, (it['id'] ?? '').toString(),
+                (it['name'] ?? '').toString(), (it['icon'] ?? '').toString()),
+        ],
+      ),
+    );
+  }
+
+  Widget _roomRailItem(ColorScheme cs, String id, String name, String icon) {
+    return InkWell(
+      onTap: () => widget.onRoomRailTap?.call(id),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+        child: Column(
+          children: [
+            railIconFor(id, icon, cs.onSurfaceVariant),
+            const SizedBox(height: 4),
+            Text(name,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+          ],
+        ),
+      ),
     );
   }
 

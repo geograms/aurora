@@ -29,6 +29,7 @@ import '../models/monitored_task.dart';
 import '../profile/storage_paths.dart';
 import '../services/background_service.dart';
 import 'geoui/geo_chat_archive.dart';
+import 'geoui/activity_archive.dart';
 import 'shared_media_fetch.dart';
 import '../services/notification_service.dart';
 import '../services/wapp_unread_service.dart';
@@ -45,6 +46,26 @@ class BackgroundWappManager {
 
   bool isRunning(String wappName) => _running.containsKey(wappName);
   List<String> get runningNames => _running.keys.toList(growable: false);
+
+  // Foreground pages that must keep ticking in the background WITHOUT handing
+  // off to a fresh headless engine — e.g. the Player while music/radio plays,
+  // where the live engine holds the decoder + playback position that a new
+  // engine couldn't reproduce. The native heartbeat drives these too.
+  final Map<String, void Function()> _pageTicks = {};
+
+  /// Keep [wappName]'s own (page) engine alive in the background by ticking
+  /// [tick] from the native heartbeat, and hold the foreground service.
+  void keepPageAlive(String wappName, void Function() tick) {
+    _pageTicks[wappName] = tick;
+    AndroidForegroundService.instance.hold('player');
+  }
+
+  /// Stop keeping [wappName]'s page engine alive.
+  void releasePage(String wappName) {
+    if (_pageTicks.remove(wappName) != null && _pageTicks.isEmpty) {
+      AndroidForegroundService.instance.release('player');
+    }
+  }
 
   /// Folder name from a package dir (mirrors WappPage._deriveWappName).
   static String folderName(String wappDir) {
@@ -69,6 +90,10 @@ class BackgroundWappManager {
       final prefs = await PreferencesService.instance();
       final engine = WappEngine();
       engine.setStorage(wappDataStorageFor(prefs, name));
+      // Identify the wapp BEFORE load so hal_rns_* has a channel tag — without
+      // this a headless engine can neither send nor receive Reticulum datagrams
+      // (the page engine sets this in WappPage; the background path must too).
+      engine.setAppId(name);
       await engine.load(wasm);
       final svc = _WappBackgroundService(name, wappDir, engine, prefs);
       _running[name] = svc;
@@ -88,6 +113,26 @@ class BackgroundWappManager {
     unawaited(svc.stop());
     debugPrint('BackgroundWapp: stopped $wappName');
     _onRunningChanged();
+  }
+
+  /// Inject a flat `{"command":…}` JSON into a running background wapp engine,
+  /// pump it once, and process the resulting outbox (notifications etc.).
+  /// Returns the engine's outbox for observation, or null if not running.
+  /// Used by the remote-control API to drive a headless wapp deterministically.
+  List<String>? injectCommand(String wappName, String flatCommandJson) =>
+      _running[wappName]?.inject(flatCommandJson);
+
+  /// Force [n] ticks on a running background wapp (advance RNS draining +
+  /// periodic logic on demand). Returns the merged outbox, or null if not
+  /// running.
+  List<String>? pumpTicks(String wappName, [int n = 1]) {
+    final svc = _running[wappName];
+    if (svc == null) return null;
+    final out = <String>[];
+    for (var k = 0; k < n; k++) {
+      out.addAll(svc.pumpOnce());
+    }
+    return out;
   }
 
   /// A UI page for [wappName] is opening — drop the background engine so the
@@ -139,6 +184,10 @@ class BackgroundWappManager {
     for (final svc in _running.values) {
       unawaited(svc.tickNow());
     }
+    // Also drive any foreground pages kept alive for background playback.
+    for (final tick in _pageTicks.values) {
+      try { tick(); } catch (_) {}
+    }
   }
 }
 
@@ -166,6 +215,11 @@ class _WappBackgroundService extends BackgroundService {
   late final GeoChatArchive _geoArchive =
       GeoChatArchive.forStorage(wappDataStorageFor(prefs, name));
 
+  /// Activity feed archive (shared with the foreground page), so posts received
+  /// while running headless show up when the user later opens the Activity tab.
+  late final ActivityArchive _activityArchive =
+      ActivityArchive.forStorage(wappDataStorageFor(prefs, name));
+
   @override
   Future<void> onStart() async {
     engine.init();
@@ -183,6 +237,24 @@ class _WappBackgroundService extends BackgroundService {
     try {
       engine.dispose();
     } catch (_) {}
+  }
+
+  /// Inject a flat command, pump the engine once, capture the outbox for the
+  /// caller, then run the normal headless drain (so notifications still fire).
+  List<String> inject(String flatCommandJson) {
+    engine.sendMessage(flatCommandJson);
+    engine.handleEvent();
+    final out = engine.outbox.toList();
+    _drain();
+    return out;
+  }
+
+  /// Run one engine tick, capture the outbox, then drain normally.
+  List<String> pumpOnce() {
+    engine.tick();
+    final out = engine.outbox.toList();
+    _drain();
+    return out;
   }
 
   /// Process the engine outbox the way the headless context cares about:
@@ -207,8 +279,11 @@ class _WappBackgroundService extends BackgroundService {
         // No UI in the background, but still archive geo-tagged Live messages
         // so an always-on station keeps its history as messages happen.
         final msg = data['message'];
-        if ((data['field'] as String? ?? 'messages') == 'geochat') {
+        final field = data['field'] as String? ?? 'messages';
+        if (field == 'geochat') {
           if (msg is Map) _geoArchive.add(msg);
+        } else if (field == 'activity') {
+          if (msg is Map) _activityArchive.add(msg);
         }
         // Auto-fetch shared media even with no UI: an incoming message carrying
         // a file: token + ih:/pa: hints joins the swarm so the bytes land in the
@@ -220,6 +295,14 @@ class _WappBackgroundService extends BackgroundService {
           // Outgoing shares: publish the bytes to public Blossom so stations on
           // other (NAT'd) networks can fetch them over the internet.
           maybePublishSharedMedia(mtext, mdir);
+        }
+      } else if (type == 'ui.activity.react') {
+        // Tally like votes received while headless so they show on next open.
+        final mid = (data['mid'] ?? '').toString();
+        final from = (data['from'] ?? '').toString();
+        if (mid.isNotEmpty && from.isNotEmpty) {
+          _activityArchive.setReaction(
+              mid, from, data['like'] == true, data['mine'] == true);
         }
       } else if (type == 'notify') {
         final levelStr = (data['level'] as String? ?? 'info').toLowerCase();

@@ -41,6 +41,7 @@
          incoming connections (Blossom + BitTorrent seeds) and receiving APRS-IS
          pushes without WiFi power-save latency. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <!-- Ask to be exempt from battery optimization (Doze) so the always-on
          background service isn't killed in deep sleep on aggressive OEMs. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
@@ -75,6 +76,23 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Deep links: tapping https://geogram.radio/circle/<key> opens Aurora
+                 straight on the "apply to join" flow. autoVerify lets Android open
+                 the link without the chooser once the assetlinks are served. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="geogram.radio" android:pathPrefix="/circle"/>
+                <data android:scheme="http" android:host="geogram.radio" android:pathPrefix="/circle"/>
+            </intent-filter>
+            <!-- Custom-scheme fallback (QR apps / chats that don't linkify https). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="geogram" android:host="circle"/>
+            </intent-filter>
         </activity>
         <!-- Background-service runtime for autostarted wapps (keeps BLE/APRS-IS
              receiving with the screen off). Started via the bg_service channel. -->
@@ -103,6 +121,16 @@
             android:name=".DownloadForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Receives the media notification's transport-button taps (play /
+             pause / next / prev) and forwards them to the Player wapp. -->
+        <receiver
+            android:name=".MediaActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.geogram.aurora.MEDIA_ACTION" />
+            </intent-filter>
+        </receiver>
 
         <!-- FileProvider so the downloaded APK can be handed to the system
              package installer (content:// URI, Android 7+). -->

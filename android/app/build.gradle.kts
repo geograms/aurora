@@ -42,3 +42,8 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // MediaSessionCompat + MediaStyle notification for lock-screen media controls.
+    implementation("androidx.media:media:1.7.0")
+}

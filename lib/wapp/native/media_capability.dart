@@ -2,22 +2,22 @@
  * Media capability — the host-side seam for the `media.video`
  * capability that the `mediapack` library wapp advertises.
  *
- * Why this exists: a WASM wapp cannot draw a native video surface, and
- * Flutter links its packages at compile time, so the actual player
- * (media_kit) has to live in the host binary. To keep that from being
- * hardwired into the wapp runtime, the player is modelled as a
- * *capability*:
+ * Why this exists: the actual codec/player must NOT live in the host
+ * binary (it bloats the app and is not platform agnostic). Instead the
+ * decoder runs as WebAssembly INSIDE a downloadable media wapp, and the
+ * host provides only a generic, codec-free render sink. The player is
+ * modelled as a *capability*:
  *
- *   - The platform-specific backend (media_kit) registers itself here
- *     at startup via [MediaCapabilities.registerBackend] — and only on
- *     platforms it supports. The wapp runtime never imports media_kit.
- *   - The capability is only *active* when a library wapp advertising
+ *   - The host registers a codec-free backend at startup via
+ *     [MediaCapabilities.registerBackend] — see WasmVideoBackend in
+ *     wasm_video_session.dart, which only uploads RGBA frames the wapp
+ *     pushes (no codec, no media_kit, no platform plugin).
+ *   - The capability is only *active* when a wapp advertising
  *     `media.video` is actually installed (checked against the
- *     [FunctionalityRegistry]). Remove the mediapack wapp and video
- *     goes away; ship a different backend and it swaps cleanly.
+ *     [FunctionalityRegistry]). Remove that wapp and video goes away.
  *
- * This file has NO dependency on media_kit, so the wapp runtime can talk
- * to video through [MediaSession] without pulling the engine into core.
+ * This file has NO codec dependency; the wapp runtime talks to video
+ * through [MediaSession], and the decoder travels inside the .wapp.
  */
 
 import 'package:flutter/widgets.dart';

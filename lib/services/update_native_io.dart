@@ -77,6 +77,29 @@ class UpdateNative {
     }
   }
 
+  /// Write already-fetched [bytes] (a binary pulled over Reticulum) to the
+  /// support dir as [filename], reporting progress, and return the saved path.
+  /// The Reticulum transfer streams the whole content into memory first (a
+  /// Resource), so this is a single write; we still report 0%->100% for the UI.
+  static Future<String?> writeBytes(
+    String filename,
+    Uint8List bytes,
+    void Function(int received, int total) onProgress,
+  ) async {
+    final dir = await supportDir();
+    if (dir == null) return null;
+    final dest = '$dir/$filename';
+    try {
+      onProgress(0, bytes.length);
+      await File(dest).writeAsBytes(bytes, flush: true);
+      onProgress(bytes.length, bytes.length);
+      return dest;
+    } catch (e) {
+      debugPrint('UpdateNative.writeBytes failed: $e');
+      return null;
+    }
+  }
+
   static Future<bool> canInstall() async {
     if (!Platform.isAndroid) return true;
     try {

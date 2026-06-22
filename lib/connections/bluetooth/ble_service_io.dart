@@ -90,6 +90,18 @@ class BleService {
   bool get supported => true;
   bool get advertiseSupported => _advertiseSupported;
 
+  /// True only when the physical Bluetooth adapter is powered ON and usable.
+  /// Goes false the moment the user turns Bluetooth off at the OS level, so a
+  /// wapp can hide its "BLE available" indicator instead of claiming a channel
+  /// that can't carry anything. Before init (no central yet) BLE is unavailable.
+  bool get poweredOn {
+    final c = _central;
+    if (c != null) return c.state == BluetoothLowEnergyState.poweredOn;
+    final bz = _bzAdapter;
+    if (bz != null) return bz.powered;
+    return false;
+  }
+
   final _inbound = StreamController<BleInboundFrame>.broadcast();
   Stream<BleInboundFrame> get inbound => _inbound.stream;
 

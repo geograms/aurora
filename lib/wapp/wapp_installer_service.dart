@@ -21,6 +21,7 @@ import 'package:archive/archive.dart';
 
 import '../connections/internet/http_transport.dart';
 import '../services/event_bus.dart';
+import '../services/reticulum/rns_service.dart';
 import '../profile/profile_storage.dart';
 import '../profile/storage_paths.dart';
 import 'wapp_signing_service.dart';
@@ -29,11 +30,11 @@ import 'wapp_signing_service.dart';
 /// the install so it can be re-run ("Reload") from its origin without
 /// the user re-entering the URL / re-picking the file.
 class WappSource {
-  /// 'url' | 'path' | 'file' | 'bytes' | 'compiled'
+  /// 'url' | 'path' | 'file' | 'rns' | 'bytes' | 'compiled'
   final String type;
 
   /// URL for 'url', source directory for 'path', absolute .wapp path
-  /// for 'file', empty otherwise.
+  /// for 'file', `folderAddr|sha` for 'rns', empty otherwise.
   final String value;
 
   const WappSource(this.type, this.value);
@@ -41,6 +42,11 @@ class WappSource {
   factory WappSource.url(String v) => WappSource('url', v);
   factory WappSource.path(String v) => WappSource('path', v);
   factory WappSource.file(String v) => WappSource('file', v);
+
+  /// A signed Reticulum folder: [addr] is the folder address (npub/hex) and
+  /// [sha] the content hash of the .wapp, so Reload can re-fetch it P2P.
+  factory WappSource.rns(String addr, String sha) =>
+      WappSource('rns', '$addr|$sha');
 
   Map<String, dynamic> toJson() =>
       {'version': 1, 'type': type, 'value': value};
@@ -473,6 +479,23 @@ class WappInstallerService {
         final bytes = await wappPackageStorage(dir).readBytes(file);
         if (bytes == null) {
           return InstallResult.failure(wappId, 'source file gone: ${source.value}');
+        }
+        return installFromBytes(
+            wappId: wappId, zipBytes: bytes, source: source);
+      case 'rns':
+        // "<folderAddr>|<sha>": re-fetch the .wapp from the signed Reticulum
+        // folder by content hash (verified + re-seeded by folderFetchBytes).
+        final bar = source.value.indexOf('|');
+        if (bar <= 0) {
+          return InstallResult.failure(wappId, 'bad rns source: ${source.value}');
+        }
+        final addr = source.value.substring(0, bar);
+        final sha = source.value.substring(bar + 1);
+        final bytes =
+            await RnsService.instance.folderFetchBytes(addr, sha, ext: '.wapp');
+        if (bytes == null) {
+          return InstallResult.failure(
+              wappId, 'could not fetch over Reticulum (no provider online)');
         }
         return installFromBytes(
             wappId: wappId, zipBytes: bytes, source: source);

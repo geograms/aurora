@@ -37,12 +37,42 @@ class AndroidForegroundService {
   bool get _supported => !kIsWeb && Platform.isAndroid;
   bool get isRunning => _running;
 
+  /// Set by the wapp page that currently owns media playback; the native
+  /// MediaSession routes lock-screen / notification button presses here.
+  void Function(String action)? onMediaAction;
+
   Future<dynamic> _onCall(MethodCall call) async {
     if (call.method == 'onTick') {
       // Native heartbeat — advance every live background engine.
       BackgroundWappManager.instance.tickAllFromNative();
+    } else if (call.method == 'media.action') {
+      final action = (call.arguments is Map)
+          ? (call.arguments['action']?.toString() ?? '')
+          : call.arguments?.toString() ?? '';
+      if (action.isNotEmpty) onMediaAction?.call(action);
     }
     return null;
+  }
+
+  /// Push the current media-session state to the native MediaSession so the
+  /// lock-screen / notification panel shows it with transport controls.
+  Future<void> mediaUpdate(Map<String, dynamic> info) async {
+    if (!_supported) return;
+    try {
+      await _channel.invokeMethod('media.update', info);
+    } catch (e) {
+      debugPrint('AndroidForegroundService: media.update failed: $e');
+    }
+  }
+
+  /// Tear down the media notification/session (playback stopped).
+  Future<void> mediaStop() async {
+    if (!_supported) return;
+    try {
+      await _channel.invokeMethod('media.stop');
+    } catch (e) {
+      debugPrint('AndroidForegroundService: media.stop failed: $e');
+    }
   }
 
   String _composeLabel() {

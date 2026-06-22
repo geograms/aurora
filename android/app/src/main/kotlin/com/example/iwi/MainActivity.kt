@@ -3,6 +3,7 @@ package com.geogram.aurora
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.Settings
@@ -20,6 +21,67 @@ class MainActivity : FlutterActivity() {
         // the activity is backgrounded. Mirrors AuroraApplication.bgChannel.
         var channel: MethodChannel? = null
         private const val UPDATE_CHANNEL = "com.geogram.aurora/updates"
+        private const val LINKS_CHANNEL = "com.geogram.aurora/links"
+    }
+
+    // Deep-link plumbing: the URI a cold start was launched with (delivered to
+    // Dart via getInitialLink), and the channel used to push later links.
+    private var linksChannel: MethodChannel? = null
+    private var initialLink: String? = null
+
+    // Wi-Fi multicast lock: by default Android drops incoming broadcast/multicast
+    // UDP to save power, which would stop the Reticulum LAN auto-peering
+    // interface from RECEIVING peers' announces. Holding this lets co-located
+    // devices discover each other on the same Wi-Fi.
+    private var multicastLock: WifiManager.MulticastLock? = null
+
+    private fun acquireMulticastLock() {
+        if (multicastLock != null) return
+        try {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE)
+                as WifiManager
+            multicastLock = wifi.createMulticastLock("aurora-rns-lan").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    // Warm start (singleTop): a new deep link arrives while we're already up.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val link = linkFrom(intent)
+        if (link != null) {
+            val ch = linksChannel
+            if (ch != null) ch.invokeMethod("onLink", link) else initialLink = link
+        }
+    }
+
+    private fun captureLink(intent: Intent?) {
+        val link = linkFrom(intent) ?: return
+        initialLink = link
+    }
+
+    /** Pull a circle deep link out of an ACTION_VIEW intent, or null. */
+    private fun linkFrom(intent: Intent?): String? {
+        if (intent == null || intent.action != Intent.ACTION_VIEW) return null
+        val data = intent.data ?: return null
+        val s = data.toString()
+        val ok = (data.scheme == "https" || data.scheme == "http") &&
+            data.host == "geogram.radio" && (data.path?.startsWith("/circle") == true) ||
+            (data.scheme == "geogram" && data.host == "circle")
+        return if (ok) s else null
+    }
+
+    override fun onDestroy() {
+        try {
+            multicastLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {
+        }
+        multicastLock = null
+        super.onDestroy()
     }
 
     /**
@@ -51,6 +113,23 @@ class MainActivity : FlutterActivity() {
 
         // BLE 5 extended advertising/scanning for the Reticulum broadcast transport.
         Ble5(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+
+        // Deep links (geogram.radio/circle/<key>): expose the launch URI and push
+        // any later ones (onNewIntent) to Dart's DeepLinkService.
+        linksChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, LINKS_CHANNEL)
+            .also { ch ->
+                ch.setMethodCallHandler { call, result ->
+                    when (call.method) {
+                        "getInitialLink" -> { result.success(initialLink); initialLink = null }
+                        else -> result.notImplemented()
+                    }
+                }
+            }
+        // Capture the URI this activity was (re)started with.
+        captureLink(intent)
+
+        // Allow receiving LAN broadcast/multicast (Reticulum LAN auto-peering).
+        acquireMulticastLock()
     }
 
     private fun handleUpdate(call: MethodCall, result: MethodChannel.Result) {

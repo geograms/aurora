@@ -5,7 +5,8 @@ import 'dart:typed_data';
 
 import 'dart:io'
     if (dart.library.html) '../platform/io_stub.dart'
-    show Directory, File, FileMode, Platform, Process, Socket, RawSynchronousSocket;
+    show Directory, File, FileMode, Platform, Process, Socket, RawSynchronousSocket,
+        HttpClient;
 
 import 'package:wasm_run/wasm_run.dart';
 
@@ -30,6 +31,8 @@ import '../util/nostr_crypto.dart';
 import '../util/aprx_sign.dart';
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:hex/hex.dart';
+import 'package:sqlite3/sqlite3.dart';
+import 'package:pointycastle/export.dart' as pc;
 
 /// State for a single hal_process_exec subprocess. Lives in
 /// [WappEngine._procs] keyed by handle. The wapp polls hal_process_poll
@@ -57,15 +60,37 @@ class _WappFileState {
   final List<int> writeBuf = <int>[];
 }
 
-/// State for a single hal_socket_* handle. Lives in [WappEngine._sockets]
-/// keyed by handle. A background `Socket.connect` fills [socket] when it
-/// resolves; inbound bytes accumulate in [rxBuf] (drained by recv).
-/// [state]: 0 = connecting, 1 = open, 2 = closed/error.
-class _WappSocketState {
+/// One real TCP connection shared by every wapp engine that opens the same
+/// (host, port) — there is exactly ONE connection to APRS-IS per server for the
+/// whole app, instead of one per engine (foreground page + background service),
+/// which used to produce duplicate/triplicate logins for the same callsign and
+/// a kick-war on APRS-IS (the server drops duplicate logins). Inbound bytes are
+/// fanned out to every [view]'s rxBuf; the duplicate APRS-IS login line is
+/// suppressed (only the first is sent). Shared statically across engines.
+class _SharedSocket {
+  _SharedSocket(this.key);
+  final String key; // "host:port"
   Socket? socket;
-  int state = 0;
-  final List<int> rxBuf = <int>[];
+  int state = 0; // 0 connecting, 1 up, 2 closed/error
+  bool loginSent = false; // first "user ..." login forwarded; later ones dropped
   StreamSubscription<List<int>>? sub;
+  final List<_WappSocketState> views = <_WappSocketState>[];
+  void fanOut(List<int> data) {
+    for (final v in views) {
+      v.rxBuf.addAll(data);
+    }
+  }
+}
+
+/// State for a single hal_socket_* handle. Lives in [WappEngine._sockets]
+/// keyed by handle. Each handle is a VIEW onto a [_SharedSocket]: it has its own
+/// [rxBuf] (so two engines each drain their own copy of the inbound stream),
+/// while [shared] holds the one real TCP socket. [state] for a view mirrors
+/// [shared.state].
+class _WappSocketState {
+  _SharedSocket? shared;
+  final List<int> rxBuf = <int>[];
+  int get state => shared?.state ?? 2;
 }
 
 /// State for a single hal_http_* request. Lives in [WappEngine._https]
@@ -79,6 +104,60 @@ class _WappHttpState {
   int status = -1; // HTTP status code once [done] && !failed
   Uint8List body = Uint8List(0);
   int readOffset = 0;
+}
+
+/// State for a single hal_http_stream_* handle (online radio). A streamed GET
+/// keeps audio bytes flowing into [rxBuf] over time; the wapp drains them and
+/// decodes incrementally. ICY (SHOUTcast) metadata is requested and stripped
+/// out here so the wapp only sees pure audio; the latest StreamTitle is exposed
+/// via [title]. [state]: 0 = connecting, 1 = open, 2 = closed/error.
+class _WappStreamState {
+  StreamSubscription<List<int>>? sub;
+  final List<int> rxBuf = <int>[];
+  int state = 0;
+  // ICY metadata de-interleaving.
+  int icyMetaInt = 0; // 0 = no metadata interleaved
+  int sinceMeta = 0; // audio bytes since the last metadata block
+  bool readingMetaLen = false; // next byte is a metadata length (×16)
+  int metaLeft = 0; // metadata bytes still to read
+  final List<int> metaAcc = <int>[];
+  String title = '';
+  static const int _maxBuf = 4 * 1024 * 1024; // bound memory if the wapp stalls
+
+  void ingest(List<int> data) {
+    for (final b in data) {
+      if (icyMetaInt == 0) { rxBuf.add(b); continue; }
+      if (readingMetaLen) { metaLeft = b * 16; readingMetaLen = false; continue; }
+      if (metaLeft > 0) {
+        metaAcc.add(b);
+        if (--metaLeft == 0) { _parseTitle(); metaAcc.clear(); }
+        continue;
+      }
+      rxBuf.add(b);
+      if (++sinceMeta >= icyMetaInt) { sinceMeta = 0; readingMetaLen = true; }
+    }
+    if (rxBuf.length > _maxBuf) rxBuf.removeRange(0, rxBuf.length - _maxBuf);
+  }
+
+  void _parseTitle() {
+    // metaAcc looks like: StreamTitle='Artist - Song';StreamUrl='...';
+    final s = String.fromCharCodes(metaAcc);
+    const key = "StreamTitle='";
+    final i = s.indexOf(key);
+    if (i < 0) return;
+    final j = s.indexOf("'", i + key.length);
+    if (j < 0) return;
+    title = s.substring(i + key.length, j);
+  }
+}
+
+/// State for a single hal_sqlite_* handle. Lives in [WappEngine._sqlite] keyed
+/// by handle. Wraps one open [Database] (a file under the wapp's private data
+/// dir) and the last error string for hal_sqlite_error.
+class _WappSqliteState {
+  _WappSqliteState(this.db);
+  final Database db;
+  String? lastError;
 }
 
 /// Log entry from a WASM module.
@@ -129,6 +208,19 @@ class WappEngine {
   ProfileStorage? _storage;
   bool _loaded = false;
 
+  // ── Codec-free A/V sink callbacks ──────────────────────────────────
+  // A media wapp decodes video IN wasm and pushes raw frames/PCM out
+  // through the hal_video_*/hal_audio_pcm imports below. The host holds
+  // NO codec; it only forwards what the wapp hands it to whatever render
+  // session is attached (wired by the owning WappPage). Null => drop.
+  void Function(int width, int height, int pixfmt)? onVideoConfig;
+  void Function(Uint8List rgba, int width, int height, int pixfmt, int ptsMs)?
+      onVideoFrame;
+  void Function(
+          Uint8List pcm, int sampleRate, int channels, int sampfmt, int ptsMs)?
+      onAudioPcm;
+  void Function()? onVideoEnd;
+
   // hal_process_* state. Handles are positive ints; 0 is reserved so
   // callers can use 0 as an "absent" sentinel.
   final Map<int, _WappProcState> _procs = {};
@@ -141,12 +233,29 @@ class WappEngine {
   // hal_socket_* state. Same handle convention as _procs.
   final Map<int, _WappSocketState> _sockets = {};
   int _nextSocketHandle = 1;
+  // One real TCP per (host, port) shared across ALL engines (foreground page +
+  // background service), so APRS-IS sees a single connection/login per server.
+  static final Map<String, _SharedSocket> _sharedSockets = {};
 
   // hal_http_* state. Same handle convention as _procs. Backed by the
   // host's one HttpTransport so the Wapp Store can fetch its catalog
   // index.json from a remote repo (raw.githubusercontent.com/...).
   final Map<int, _WappHttpState> _https = {};
   int _nextHttpHandle = 1;
+  final Map<int, _WappStreamState> _streams = {};
+  int _nextStreamHandle = 1;
+
+  // hal_sqlite_* state. Per-wapp databases live under the wapp's private data
+  // dir; handles are disposed on teardown.
+  final Map<int, _WappSqliteState> _sqlite = {};
+  int _nextSqliteHandle = 1;
+
+  // This wapp's id (folder name), used as the tag for the per-wapp RNS datagram
+  // channel so hal_rns_* traffic demultiplexes between wapps. Set via setAppId.
+  String? _appId;
+  // Local staging buffer for inbound RNS datagrams (JSON envelopes), drained from
+  // RnsService one datagram at a time to give hal_rns_available/recv semantics.
+  final List<String> _rnsRx = [];
 
   // hal_socket_*_sync state — blocking sockets for synchronous test code
   // (the wasm test runner can't await async I/O). Keyed by handle.
@@ -190,6 +299,14 @@ class WappEngine {
     _loadKv();
   }
 
+  /// Identify this wapp (its folder id) before [load]. Used as the tag for the
+  /// per-wapp RNS datagram channel (hal_rns_*) so two devices running the same
+  /// wapp see each other's datagrams and other wapps don't.
+  void setAppId(String id) {
+    _appId = id;
+    RnsService.instance.wappRegister(id);
+  }
+
   void _loadKv() {
     final storage = _storage;
     if (storage == null) return;
@@ -216,6 +333,15 @@ class WappEngine {
   /// Check if a KV key exists (before module is loaded).
   bool hasKvKey(String key) => _kv.containsKey(key);
 
+  /// Read a KV value as a string (before/after the module loads), or null when
+  /// the key isn't set. Lets the host restore persisted settings into its field
+  /// map so a wapp's saved settings (e.g. the map's my_lat/my_lon) survive a
+  /// restart instead of reverting to the declared defaults.
+  String? kvGet(String key) {
+    final v = _kv[key];
+    return v == null ? null : String.fromCharCodes(v);
+  }
+
   /// List all KV keys (for debugging).
   List<String> get kvKeys => _kv.keys.toList();
 
@@ -226,6 +352,11 @@ class WappEngine {
   }
 
   void sendMessage(String msg) => _inbox.add(msg);
+
+  /// Host→wapp messages still queued. `module_handle_event` consumes one per
+  /// call, so a caller that needs its message processed must pump [handleEvent]
+  /// until this is zero.
+  int get inboxLength => _inbox.length;
 
   List<String> drainOutbox() {
     final out = List<String>.from(_outbox);
@@ -250,6 +381,10 @@ class WappEngine {
     final n = bytes.length < maxLen ? bytes.length : maxLen;
     final mem = _memory!.view;
     for (var i = 0; i < n; i++) mem[ptr + i] = bytes[i];
+    // NUL-terminate so the wapp's strlen-based readers work on uninitialized
+    // (stack) buffers — without this, s_len() runs past the data into garbage,
+    // corrupting e.g. signatures carried in datagram JSON.
+    if (n < maxLen) mem[ptr + n] = 0;
     return n;
   }
 
@@ -326,6 +461,54 @@ class WappEngine {
     final mem = _memory!.view;
     for (var i = 0; i < n; i++) mem[ptr + i] = bytes[i];
     return n;
+  }
+
+  /// Read a UTF-8 string from wasm memory (correct for non-ASCII text, unlike
+  /// the byte-preserving [_readStr]). Used by the sqlite HAL where SQL and bound
+  /// values can carry user chat text.
+  String _readUtf8(int ptr, int len) =>
+      utf8.decode(_readBytes(ptr, len), allowMalformed: true);
+
+  /// Write a UTF-8 string into wasm memory; returns bytes written. Pair with the
+  /// wapp utf8-decoding the buffer.
+  int _writeUtf8(int ptr, int maxLen, String s) {
+    final n = _writeBytes(ptr, maxLen, Uint8List.fromList(utf8.encode(s)));
+    if (n < maxLen) _memory!.view[ptr + n] = 0; // NUL-terminate (see _writeStr)
+    return n;
+  }
+
+  /// Resolve a wapp-supplied sqlite path to an absolute path confined to this
+  /// wapp's private data dir. Rejects absolute paths and any '..' segment so a
+  /// wapp can't escape its sandbox. Returns null if unresolvable/unsafe.
+  String? _wappDbPath(String rel) {
+    final s = _storage;
+    if (s == null || rel.isEmpty) return null;
+    final parts =
+        rel.split('/').where((p) => p.isNotEmpty && p != '.').toList();
+    if (parts.isEmpty || parts.contains('..')) return null;
+    return s.getAbsolutePath(parts.join('/'));
+  }
+
+  /// Decode the optional JSON-array bind parameters for a sqlite call.
+  List<Object?> _sqliteParams(int ptr, int len) {
+    if (len <= 0) return const [];
+    try {
+      final v = jsonDecode(_readUtf8(ptr, len));
+      return v is List ? v : const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// AES-256-CBC with PKCS7 padding (matches AprxSign's scheme). [iv] is 16 bytes.
+  Uint8List _aesCbc(bool encrypt, Uint8List key, Uint8List iv, Uint8List data) {
+    final c = pc.PaddedBlockCipherImpl(
+        pc.PKCS7Padding(), pc.CBCBlockCipher(pc.AESEngine()));
+    c.init(
+        encrypt,
+        pc.PaddedBlockCipherParameters(
+            pc.ParametersWithIV(pc.KeyParameter(key), iv), null));
+    return c.process(data);
   }
 
   // ── Load ─────────────────────────────────────────────────────────────
@@ -437,7 +620,7 @@ class WappEngine {
     MediaArchive? mediaArchive() {
       final prefs = PreferencesService.instanceSync;
       if (prefs == null) return null;
-      return MediaArchive.forStorage(wappsDataStorage(prefs));
+      return MediaArchive.forDirectory(wappsDataStorage(prefs).getAbsolutePath(''));
     }
 
     Map<String, dynamic> metaJson(MediaMeta m) => {
@@ -1446,6 +1629,74 @@ class WappEngine {
       params: [ValueTy.i32],
     );
 
+    // ── Streaming HTTP HAL (online radio) ──
+    // A long-lived GET whose bytes flow in over time (https + redirects + ICY
+    // metadata handled here). The wapp reads chunks with hal_http_stream_read
+    // and decodes incrementally; hal_http_stream_meta returns the StreamTitle.
+    final halHttpStreamOpen = WasmFunction(
+      (int urlPtr, int urlLen) {
+        final url = _readStr(urlPtr, urlLen);
+        if (url.isEmpty) return -1;
+        final Uri uri;
+        try { uri = Uri.parse(url); } catch (_) { return -1; }
+        final h = _nextStreamHandle++;
+        final s = _WappStreamState();
+        _streams[h] = s;
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 20)
+          ..autoUncompress = false;
+        client.getUrl(uri).then((req) {
+          req.headers.set('Icy-MetaData', '1');
+          req.headers.set('User-Agent', 'Aurora/1.0');
+          return req.close();
+        }).then((resp) {
+          final mi = resp.headers.value('icy-metaint');
+          if (mi != null) s.icyMetaInt = int.tryParse(mi) ?? 0;
+          s.state = 1;
+          s.sub = resp.listen(
+            s.ingest,
+            onDone: () { s.state = 2; client.close(force: true); },
+            onError: (Object _) { s.state = 2; client.close(force: true); },
+            cancelOnError: true,
+          );
+        }).catchError((Object _) {
+          s.state = 2;
+          client.close(force: true);
+        });
+        return h;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halHttpStreamRead = WasmFunction(
+      (int h, int bufPtr, int bufLen) {
+        final s = _streams[h];
+        if (s == null) return -1;
+        if (s.rxBuf.isEmpty) return s.state == 2 ? -1 : 0; // -1 closed, 0 wait
+        if (bufLen <= 0) return 0;
+        final n = s.rxBuf.length < bufLen ? s.rxBuf.length : bufLen;
+        final mem = _memory!.view;
+        for (var i = 0; i < n; i++) mem[bufPtr + i] = s.rxBuf[i];
+        s.rxBuf.removeRange(0, n);
+        return n;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halHttpStreamMeta = WasmFunction(
+      (int h, int bufPtr, int bufLen) {
+        final s = _streams[h];
+        if (s == null || s.title.isEmpty || bufLen <= 0) return 0;
+        return _writeStr(bufPtr, bufLen, s.title);
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halHttpStreamClose = WasmFunction.voidReturn(
+      (int h) {
+        final s = _streams.remove(h);
+        s?.sub?.cancel();
+      },
+      params: [ValueTy.i32],
+    );
+
     // ── File HAL (host filesystem, no sandbox) ──
     //
     // Absolute paths, full filesystem access — same trust model as
@@ -1539,23 +1790,39 @@ class WappEngine {
       (int hostPtr, int hostLen, int port) {
         final host = _readStr(hostPtr, hostLen);
         if (host.isEmpty || port <= 0 || port > 65535) return -1;
-        final s = _WappSocketState();
+        final key = '$host:$port';
+        // Reuse the live shared connection to this server if one exists; a dead
+        // one (state 2) was unregistered on drop, so a fresh connect happens.
+        var sh = _sharedSockets[key];
+        if (sh == null) {
+          sh = _SharedSocket(key);
+          _sharedSockets[key] = sh;
+          final created = sh;
+          Socket.connect(host, port, timeout: const Duration(seconds: 15))
+              .then((sock) {
+            created.socket = sock;
+            created.state = 1;
+            created.sub = sock.listen(
+              created.fanOut,
+              onDone: () {
+                created.state = 2;
+                _sharedSockets.remove(created.key); // next open reconnects fresh
+              },
+              onError: (_) {
+                created.state = 2;
+                _sharedSockets.remove(created.key);
+              },
+              cancelOnError: true,
+            );
+          }).catchError((_) {
+            created.state = 2;
+            _sharedSockets.remove(created.key);
+          });
+        }
+        final view = _WappSocketState()..shared = sh;
+        sh.views.add(view);
         final h = _nextSocketHandle++;
-        _sockets[h] = s;
-        Socket.connect(host, port,
-                timeout: const Duration(seconds: 15))
-            .then((sock) {
-          s.socket = sock;
-          s.state = 1;
-          s.sub = sock.listen(
-            (data) => s.rxBuf.addAll(data),
-            onDone: () => s.state = 2,
-            onError: (_) => s.state = 2,
-            cancelOnError: true,
-          );
-        }).catchError((_) {
-          s.state = 2;
-        });
+        _sockets[h] = view;
         return h;
       },
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
@@ -1568,16 +1835,28 @@ class WappEngine {
     );
     final halSocketSend = WasmFunction(
       (int h, int bufPtr, int bufLen) {
-        final s = _sockets[h];
-        if (s == null || s.state != 1 || s.socket == null) return -1;
+        final sh = _sockets[h]?.shared;
+        if (sh == null || sh.state != 1 || sh.socket == null) return -1;
         if (bufLen <= 0) return 0;
         final mem = _memory!.view;
         final out = List<int>.generate(bufLen, (i) => mem[bufPtr + i]);
+        // Suppress duplicate APRS-IS logins on the shared connection: the first
+        // engine's "user <call> pass ..." authenticates the single connection;
+        // any other engine's login for the same connection is dropped (pretend
+        // sent) so the server never sees two logins for one callsign and kicks
+        // us into a reconnect war. Beacons/messages/acks all pass through.
+        if (out.length >= 5 &&
+            out[0] == 0x75 && out[1] == 0x73 && out[2] == 0x65 &&
+            out[3] == 0x72 && out[4] == 0x20) { // "user "
+          if (sh.loginSent) return bufLen;
+          sh.loginSent = true;
+        }
         try {
-          s.socket!.add(out);
+          sh.socket!.add(out);
           return bufLen;
         } catch (_) {
-          s.state = 2;
+          sh.state = 2;
+          _sharedSockets.remove(sh.key);
           return -1;
         }
       },
@@ -1594,13 +1873,7 @@ class WappEngine {
       results: [ValueTy.i32],
     );
     final halSocketClose = WasmFunction.voidReturn(
-      (int h) {
-        final s = _sockets.remove(h);
-        if (s == null) return;
-        s.state = 2;
-        s.sub?.cancel();
-        try { s.socket?.destroy(); } catch (_) {}
-      },
+      (int h) => _closeSocketHandle(h),
       params: [ValueTy.i32],
     );
 
@@ -1691,10 +1964,91 @@ class WappEngine {
 
     // ── Stubs (return sentinel values) ──
 
-    WasmFunction stubVoid(List<ValueTy> p) =>
-        WasmFunction.voidReturn(() {}, params: p);
-    WasmFunction stubI32(List<ValueTy> p, int v) =>
-        WasmFunction(() => v, params: p, results: [ValueTy.i32]);
+    // The stub closures MUST accept as many positional args as the import
+    // declares: wasm_run invokes them via Function.apply(inner, args), so a
+    // zero-arg closure throws NoSuchMethodError ("mismatched arguments") the
+    // moment a module actually calls the stub WITH arguments — and a throw in
+    // a host callback returns null to the runtime, which then derefs it and
+    // crashes the whole app natively. Most wapps never hit this (they don't
+    // call gpio/wasi/lib_call stubs), but a libc-heavy wapp like mp4player
+    // does. The optional positional params cover every stub arity in use
+    // (max 8, for lib_call); extra params just stay null.
+    WasmFunction stubVoid(List<ValueTy> p) => WasmFunction.voidReturn(
+        ([Object? a, Object? b, Object? c, Object? d, Object? e, Object? f,
+                Object? g, Object? h]) {},
+        params: p);
+    WasmFunction stubI32(List<ValueTy> p, int v) => WasmFunction(
+        ([Object? a, Object? b, Object? c, Object? d, Object? e, Object? f,
+                Object? g, Object? h]) =>
+            v,
+        params: p,
+        results: [ValueTy.i32]);
+
+    // ── Generic codec-free A/V sink ───────────────────────────────────
+    // The wapp's wasm decoder pushes decoded frames/PCM here; the host
+    // copies the bytes out of linear memory (the view is invalidated on
+    // memory growth, so the copy is mandatory) and forwards to the
+    // attached session, if any. No codec lives in the host.
+    // A thrown exception inside a host import callback crashes the wasm
+    // runtime NATIVELY (SIGSEGV), taking the whole app down — so every sink
+    // callback swallows and logs instead of letting anything escape.
+    final halVideoConfig = WasmFunction.voidReturn(
+      (int width, int height, int pixfmt) {
+        try {
+          onVideoConfig?.call(width, height, pixfmt);
+        } catch (e) {
+          debugPrint('hal_video_config error: $e');
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+    );
+    final halVideoFrame = WasmFunction.voidReturn(
+      (int ptr, int len, int width, int height, int pixfmt, int ptsMs) {
+        try {
+          final cb = onVideoFrame;
+          if (cb == null) return; // no session attached — drop
+          final mem = _memory!.view;
+          if (ptr < 0 || len < 0 || ptr + len > mem.lengthInBytes) return;
+          cb(Uint8List.fromList(mem.buffer.asUint8List(ptr, len)), width,
+              height, pixfmt, ptsMs);
+        } catch (e) {
+          debugPrint('hal_video_frame error: $e');
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, // ptr, len, width
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, // height, pixfmt, pts_ms
+      ],
+    );
+    final halAudioPcm = WasmFunction.voidReturn(
+      (int ptr, int len, int sampleRate, int channels, int sampfmt,
+          int ptsMs) {
+        try {
+          final cb = onAudioPcm;
+          if (cb == null) return;
+          final mem = _memory!.view;
+          if (ptr < 0 || len < 0 || ptr + len > mem.lengthInBytes) return;
+          cb(Uint8List.fromList(mem.buffer.asUint8List(ptr, len)), sampleRate,
+              channels, sampfmt, ptsMs);
+        } catch (e) {
+          debugPrint('hal_audio_pcm error: $e');
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, // ptr, len, sample_rate
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, // channels, sampfmt, pts_ms
+      ],
+    );
+    final halVideoEnd = WasmFunction.voidReturn(
+      () {
+        try {
+          onVideoEnd?.call();
+        } catch (e) {
+          debugPrint('hal_video_end error: $e');
+        }
+      },
+      params: const [],
+    );
 
     final wasiRandomGet = WasmFunction(
       (int ptr, int len) {
@@ -1773,6 +2127,339 @@ class WappEngine {
     final halBleAdvertiseStop = WasmFunction.voidReturn(
       () => ble.clearAdverts(this),
       params: [],
+    );
+    // Report whether the physical Bluetooth adapter is powered ON right now (the
+    // user can toggle it at the OS level at any time). A wapp uses this to avoid
+    // claiming BLE is available when Bluetooth is off. Returns 1 = on, 0 = off.
+    final halBleAvailable = WasmFunction(
+      () => ble.poweredOn ? 1 : 0,
+      params: [], results: [ValueTy.i32],
+    );
+
+    // ── SQLite HAL (per-wapp database, scoped to the wapp data dir) ──────────
+    final halSqliteOpen = WasmFunction(
+      (int pathPtr, int pathLen) {
+        if (pathLen <= 0) return -1;
+        final p = _wappDbPath(_readUtf8(pathPtr, pathLen));
+        if (p == null) return -1;
+        try {
+          final slash = p.lastIndexOf('/');
+          if (slash > 0) {
+            Directory(p.substring(0, slash)).createSync(recursive: true);
+          }
+          final db = sqlite3.open(p);
+          db.execute('PRAGMA journal_mode=WAL;');
+          final h = _nextSqliteHandle++;
+          _sqlite[h] = _WappSqliteState(db);
+          return h;
+        } catch (_) {
+          return -1;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halSqliteExec = WasmFunction(
+      (int h, int sqlPtr, int sqlLen, int parPtr, int parLen) {
+        final st = _sqlite[h];
+        if (st == null || sqlLen <= 0) return -1;
+        try {
+          st.db.execute(_readUtf8(sqlPtr, sqlLen), _sqliteParams(parPtr, parLen));
+          st.lastError = null;
+          return 0;
+        } catch (e) {
+          st.lastError = e.toString();
+          return -1;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halSqliteQuery = WasmFunction(
+      (int h, int sqlPtr, int sqlLen, int parPtr, int parLen, int outPtr,
+          int outCap) {
+        final st = _sqlite[h];
+        if (st == null || sqlLen <= 0 || outCap <= 0) return -1;
+        try {
+          final rs =
+              st.db.select(_readUtf8(sqlPtr, sqlLen), _sqliteParams(parPtr, parLen));
+          final cols = rs.columnNames;
+          final rows = [
+            for (final row in rs) {for (final c in cols) c: row[c]}
+          ];
+          final bytes = utf8.encode(jsonEncode(rows));
+          if (bytes.length > outCap) return -2;
+          st.lastError = null;
+          return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+        } catch (e) {
+          st.lastError = e.toString();
+          return -1;
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32, ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    final halSqliteError = WasmFunction(
+      (int h, int outPtr, int outCap) {
+        final st = _sqlite[h];
+        if (st == null || outCap <= 0) return 0;
+        return _writeUtf8(outPtr, outCap, st.lastError ?? '');
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halSqliteClose = WasmFunction.voidReturn(
+      (int h) {
+        final st = _sqlite.remove(h);
+        if (st != null) {
+          try {
+            st.db.dispose();
+          } catch (_) {}
+        }
+      },
+      params: [ValueTy.i32],
+    );
+
+    // ── Generic crypto HAL (caller-supplied keys) ───────────────────────────
+    final halCryptoKeygen = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        try {
+          final kp = NostrCrypto.generateKeyPair();
+          return _writeStr(outPtr, outCap,
+              jsonEncode({'priv': kp.privateKeyHex, 'pub': kp.publicKeyHex}));
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halCryptoSign = WasmFunction(
+      (int privPtr, int privLen, int msgPtr, int msgLen, int outPtr, int outCap) {
+        if (privLen <= 0 || msgLen <= 0 || outCap <= 0) return 0;
+        try {
+          final priv = _readStr(privPtr, privLen);
+          final digest =
+              HEX.encode(sha256.convert(_readBytes(msgPtr, msgLen)).bytes);
+          return _writeStr(
+              outPtr, outCap, NostrCrypto.schnorrSign(digest, priv));
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    final halCryptoVerify = WasmFunction(
+      (int pubPtr, int pubLen, int sigPtr, int sigLen, int msgPtr, int msgLen) {
+        if (pubLen <= 0 || sigLen <= 0 || msgLen <= 0) return 0;
+        try {
+          final digest =
+              HEX.encode(sha256.convert(_readBytes(msgPtr, msgLen)).bytes);
+          return NostrCrypto.schnorrVerify(
+                  digest, _readStr(sigPtr, sigLen), _readStr(pubPtr, pubLen))
+              ? 1
+              : 0;
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    final halCryptoRandom = WasmFunction(
+      (int outPtr, int outLen) {
+        if (outLen <= 0) return 0;
+        final b = Uint8List(outLen);
+        for (var i = 0; i < outLen; i++) b[i] = _random.nextInt(256);
+        return _writeBytes(outPtr, outLen, b);
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halCryptoAesEncrypt = WasmFunction(
+      (int keyPtr, int keyLen, int inPtr, int inLen, int outPtr, int outCap) {
+        if (keyLen != 32 || inLen <= 0 || outCap <= 0) return 0;
+        try {
+          final iv = Uint8List(16);
+          for (var i = 0; i < 16; i++) iv[i] = _random.nextInt(256);
+          final ct = _aesCbc(
+              true, _readBytes(keyPtr, keyLen), iv, _readBytes(inPtr, inLen));
+          final out = Uint8List(iv.length + ct.length)
+            ..setAll(0, iv)
+            ..setAll(iv.length, ct);
+          if (out.length > outCap) return 0;
+          return _writeBytes(outPtr, outCap, out);
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    final halCryptoAesDecrypt = WasmFunction(
+      (int keyPtr, int keyLen, int inPtr, int inLen, int outPtr, int outCap) {
+        if (keyLen != 32 || inLen <= 16 || outCap <= 0) return 0;
+        try {
+          final blob = _readBytes(inPtr, inLen);
+          final iv = Uint8List.sublistView(blob, 0, 16);
+          final ct = Uint8List.sublistView(blob, 16);
+          final pt = _aesCbc(false, _readBytes(keyPtr, keyLen), iv, ct);
+          if (pt.length > outCap) return 0;
+          return _writeBytes(outPtr, outCap, pt);
+        } catch (_) {
+          return 0;
+        }
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+
+    // ── Reticulum HAL (wapp-scoped datagrams) ───────────────────────────────
+    final halRnsIdentity = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap, RnsService.instance.destHex ?? '');
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halRnsBroadcast = WasmFunction(
+      (int payPtr, int payLen) {
+        final tag = _appId;
+        if (tag == null || payLen <= 0) return -1;
+        // Fire-and-forget broadcast, like hal-level announces.
+        RnsService.instance.wappBroadcast(tag, _readBytes(payPtr, payLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Reliable ADDRESSED datagram to one peer's RNS dest (LXMF: direct, else
+    // stored for the peer to pull). Generic — any wapp gets reliable, NAT/inbound-
+    // tolerant member-to-member delivery instead of best-effort broadcast.
+    final halRnsSendTo = WasmFunction(
+      (int destPtr, int destLen, int payPtr, int payLen) {
+        final tag = _appId;
+        if (tag == null || destLen <= 0 || payLen <= 0) return -1;
+        RnsService.instance.wappSendTo(
+            tag, _readStr(destPtr, destLen), _readBytes(payPtr, payLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Pull store-and-forwarded datagrams a peer holds for us, from its
+    // propagation dest. Fire-and-forget; pulled datagrams land on the same
+    // inbound queue as hal_rns_recv.
+    final halRnsPull = WasmFunction(
+      (int destPtr, int destLen) {
+        final tag = _appId;
+        if (tag == null || destLen <= 0) return -1;
+        RnsService.instance.wappPull(_readStr(destPtr, destLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // This node's LXMF propagation (mailbox) dest hex — peers pull from it.
+    final halRnsPropDest = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap, RnsService.instance.lxmfPropagationHex ?? '');
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // This node's LXMF delivery dest hex — peers address messages to it.
+    final halRnsDeliveryDest = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap, RnsService.instance.lxmfDeliveryHex ?? '');
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Short-code rendezvous (discovery without a directory). Owner announces a
+    // rendezvous dest derived from a public seed (the short code) carrying its
+    // address; a joiner resolves the same seed to that address. See RnsService.
+    final halRnsRvAnnounce = WasmFunction(
+      (int seedPtr, int seedLen, int appPtr, int appLen) {
+        if (seedLen <= 0) return -1;
+        RnsService.instance.rvAnnounce(
+            _readBytes(seedPtr, seedLen),
+            appLen > 0 ? _readBytes(appPtr, appLen) : Uint8List(0));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halRnsRvResolve = WasmFunction(
+      (int seedPtr, int seedLen, int outPtr, int outCap) {
+        if (seedLen <= 0 || outCap <= 0) return 0;
+        final app = RnsService.instance.rvResolve(_readBytes(seedPtr, seedLen));
+        if (app.isEmpty) return 0;
+        return _writeBytes(outPtr, outCap, app);
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Send a payload (e.g. a join request) to the rendezvous dest derived from a
+    // seed — ONE connectionless encrypted packet the owner receives without a
+    // link handshake (first-contact channel that survives a flaky owner inbound).
+    final halRnsRvSend = WasmFunction(
+      (int seedPtr, int seedLen, int payPtr, int payLen) {
+        if (seedLen <= 0 || payLen <= 0) return -1;
+        RnsService.instance.rvSend(
+            _readBytes(seedPtr, seedLen), _readBytes(payPtr, payLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halRnsAvailable = WasmFunction(
+      () {
+        final tag = _appId;
+        if (tag == null) return 0;
+        if (_rnsRx.isEmpty) {
+          for (final d in RnsService.instance.wappDrain(tag)) {
+            _rnsRx.add(jsonEncode(d));
+          }
+        }
+        if (_rnsRx.isEmpty) return 0;
+        return utf8.encode(_rnsRx.first).length;
+      },
+      params: [], results: [ValueTy.i32],
+    );
+    final halRnsRecv = WasmFunction(
+      (int outPtr, int outCap) {
+        if (_rnsRx.isEmpty || outCap <= 0) return 0;
+        final bytes = utf8.encode(_rnsRx.first);
+        if (bytes.length > outCap) return 0; // caller must size via rns_available
+        _rnsRx.removeAt(0);
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+
+    // ── Contacts HAL (reusable people picker source) ────────────────────────
+    final halContactsQuery = WasmFunction(
+      (int qPtr, int qLen, int outPtr, int outCap) {
+        if (outCap <= 0) return -1;
+        final q = qLen > 0 ? _readUtf8(qPtr, qLen) : '';
+        final bytes = utf8.encode(jsonEncode(RnsService.instance.contacts(q)));
+        if (bytes.length > outCap) return -2;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
     );
 
     final allImports = [
@@ -1860,6 +2547,7 @@ class WappEngine {
       WasmImport('hal', 'ble_scan_read', halBleScanRead),
       WasmImport('hal', 'ble_advertise', halBleAdvertise),
       WasmImport('hal', 'ble_advertise_stop', halBleAdvertiseStop),
+      WasmImport('hal', 'ble_available', halBleAvailable),
       // HTTP HAL — real, backed by HttpTransport (so the Wapp Store can
       // fetch its remote catalog). Defined above; replaces the old stubs.
       WasmImport('hal', 'http_request', halHttpRequest),
@@ -1867,6 +2555,10 @@ class WappEngine {
       WasmImport('hal', 'http_read_response', halHttpReadResponse),
       WasmImport('hal', 'http_status', halHttpStatus),
       WasmImport('hal', 'http_free', halHttpFree),
+      WasmImport('hal', 'http_stream_open', halHttpStreamOpen),
+      WasmImport('hal', 'http_stream_read', halHttpStreamRead),
+      WasmImport('hal', 'http_stream_meta', halHttpStreamMeta),
+      WasmImport('hal', 'http_stream_close', halHttpStreamClose),
       // Remaining transport HAL (hal.lora) — stubs defined in
       // lib/connections/hal/. (hal.ble is implemented above, not stubbed.)
       ...connectionHalImports(stubVoid: stubVoid, stubI32: stubI32),
@@ -1905,6 +2597,12 @@ class WappEngine {
       WasmImport('hal', 'display_pixel', stubVoid([ValueTy.i32, ValueTy.i32, ValueTy.i32])),
       WasmImport('hal', 'display_rect', stubVoid([ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32])),
       WasmImport('hal', 'display_flush', stubVoid([])),
+      // Codec-free A/V sink (real — forwards wasm-decoded frames/PCM to the
+      // attached render session; host carries no codec).
+      WasmImport('hal', 'video_config', halVideoConfig),
+      WasmImport('hal', 'video_frame', halVideoFrame),
+      WasmImport('hal', 'audio_pcm', halAudioPcm),
+      WasmImport('hal', 'video_end', halVideoEnd),
       // GPIO (stubs)
       WasmImport('hal', 'gpio_mode', stubVoid([ValueTy.i32, ValueTy.i32])),
       WasmImport('hal', 'gpio_read', stubI32([ValueTy.i32], 0)),
@@ -1917,6 +2615,33 @@ class WappEngine {
       WasmImport('hal', 'event_publish', halEventPublish),
       WasmImport('hal', 'event_available', halEventAvailable),
       WasmImport('hal', 'event_recv', halEventRecv),
+      // SQLite (per-wapp relational storage, scoped to the wapp data dir)
+      WasmImport('hal', 'sqlite_open', halSqliteOpen),
+      WasmImport('hal', 'sqlite_exec', halSqliteExec),
+      WasmImport('hal', 'sqlite_query', halSqliteQuery),
+      WasmImport('hal', 'sqlite_error', halSqliteError),
+      WasmImport('hal', 'sqlite_close', halSqliteClose),
+      // Generic crypto (caller-supplied keys; complements identity_*/encrypt)
+      WasmImport('hal', 'crypto_keygen', halCryptoKeygen),
+      WasmImport('hal', 'crypto_sign', halCryptoSign),
+      WasmImport('hal', 'crypto_verify', halCryptoVerify),
+      WasmImport('hal', 'crypto_random', halCryptoRandom),
+      WasmImport('hal', 'crypto_aes_encrypt', halCryptoAesEncrypt),
+      WasmImport('hal', 'crypto_aes_decrypt', halCryptoAesDecrypt),
+      // Reticulum (wapp-scoped peer-to-peer datagrams via RnsService)
+      WasmImport('hal', 'rns_identity', halRnsIdentity),
+      WasmImport('hal', 'rns_broadcast', halRnsBroadcast),
+      WasmImport('hal', 'rns_send_to', halRnsSendTo),
+      WasmImport('hal', 'rns_pull', halRnsPull),
+      WasmImport('hal', 'rns_prop_dest', halRnsPropDest),
+      WasmImport('hal', 'rns_delivery_dest', halRnsDeliveryDest),
+      WasmImport('hal', 'rns_rv_announce', halRnsRvAnnounce),
+      WasmImport('hal', 'rns_rv_resolve', halRnsRvResolve),
+      WasmImport('hal', 'rns_rv_send', halRnsRvSend),
+      WasmImport('hal', 'rns_available', halRnsAvailable),
+      WasmImport('hal', 'rns_recv', halRnsRecv),
+      // Contacts (reusable people picker source)
+      WasmImport('hal', 'contacts_query', halContactsQuery),
       // WASI
       WasmImport('wasi_snapshot_preview1', 'random_get', wasiRandomGet),
       WasmImport('wasi_snapshot_preview1', 'args_get', stubI32([ValueTy.i32, ValueTy.i32], 0)),
@@ -1928,8 +2653,19 @@ class WappEngine {
       WasmImport('wasi_snapshot_preview1', 'fd_close', stubI32([ValueTy.i32], 0)),
       WasmImport('wasi_snapshot_preview1', 'fd_write', stubI32([ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32], 0)),
       WasmImport('wasi_snapshot_preview1', 'fd_read', stubI32([ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32], 0)),
-      WasmImport('wasi_snapshot_preview1', 'fd_seek', stubI32([ValueTy.i32, ValueTy.i64, ValueTy.i32], 0)),
+      // fd_seek(fd, offset:i64, whence, newoffset_ptr) -> errno. Four args —
+      // the trailing result pointer was missing, so the signature mismatched
+      // and the import was silently dropped, breaking any wapp whose libc
+      // pulls in fd_seek (e.g. the C++ mp4player). Return ESPIPE(29) since
+      // these are non-seekable stubs.
+      WasmImport('wasi_snapshot_preview1', 'fd_seek', stubI32([ValueTy.i32, ValueTy.i64, ValueTy.i32, ValueTy.i32], 29)),
       WasmImport('wasi_snapshot_preview1', 'fd_fdstat_get', stubI32([ValueTy.i32, ValueTy.i32], 0)),
+      // Preopen enumeration + poll: a wapp linking more of wasi-libc (e.g.
+      // the mp4player's C++ runtime) imports these. EBADF (8) from
+      // fd_prestat_get tells libc there are no preopens; poll is a no-op.
+      WasmImport('wasi_snapshot_preview1', 'fd_prestat_get', stubI32([ValueTy.i32, ValueTy.i32], 8)),
+      WasmImport('wasi_snapshot_preview1', 'fd_prestat_dir_name', stubI32([ValueTy.i32, ValueTy.i32, ValueTy.i32], 8)),
+      WasmImport('wasi_snapshot_preview1', 'poll_oneoff', stubI32([ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32], 0)),
     ];
 
     // Add imports one by one, skipping any the module doesn't declare.
@@ -1963,6 +2699,23 @@ class WappEngine {
     return (fn.call([]).first as int?) ?? 5000;
   }
 
+  /// Release a socket handle (a view onto a shared connection). The underlying
+  /// TCP socket is closed only when the last view on that shared connection is
+  /// released, so one engine closing doesn't drop a connection another still
+  /// uses.
+  void _closeSocketHandle(int h) {
+    final view = _sockets.remove(h);
+    final sh = view?.shared;
+    if (sh == null) return;
+    sh.views.remove(view);
+    if (sh.views.isEmpty) {
+      sh.sub?.cancel();
+      try { sh.socket?.destroy(); } catch (_) {}
+      sh.state = 2;
+      _sharedSockets.remove(sh.key);
+    }
+  }
+
   void dispose() {
     if (_loaded) { destroy(); _loaded = false; }
     // Tear down any subprocesses the wapp left running. Best-effort —
@@ -1987,12 +2740,13 @@ class WappEngine {
       }
     }
     _files.clear();
-    // Close any sockets the wapp left open.
-    for (final s in _sockets.values) {
-      s.sub?.cancel();
-      try { s.socket?.destroy(); } catch (_) {}
+    // Release any socket handles this engine left open — each is a view onto a
+    // shared connection, so the real TCP closes only when the LAST engine using
+    // it goes away (the foreground page disposing must not drop the connection
+    // the background service is still using, and vice-versa).
+    for (final h in _sockets.keys.toList()) {
+      _closeSocketHandle(h);
     }
-    _sockets.clear();
     for (final s in _syncSockets.values) {
       try { s.closeSync(); } catch (_) {}
     }
@@ -2000,6 +2754,21 @@ class WappEngine {
     // Drop any in-flight HTTP request state. Pending futures still hold
     // their own state reference and resolve harmlessly into nothing.
     _https.clear();
+    // Stop any radio streams.
+    for (final s in _streams.values) {
+      try { s.sub?.cancel(); } catch (_) {}
+    }
+    _streams.clear();
+    // Close any sqlite databases the wapp left open.
+    for (final s in _sqlite.values) {
+      try { s.db.dispose(); } catch (_) {}
+    }
+    _sqlite.clear();
+    // Release this wapp's slot on the RNS datagram channel.
+    if (_appId != null) {
+      RnsService.instance.wappUnregister(_appId!);
+    }
+    _rnsRx.clear();
     // Release this wapp's share of the BLE adapter.
     _bleSub?.cancel();
     _bleSub = null;

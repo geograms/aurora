@@ -104,7 +104,7 @@ void main() {
   MediaArchive freshArchive() {
     final dir = Directory.systemTemp.createTempSync('deposit_test_');
     temps.add(dir);
-    return MediaArchive.forStorage(makeFilesystemStorage(dir.path));
+    return MediaArchive.forDirectory(dir.path);
   }
 
   HostQuota quota({int sliceBytes = 100 << 20}) => HostQuota(

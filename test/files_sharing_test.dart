@@ -23,7 +23,7 @@ void main() {
   (MediaArchive, Directory) freshArchive() {
     final dir = Directory.systemTemp.createTempSync('filesshare_test_');
     temps.add(dir);
-    return (MediaArchive.forStorage(makeFilesystemStorage(dir.path)), dir);
+    return (MediaArchive.forDirectory(dir.path), dir);
   }
 
   tearDownAll(() {

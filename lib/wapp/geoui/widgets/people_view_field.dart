@@ -26,12 +26,16 @@ class PeopleViewField extends StatefulWidget {
   /// `<field>_id`.
   final void Function(String action, String id) onAction;
 
+  /// Message shown when the active section has no rows.
+  final String? emptyText;
+
   const PeopleViewField({
     super.key,
     required this.fieldName,
     required this.sections,
     required this.onTap,
     required this.onAction,
+    this.emptyText,
   });
 
   @override
@@ -128,7 +132,10 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
   Widget _empty(ColorScheme cs) {
     return Center(
       child: Text(
-        'Nobody here yet.',
+        (widget.emptyText?.isNotEmpty ?? false)
+            ? widget.emptyText!
+            : 'Nobody here yet.',
+        textAlign: TextAlign.center,
         style: TextStyle(color: cs.onSurfaceVariant),
       ),
     );
@@ -137,6 +144,8 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
   Widget _row(ColorScheme cs, Map<String, dynamic> it) {
     final id = (it['id'] ?? '').toString();
     final title = (it['title'] ?? id).toString();
+    // Optional glyph (emoji / symbol) shown in the avatar instead of an initial.
+    final avatar = (it['avatar'] ?? '').toString();
     final subtitle = (it['subtitle'] ?? '').toString();
     final tags = ((it['tags'] as List?) ?? const [])
         .map((t) => t.toString())
@@ -154,6 +163,14 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         .map((m) => m.cast<String, dynamic>())
         .where((m) => (m['value'] ?? '').toString().isNotEmpty)
         .toList();
+    // Optional row of small trailing icon buttons: [{icon, action, tip}].
+    // Each fires onAction(action, id) — for compact per-row controls like an
+    // edit pencil and a remove (−) button.
+    final buttons = ((it['buttons'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => m.cast<String, dynamic>())
+        .where((m) => (m['action'] ?? '').toString().isNotEmpty)
+        .toList();
 
     return InkWell(
       onTap: () => widget.onTap(id),
@@ -166,7 +183,9 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
               radius: 22,
               backgroundColor: _avatarColor(id),
               child: Text(
-                title.isEmpty ? '?' : title[0].toUpperCase(),
+                avatar.isNotEmpty
+                    ? avatar
+                    : (title.isEmpty ? '?' : title[0].toUpperCase()),
                 style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -240,6 +259,13 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
                       child: Text(actionLabel),
                     ),
             ],
+            for (final b in buttons)
+              IconButton(
+                icon: Icon(_rowIcon((b['icon'] ?? '').toString()), size: 20),
+                tooltip: (b['tip'] ?? '').toString(),
+                visualDensity: VisualDensity.compact,
+                onPressed: () => widget.onAction((b['action']).toString(), id),
+              ),
             if (menu.isNotEmpty)
               PopupMenuButton<String>(
                 icon: const Icon(Icons.more_vert),
@@ -257,5 +283,27 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         ),
       ),
     );
+  }
+
+  IconData _rowIcon(String name) {
+    switch (name) {
+      case 'edit':
+        return Icons.edit_outlined;
+      case 'delete':
+      case 'remove':
+        return Icons.remove_circle_outline;
+      case 'add':
+        return Icons.add_circle_outline;
+      case 'star':
+      case 'default':
+        return Icons.star_outline;
+      case 'lock':
+      case 'access':
+        return Icons.lock_outline;
+      case 'settings':
+        return Icons.settings_outlined;
+      default:
+        return Icons.more_horiz;
+    }
   }
 }

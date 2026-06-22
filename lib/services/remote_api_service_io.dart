@@ -20,6 +20,7 @@ import '../util/media_archive.dart';
 import '../util/media_ref.dart';
 import '../util/nostr_crypto.dart';
 import '../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
+import '../wapp/background_wapp_manager.dart';
 import '../wapp/shared_media_fetch.dart' show resolveSharedMedia;
 import '../wapp/wapp_page.dart';
 import 'blossom_server.dart';
@@ -318,6 +319,42 @@ class RemoteApiService {
       if (req.method == 'GET' && path == '/api/rns/inbox') {
         return _json(res, {'inbox': RnsService.instance.inbox});
       }
+      if (req.method == 'POST' && path == '/api/rns/requestpath') {
+        // {"dest":"<32hex>"} — pull a path to a destination whose announce
+        // never passively flooded to us. Poll /api/rns/haspath to see it land.
+        final dest = '${(await _body(req))['dest'] ?? ''}'.trim();
+        final ok = RnsService.instance.requestPath(dest);
+        return _json(res, {'ok': ok, 'dest': dest,
+            'has': RnsService.instance.hasPathTo(dest)});
+      }
+      if (req.method == 'GET' && path == '/api/rns/haspath') {
+        final dest = (req.uri.queryParameters['dest'] ?? '').trim();
+        return _json(res,
+            {'dest': dest, 'has': RnsService.instance.hasPathTo(dest)});
+      }
+      if (req.method == 'GET' && path == '/api/rns/route') {
+        // ?dest=<32hex> — routing diagnostics (next hop, via iface, hops, age).
+        final dest = (req.uri.queryParameters['dest'] ?? '').trim();
+        return _json(res, RnsService.instance.routeInfo(dest));
+      }
+      if (req.method == 'POST' && path == '/api/rns/lxmf/send') {
+        // {"dest":"<lxmf delivery dest 32hex>","title":"..","content":".."}
+        // Reliable addressed delivery (auto path-request). Returns delivery ok.
+        final data = await _body(req);
+        final ok = await RnsService.instance.sendLxmf(
+          destHex: '${data['dest'] ?? ''}'.trim(),
+          title: '${data['title'] ?? ''}',
+          content: '${data['content'] ?? ''}',
+        );
+        return _json(res, {'ok': ok});
+      }
+      if (req.method == 'POST' && path == '/api/rns/lxmf/pull') {
+        // {"dest":"<peer propagation dest 32hex>"} — pull store-and-forwarded
+        // messages a peer holds for us (we initiate the link). Returns count.
+        final dest = '${(await _body(req))['dest'] ?? ''}'.trim();
+        final n = await RnsService.instance.pullLxmf(dest);
+        return _json(res, {'ok': true, 'delivered': n});
+      }
       if (req.method == 'POST' && path == '/api/rns/get') {
         // {"sha256":"<hex|b64u>","ext":"png"} — DISCOVER providers via the DHT,
         // fetch the bytes from the best one, cache them, and auto-seed (publish
@@ -534,6 +571,52 @@ class RemoteApiService {
         return _json(res, {'ok': true, 'size': size, ...BleService.instance.gattStatus()});
       }
 
+      // --- headless wapp control (drive a wapp's wasm engine with no UI) ---
+      // Runs the wapp as a background service, then injects flat
+      // {"command":…} messages and pumps ticks — generic, works for any wapp.
+      if (req.method == 'POST' && path == '/api/wapp/start') {
+        final name = (await _body(req))['wapp']?.toString() ?? '';
+        final dir = await _wappDirFor(name);
+        if (dir == null) {
+          return _json(res, {'ok': false, 'error': 'unknown wapp'},
+              status: HttpStatus.notFound);
+        }
+        await BackgroundWappManager.instance.start(dir);
+        return _json(res,
+            {'ok': BackgroundWappManager.instance.isRunning(name), 'wapp': name});
+      }
+      if (req.method == 'POST' && path == '/api/wapp/stop') {
+        final name = (await _body(req))['wapp']?.toString() ?? '';
+        BackgroundWappManager.instance.stop(name);
+        return _json(res, {'ok': true, 'wapp': name});
+      }
+      if (req.method == 'POST' && path == '/api/wapp/cmd') {
+        // {"wapp":"circles","msg":{"command":"prompt","prompt_id":"newcircle",
+        //  "prompt_input":"My Circle"}} — inject + pump, return the outbox.
+        final data = await _body(req);
+        final name = data['wapp']?.toString() ?? '';
+        final msg = data['msg'];
+        final flat = msg is String ? msg : jsonEncode(msg ?? {});
+        final out = BackgroundWappManager.instance.injectCommand(name, flat);
+        if (out == null) {
+          return _json(res, {'ok': false, 'error': 'wapp not running'},
+              status: HttpStatus.conflict);
+        }
+        return _json(res, {'ok': true, 'wapp': name, 'outbox': out});
+      }
+      if (req.method == 'POST' && path == '/api/wapp/tick') {
+        // {"wapp":"circles","n":3} — force N engine ticks (drain RNS etc.).
+        final data = await _body(req);
+        final name = data['wapp']?.toString() ?? '';
+        final n = int.tryParse('${data['n'] ?? 1}') ?? 1;
+        final out = BackgroundWappManager.instance.pumpTicks(name, n);
+        if (out == null) {
+          return _json(res, {'ok': false, 'error': 'wapp not running'},
+              status: HttpStatus.conflict);
+        }
+        return _json(res, {'ok': true, 'wapp': name, 'ticks': n, 'outbox': out});
+      }
+
       return _json(res, {
         'error': 'Not found',
         'endpoints': [
@@ -541,6 +624,10 @@ class RemoteApiService {
           'GET /api/log?n=200',
           'GET /api/wapps',
           'POST /api/launch {"wapp":"<id>"}',
+          'POST /api/wapp/start {"wapp":"<id>"}',
+          'POST /api/wapp/stop {"wapp":"<id>"}',
+          'POST /api/wapp/cmd {"wapp":"<id>","msg":{"command":"…",…}}',
+          'POST /api/wapp/tick {"wapp":"<id>","n":1}',
           'GET /api/media/torrents',
           'GET /api/media/has?sha256=<hex|b64u>',
           'POST /api/media/fetch {"sha256":"<hex|b64u>","ext":"png","ih":"<40hex?>"}',
@@ -631,6 +718,18 @@ class RemoteApiService {
     };
   }
 
+  /// Resolve an installed wapp (by folder / id / name) to its package dir, or
+  /// null if not installed. Used by the headless wapp-control endpoints.
+  Future<String?> _wappDirFor(String key) async {
+    if (key.isEmpty) return null;
+    for (final w in await _listWapps()) {
+      if (w['folder'] == key || w['id'] == key || w['name'] == key) {
+        return w['dir'];
+      }
+    }
+    return null;
+  }
+
   Future<List<Map<String, String>>> _listWapps() async {
     final out = <Map<String, String>>[];
     final installed = installedAppsStorage();
@@ -645,6 +744,7 @@ class RemoteApiService {
           'folder': e.name,
           'id': (m['id'] ?? '').toString(),
           'name': (m['name'] ?? e.name).toString(),
+          'title': (m['title'] ?? m['name'] ?? e.name).toString(),
           'kind': (m['kind'] ?? 'app').toString(),
           'dir': pkg.basePath,
         });
@@ -674,7 +774,11 @@ class RemoteApiService {
       LogService.instance.add('RemoteApi: launch "$key" — not found');
       return false;
     }
-    final title = (w['name']?.isNotEmpty ?? false) ? w['name']! : w['folder']!;
+    final title = (w['title']?.isNotEmpty ?? false)
+        ? w['title']!
+        : (w['name']?.isNotEmpty ?? false)
+            ? w['name']!
+            : w['folder']!;
     LogService.instance.add('RemoteApi: launching ${w['id']}');
     await nav.push(MaterialPageRoute(
       builder: (_) => WappPage(wappDir: w!['dir']!, title: title),

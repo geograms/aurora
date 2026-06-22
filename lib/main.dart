@@ -7,6 +7,8 @@ import 'models/monitored_task.dart';
 import 'connections/builtin_connections.dart';
 import 'editor/editor_install.dart';
 import 'wapp/host_event_bridge.dart';
+import 'wapp/native/media_capability.dart';
+import 'wapp/native/wasm_video_session.dart';
 import 'wapp/background_wapp_manager.dart';
 import 'services/power_governor.dart';
 import 'services/i2p/i2p_background_service.dart';
@@ -16,6 +18,7 @@ import 'services/notification_service.dart';
 import 'services/preferences_service.dart';
 import 'services/log_service.dart';
 import 'services/remote_api_service.dart';
+import 'services/deep_link_service.dart';
 import 'profile/profile_service.dart';
 import 'profile/storage_paths.dart';
 import 'services/task_monitor_service.dart';
@@ -48,9 +51,11 @@ Future<void> main() async {
   // task touches disk (Android/iOS have no $HOME — use the app sandbox).
   await initStorageRoot();
 
-  // Video playback is an optional add-on: no media backend is bundled in
-  // the base app, so the media.video capability stays unbacked here. A
-  // backend can register itself via MediaCapabilities.registerBackend.
+  // Video playback is an optional add-on. The host carries NO codec: the
+  // decoder runs as wasm inside a media wapp and pushes RGBA frames to
+  // this generic, codec-free sink. Registering it unconditionally is safe
+  // — media.video only lights up when a wapp advertising it is installed.
+  MediaCapabilities.registerBackend(WasmVideoBackend());
 
   // Register core host services as parallel boot tasks so they run
   // through the orchestrator (and show up in the tasks wapp with the
@@ -155,6 +160,18 @@ Future<void> main() async {
       await upgradeBundledWapps();
     },
   );
+  BootOrchestrator.instance.register(
+    id: 'ensure-new-default-wapps',
+    name: 'Ensure new default wapps',
+    description:
+        'Backfills default wapps added after a profile was first seeded '
+        '(wallet, atm) into already-seeded profiles, exactly once each, '
+        'without resurrecting wapps the user uninstalled. Runs every launch.',
+    mode: BootStart.sequential,
+    init: () async {
+      await ensureNewDefaultWapps();
+    },
+  );
 
   BootOrchestrator.instance.register(
     id: 'reticulum-autostart',
@@ -201,6 +218,10 @@ Future<void> main() async {
   // receiving over BLE/APRS-IS without its page open. Fire-and-forget so a
   // slow/failed engine never blocks startup.
   unawaited(BackgroundWappManager.instance.startAutostart());
+
+  // Deep links (Android): open geogram.radio/circle/<key> straight on the
+  // circles "apply to join" flow. Needs the navigator live (after runApp).
+  unawaited(DeepLinkService.instance.start());
 
   // Check GitHub for a newer Geogram Aurora release and, if found, surface one
   // notification (Settings → Updates does the install). Best-effort, off web.

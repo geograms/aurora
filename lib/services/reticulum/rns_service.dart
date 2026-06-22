@@ -31,7 +31,6 @@ import '../files/composite_file_source.dart';
 import '../files/disk_index.dart';
 import '../files/file_node.dart';
 import '../files/file_transfer.dart';
-import '../files/file_transfer.dart';
 import '../files/media_file_source.dart';
 import '../files/open_path.dart';
 import '../files/serve_quota.dart';
@@ -56,7 +55,8 @@ import '../../profile/profile_service.dart';
 import '../preferences_service.dart';
 import '../../util/nostr_crypto.dart';
 import '../../util/nostr_event.dart';
-import 'lxmf/lxmf.dart' show kLxmfApp, kLxmfDeliveryAspects;
+import 'lxmf/lxmf.dart'
+    show kLxmfApp, kLxmfDeliveryAspects, kLxmfPropagationAspects;
 import 'lxmf/lxmf_message.dart';
 import 'lxmf/lxmf_router.dart';
 import 'rns_announce.dart';
@@ -64,6 +64,7 @@ import 'rns_ble_interface.dart';
 import 'rns_crypto.dart';
 import 'rns_identity.dart';
 import 'rns_packet.dart';
+import 'rns_lan_interface.dart';
 import 'rns_tcp_interface.dart';
 import 'rns_tcp_server_interface.dart';
 import 'rns_transport.dart';
@@ -74,6 +75,9 @@ import 'rns_transport.dart';
 // interop with Sideband/NomadNet.)
 const String _app = 'geogram';
 const List<String> _aspects = ['chat'];
+// Dedicated destination for wapp-to-wapp datagrams (circles, etc.), kept off the
+// chat/files/dht/relay destinations so its traffic demultiplexes cleanly.
+const List<String> _aspectsWapp = ['wapp'];
 
 class RnsService {
   RnsService._();
@@ -84,7 +88,33 @@ class RnsService {
   RnsTransport? _transport;
   final List<RnsInterface> _ifaces = [];
   RnsTcpServerInterface? _server;
-  RnsTcpInterface? _client;
+  // Loopback "shared instance" so other geogram apps (e.g. GNPA) route through
+  // this node instead of each running their own Reticulum stack.
+  RnsTcpServerInterface? _gateway;
+  // Hub uplinks (tcpclient). We connect to ALL reachable bootstrap hubs at once
+  // — a mesh, not first-wins — so two devices that each reach a different subset
+  // still share at least one hub and can find each other (different community
+  // hubs don't reliably bridge announces between themselves). _connectedHubs is
+  // the set of "host:port" we currently hold an uplink to (top-up is idempotent).
+  final List<RnsTcpInterface> _clients = [];
+  final Set<String> _connectedHubs = {};
+
+  /// Called when the hub uplink (tcpclient) drops — the socket errored/closed or
+  /// went silent (e.g. the device's network changed). The owner (rns_autostart)
+  /// wires this to kick an immediate reconnect across the bootstrap hub list.
+  void Function()? onLinkDown;
+  // Wall-clock of the last inbound packet on any interface; a live hub floods
+  // announces continuously, so a long silence while "up" means the uplink died
+  // (a network change often kills the socket without a clean close). The
+  // watchdog reconnects on that silence.
+  int _lastInboundMs = 0;
+  Timer? _linkWatchdog;
+  static const Duration _linkSilenceTimeout = Duration(seconds: 30);
+  // LAN auto-peering interface for same-LAN discovery (co-located devices):
+  // announces broadcast, data unicast to learned peers (no broadcast storm).
+  RnsLanInterface? _lan;
+  // Fixed UDP port every Aurora node broadcasts/listens on for LAN auto-peering.
+  static const int _lanDiscoveryPort = 42671;
 
   // Content-addressed file sharing over this node. The serve source is pluggable
   // (set [fileServeSource] before start to serve from MediaArchive); a fetcher
@@ -115,11 +145,20 @@ class RnsService {
   FollowSet get follows => _follows;
 
   /// Our own NOSTR pubkey (lowercase hex) from the active profile, or null.
+  // Cache the decoded self pubkey: decodeNpub is bech32 work and this getter is
+  // called on hot paths (per event for tiering, per relay link). Re-derive only
+  // when the active profile's npub changes.
+  String? _selfPubCacheNpub;
+  String? _selfPubCacheHex;
   String? get selfPubHex {
     try {
       final npub = ProfileService.instance.activeProfile?.npub;
       if (npub == null || npub.isEmpty) return null;
-      return NostrCrypto.decodeNpub(npub).toLowerCase();
+      if (npub == _selfPubCacheNpub) return _selfPubCacheHex;
+      final hex = NostrCrypto.decodeNpub(npub).toLowerCase();
+      _selfPubCacheNpub = npub;
+      _selfPubCacheHex = hex;
+      return hex;
     } catch (_) {
       return null;
     }
@@ -175,12 +214,114 @@ class RnsService {
   // callsign -> that peer's chat dest hex (learned from chat announces), for
   // direct media fetch from a known sender.
   final Map<String, String> _callsignDest = {};
+
+  // callsign -> that peer's full RNS identity (learned from its chat announce).
+  // Lets us derive the peer's relay destination and fetch its NOSTR events
+  // (e.g. its kind-0 profile) DIRECTLY from it — no third-party indexer needed.
+  final Map<String, RnsIdentity> _callIdentity = {};
+
+  // callsign -> that peer's NOSTR pubkey (hex), bridged from the APRS wapp's
+  // pubkey beacons (social.identity). Drives the npub shown on Activity posts
+  // and the profile screen.
+  final Map<String, String> _callPub = {};
+  void recordCallsignPubkey(String callsign, String? key) {
+    final c = callsign.trim();
+    if (c.isEmpty || key == null || key.isEmpty) return;
+    final hex = FollowSet.toHex(key); // accepts hex / npub / base64url
+    if (hex != null) {
+      _callPub[c] = hex;
+      // Learning a followed callsign's key may unblock fetching its profile.
+      _maybeFetchFollowedProfile(c);
+    }
+  }
+
+  String? pubkeyForCallsign(String callsign) => _callPub[callsign.trim()];
+
+  /// The bech32 npub for [callsign] if we've learned its key, else null.
+  String? npubForCallsign(String callsign) {
+    final h = _callPub[callsign.trim()];
+    if (h == null) return null;
+    try {
+      return NostrCrypto.encodeNpub(h);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The people this device knows, as pickable contacts — those seen on APRS
+  /// (callsign↔pubkey, from [_callPub]) and those followed ([_follows]), each
+  /// {npub, callsign, nick}. [query] filters case-insensitively across all three
+  /// (empty = everyone); the result is sorted by callsign. Generic and exposed to
+  /// wapps via the hal_contacts_* HAL so any wapp can offer an "add from contacts"
+  /// picker. A callsign is always derivable from the key (X1<short>), and the
+  /// observed APRS callsign overrides it when known.
+  List<Map<String, dynamic>> contacts(String query) {
+    final q = query.trim().toLowerCase();
+    final byPub = <String, Map<String, dynamic>>{};
+    String nickFor(String hex) {
+      final ev = _relayStore?.profileOf(hex);
+      if (ev == null) return '';
+      try {
+        final m = jsonDecode(ev.content);
+        if (m is Map) {
+          final n = m['display_name'] ?? m['name'];
+          if (n is String && n.trim().isNotEmpty) return n.trim();
+        }
+      } catch (_) {}
+      return '';
+    }
+
+    void add(String hex, {String? callsign}) {
+      hex = hex.toLowerCase();
+      if (hex.length != 64) return;
+      final e = byPub.putIfAbsent(
+          hex,
+          () => <String, dynamic>{
+                'npub': NostrCrypto.encodeNpub(hex),
+                'callsign': '',
+                'nick': '',
+              });
+      if (callsign != null && callsign.trim().isNotEmpty) {
+        e['callsign'] = callsign.trim();
+      }
+      if ((e['callsign'] as String).isEmpty) {
+        e['callsign'] = 'X1${NostrCrypto.deriveCallsign(hex)}';
+      }
+      if ((e['nick'] as String).isEmpty) e['nick'] = nickFor(hex);
+    }
+
+    _callPub.forEach((cs, hex) => add(hex, callsign: cs));
+    for (final hex in _follows.asSet) {
+      add(hex);
+    }
+
+    var list = byPub.values.toList();
+    if (q.isNotEmpty) {
+      list = list
+          .where((e) =>
+              (e['npub'] as String).toLowerCase().contains(q) ||
+              (e['callsign'] as String).toLowerCase().contains(q) ||
+              (e['nick'] as String).toLowerCase().contains(q))
+          .toList();
+    }
+    list.sort((a, b) =>
+        (a['callsign'] as String).compareTo(b['callsign'] as String));
+    return list;
+  }
+
   // Local services (identity, store, folders, disk-folder adoption) are built
   // once and survive failed/slow bootstrap connects, so the user's own shared
   // folders are usable offline and a reconnect doesn't rebuild/rescan them.
   bool _localReady = false;
   String _mode = '';
   final List<Map<String, dynamic>> _inbox = [];
+
+  // Per-wapp datagram channel: wapps (e.g. circles) exchange opaque, app-tagged
+  // datagrams over the dedicated "geogram/wapp" destination. Inbound datagrams
+  // are demultiplexed by tag into these per-tag queues, drained by the calling
+  // wapp's engine; the payload is whatever bytes the wapp sent (it encrypts
+  // end-to-end itself — this channel is a dumb pipe).
+  final Map<String, List<Map<String, dynamic>>> _wappInbox = {};
 
   /// Last announced app_data and a periodic re-announce so the node stays
   /// visible to the mesh (and so repeaters keep an "in range" view of it). The
@@ -224,6 +365,128 @@ class RnsService {
   String get mode => _mode;
   List<Map<String, dynamic>> get inbox => List.unmodifiable(_inbox);
 
+  /// Live hub uplinks (mesh). 'host:port' of each connected bootstrap hub.
+  Set<String> get connectedHubs => Set.unmodifiable(_connectedHubs);
+
+  /// Ask the network for a path to [destHex] (32-hex destination hash). The pull
+  /// half of RNS path-finding: reaches a destination whose announce never
+  /// passively flooded to us. The response (a PATH_RESPONSE announce) is learned
+  /// asynchronously; poll [hasPathTo] to see when the path lands.
+  bool requestPath(String destHex) {
+    final t = _transport;
+    if (t == null) return false;
+    final bytes = _hexToBytes(destHex);
+    if (bytes == null || bytes.length != kRnsDestHashBytes) return false;
+    t.requestPath(bytes);
+    return true;
+  }
+
+  /// Whether we currently hold a path to [destHex] (32-hex destination hash).
+  bool hasPathTo(String destHex) {
+    final t = _transport;
+    final bytes = _hexToBytes(destHex);
+    if (t == null || bytes == null) return false;
+    return t.hasPath(bytes);
+  }
+
+  /// Diagnostic: our routing to [destHex] (next hop, interface, hops, age) plus
+  /// our live interfaces and passive state — to debug WHY addressed packets to a
+  /// destination do or don't get forwarded.
+  Map<String, dynamic> routeInfo(String destHex) {
+    final t = _transport;
+    final bytes = _hexToBytes(destHex);
+    return {
+      'dest': destHex,
+      'path': (t == null || bytes == null) ? null : t.pathInfo(bytes),
+      'interfaces': t?.interfaceLabels ?? const [],
+      'passive': t?.passive ?? false,
+    };
+  }
+
+  static Uint8List? _hexToBytes(String hex) {
+    final s = hex.trim();
+    if (s.isEmpty || s.length.isOdd) return null;
+    final out = Uint8List(s.length ~/ 2);
+    for (var i = 0; i < out.length; i++) {
+      final b = int.tryParse(s.substring(i * 2, i * 2 + 2), radix: 16);
+      if (b == null) return null;
+      out[i] = b;
+    }
+    return out;
+  }
+
+  void _dropClient(RnsTcpInterface c) {
+    _transport?.removeInterface(c);
+    _ifaces.remove(c);
+    _clients.remove(c);
+    _connectedHubs.remove('${c.host}:${c.port}');
+    // ignore: discarded_futures
+    c.close();
+  }
+
+  /// One uplink's socket closed/errored. Drop it; if it was the LAST uplink the
+  /// node has no internet path, so go down and reconnect the whole mesh from the
+  /// current network. While other uplinks remain, the periodic autostart top-up
+  /// re-adds the dropped hub. Keeps local services + LAN/gateway intact.
+  void _onUplinkDown(RnsTcpInterface c, String why) {
+    if (_mode != 'tcpclient') return;
+    if (!_clients.contains(c)) return; // already removed
+    LogService.instance.add('RNS: uplink ${c.host}:${c.port} down ($why)');
+    _dropClient(c);
+    if (_clients.isEmpty) _allLinksDown(why);
+  }
+
+  /// No uplink left (all sockets dead, or the watchdog saw total silence after a
+  /// network change). Mark down, tear any stragglers, and trigger an immediate
+  /// reconnect of the full hub mesh.
+  void _allLinksDown(String why) {
+    if (_mode != 'tcpclient') return;
+    if (!_up && _clients.isEmpty) return;
+    LogService.instance.add('RNS: all hub uplinks down ($why) — reconnecting');
+    _up = false;
+    _linkWatchdog?.cancel();
+    _linkWatchdog = null;
+    for (final c in List.of(_clients)) {
+      _dropClient(c);
+    }
+    final cb = onLinkDown;
+    if (cb != null) cb();
+  }
+
+  /// Add an extra hub uplink to the already-up node (the mesh). Idempotent per
+  /// host:port. Best-effort: a hub that won't connect is just skipped. Returns
+  /// true if an uplink to [host]:[port] is now held.
+  Future<bool> connectUplink(String host, int port) async {
+    if (!_up || _transport == null) return false;
+    final key = '$host:$port';
+    if (_connectedHubs.contains(key)) return true;
+    try {
+      late final RnsTcpInterface c;
+      c = RnsTcpInterface(
+        host: host,
+        port: port,
+        label: 'tcp:$key',
+        onPacket: (raw) => _onInbound(raw, 'tcp:$key'),
+        log: (m) => LogService.instance.add('RNS/tcp: $m'),
+        onDisconnect: () => _onUplinkDown(c, 'socket closed'),
+      );
+      await c.connect(timeout: const Duration(seconds: 8));
+      _clients.add(c);
+      _connectedHubs.add(key);
+      _transport!.addInterface(c);
+      _ifaces.add(c);
+      LogService.instance.add('RNS: added hub uplink $key (mesh)');
+      // Announce on the new interface so this hub (and peers reachable via it)
+      // learn our destinations promptly instead of waiting for the next cycle.
+      await announce(_announceText);
+      await _announceServiceDests();
+      return true;
+    } catch (e) {
+      LogService.instance.add('RNS: uplink $key failed: $e');
+      return false;
+    }
+  }
+
   Map<String, dynamic> status() => {
         'up': _up,
         'starting': _starting,
@@ -231,11 +494,17 @@ class RnsService {
         'identity': identityHex,
         'dest': destHex,
         'paths': _transport?.pathCount ?? 0,
+        // Passive = shedding relay work under CPU load (still meshed + sending/
+        // receiving our own traffic); annRate = inbound announces/sec driving it.
+        'passive': _transport?.passive ?? false,
+        'annRate': (_transport?.announceRatePerSec ?? 0).round(),
         'connections': _server?.connectionCount ?? 0,
         'interfaces': _ifaces.length + (_server != null ? 1 : 0),
         'inbox': _inbox.length,
         'provided': _files?.providedCount ?? 0,
+        'dhtPeers': _files?.dhtRoutingSize ?? 0,
         'lxmfDest': lxmfDeliveryHex,
+        'lxmfPropDest': lxmfPropagationHex,
         'lxmfInbox': _lxmfInbox.length,
         'selfCapacity': selfCapacity,
         'net': CapacityGovernor.instance.lastNet.name,
@@ -257,6 +526,8 @@ class RnsService {
     String host = '127.0.0.1',
     int port = 4242,
     String announceName = 'online',
+    bool localGateway = true,
+    int localGatewayPort = 37242,
   }) async {
     if (_up || _starting) return _up;
     _starting = true;
@@ -269,6 +540,23 @@ class RnsService {
       _destHash = RnsDestination.hash(_id!, _app, _aspects);
       _transport = RnsTransport(
           transportId: _id!.hash, log: (m) => LogService.instance.add('RNS: $m'));
+      // Never let the public-hub announce flood drown out OUR overlay's
+      // announces: register the name_hashes of every Aurora destination so the
+      // transport's per-second verify budget always processes them. Without
+      // this, peers fail to discover each other (no media fetch / FEED backfill)
+      // on busy hubs. The name_hash is constant per app+aspects.
+      _transport!.priorityAnnounceNames.addAll([
+        _hex(RnsDestination.nameHash(_app, _aspects)), // chat (callsign)
+        _hex(RnsDestination.nameHash(_app, _aspectsFiles)), // files
+        _hex(RnsDestination.nameHash(_app, _aspectsDht)), // dht
+        _hex(RnsDestination.nameHash(kRelayApp, kRelayAspects)), // relay
+        _hex(RnsDestination.nameHash(kLxmfApp, kLxmfDeliveryAspects)), // lxmf
+        _hex(RnsDestination.nameHash(_app, _aspectsWapp)), // wapp datagrams
+        // Short-code rendezvous beacons (circles/rv). Flood-exempt so a joiner
+        // ALWAYS ingests the owner's beacon under a busy hub — that ingest is
+        // exactly what makes the joiner's pathFor(rvDest) resolve the address.
+        _hex(RnsDestination.nameHash('circles', const ['rv'])),
+      ]);
       _mode = mode;
       // One serve source that fans out: the MediaArchive plus any owner disk
       // folders (added later by the DiskFolderManager) — disk bytes are never
@@ -335,7 +623,15 @@ class RnsService {
         send: (raw) => _transport?.sendOnAll(raw),
         nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
         identityForDest: (h) => _transport?.pathFor(h)?.identity,
+        requestPath: (h) => _transport?.requestPath(h),
         onMessage: (m) {
+          // Wapp datagrams ride LXMF too — route them to the wapp inbox instead
+          // of surfacing them as chat messages.
+          if (_routeWappLxmf(m)) {
+            LogService.instance.add(
+                'LXMF: wapp datagram from ${_hex(m.sourceHash)} (${m.contentString.isEmpty ? 'addressed' : m.contentString})');
+            return;
+          }
           _lxmfInbox.add({
             'from': _hex(m.sourceHash),
             'title': m.titleString,
@@ -347,6 +643,12 @@ class RnsService {
               .add('LXMF: from ${_hex(m.sourceHash)}: "${m.contentString}"');
         },
         log: (msg) => LogService.instance.add('RNS/lxmf: $msg'),
+        // Wapp datagrams carry their own app-layer signature (verified inside the
+        // wapp), so deliver them even when we never heard the sender's announce —
+        // otherwise a first-contact join request from a peer whose announce hasn't
+        // reached us (asymmetric/quiet hubs) would be dropped before the wapp can
+        // authenticate it.
+        acceptUnverified: (m) => m.fields.containsKey(_kWappLxmfField),
       );
 
       // Per-file serve statistics (best-effort; never blocks node start).
@@ -378,10 +680,15 @@ class RnsService {
           nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
           spam: SpamPolicy.lenient(),
           log: (m) => LogService.instance.add('RNS/relay: $m'),
-          // Host for the network only when the device is willing + capable
-          // (settings switch + capacity gate). Toggled live by the capacity
-          // callback / settings below.
-          serve: hostingActive,
+          // Always answer relay queries when hosting isn't disabled, so peers can
+          // fetch events we published (e.g. our own kind-0 profile) directly from
+          // us — this is request-driven and cheap. The capacity gate still limits
+          // the heavy role (accepting OTHERS' content) via admitEvent below.
+          serve: PreferencesService.instanceSync?.hostEnabled ?? true,
+          // Even when NOT hosting the network, answer queries for OUR OWN posts
+          // so a peer can pull what we published directly from us (the poster) —
+          // the decentralised "ask the device by callsign for its content" path.
+          selfPubHex: () => selfPubHex,
           // Classify an author into a retention tier (0 self / 1 followed /
           // 2 stranger) for hosting quota + eviction.
           tierOfPub: (pub) => tierOf(pub,
@@ -408,6 +715,7 @@ class RnsService {
         final p = PreferencesService.instanceSync;
         _relayRole = (p?.hostEnabled ?? true)
             ? RelayRoleManager(
+                selfPubkey: selfPubHex,
                 onChanged: (_) => _announceRelayDest(),
               )
             : null;
@@ -484,8 +792,12 @@ class RnsService {
         final q = _files?.serveQuota;
         if (q != null) p.applyTo(q);
         _relayRole?.applyCapacity(p);
-        // Flip relay hosting on/off as power/network changes (capacity gate).
-        if (_relay != null) _relay!.serve = hostingActive;
+        // Keep the responder answering queries (so peers can fetch our published
+        // profile/notes) regardless of capacity; only the heavy hosting role is
+        // capacity-gated, via admitEvent.
+        if (_relay != null) {
+          _relay!.serve = PreferencesService.instanceSync?.hostEnabled ?? true;
+        }
       });
 
       // Re-index owned disk folders so on-disk edits get signed + synced. Runs
@@ -550,15 +862,18 @@ class RnsService {
           await _server!.bind();
           break;
         case 'tcpclient':
-          final c = RnsTcpInterface(
+          late final RnsTcpInterface c;
+          c = RnsTcpInterface(
             host: host,
             port: port,
             label: 'tcp',
             onPacket: (raw) => _onInbound(raw, 'tcp'),
             log: (m) => LogService.instance.add('RNS/tcp: $m'),
+            onDisconnect: () => _onUplinkDown(c, 'socket closed'),
           );
           await c.connect();
-          _client = c;
+          _clients.add(c);
+          _connectedHubs.add('$host:$port');
           _transport!.addInterface(c);
           _ifaces.add(c);
           break;
@@ -590,6 +905,53 @@ class RnsService {
           throw StateError('unknown mode $mode');
       }
 
+      // Local loopback gateway: let other geogram apps on this device share this
+      // node (one identity, one set of uplinks) instead of each binding their
+      // own ports. Loopback-only and non-fatal if the port is taken.
+      if (localGateway && _gateway == null) {
+        try {
+          final g = RnsTcpServerInterface(
+            port: localGatewayPort,
+            bindHost: '127.0.0.1',
+            transport: _transport!,
+            onPacket: _onInbound,
+            shared: false,
+            log: (m) => LogService.instance.add('RNS/gw: $m'),
+          );
+          await g.bind();
+          _gateway = g;
+          LogService.instance
+              .add('RNS: local gateway on 127.0.0.1:$localGatewayPort');
+        } catch (e) {
+          LogService.instance.add('RNS: local gateway unavailable: $e');
+        }
+      }
+
+      // LAN auto-peering: a UDP broadcast interface so co-located Aurora
+      // devices (same Wi-Fi/LAN) discover each other and exchange announces +
+      // links DIRECTLY — without depending on the public hub to cross-forward
+      // between its clients (which it doesn't). This is what makes media fetch
+      // and FEED backfill work between devices on the same network even with no
+      // always-on relay. Best-effort + non-fatal (e.g. no UDP on the platform).
+      if (_lan == null && mode != 'ble' && mode != 'ble5') {
+        try {
+          final lan = RnsLanInterface(
+            port: _lanDiscoveryPort,
+            onPacket: (raw) => _onInbound(raw, 'lan'),
+            log: (m) => LogService.instance.add('RNS/lan: $m'),
+            label: 'lan',
+          );
+          await lan.bind();
+          _lan = lan;
+          _transport!.addInterface(lan);
+          _ifaces.add(lan);
+          LogService.instance.add(
+              'RNS: LAN discovery on UDP $_lanDiscoveryPort (announce-only)');
+        } catch (e) {
+          LogService.instance.add('RNS: LAN auto-peering unavailable: $e');
+        }
+      }
+
       _up = true;
       await announce(announceName);
       await _announceServiceDests();
@@ -606,8 +968,12 @@ class RnsService {
         for (final i in _ifaces) {
           _transport?.removeInterface(i);
         }
-        _client?.close();
-        _client = null;
+        for (final c in _clients) {
+          // ignore: discarded_futures
+          c.close();
+        }
+        _clients.clear();
+        _connectedHubs.clear();
         _ifaces.clear();
         return false;
       }
@@ -622,8 +988,34 @@ class RnsService {
       // Pull newer versions of files the user downloaded from auto-sync folders.
       _autoSyncTimer?.cancel();
       _autoSyncTimer = Timer.periodic(const Duration(minutes: 5), (_) {
-        if (_up) _autoSyncTick();
+        if (_up) {
+          _autoSyncTick();
+          refreshFollowedProfiles(); // keep followed nicknames/avatars current
+        }
       });
+      // Keep trying, every now and then, to fetch followed profiles we still
+      // don't have (the author may have been unreachable on earlier attempts).
+      _profileRetryTimer?.cancel();
+      _profileRetryTimer = Timer.periodic(const Duration(seconds: 90), (_) {
+        if (_up) _retryWantedProfiles();
+      });
+      // Hub-uplink watchdog: a connected hub floods signed announces nonstop, so
+      // a stretch of total silence while "up" means the uplink died — typically a
+      // network change (Wi-Fi⇄cellular, AP roam) that kills the socket without a
+      // clean FIN. Reconnect on that silence (the socket onDisconnect handles the
+      // clean-close case faster). Only the tcpclient uplink needs this.
+      _linkWatchdog?.cancel();
+      if (mode == 'tcpclient') {
+        _lastInboundMs = DateTime.now().millisecondsSinceEpoch;
+        _linkWatchdog = Timer.periodic(const Duration(seconds: 10), (_) {
+          if (!_up || _clients.isEmpty) return;
+          final silent =
+              DateTime.now().millisecondsSinceEpoch - _lastInboundMs;
+          if (silent > _linkSilenceTimeout.inMilliseconds) {
+            _allLinksDown('no inbound for ${silent ~/ 1000}s');
+          }
+        });
+      }
       return true;
     } catch (e) {
       LogService.instance.add('RNS: start error: $e');
@@ -633,9 +1025,17 @@ class RnsService {
       try {
         await _server?.close();
       } catch (_) {}
+      try {
+        await _gateway?.close();
+      } catch (_) {}
       _server = null;
-      _client?.close();
-      _client = null;
+      _gateway = null;
+      for (final c in _clients) {
+        // ignore: discarded_futures
+        c.close();
+      }
+      _clients.clear();
+      _connectedHubs.clear();
       _ifaces.clear();
       _up = false;
       return false;
@@ -718,20 +1118,34 @@ class RnsService {
           appData: Uint8List(0));
       _transport!.sendOnAll(pkt.pack());
     }
-    // Announce our LXMF delivery destination so peers (and other LXMF clients,
-    // e.g. Sideband/NomadNet) can route messages to us.
+    await _announceLxmfDests();
+    // Announce our relay role + interest set so peers can find/rank us.
+    await _announceRelayDest();
+  }
+
+  /// Announce our LXMF delivery + propagation destinations so peers (and other
+  /// LXMF clients, e.g. Sideband/NomadNet) can route messages to us, and so a
+  /// path request for either can be answered by the hub we're attached to. Split
+  /// out so the rendezvous re-announce can keep these fresh at a FAST cadence
+  /// while we have joinable circles — a short-code applicant resolves our beacon
+  /// quickly but then must PATH-REQUEST our delivery dest to push its join
+  /// request, and the normal 30s–5min service-announce cadence is too slow.
+  Future<void> _announceLxmfDests() async {
+    if (!_up || _id == null || _transport == null) return;
     final lx = await RnsAnnounceBuilder.build(
         _id!, kLxmfApp, kLxmfDeliveryAspects,
         appData: Uint8List.fromList(utf8.encode(_announceText)));
     _transport!.sendOnAll(lx.pack());
-    // Announce our relay role + interest set so peers can find/rank us.
-    await _announceRelayDest();
+    final lp = await RnsAnnounceBuilder.build(
+        _id!, kLxmfApp, kLxmfPropagationAspects);
+    _transport!.sendOnAll(lp.pack());
   }
 
   /// Announce the relay destination carrying our role/capacity/interest summary
   /// (RelayAnnouncement). Peers collect these into their RelayDirectory.
   Future<void> _announceRelayDest() async {
     if (!_up || _id == null || _relayRole == null) return;
+    _relayRole!.selfPubkey = selfPubHex; // advertise our npub for profile fetch
     final pkt = await RnsAnnounceBuilder.build(_id!, kRelayApp, kRelayAspects,
         appData: _relayRole!.announcementAppData());
     _transport!.sendOnAll(pkt.pack());
@@ -740,15 +1154,114 @@ class RnsService {
   static const List<String> _aspectsFiles = kFilesAspects;
   static const List<String> _aspectsDht = kDhtAspects;
 
+  // ── Wapp datagram channel ───────────────────────────────────────────────────
+
+  /// Start queueing inbound datagrams for wapp [tag] (the calling wapp's id).
+  /// Idempotent; call again on each wapp load.
+  void wappRegister(String tag) => _wappInbox.putIfAbsent(tag, () => []);
+
+  /// Stop queueing for [tag] and drop any buffered datagrams.
+  void wappUnregister(String tag) => _wappInbox.remove(tag);
+
+  /// Broadcast [payload] to every reachable peer running wapp [tag]. Returns
+  /// false if the node isn't up. The payload must fit one packet (a few hundred
+  /// bytes) — larger transfers should be chunked by the wapp. Content privacy is
+  /// the wapp's responsibility (encrypt before calling).
+  Future<bool> wappBroadcast(String tag, Uint8List payload) async {
+    if (!_up || _id == null) return false;
+    // RAW app_data: [tagLen:1][tag][payload]. Earlier this JSON-wrapped a base64
+    // payload, which inflated it ~33% and pushed the announce past the 500B MTU —
+    // so a ~300B datagram (e.g. a join request) silently failed to send at all
+    // (pack() throws inside a fire-and-forget async). Raw bytes avoid the inflation
+    // so the same datagram fits one announce; we still guard the MTU and skip
+    // (logging) anything too big rather than throwing into the void.
+    final tagB = utf8.encode(tag);
+    final appData = Uint8List(1 + tagB.length + payload.length)
+      ..[0] = tagB.length & 0xff
+      ..setRange(1, 1 + tagB.length, tagB)
+      ..setRange(1 + tagB.length, 1 + tagB.length + payload.length, payload);
+    final pkt =
+        await RnsAnnounceBuilder.build(_id!, _app, _aspectsWapp, appData: appData);
+    Uint8List raw;
+    try {
+      raw = pkt.pack();
+    } catch (_) {
+      LogService.instance.add(
+          'RNS/wapp: broadcast for "$tag" too big for one announce (${appData.length}B app_data) — skipped');
+      return false;
+    }
+    _transport!.sendOnAll(raw);
+    return true;
+  }
+
+  /// Drain queued inbound datagrams for wapp [tag]. Each entry is
+  /// {from: identityHex, payload: base64, ts: epochMs}.
+  List<Map<String, dynamic>> wappDrain(String tag) {
+    final q = _wappInbox[tag];
+    if (q == null || q.isEmpty) return const [];
+    final out = List<Map<String, dynamic>>.from(q);
+    q.clear();
+    return out;
+  }
+
+  /// LXMF field key marking a message as a wapp datagram: value = [tag, payload].
+  /// Lets the reliable LXMF transport (direct + store-and-forward) carry wapp
+  /// datagrams ADDRESSED to a specific peer, instead of the broadcast announce
+  /// channel — the receiving wapp gets them on the same [_wappInbox] queue.
+  static const int _kWappLxmfField = 0xB0;
+
+  /// Reliably deliver wapp datagram [payload] for [tag] to ONE peer's LXMF
+  /// delivery dest [destHex] (direct if reachable, else held for the peer to
+  /// pull). Returns true on direct delivery (false also means "stored to relay").
+  Future<bool> wappSendTo(String tag, String destHex, Uint8List payload) async {
+    if (!_up || _id == null) return false;
+    return sendLxmf(destHex: destHex, fields: {
+      _kWappLxmfField: [tag, payload],
+    });
+  }
+
+  /// Pull store-and-forwarded wapp datagrams a peer holds for us from its
+  /// propagation dest [propDestHex]. Delivered datagrams land on [_wappInbox].
+  Future<int> wappPull(String propDestHex) => pullLxmf(propDestHex);
+
+  /// If [m] is a wapp datagram (carries [_kWappLxmfField]), route it to the
+  /// matching wapp inbox and return true (so it isn't shown as an LXMF chat).
+  bool _routeWappLxmf(LxmfMessage m) {
+    final f = m.fields[_kWappLxmfField];
+    if (f is! List || f.length < 2) return false;
+    final tag = f[0];
+    final payload = f[1];
+    if (tag is! String || payload is! List) return false;
+    final q = _wappInbox[tag];
+    if (q != null) {
+      q.add({
+        'from': _hex(m.sourceHash),
+        'payload': base64.encode(List<int>.from(payload)),
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      });
+      while (q.length > 1024) {
+        q.removeAt(0);
+      }
+    }
+    return true;
+  }
+
   Future<void> _onInbound(Uint8List raw, String via) async {
     final p = RnsPacket.parse(raw);
     if (p == null) return;
+    // Liveness for the hub-uplink watchdog: only a hub uplink ('tcp' or
+    // 'tcp:host:port') keeps the mesh "alive"; LAN/gateway/server ('tcps#…')
+    // chatter must not mask all hubs being dead.
+    if (via == 'tcp' || via.startsWith('tcp:')) {
+      _lastInboundMs = DateTime.now().millisecondsSinceEpoch;
+    }
     // Link / file-transfer packets (link requests + link-addressed data) are
     // handled by the files node, not the announce path.
     if (p.packetType != RnsPacketType.announce) {
       if (await _files?.handlePacket(p) ?? false) return;
       if (await _lxmf?.handlePacket(p) ?? false) return;
       if (await _relay?.handlePacket(p) ?? false) return;
+      if (_rvInboundDests.isNotEmpty && await _handleRvInbound(p)) return;
     }
     final ann = await _transport!.ingest(p, via);
     if (ann == null) return;
@@ -759,6 +1272,34 @@ class RnsService {
     // Skip our own announces.
     if (_id != null &&
         RnsCrypto.constantTimeEquals(ann.identity.hash, _id!.hash)) {
+      return;
+    }
+    // Wapp datagram channel: a datagram arrives as an announce of the sender's
+    // "geogram/wapp" destination carrying RAW app_data [tagLen:1][tag][payload].
+    // Route it to the matching per-tag queue and stop — not a chat/route announce.
+    final wappHash = RnsDestination.hash(ann.identity, _app, _aspectsWapp);
+    if (RnsCrypto.constantTimeEquals(ann.destHash, wappHash)) {
+      try {
+        final a = ann.appData;
+        if (a.length >= 1) {
+          final tagLen = a[0];
+          if (a.length >= 1 + tagLen) {
+            final tag = utf8.decode(a.sublist(1, 1 + tagLen), allowMalformed: true);
+            final payload = a.sublist(1 + tagLen);
+            final q = _wappInbox[tag];
+            if (q != null) {
+              q.add({
+                'from': ann.identity.hexHash,
+                'payload': base64.encode(payload),
+                'ts': DateTime.now().millisecondsSinceEpoch,
+              });
+              while (q.length > 1024) {
+                q.removeAt(0);
+              }
+            }
+          }
+        }
+      } catch (_) {}
       return;
     }
     // Learn the peer as a DHT contact ONLY from its DHT-destination announce.
@@ -778,7 +1319,13 @@ class RnsService {
     // Relay directory: record a peer's relay role announcement.
     final relayHash = RnsDestination.hash(ann.identity, kRelayApp, kRelayAspects);
     if (RnsCrypto.constantTimeEquals(ann.destHash, relayHash)) {
-      _relayDir.observe(ann.identity, ann.appData, hops: p.hops + 1);
+      final e = _relayDir.observe(ann.identity, ann.appData, hops: p.hops + 1);
+      // If this relay belongs to a followed author we couldn't reach before,
+      // its npub→identity is now known — try fetching its profile.
+      final pk = e?.announcement.pubkey;
+      if (pk != null && _follows.contains(pk.toLowerCase())) {
+        _maybeFetchFollowedProfileByPub(pk.toLowerCase());
+      }
     }
     // Store-and-forward: a recipient's LXMF dest came online — flush its mail.
     final lxHash =
@@ -798,6 +1345,10 @@ class RnsService {
       final cs = text.trim();
       if (cs.isNotEmpty && cs.length <= 20 && !cs.contains(' ')) {
         _callsignDest[cs] = _hex(ann.destHash);
+        _callIdentity[cs] = ann.identity;
+        // Now that we can reach this peer directly, fetch its profile if we
+        // follow it and don't have it yet.
+        _maybeFetchFollowedProfile(cs);
       }
     }
     _inbox.add({
@@ -902,6 +1453,12 @@ class RnsService {
   /// archive) by copying the bytes in. Null if we don't hold it.
   Uint8List? localFileBytes(Uint8List fileHash) => _composite?.read(fileHash);
 
+  /// Live download progress (received, total bytes) for an in-flight
+  /// content-addressed fetch of [fileHash] (32B) over Reticulum, or null when
+  /// nothing is downloading for it. Drives the chat media progress label.
+  ({int received, int total})? fileFetchProgress(Uint8List fileHash) =>
+      _files?.fetchProgress(fileHash);
+
   /// Resolve providers for [fileHash] (sha256, 32B) via the DHT and fetch the
   /// bytes from the best available provider over a Reticulum link. Returns the
   /// verified bytes or null. No fixed peer needed — discovery is the DHT.
@@ -952,6 +1509,17 @@ class RnsService {
     if (!_up || r == null || _id == null) return false;
     final dh = _bytesFromHex(destHex);
     if (dh == null) return false;
+    // Self-heal: if we have no path to the recipient yet, pull one (path
+    // request) and wait briefly. This lets delivery reach a peer whose announce
+    // never passively flooded to us over busy/asymmetric public hubs.
+    final t = _transport;
+    if (t != null && !t.hasPath(dh)) {
+      t.requestPath(dh);
+      final deadline = DateTime.now().add(const Duration(seconds: 12));
+      while (!t.hasPath(dh) && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      }
+    }
     final msg = await LxmfMessage.create(
       destinationHash: dh,
       source: _id!,
@@ -960,6 +1528,203 @@ class RnsService {
       fields: fields,
     );
     return r.send_(msg);
+  }
+
+  /// This node's LXMF propagation (cooperative mailbox) destination hash, hex.
+  String? get lxmfPropagationHex {
+    final lx = _lxmf;
+    return lx == null ? null : _hex(lx.propagationDestHash);
+  }
+
+  /// Pull store-and-forwarded messages a peer is holding for us from its
+  /// propagation destination [propDestHex]. We initiate the link (works even
+  /// when our inbound is unreachable). Returns the number of messages delivered.
+  Future<int> pullLxmf(String propDestHex) async {
+    final lx = _lxmf;
+    final dh = _bytesFromHex(propDestHex);
+    if (!_up || lx == null || dh == null) return 0;
+    return lx.pullFrom(dh);
+  }
+
+  // ── Short-code rendezvous (discovery without a directory) ──────────────────
+  // A public short code (e.g. a circle's "5cc-d08") is deterministically mapped
+  // to an RNS identity. A circle owner/member ANNOUNCES a "circles/rv" dest of
+  // that identity carrying its real address; a joiner holding only the short
+  // code derives the same identity, PATH-REQUESTS the dest, and reads the
+  // address — bootstrapping addressed contact. Not secret (the code is public);
+  // it is only a meeting point, membership is still owner-approved + encrypted.
+  final Map<String, Uint8List> _rvCache = {}; // seedHex -> resolved appData
+  final Set<String> _rvPending = {};
+  // Active rendezvous beacons we (the owner) keep fresh: seedHex -> (appData,
+  // lastRefreshMs). The wapp re-asserts each via rvAnnounce roughly once per
+  // circle_tick (~15s), but a fresh circle needs its beacon propagated FAST and
+  // OFTEN for a joiner's path request to land, so a host timer re-announces every
+  // few seconds independent of the slow wapp tick. Entries not re-asserted for a
+  // while (circle deleted / no longer owned) expire so this never grows unbounded.
+  final Map<String, ({Uint8List appData, int lastMs})> _rvActive = {};
+  Timer? _rvTimer;
+  static const Duration _rvReannounceEvery = Duration(seconds: 8);
+  static const int _rvActiveTtlMs = 90 * 1000;
+  // rvDestHashHex -> the rv identity we (the owner) hold for it, so we can RECEIVE
+  // a join request sent connectionlessly to our rendezvous dest and decrypt it.
+  // This is the first-contact channel: a non-member applicant can't be pulled and
+  // the owner's normal delivery-dest inbound may be path-stale, but the rv dest is
+  // re-announced every 8s (flood-exempt) so the hub keeps a fresh route to us.
+  final Map<String, RnsIdentity> _rvInboundDests = {};
+
+  void _emitRvAnnounce(Uint8List seed, Uint8List appData) {
+    final t = _transport;
+    if (!_up || t == null) return;
+    unawaited(() async {
+      final id = await _rvIdentity(seed);
+      final dest = RnsDestination.hash(id, 'circles', const ['rv']);
+      _rvInboundDests[_hex(dest)] = id; // listen for inbound jr on this dest
+      final pkt = await RnsAnnounceBuilder.build(id, 'circles', const ['rv'],
+          appData: appData);
+      t.sendOnAll(pkt.pack());
+    }());
+  }
+
+  /// Owner side: a connectionless DATA packet to one of our rendezvous dests is a
+  /// join request from an applicant that resolved our beacon. Decrypt it with the
+  /// rv identity and hand the payload to the circles wapp inbox (it is the same
+  /// signed `jr` datagram the wapp would get over LXMF; handle_jr verifies it).
+  Future<bool> _handleRvInbound(RnsPacket p) async {
+    if (p.packetType != RnsPacketType.data ||
+        p.destType != RnsDestType.single) {
+      return false;
+    }
+    final id = _rvInboundDests[_hex(p.destHash)];
+    if (id == null) return false;
+    try {
+      final plain = await id.decrypt(p.data);
+      final q = _wappInbox['circles'];
+      if (q != null) {
+        q.add({
+          'from': '',
+          'payload': base64.encode(plain),
+          'ts': DateTime.now().millisecondsSinceEpoch,
+        });
+        while (q.length > 1024) {
+          q.removeAt(0);
+        }
+        LogService.instance.add(
+            'RNS/rv: join request received on rendezvous dest ${_hex(p.destHash).substring(0, 8)} (${plain.length}B)');
+      }
+    } catch (_) {
+      // Not addressed to us / undecryptable — ignore.
+    }
+    return true;
+  }
+
+  /// Applicant side: send [payload] (a signed join-request datagram) to the
+  /// rendezvous dest derived from [seed] (the circle's short code) as ONE
+  /// encrypted connectionless packet. The owner listens there (see
+  /// [_handleRvInbound]). No link handshake, so it survives a flaky owner inbound.
+  void rvSend(Uint8List seed, Uint8List payload) {
+    final t = _transport;
+    if (!_up || t == null) return;
+    unawaited(() async {
+      final id = await _rvIdentity(seed);
+      final dest = RnsDestination.hash(id, 'circles', const ['rv']);
+      final enc = await id.encrypt(payload);
+      if (enc.length + 24 > 500) {
+        LogService.instance.add(
+            'RNS/rv: join request too big for one packet (${enc.length}B) — relying on direct/broadcast');
+        return;
+      }
+      // Self-heal a path to the rv dest so this works even without a prior beacon
+      // resolution: without a path `sendDataTo` can only HEADER_1-broadcast, which
+      // a hub may not forward toward a SINGLE dest. The owner announces the rv dest
+      // flood-exempt every ~8s, so a path request is normally answered quickly.
+      if (!t.hasPath(dest)) {
+        t.requestPath(dest);
+        final deadline = DateTime.now().add(const Duration(seconds: 12));
+        while (!t.hasPath(dest) && DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+        }
+      }
+      t.sendDataTo(dest, enc);
+    }());
+  }
+
+  void _rvReannounceTick() {
+    if (!_up || _transport == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _rvActive.removeWhere((_, v) => now - v.lastMs > _rvActiveTtlMs);
+    if (_rvActive.isEmpty) return;
+    for (final e in _rvActive.entries) {
+      _emitRvAnnounce(_bytesFromHexOrEmpty(e.key), e.value.appData);
+    }
+    // While we have joinable circles, keep our delivery/propagation dests fresh
+    // too so an applicant that just resolved our beacon can immediately path to
+    // our delivery dest and push its join request (the slow service-announce
+    // cadence would otherwise leave that path unresolvable for minutes).
+    unawaited(_announceLxmfDests());
+  }
+
+  Uint8List _bytesFromHexOrEmpty(String hex) =>
+      _bytesFromHex(hex) ?? Uint8List(0);
+
+  Future<RnsIdentity> _rvIdentity(Uint8List seed) async {
+    final xPrv = Uint8List.fromList(
+        crypto.sha256.convert([...utf8.encode('circles-rv-x|'), ...seed]).bytes);
+    final ePrv = Uint8List.fromList(
+        crypto.sha256.convert([...utf8.encode('circles-rv-e|'), ...seed]).bytes);
+    final prv = Uint8List(64)
+      ..setAll(0, xPrv)
+      ..setAll(32, ePrv);
+    return RnsIdentity.fromPrivateKey(prv);
+  }
+
+  /// Announce the rendezvous destination for [seed] carrying [appData] (e.g. the
+  /// full circle id + our delivery dest). Sends immediately AND registers the
+  /// beacon so a host timer keeps re-announcing it every few seconds (decoupled
+  /// from the slow wapp tick), so a joiner's path request can be answered fast —
+  /// critical for a freshly-created circle whose beacon isn't cached on any hub.
+  void rvAnnounce(Uint8List seed, Uint8List appData) {
+    final t = _transport;
+    if (!_up || t == null) return;
+    _rvActive[_hex(seed)] = (
+      appData: appData,
+      lastMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _emitRvAnnounce(seed, appData);
+    _rvTimer ??= Timer.periodic(_rvReannounceEvery, (_) => _rvReannounceTick());
+  }
+
+  /// Resolve the rendezvous for [seed] — returns the announced appData, or empty
+  /// while pending (kicks off the async path-request on first call). The joiner
+  /// polls this until it returns the owner's address.
+  Uint8List rvResolve(Uint8List seed) {
+    final t = _transport;
+    if (!_up || t == null) return Uint8List(0);
+    final key = _hex(seed);
+    final cached = _rvCache[key];
+    if (cached != null) return cached;
+    if (!_rvPending.contains(key)) {
+      _rvPending.add(key);
+      unawaited(() async {
+        final id = await _rvIdentity(seed);
+        final dest = RnsDestination.hash(id, 'circles', const ['rv']);
+        // Run well past one owner re-announce interval so a beacon that lands
+        // mid-window is caught; the wapp's discovery_tick re-arms this between
+        // windows. With the owner re-announcing every ~8s and the beacon now
+        // flood-exempt, resolution typically lands within the first window.
+        final deadline = DateTime.now().add(const Duration(seconds: 40));
+        while (DateTime.now().isBefore(deadline)) {
+          final e = t.pathFor(dest);
+          if (e != null && e.appData.isNotEmpty) {
+            _rvCache[key] = e.appData;
+            break;
+          }
+          t.requestPath(dest);
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+        }
+        _rvPending.remove(key);
+      }());
+    }
+    return Uint8List(0);
   }
 
   // ── Social relay / indexer (app-facing) ────────────────────────────────────
@@ -990,13 +1755,16 @@ class RnsService {
   /// signed NOSTR note (kind 1) in the relay, so other nodes can request our
   /// posts later. [topic] tags the group/context for search. Self-tier (never
   /// evicted). No-op without a profile key or text. Returns the event id.
-  Future<String?> publishNote(String text, {String? topic}) async {
+  Future<String?> publishNote(String text, {String? topic, String? parent}) async {
     final t = text.trim();
     final pub = selfPubHex;
     final priv = _profilePrivHex();
     if (t.isEmpty || pub == null || priv == null) return null;
     final tags = <List<String>>[];
     if (topic != null && topic.isNotEmpty) tags.add(['t', topic]);
+    // Carry the reply parent (the APRS thread id) so a backfilled reply threads
+    // under the right post instead of polluting the top-level feed.
+    if (parent != null && parent.isNotEmpty) tags.add(['parent', parent]);
     final ev = NostrEvent(
       pubkey: pub,
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -1037,6 +1805,358 @@ class RnsService {
     return stored;
   }
 
+  /// Backfill the FEED stream from Reticulum: ask every known relay peer (and
+  /// the best indexer) for kind-1 notes tagged [topic] with created_at >=
+  /// [sinceSec], so posts that were lost over APRS-IS get recovered. Each peer
+  /// serves at least its own notes. Fetched notes are cached in our store and
+  /// returned as raw maps {pub, text, parent, ts} (newest first); the caller
+  /// reconstructs the feed entries (callsign from pubkey, etc.). NOSTR-native.
+  Future<List<Map<String, dynamic>>> fetchFeedBackfill(int sinceSec,
+      {String topic = 'activity', int limit = 300}) async {
+    final relay = _relay;
+    final store = _relayStore;
+    if (relay == null) return const [];
+    final filter = NostrFilter(
+        kinds: const [1], tags: {'t': [topic]}, since: sinceSec, limit: limit);
+    final byId = <String, NostrEvent>{};
+    void take(Iterable<NostrEvent> evs) {
+      for (final e in evs) {
+        if (e.id != null) byId.putIfAbsent(e.id!, () => e);
+      }
+    }
+
+    // Local store first (cheap), then every reachable Aurora node we know.
+    if (store != null) take(store.query(filter));
+    final targets = <RnsIdentity>[];
+    final best = _relayDir.bestIndexer(topic: topic);
+    if (best != null) targets.add(best.identity);
+    for (final e in _relayDir.entries()) {
+      targets.add(e.identity);
+    }
+    // ALSO query every Aurora peer we discovered by its callsign announce, even
+    // if it isn't a hosting indexer: each node answers at least its OWN posts,
+    // so a joiner pulls what others published directly from the posters — the
+    // decentralised path that doesn't depend on anyone hosting the network.
+    for (final id in _callIdentity.values) {
+      targets.add(id);
+    }
+    // Dedup, cap, and query peers in PARALLEL with a short timeout, so one
+    // slow/unreachable peer can't stall the sweep and the queries don't pile up.
+    final seen = <String>{};
+    final unique = <RnsIdentity>[];
+    for (final id in targets) {
+      if (seen.add(_hex(id.hash))) unique.add(id);
+    }
+    const maxPeers = 12;
+    final pick =
+        unique.length <= maxPeers ? unique : unique.sublist(0, maxPeers);
+    // Generous per-query timeout: a relay link to a peer through a busy public
+    // hub is several round-trips and can take 20s+. Queries run in parallel, so
+    // a long timeout doesn't serialise the sweep.
+    final results = await Future.wait(pick.map((id) async {
+      try {
+        return await relay.query(id, filter,
+            timeout: const Duration(seconds: 40));
+      } catch (_) {
+        return const <NostrEvent>[];
+      }
+    }));
+    var hostsAnswered = 0;
+    for (final r in results) {
+      if (r.isNotEmpty) hostsAnswered++;
+      take(r);
+    }
+    if (pick.isNotEmpty) {
+      LogService.instance.add(
+          'RNS/relay: FEED backfill queried ${pick.length} peer(s) '
+          '($hostsAnswered answered)');
+    }
+
+    final out = <Map<String, dynamic>>[];
+    final tierFollows = _follows.asSet;
+    for (final e in byId.values) {
+      // Cache the note in our store too (so we can serve it onward + keep it).
+      store?.put(e,
+          tier: tierOf(e.pubkey, selfPubHex: selfPubHex, followsHex: tierFollows)
+              .index);
+      String parent = '';
+      for (final t in e.tags) {
+        if (t.length >= 2 && t[0] == 'parent') parent = t[1];
+      }
+      out.add({
+        'pub': e.pubkey,
+        'text': e.content,
+        'parent': parent,
+        'ts': e.createdAt,
+      });
+    }
+    out.sort((a, b) => (b['ts'] as int).compareTo(a['ts'] as int));
+    if (out.isNotEmpty) {
+      LogService.instance
+          .add('RNS/relay: FEED backfill fetched ${out.length} note(s)');
+    }
+    return out;
+  }
+
+  /// Publish OUR profile as a NOSTR kind-0 (set_metadata) event, so peers can
+  /// fetch it by npub. [name]/[about]/[picture] map to the standard kind-0
+  /// fields ({name, about, picture}); [picture] is a `file:<sha>.<ext>` media
+  /// token (content-addressed, fetchable over the swarm). Replaceable: the relay
+  /// keeps only our newest kind-0. Self-tier (never evicted). Returns event id.
+  Future<String?> publishMetadata(
+      {String? name, String? about, String? picture}) async {
+    final pub = selfPubHex;
+    final priv = _profilePrivHex();
+    if (pub == null || priv == null) return null;
+    final content = <String, dynamic>{};
+    if (name != null && name.isNotEmpty) content['name'] = name;
+    if (about != null && about.isNotEmpty) content['about'] = about;
+    if (picture != null && picture.isNotEmpty) content['picture'] = picture;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: NostrEventKind.setMetadata,
+      tags: const [],
+      content: jsonEncode(content),
+    );
+    try {
+      ev.sign(priv);
+    } catch (e) {
+      LogService.instance.add('RNS/relay: metadata sign failed: $e');
+      return null;
+    }
+    await relayPublish(ev.toJson());
+    return ev.id;
+  }
+
+  /// Fetch a peer's profile metadata (kind-0 content map: {name, about,
+  /// picture}) by [npubOrHex]. Tries the local relay store first, then the best
+  /// known indexer; a fetched event is cached locally for next time. Null if no
+  /// metadata is known. (Direct by-npub peer fetch needs the peer's relay
+  /// identity, which we don't always have — this is best-effort via indexers.)
+  Future<Map<String, dynamic>?> fetchProfileMetadata(String npubOrHex) async {
+    final hex = FollowSet.toHex(npubOrHex);
+    if (hex == null) return null;
+    Map<String, dynamic>? parse(NostrEvent? ev) {
+      if (ev == null) return null;
+      try {
+        final m = jsonDecode(ev.content);
+        if (m is Map) return m.cast<String, dynamic>();
+      } catch (_) {}
+      return null;
+    }
+
+    final local = parse(_relayStore?.profileOf(hex));
+    if (local != null) return local;
+    // Prefer a DIRECT query to the author (we may know its identity from a chat
+    // announce) — no third-party indexer needed. Fall back to the best indexer.
+    final id = _identityForPub(hex);
+    try {
+      if (id != null && _relay != null) {
+        final evs = await _relay!
+            .query(id, NostrFilter(authors: [hex], kinds: const [0], limit: 1));
+        if (evs.isNotEmpty) {
+          final ev = evs.first;
+          _relayStore?.put(ev,
+              tier: tierOf(ev.pubkey,
+                      selfPubHex: selfPubHex, followsHex: _follows.asSet)
+                  .index);
+          return parse(ev);
+        }
+      }
+      final res = await _relayRun(
+          NostrFilter(authors: [hex], kinds: const [0], limit: 1));
+      if (res.isNotEmpty) {
+        final ev = NostrEvent.fromJson(res.first);
+        final tier =
+            tierOf(ev.pubkey, selfPubHex: selfPubHex, followsHex: _follows.asSet);
+        _relayStore?.put(ev, tier: tier.index); // cache for next time
+        return parse(ev);
+      }
+    } catch (e) {
+      LogService.instance.add('RNS/relay: metadata fetch failed: $e');
+    }
+    return null;
+  }
+
+  /// The RNS identity for a pubkey hex, so we can query that node's relay
+  /// directly. Learned either from its chat announce (callsign→identity) or — more
+  /// reliably on a busy hub — from its relay announce (which carries its npub and
+  /// is kept in the directory with a TTL).
+  RnsIdentity? _identityForPub(String pubHex) {
+    for (final e in _callPub.entries) {
+      if (e.value == pubHex) {
+        final id = _callIdentity[e.key];
+        if (id != null) return id;
+      }
+    }
+    return _relayDir.identityForPubkey(pubHex);
+  }
+
+  // ── Followed-profile auto-fetch + cache (drives nicknames/avatars on the
+  //    Activity stream) ──────────────────────────────────────────────────────
+  // callsign -> resolved kind-0 content map {name, about, picture}.
+  final Map<String, Map<String, dynamic>> _profileMeta = {};
+  final Map<String, int> _profileFetchedAt = {}; // callsign -> epoch ms
+  final Set<String> _profileInFlight = {};
+  static const int _profileTtlMs = 6 * 60 * 60 * 1000; // refetch after 6h
+
+  // Callsigns the app says we follow (the wapp's follow list is authoritative).
+  // Their profiles are retried periodically until we have them — see
+  // [setFollowedCallsigns] + the retry timer.
+  final Set<String> _wantProfiles = {};
+  Timer? _profileRetryTimer;
+
+  /// Tell the service which callsigns we follow, so it keeps trying to fetch
+  /// their profiles in the background (even if earlier attempts failed).
+  void setFollowedCallsigns(Iterable<String> callsigns) {
+    _wantProfiles
+      ..clear()
+      ..addAll(callsigns.map((c) => c.trim()).where((c) => c.isNotEmpty));
+    _retryWantedProfiles();
+  }
+
+  /// Retry fetching every followed callsign whose profile we don't have yet.
+  void _retryWantedProfiles() {
+    for (final cs in _wantProfiles) {
+      if (!_profileMeta.containsKey(cs)) fetchFollowedProfile(cs);
+    }
+  }
+
+  final List<void Function()> _profileListeners = [];
+  void addProfileListener(void Function() cb) => _profileListeners.add(cb);
+  void removeProfileListener(void Function() cb) =>
+      _profileListeners.remove(cb);
+  void _notifyProfiles() {
+    for (final c in List.of(_profileListeners)) {
+      try {
+        c();
+      } catch (_) {}
+    }
+  }
+
+  /// Resolved profile metadata for [callsign] ({name, about, picture}) or null.
+  Map<String, dynamic>? profileMetaFor(String callsign) =>
+      _profileMeta[callsign.trim()];
+
+  /// Fetch [callsign]'s profile because the app says we follow it (the wapp's
+  /// follow list is authoritative; this bypasses the host pubkey follow-set,
+  /// which may not have the key). Reaches the peer via its chat-announce identity
+  /// or its relay announce (npub→identity). Deduped + TTL-gated; safe to call
+  /// often (e.g. while rendering followed posts).
+  void fetchFollowedProfile(String callsign) {
+    final cs = callsign.trim();
+    if (cs.isEmpty) return;
+    final pub = _callPub[cs];
+    if (pub == null) return; // need its key first (from the beacon)
+    // Show a previously-fetched copy instantly (it persists in the relay store
+    // across restarts) even before/without a live path to refresh it.
+    _loadCachedProfile(cs, pub);
+    if (_profileInFlight.contains(cs)) return;
+    final last = _profileFetchedAt[cs] ?? 0;
+    if (_profileMeta.containsKey(cs) &&
+        DateTime.now().millisecondsSinceEpoch - last < _profileTtlMs) {
+      return;
+    }
+    final id = _callIdentity[cs] ?? _relayDir.identityForPubkey(pub);
+    if (id == null) return; // no path yet — retried on the next announce/sweep
+    _profileInFlight.add(cs);
+    unawaited(_fetchProfileDirect(cs, id, pub));
+  }
+
+  /// Populate the display cache from a kind-0 already in our relay store (from a
+  /// prior fetch), so a followed profile shows immediately on restart.
+  void _loadCachedProfile(String cs, String pub) {
+    if (_profileMeta.containsKey(cs)) return;
+    final cached = _parseProfileContent(_relayStore?.profileOf(pub)?.content);
+    if (cached != null) {
+      _profileMeta[cs] = cached;
+      _notifyProfiles();
+    }
+  }
+
+  /// Auto-fetch the profile of a FOLLOWED callsign directly from it, if we don't
+  /// already hold a fresh copy and we know how to reach it. Cheap to call often
+  /// (deduped + TTL-gated). We deliberately fetch ONLY followed callsigns.
+  void _maybeFetchFollowedProfile(String callsign) {
+    final cs = callsign.trim();
+    if (cs.isEmpty) return;
+    final pub = _callPub[cs];
+    if (pub == null || !_follows.contains(pub)) return; // followed only
+    _loadCachedProfile(cs, pub); // instant display from a prior fetch
+    if (_profileInFlight.contains(cs)) return;
+    final last = _profileFetchedAt[cs] ?? 0;
+    final fresh = _profileMeta.containsKey(cs) &&
+        DateTime.now().millisecondsSinceEpoch - last < _profileTtlMs;
+    if (fresh) return;
+    // Reach the peer via its chat-announce identity, or (more reliably on a busy
+    // hub) via its relay announce, which carries its npub in the directory.
+    final id = _callIdentity[cs] ?? _relayDir.identityForPubkey(pub);
+    if (id == null) return; // can't reach it directly yet — retried on announce
+    _profileInFlight.add(cs);
+    unawaited(_fetchProfileDirect(cs, id, pub));
+  }
+
+  /// Like [_maybeFetchFollowedProfile] but keyed by pubkey (resolves to the
+  /// callsign we learned from the key beacon).
+  void _maybeFetchFollowedProfileByPub(String pubHex) {
+    for (final e in _callPub.entries) {
+      if (e.value == pubHex) {
+        _maybeFetchFollowedProfile(e.key);
+        return;
+      }
+    }
+  }
+
+  Future<void> _fetchProfileDirect(
+      String cs, RnsIdentity id, String pubHex) async {
+    try {
+      Map<String, dynamic>? content;
+      if (_relay != null) {
+        final evs = await _relay!.query(
+            id, NostrFilter(authors: [pubHex], kinds: const [0], limit: 1));
+        if (evs.isNotEmpty) {
+          final ev = evs.first;
+          _relayStore?.put(ev,
+              tier: tierOf(ev.pubkey,
+                      selfPubHex: selfPubHex, followsHex: _follows.asSet)
+                  .index);
+          content = _parseProfileContent(ev.content);
+        }
+      }
+      content ??= _parseProfileContent(_relayStore?.profileOf(pubHex)?.content);
+      if (content != null) {
+        // Only stamp "fetched" on success, so failures keep being retried.
+        _profileFetchedAt[cs] = DateTime.now().millisecondsSinceEpoch;
+        _profileMeta[cs] = content;
+        LogService.instance
+            .add('RNS/relay: fetched profile of $cs (${content['name'] ?? '?'})');
+        _notifyProfiles();
+      }
+    } catch (e) {
+      LogService.instance.add('RNS/relay: profile fetch for $cs failed: $e');
+    } finally {
+      _profileInFlight.remove(cs);
+    }
+  }
+
+  Map<String, dynamic>? _parseProfileContent(String? content) {
+    if (content == null || content.isEmpty) return null;
+    try {
+      final m = jsonDecode(content);
+      if (m is Map) return m.cast<String, dynamic>();
+    } catch (_) {}
+    return null;
+  }
+
+  /// Sweep all followed callsigns and refresh any stale/missing profiles.
+  /// Called periodically and right after a new follow.
+  void refreshFollowedProfiles() {
+    for (final e in _callPub.entries) {
+      if (_follows.contains(e.value)) _maybeFetchFollowedProfile(e.key);
+    }
+  }
+
   /// Full-text search (NIP-50). Queries the best known indexer if available,
   /// otherwise the local store. Returns matching events as JSON.
   Future<List<Map<String, dynamic>>> relaySearch(String text,
@@ -1069,7 +2189,11 @@ class RnsService {
   /// Mark [key] (hex / npub / base64url pubkey) as followed — its hosted notes
   /// and files get the "followed" retention tier (kept; media evicted only under
   /// pressure). Bridged from the APRS wapp's callsign follows.
-  void followPubkey(String key) => _follows.add(key);
+  void followPubkey(String key) {
+    _follows.add(key);
+    // We just followed someone — pull their profile (if reachable) right away.
+    refreshFollowedProfiles();
+  }
 
   /// Drop [key] from the follow set.
   void unfollowPubkey(String key) => _follows.remove(key);
@@ -1107,8 +2231,8 @@ class RnsService {
   /// flip serve on/off and create or drop the advertised relay role.
   void applyHostingSettings() {
     if (_relay == null) return;
-    _relay!.serve = hostingActive;
     final enabled = PreferencesService.instanceSync?.hostEnabled ?? true;
+    _relay!.serve = enabled; // responder on unless hosting is fully disabled
     if (enabled && _relayRole == null) {
       _relayRole = RelayRoleManager(onChanged: (_) => _announceRelayDest());
       final prof = CapacityGovernor.instance.lastProfile;
@@ -1478,26 +2602,76 @@ class RnsService {
   /// DHT), store it in the local archive, record it for this folder, and auto-seed.
   Future<bool> folderDownloadFile(
       String folderId, String shaHex, String name) async {
-    final shaB = _bytesFromHex(shaHex);
-    if (shaB == null) return false;
-    final bytes = await _files?.resolveAndFetch(shaB);
+    final fid = _normFolderId(folderId);
+    final bytes = await folderFetchBytes(fid, shaHex, ext: _extOf(name));
     if (bytes == null) return false;
+    _subs?.recordDownload(fid, name, shaHex);
+    return true;
+  }
+
+  /// Fetch the raw bytes of a content-addressed file (sha256 hex) over
+  /// Reticulum and return them. The bytes are stored in the serve archive (so
+  /// this device re-seeds the hash to others — peer-to-peer distribution) and
+  /// we advertise as a provider; [ext] is the archive's filename hint (empty is
+  /// fine when the caller only wants the bytes, e.g. the decentralized updater,
+  /// which verifies sha256(bytes)==shaHex and writes the binary itself).
+  /// Returns null on failure.
+  Future<Uint8List?> folderFetchBytes(String folderId, String shaHex,
+      {String ext = ''}) async {
+    final shaB = _bytesFromHex(shaHex);
+    if (shaB == null) return null;
+    // Serve a copy we already hold (mirrored / previously fetched) WITHOUT going
+    // to the network — content is addressed by sha, so a local hit is identical
+    // and instant. This is what lets a mirror answer when the owner is offline,
+    // and lets the wapp store read its index from a folder it has cached.
+    final local = localFileBytes(shaB);
+    if (local != null) return local;
+    final bytes = await _files?.resolveAndFetch(shaB);
+    if (bytes == null) return null;
     final src = fileServeSource;
-    if (src is MediaFileSource) src.archive.putBytes(bytes, _extOf(name));
-    _subs?.recordDownload(folderId, name, shaHex);
+    if (src is MediaFileSource) src.archive.putBytes(bytes, ext);
     // ignore: discarded_futures
     _files?.publishProvider(shaB, capacity: selfCapacity); // become a provider
-    return true;
+    return bytes;
+  }
+
+  /// Like [folderBrowse] but awaits a fresh network fetch of the folder's
+  /// op-log instead of returning the cached/local reduction immediately. The
+  /// updater calls this so a one-shot "Check for updates" sees the latest
+  /// release the moment it runs, rather than on the next 20s background refresh.
+  Future<Map<String, dynamic>> folderBrowseAsync(
+      String folderIdOrNpub) async {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final f = _folders;
+    if (f == null) return folderBrowse(folderId);
+    try {
+      final st = await f.browse(folderId);
+      _folderCache[folderId] = jsonEncode(st.toJson());
+      if (st.files.isNotEmpty || st.name != null) {
+        // ignore: discarded_futures
+        _folderRelay?.publish(folderId);
+      }
+      // NOTE: browsing a folder does NOT mirror it. Pulling the whole folder is
+      // a deliberate "host this folder" choice (setFolderAutoSync / the host
+      // action), not a side effect of viewing it — the wapp store, for one, only
+      // fetches the index of available wapps here, never the bytes. Phase 3
+      // mirroring (survive-owner-offline) runs in _autoSyncTick for folders the
+      // node was explicitly told to host, gated to always-on indexer nodes.
+      return st.toJson();
+    } catch (_) {
+      return folderBrowse(folderId); // fall back to whatever we hold locally
+    }
   }
 
   /// Download every file in a folder. Returns how many succeeded.
   Future<int> folderDownloadAll(String folderId) async {
     final f = _folders;
     if (f == null) return 0;
-    final st = await f.browse(folderId);
+    final fid = _normFolderId(folderId);
+    final st = await f.browse(fid);
     var n = 0;
     for (final file in st.fileList) {
-      if (await folderDownloadFile(folderId, file.sha, file.name ?? file.sha)) {
+      if (await folderDownloadFile(fid, file.sha, file.name ?? file.sha)) {
         n++;
       }
     }
@@ -1505,7 +2679,7 @@ class RnsService {
   }
 
   void setFolderAutoSync(String folderId, bool on) =>
-      _subs?.setAutoSync(folderId, on);
+      _subs?.setAutoSync(_normFolderId(folderId), on);
 
   List<Map<String, dynamic>> folderSubscriptions() {
     final s = _subs;
@@ -1515,20 +2689,44 @@ class RnsService {
     ];
   }
 
-  // For each auto-sync folder, re-fetch downloaded files whose sha changed.
+  /// True when this node is a self-nominated INDEXER (always-on: charger +
+  /// Wi-Fi/Ethernet, per RelayRole) AND hosting is enabled. Such nodes mirror
+  /// the folders they discover so a folder stays reachable when its owner is
+  /// offline. Leaf/battery nodes return false and never mirror others' folders.
+  bool _isIndexerHost() {
+    if (!(PreferencesService.instanceSync?.hostEnabled ?? true)) return false;
+    return _relayRole?.current.isIndexer ?? false;
+  }
+
+  // Keep auto-sync folders current, and — on an indexer host — fully MIRROR them
+  // (download every file, not just changed ones) so this node can serve both the
+  // directory and the bytes after the owner sleeps. Runs on the background tick.
   Future<void> _autoSyncTick() async {
     final s = _subs, f = _folders;
     if (s == null || f == null) return;
+    final mirror = _isIndexerHost();
     for (final fid in s.folderIds()) {
       if (!s.autoSyncOf(fid)) continue;
       final st = await f.browse(fid);
+      // Re-cache + re-advertise as a folder provider so consumers resolve THIS
+      // mirror by the folder key while the owner is offline.
+      _folderCache[fid] = jsonEncode(st.toJson());
+      if (mirror && (st.files.isNotEmpty || st.name != null)) {
+        // ignore: discarded_futures
+        _folderRelay?.publish(fid);
+      }
       final cur = <String, String>{
         for (final e in st.fileList) (e.name ?? e.sha): e.sha
       };
-      for (final entry in s.downloadedOf(fid).entries) {
-        final now = cur[entry.key];
-        if (now != null && now != entry.value) {
-          await folderDownloadFile(fid, now, entry.key);
+      final have = s.downloadedOf(fid);
+      for (final e in cur.entries) {
+        final old = have[e.key];
+        if (old == null) {
+          // New / never-downloaded file: an indexer host mirrors it so it holds
+          // (and re-seeds) the bytes; a leaf only tracks what it explicitly got.
+          if (mirror) await folderDownloadFile(fid, e.value, e.key);
+        } else if (old != e.value) {
+          await folderDownloadFile(fid, e.value, e.key); // changed → refresh
         }
       }
     }
@@ -1547,6 +2745,12 @@ class RnsService {
     _announceTimer = null;
     _republishTimer?.cancel();
     _republishTimer = null;
+    _rvTimer?.cancel();
+    _rvTimer = null;
+    _rvActive.clear();
+    _rvInboundDests.clear();
+    _linkWatchdog?.cancel();
+    _linkWatchdog = null;
     _lxmf = null;
     _relay = null;
     _relayRole = null;
@@ -1565,6 +2769,8 @@ class RnsService {
     _diskSyncTimer = null;
     _autoSyncTimer?.cancel();
     _autoSyncTimer = null;
+    _profileRetryTimer?.cancel();
+    _profileRetryTimer = null;
     _hostPruneTimer?.cancel();
     _hostPruneTimer = null;
     _diskMgr = null;
@@ -1572,9 +2778,17 @@ class RnsService {
     _composite = null;
     CapacityGovernor.instance.stop();
     await _server?.close();
-    _client?.close();
+    await _gateway?.close();
+    for (final c in _clients) {
+      // ignore: discarded_futures
+      c.close();
+    }
+    _clients.clear();
+    _connectedHubs.clear();
+    await _lan?.close();
     _server = null;
-    _client = null;
+    _gateway = null;
+    _lan = null;
     _files = null;
     _ifaces.clear();
     _transport = null;

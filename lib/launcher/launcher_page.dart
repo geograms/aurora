@@ -2,6 +2,10 @@ part of 'launcher.dart';
 
 // ── Launcher ──────────────────────────────────────────────────────────
 
+/// Wapps that are installed but temporarily hidden from the grid (their
+/// implementation isn't finished yet). Folder names, matched during the scan.
+const Set<String> _kHiddenWapps = {'maps', 'atm', 'wallet'};
+
 /// Outcome of the unmet-dependency dialog shown before launching a wapp.
 enum _DepAction { cancel, openAnyway, install }
 
@@ -84,6 +88,9 @@ class _LauncherPageState extends State<LauncherPage> {
         // reached via each wapp's Edit action. Skip it here too so legacy
         // profiles that seeded it into wapps/ don't surface it.
         if (entry.name == 'app-creator') continue;
+        // Temporarily hidden wapps (unfinished) — kept out of the grid even on
+        // profiles that already have them installed.
+        if (_kHiddenWapps.contains(entry.name)) continue;
         final pkg = wappPackageStorage(installed.getAbsolutePath(entry.path));
         await _scanManifest(pkg, wapps, seen);
       }
@@ -528,7 +535,14 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
   Widget build(BuildContext context) {
     final service = ProfileService.instance;
     final active = service.activeProfile;
-    final label = active?.displayName ?? 'No profile';
+    // "Nickname (CALLSIGN)" when a nickname is set, otherwise just the
+    // callsign — never "CALLSIGN (CALLSIGN)" (displayName falls back to the
+    // callsign when there's no nickname).
+    final label = active == null
+        ? 'No profile'
+        : (active.nickname.trim().isNotEmpty
+            ? '${active.nickname.trim()} (${active.callsign})'
+            : active.callsign);
     final cs = Theme.of(context).colorScheme;
 
     return PopupMenuButton<String>(
@@ -558,11 +572,14 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
                     children: [
                       Text(p.displayName,
                           style: const TextStyle(fontWeight: FontWeight.w600)),
-                      Text(p.callsign,
-                          style: TextStyle(
-                              fontSize: 11,
-                              color: cs.onSurfaceVariant,
-                              fontFamily: 'monospace')),
+                      // Only show the callsign sub-line when a nickname is set,
+                      // so a profile without one isn't listed as "X1ABCD" twice.
+                      if (p.nickname.trim().isNotEmpty)
+                        Text(p.callsign,
+                            style: TextStyle(
+                                fontSize: 11,
+                                color: cs.onSurfaceVariant,
+                                fontFamily: 'monospace')),
                     ],
                   ),
                 ),

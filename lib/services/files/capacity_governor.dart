@@ -74,7 +74,13 @@ class CapacityGovernor {
     var charging = false;
     try {
       final s = await _battery.batteryState;
-      charging = s == BatteryState.charging || s == BatteryState.full;
+      // A battery-less desktop/server reports `unknown` (the plugin doesn't
+      // throw on Linux when there's no battery) — treat it as on mains power so
+      // always-on machines qualify as unlimited providers/indexers. Only a real
+      // battery that is discharging keeps charging=false.
+      charging = s == BatteryState.charging ||
+          s == BatteryState.full ||
+          s == BatteryState.unknown;
     } catch (_) {
       charging = true; // no battery (desktop/server) — treat as on power
     }

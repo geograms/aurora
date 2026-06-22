@@ -13,6 +13,14 @@ class ConversationItem {
   String icon; // generic icon name (person, campaign, tag, group, chat…)
   int unread;
 
+  /// Muted: unread still counts on this row (shown grey) but does NOT propagate
+  /// to the Messages-tab / app-icon badge (no app-wide attention).
+  bool muted;
+
+  /// Closed: removed from the conversation list view. Re-appears when a new
+  /// incoming message arrives.
+  bool closed;
+
   /// Host wall-clock (ms) of the last real activity (message / pin / new
   /// unread) — the primary sort key so the most recently active conversations
   /// sit on top. 0 for legacy rows that predate this field; the list sort then
@@ -30,6 +38,8 @@ class ConversationItem {
     this.icon = 'chat',
     this.unread = 0,
     this.activityTs = 0,
+    this.muted = false,
+    this.closed = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -40,6 +50,8 @@ class ConversationItem {
         'icon': icon,
         'unread': unread,
         'activityTs': activityTs,
+        'muted': muted,
+        'closed': closed,
         'messages': messages,
       };
 
@@ -52,6 +64,8 @@ class ConversationItem {
       icon: (j['icon'] ?? 'chat').toString(),
       unread: (j['unread'] as num?)?.toInt() ?? 0,
       activityTs: (j['activityTs'] as num?)?.toInt() ?? 0,
+      muted: j['muted'] == true,
+      closed: j['closed'] == true,
     );
     final msgs = j['messages'];
     if (msgs is List) {
@@ -120,8 +134,12 @@ class ConversationStore {
   void addMessage(Map d) {
     final id = (d['id'] ?? '').toString();
     if (id.isEmpty) return;
-    final it = _ensure(id);
+    // A closed conversation is unsubscribed: drop incoming messages so it stays
+    // gone (our own sends still go through — they reopen it intentionally).
+    final existing = items[id];
     final dir = (d['dir'] ?? 'in').toString();
+    if (existing != null && existing.closed && dir == 'in') return;
+    final it = _ensure(id);
     it.messages.add({
       'dir': dir,
       'from': (d['from'] ?? '').toString(),
@@ -150,6 +168,18 @@ class ConversationStore {
     _bump(id);
   }
 
+  /// Mute / unmute a conversation (its unread stops counting app-wide).
+  void setMuted(String id, bool v) {
+    final it = items[id];
+    if (it != null) it.muted = v;
+  }
+
+  /// Close a conversation (hide from the list) or reopen it.
+  void setClosed(String id, bool v) {
+    final it = items[id];
+    if (it != null) it.closed = v;
+  }
+
   /// Remove already-shown messages locally (hide / block — never network state).
   /// Two forms: `{id, key}` drops one message from one conversation; `{from}`
   /// drops every message by a sender across all conversations and removes a
@@ -170,7 +200,13 @@ class ConversationStore {
     }
     final id = (d['id'] ?? '').toString();
     final key = (d['key'] ?? '').toString();
-    if (id.isEmpty || key.isEmpty) return;
+    if (id.isEmpty) return;
+    if (key.isEmpty) {
+      // Remove the whole conversation row (e.g. a wapp deleting/leaving a circle).
+      items.remove(id);
+      order.remove(id);
+      return;
+    }
     items[id]?.messages.removeWhere((m) => (m['key'] ?? '').toString() == key);
   }
 
@@ -229,9 +265,12 @@ class ConversationStore {
   }
 
   /// Total unread across all conversations — drives the Messages tab/app-icon
-  /// badge.
-  int get totalUnread =>
-      items.values.fold(0, (sum, it) => sum + (it.unread > 0 ? it.unread : 0));
+  /// badge. Muted (and closed) conversations are excluded so they don't pull
+  /// app-wide attention; their count still shows on their own row.
+  int get totalUnread => items.values.fold(
+      0,
+      (sum, it) =>
+          sum + ((it.unread > 0 && !it.muted && !it.closed) ? it.unread : 0));
 
   static int _nowMs() => DateTime.now().millisecondsSinceEpoch;
 
@@ -241,7 +280,12 @@ class ConversationStore {
   /// to: unread first, then non-empty, then insertion order — which fixes
   /// already-persisted lists where unread/active rows had sunk below empties.
   List<ConversationItem> ordered() {
-    final list = [for (final id in order) if (items.containsKey(id)) items[id]!];
+    // Closed conversations are hidden from the list (they reappear on a new
+    // incoming message).
+    final list = [
+      for (final id in order)
+        if (items.containsKey(id) && !items[id]!.closed) items[id]!
+    ];
     final idx = {for (var i = 0; i < order.length; i++) order[i]: i};
     list.sort((a, b) {
       if (a.activityTs != b.activityTs) {

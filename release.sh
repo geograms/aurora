@@ -4,9 +4,11 @@
 #
 # Bumps pubspec.yaml, syncs lib/version.dart, commits, tags vX.Y.Z and pushes.
 # The release workflow (.github/workflows/release.yml) then builds the Android
-# APK, Linux tar.gz and Windows installer and PUBLISHES them to the self-hosted
-# update feed at geogram.radio (the geograms/geogram-html repo), which the
-# in-app Update Center reads — no github.com runtime dependency.
+# APK, Linux tar.gz and Windows installer named aurora-<version>-<platform>.
+# Updates are decentralized: the built artifacts are published into the two
+# signed Reticulum update folders on the always-on node (see
+# tool/publish_update_folder.sh) — no central web host. The in-app Update Center
+# fetches them peer-to-peer over Reticulum and verifies each by sha256.
 #
 # Usage:
 #   ./release.sh                 # auto-bump patch (or prerelease counter)
@@ -62,12 +64,17 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 git push origin "$branch"
 git push origin "v${VERSION}"
 
-# Pushing the tag triggers .github/workflows/release.yml, which builds the
-# three platform artifacts and commits the update feed into THIS repo's
-# updates/ folder (no secrets — uses the automatic GITHUB_TOKEN). The website
-# repo's sync workflow then mirrors updates/ into geogram.radio/updates, and
-# the in-app updater sees the new release on its next check.
-echo ">> done. release.yml is building + publishing v${VERSION}'s feed to updates/."
-echo ">>   geogram.radio mirrors it on its next sync (or trigger sync manually)."
-echo ">>   (to publish manually instead, build the artifacts then run:"
-echo ">>    dart run tool/publish_release.dart --site . --version ${VERSION} <files...>)"
+# Pushing the tag triggers .github/workflows/release.yml, which builds the three
+# aurora-<version>-<platform> artifacts. Publish them into the signed Reticulum
+# update folders on the always-on node (the master keys live only in each
+# .folder.json there — no CI secret):
+#
+#   AURORA_API=http://<node>:3456 \
+#     tool/publish_update_folder.sh ${VERSION} <dir-with-built-artifacts>
+#
+# That copies the binaries into the beta folder (and the stable folder for a
+# non-prerelease) and rescans, so the node signs the addFile ops and serves the
+# bytes. Consumers fetch them over Reticulum and re-seed — no central web host.
+echo ">> done. release.yml is building v${VERSION}'s artifacts."
+echo ">>   then on the always-on node, publish them to the update folders:"
+echo ">>     tool/publish_update_folder.sh ${VERSION} <artifacts-dir>"

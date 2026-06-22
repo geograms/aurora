@@ -9,6 +9,7 @@ import battery_plus
 import ble_peripheral
 import bluetooth_low_energy_darwin
 import file_selector_macos
+import flutter_pcm_sound
 import geolocator_apple
 import path_provider_foundation
 import shared_preferences_foundation
@@ -19,6 +20,7 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   BlePeripheralPlugin.register(with: registry.registrar(forPlugin: "BlePeripheralPlugin"))
   BluetoothLowEnergyDarwinPlugin.register(with: registry.registrar(forPlugin: "BluetoothLowEnergyDarwinPlugin"))
   FileSelectorPlugin.register(with: registry.registrar(forPlugin: "FileSelectorPlugin"))
+  FlutterPcmSoundPlugin.register(with: registry.registrar(forPlugin: "FlutterPcmSoundPlugin"))
   GeolocatorPlugin.register(with: registry.registrar(forPlugin: "GeolocatorPlugin"))
   PathProviderPlugin.register(with: registry.registrar(forPlugin: "PathProviderPlugin"))
   SharedPreferencesPlugin.register(with: registry.registrar(forPlugin: "SharedPreferencesPlugin"))

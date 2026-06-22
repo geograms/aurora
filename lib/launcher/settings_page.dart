@@ -13,6 +13,7 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
   PreferencesService? _prefs;
   String? _dataDir;
   List<_WappDataEntry> _wappDataEntries = [];
+  final UpdateService _upd = UpdateService.instance;
 
   @override
   void initState() {
@@ -23,12 +24,101 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
   Future<void> _load() async {
     final prefs = await PreferencesService.instance();
     final defaultPath = wappsDataStorage(prefs).basePath;
+    await _upd.load(); // populate the stable/beta update-folder addresses
     if (!mounted) return;
     setState(() {
       _prefs = prefs;
       _dataDir = prefs.wappDataDir ?? defaultPath;
     });
     await _refreshWappData();
+  }
+
+  /// Prompt for a single text value (used for the Reticulum sharing-folder
+  /// addresses). Returns the trimmed input, or null if cancelled.
+  Future<String?> _editTextPref({
+    required String title,
+    required String help,
+    required String hint,
+    required String initial,
+  }) async {
+    final controller = TextEditingController(text: initial);
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              help,
+              style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: hint,
+                filled: true,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+              onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _folderSubtitle(String v) =>
+      v.trim().isEmpty ? 'Not set (uses the built-in default)' : v.trim();
+
+  Future<void> _editWappStoreFolder() async {
+    final r = await _editTextPref(
+      title: 'Wapp store folder',
+      help: 'Reticulum address (npub… or hex folder id) of a signed folder '
+          'that holds .wapp packages and an index.json catalog. The store '
+          'fetches and verifies them peer-to-peer — no web server needed. '
+          'Leave blank to use the built-in default source.',
+      hint: 'npub1…',
+      initial: _prefs?.wappStoreSource ?? '',
+    );
+    if (r == null || _prefs == null) return;
+    _prefs!.wappStoreSource = r.isEmpty ? null : r;
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _editUpdateFolder({required bool beta}) async {
+    final r = await _editTextPref(
+      title: beta ? 'Update folder (beta)' : 'Update folder (stable)',
+      help: 'Reticulum address (npub… or hex folder id) of the signed folder '
+          'the app pulls ${beta ? 'beta' : 'stable'} releases from. Binaries '
+          'are fetched peer-to-peer and verified by sha256. Leave blank to '
+          'reset to the built-in default.',
+      hint: 'npub1…',
+      initial: beta ? _upd.betaFolder : _upd.stableFolder,
+    );
+    if (r == null) return;
+    if (beta) {
+      await _upd.setBetaFolder(r);
+    } else {
+      await _upd.setStableFolder(r);
+    }
+    if (mounted) setState(() {});
   }
 
   Future<void> _refreshWappData() async {
@@ -436,6 +526,75 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                                 setState(() {});
                               }
                             : null,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // ── Sharing folders (Reticulum) ──
+                Text('Sharing folders',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                        )),
+                const SizedBox(height: 4),
+                Text(
+                  'Signed Reticulum folders the app pulls from, peer-to-peer '
+                  'and verified by sha256. Each is an npub… (or hex folder id). '
+                  'Change these to follow a different publisher; leave blank '
+                  'for the built-in defaults.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: Column(
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.widgets_outlined),
+                        title: const Text('Wapp store folder'),
+                        subtitle: Text(
+                          _folderSubtitle(_prefs?.wappStoreSource ?? ''),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: cs.onSurfaceVariant),
+                        ),
+                        trailing: const Icon(Icons.edit),
+                        onTap: _editWappStoreFolder,
+                      ),
+                      const Divider(height: 1),
+                      ListTile(
+                        leading: const Icon(Icons.system_update_alt),
+                        title: const Text('Update folder (stable)'),
+                        subtitle: Text(
+                          _folderSubtitle(_upd.stableFolder),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: cs.onSurfaceVariant),
+                        ),
+                        trailing: const Icon(Icons.edit),
+                        onTap: () => _editUpdateFolder(beta: false),
+                      ),
+                      const Divider(height: 1),
+                      ListTile(
+                        leading: const Icon(Icons.science_outlined),
+                        title: const Text('Update folder (beta)'),
+                        subtitle: Text(
+                          _folderSubtitle(_upd.betaFolder),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: cs.onSurfaceVariant),
+                        ),
+                        trailing: const Icon(Icons.edit),
+                        onTap: () => _editUpdateFolder(beta: true),
                       ),
                     ],
                   ),

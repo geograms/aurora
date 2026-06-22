@@ -57,6 +57,23 @@ object BgBridge {
                     notify(appCtx, id, title, body)
                     result.success(true)
                 }
+                "media.update" -> {
+                    MediaController.update(
+                        appCtx,
+                        state = call.argument<String>("state") ?: "playing",
+                        title = call.argument<String>("title") ?: "",
+                        artist = call.argument<String>("artist") ?: "",
+                        durationMs = (call.argument<Number>("durationMs") ?: 0).toLong(),
+                        positionMs = (call.argument<Number>("positionMs") ?: 0).toLong(),
+                        canNext = call.argument<Boolean>("canNext") ?: false,
+                        canPrev = call.argument<Boolean>("canPrev") ?: false,
+                    )
+                    result.success(true)
+                }
+                "media.stop" -> {
+                    MediaController.stop(appCtx)
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
         }

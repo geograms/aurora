@@ -993,8 +993,14 @@ class RnsService {
       if (!_localReady) {
       _id = await _loadOrCreateIdentity();
       _destHash = RnsDestination.hash(_id!, _app, _aspects);
-      _transport = RnsTransport(
-          transportId: _id!.hash, log: (m) => LogService.instance.add('RNS: $m'));
+      // LEAF node (no transportId): like a reference RNS client with
+      // enable_transport=False. A phone must NOT act as a transport node —
+      // relaying the public hubs' whole announce flood across every uplink
+      // saturates its CPU + bandwidth and starves real traffic (it made large
+      // file transfers crawl/stall). The hubs do the routing; we still announce
+      // ourselves and reach peers through them.
+      _transport =
+          RnsTransport(log: (m) => LogService.instance.add('RNS: $m'));
       // Never let the public-hub announce flood drown out OUR overlay's
       // announces: register the name_hashes of every Aurora destination so the
       // transport's per-second verify budget always processes them. Without
@@ -1020,10 +1026,17 @@ class RnsService {
       _files = FileTransferNode(
         identity: _id!,
         source: _composite!,
-        send: (raw) => _transport?.sendOnAll(raw),
+        send: (raw) => _transport?.sendLinkAware(raw),
         log: (m) => LogService.instance.add('RNS/files: $m'),
         enableDht: true,
         nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
+        // Per-destination routing (Reticulum routes per-dest, not per-identity):
+        // the files/dht dests of a node may be reached via different hubs, so the
+        // link request must be transport-addressed to the hub that has a route to
+        // THIS dest — using any of the identity's paths sent it to the wrong hub,
+        // which dropped it (the silent device-to-device link failure).
+        nextHopForDest: (h) => _transport?.pathFor(h)?.nextHop,
+        hasPathForDest: (h) => _transport?.hasPath(h) ?? false,
         // Pull a path to a peer we know by identity but have no cached route to
         // (its announce was never flooded to us) so DHT resolve + file fetch
         // links are routable — the fix that makes device-to-device folder
@@ -1080,7 +1093,7 @@ class RnsService {
       );
       _lxmf = LxmfRouter(
         identity: _id!,
-        send: (raw) => _transport?.sendOnAll(raw),
+        send: (raw) => _transport?.sendLinkAware(raw),
         nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
         identityForDest: (h) => _transport?.pathFor(h)?.identity,
         requestPath: (h) => _transport?.requestPath(h),
@@ -1136,8 +1149,10 @@ class RnsService {
         _relay = RelayNode(
           identity: _id!,
           store: _relayStore!,
-          send: (raw) => _transport?.sendOnAll(raw),
+          send: (raw) => _transport?.sendLinkAware(raw),
           nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
+          nextHopForDest: (h) => _transport?.pathFor(h)?.nextHop,
+          hasPathForDest: (h) => _transport?.hasPath(h) ?? false,
           requestPath: (h) => _transport?.requestPath(h),
           spam: SpamPolicy.lenient(),
           log: (m) => LogService.instance.add('RNS/relay: $m'),
@@ -1738,6 +1753,11 @@ class RnsService {
     // chatter must not mask all hubs being dead.
     if (via == 'tcp' || via.startsWith('tcp:')) {
       _lastInboundMs = DateTime.now().millisecondsSinceEpoch;
+    }
+    // Remember which interface a link's traffic arrives on, so our outbound link
+    // packets (resource parts, etc.) go ONLY there instead of every hub uplink.
+    if (p.destType == RnsDestType.link) {
+      _transport?.noteLinkIface(p.destHash, via);
     }
     // Link / file-transfer packets (link requests + link-addressed data) are
     // handled by the files node, not the announce path.

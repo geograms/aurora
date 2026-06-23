@@ -47,3 +47,6 @@ app.*.map.json
 
 # iGate provisioning secrets (real values; example is committed)
 esp32/rns_ble5/src/igate_secrets.h
+
+# Reference RNS clone for protocol comparison (re-cloneable; has its own .git)
+archive/

@@ -1,0 +1,4 @@
+- [C61 budget phone needs release](c61-budget-phone-release-only.md) — OUKITEL C61 ANRs/OOMs on debug builds; install release APK on it
+- [RNS passive mode + wapp priority](rns-passive-mode-and-wapp-priority.md) — phones shed relay duty under announce-flood CPU load; wapp announces flood-exempt
+- [Circles internet-test state](circles-internet-test-state.md) — resume point: two-phone circles test paused at Step 3 (C61→TANK2 propagation blocker); BLE disabled both phones
+- [RNS path requests](rns-path-requests.md) — pull path-finding implemented+validated; reaches peers whose announce never passively crossed (foundation for reliable addressed delivery)

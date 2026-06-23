@@ -4,7 +4,7 @@ part of 'launcher.dart';
 
 /// Folder names always auto-installed on first run, on top of every
 /// `kind: "system"` wapp. Keeps the default set in one place.
-const _kDefaultSeedNames = {'install', 'aprs', 'mp4player', 'circles'};
+const _kDefaultSeedNames = {'install', 'aprs', 'mp4player', 'circles', 'reticulum'};
 
 /// First-run bootstrap, run as a boot task BEFORE the UI so the launcher
 /// never renders an empty grid mid-seed. Installs the curated default
@@ -159,7 +159,7 @@ Future<int> _seedDefaultsFromFilesystem() async {
 /// the upgrade pass only touches already-installed wapps. So backfill each of
 /// these exactly ONCE per profile, recorded in `.seeded.json['offered']` so a
 /// wapp the user later uninstalls is never resurrected.
-const _kBackfillDefaults = {'mp4player', 'circles'};
+const _kBackfillDefaults = {'mp4player', 'circles', 'reticulum'};
 
 /// Install any [_kBackfillDefaults] not yet offered to this profile. Runs every
 /// launch (cheap: a marker read + a set check). Returns the count installed.

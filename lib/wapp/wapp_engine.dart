@@ -2448,6 +2448,56 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // ── Reticulum visualization/management HAL (read-only) ───────────────────
+    // These expose the node's observed network + status + bootstrap hubs as JSON
+    // so the "reticulum" wapp can render an interactive graph. Config (add/remove/
+    // connect hubs, passive toggle) is done via host-action messages, not here.
+    // Overflow protocol: when the JSON doesn't fit, return the NEGATED required
+    // byte length (nothing written) so the wapp can re-call with a bigger buffer.
+    final halRnsStatus = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(jsonEncode(RnsService.instance.status()));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halRnsHubs = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(jsonEncode(RnsService.instance.hubsInfo()));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halRnsNodes = WasmFunction(
+      (int filterPtr, int filterLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        String? service;
+        var geogramOnly = false;
+        String? search;
+        if (filterLen > 0) {
+          try {
+            final f = jsonDecode(_readStr(filterPtr, filterLen))
+                as Map<String, dynamic>;
+            final s = f['service'];
+            if (s is String && s.isNotEmpty) service = s;
+            geogramOnly = f['geogramOnly'] == true;
+            final q = f['search'];
+            if (q is String && q.isNotEmpty) search = q;
+          } catch (_) {}
+        }
+        final snap = RnsService.instance.graphSnapshot(
+            service: service, geogramOnly: geogramOnly, search: search);
+        final bytes = utf8.encode(jsonEncode(snap));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
 
     // ── Contacts HAL (reusable people picker source) ────────────────────────
     final halContactsQuery = WasmFunction(
@@ -2640,6 +2690,9 @@ class WappEngine {
       WasmImport('hal', 'rns_rv_send', halRnsRvSend),
       WasmImport('hal', 'rns_available', halRnsAvailable),
       WasmImport('hal', 'rns_recv', halRnsRecv),
+      WasmImport('hal', 'rns_status', halRnsStatus),
+      WasmImport('hal', 'rns_hubs', halRnsHubs),
+      WasmImport('hal', 'rns_nodes', halRnsNodes),
       // Contacts (reusable people picker source)
       WasmImport('hal', 'contacts_query', halContactsQuery),
       // WASI

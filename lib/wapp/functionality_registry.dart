@@ -244,6 +244,13 @@ class FunctionalityRegistry {
           ReturnDef('uint32', '0 if none')),
       EndpointDef('hal_rns_recv', 'Read next inbound datagram (JSON {from,payload,ts})', [],
           ReturnDef('uint32', 'Bytes written, 0 if none')),
+      EndpointDef('hal_rns_status', 'Node status JSON (up,mode,paths,observed,…)', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_rns_hubs', 'Configured bootstrap hubs [{endpoint,connected}]', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_rns_nodes', 'Observed network graph {nodes,edges} (filtered)', [
+        ParamDef('filter', 'string', 'JSON {service,geogramOnly,search} (empty = none)'),
+      ], ReturnDef('int', 'Bytes written, negated required size if too small')),
     ]),
     'hal.contacts': FunctionalityDef(
         'hal.contacts', 'Known people (reusable contact picker source)', [

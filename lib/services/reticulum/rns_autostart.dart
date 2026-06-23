@@ -55,6 +55,12 @@ Future<void> ensureRnsAutostart() async {
     rns.followsPath = ws.getAbsolutePath('host_follows.json');
     rns.diskIndexPath = ws.getAbsolutePath('disk_index.sqlite3');
 
+    // Persistent observed-node cache lives in the reticulum wapp's per-profile
+    // data folder (user-specific data the reticulum wapp surfaces). The store
+    // creates the directory if the wapp hasn't written there yet.
+    rns.observedStorePath =
+        wappDataStorageFor(prefs, 'reticulum').getAbsolutePath('observed.sqlite3');
+
     // Announce our callsign so peers/repeaters can show a human name (plaintext
     // presence beacon, same as the manual start path).
     final cs = (ProfileService.instance.activeProfile?.callsign ?? '').trim();

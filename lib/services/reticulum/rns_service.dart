@@ -59,6 +59,7 @@ import 'lxmf/lxmf.dart'
     show kLxmfApp, kLxmfDeliveryAspects, kLxmfPropagationAspects;
 import 'lxmf/lxmf_message.dart';
 import 'lxmf/lxmf_router.dart';
+import 'observed_store.dart';
 import 'rns_announce.dart';
 import 'rns_ble_interface.dart';
 import 'rns_crypto.dart';
@@ -532,6 +533,52 @@ class RnsService {
   static const int _observedStaleMs = 30 * 60 * 1000; // drop entries idle >30min
   final Map<String, _ObservedNode> _observed = {};
 
+  // Persistent on-disk cache of observed nodes (set [observedStorePath] before
+  // start; the app points it at the reticulum wapp's per-profile data folder).
+  // Keeps "first seen by you" across restarts and answers fast count/geogram
+  // queries over the full history, not just the live (capped/swept) set.
+  String? observedStorePath;
+  ObservedStore? _obStore;
+  final Map<String, int> _firstSeenByHex = {}; // durable first-seen per id
+  final Set<String> _obDirty = {}; // ids changed since the last flush
+  Timer? _obFlushTimer;
+  Map<String, dynamic> _obStats = const {
+    'total': 0,
+    'geogram': 0,
+    'oldest': 0,
+    'seen24h': 0
+  };
+
+  /// Flush the dirty observed nodes to disk and refresh the cached stats. Cheap:
+  /// one batched transaction, only the nodes that changed. Called on a slow
+  /// timer and at stop().
+  void _flushObserved() {
+    final st = _obStore;
+    if (st == null || !st.isOpen) return;
+    if (_obDirty.isNotEmpty) {
+      final rows = <Map<String, Object?>>[];
+      for (final id in _obDirty) {
+        final n = _observed[id];
+        if (n == null) continue;
+        rows.add({
+          'id': n.identityHex,
+          'pubkey': n.publicKeyHex,
+          'callsign': n.callsign ?? '',
+          'services': (n.services.toList()..sort()).join(','),
+          'geogram':
+              n.services.any((s) => s != 'lxmf' && s != 'lxmf-prop') ? 1 : 0,
+          'hops': n.hops,
+          'via': n.via,
+          'firstSeen': n.firstSeenMs,
+          'lastSeen': n.lastSeenMs,
+        });
+      }
+      if (rows.isNotEmpty) st.upsertMany(rows);
+      _obDirty.clear();
+    }
+    _obStats = st.stats();
+  }
+
   // (serviceLabel, app, aspects) tuples. A destination hash binds an identity to
   // a (app, aspects) name, so we classify an announce by recomputing the hash for
   // the announcing identity and matching. Geogram software ⇔ announces any
@@ -574,10 +621,14 @@ class RnsService {
     var n = _observed[key];
     if (n == null) {
       if (_observed.length >= _observedCap) _evictOldestObserved();
+      // Preserve the true first-seen across restarts/evictions: reuse the
+      // persisted value if we've ever recorded this node before.
+      final firstSeen = _firstSeenByHex[key] ?? now;
+      _firstSeenByHex[key] = firstSeen;
       n = _ObservedNode(
         identityHex: key,
         publicKeyHex: _hex(ann.publicKey),
-        firstSeenMs: now,
+        firstSeenMs: firstSeen,
       );
       _observed[key] = n;
     }
@@ -594,6 +645,8 @@ class RnsService {
         }
       }
     }
+    // Mark for the next periodic flush to disk.
+    if (_obStore != null) _obDirty.add(key);
   }
 
   void _evictOldestObserved() {
@@ -784,6 +837,8 @@ class RnsService {
       'sample': true, // honest: this is what we heard, not a full roster
       'observed': _observed.length,
       'passive': _transport?.passive ?? false,
+      // Persistent all-time counts from the on-disk cache (total/geogram/oldest).
+      'stats': _obStats,
     };
   }
 
@@ -1198,6 +1253,22 @@ class RnsService {
           }
         } catch (_) {}
       });
+
+      // Persistent observed-node cache (path chosen by the app — the reticulum
+      // wapp's data folder). Load the durable first-seen map so restarts keep
+      // the true first-seen, and flush dirty nodes on a slow timer.
+      if (observedStorePath != null && _obStore == null) {
+        final st = ObservedStore(observedStorePath!);
+        if (st.open()) {
+          _obStore = st;
+          _firstSeenByHex.addAll(st.loadFirstSeen());
+          _obStats = st.stats();
+          _obFlushTimer =
+              Timer.periodic(const Duration(seconds: 20), (_) => _flushObserved());
+          LogService.instance.add(
+              'RNS: observed cache at $observedStorePath (${_firstSeenByHex.length} known)');
+        }
+      }
 
       _localReady = true;
       } // end if (!_localReady)
@@ -3142,6 +3213,12 @@ class RnsService {
     _diskMgr = null;
     _subs = null;
     _composite = null;
+    // Persist anything still dirty, then close the observed cache.
+    _obFlushTimer?.cancel();
+    _obFlushTimer = null;
+    _flushObserved();
+    _obStore?.close();
+    _obStore = null;
     CapacityGovernor.instance.stop();
     await _server?.close();
     await _gateway?.close();

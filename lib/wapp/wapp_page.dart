@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show File;
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
@@ -80,6 +81,7 @@ import 'wapp_engine.dart';
 part '../editor/wapp_editor.dart';
 part '../editor/wapp_robot.dart';
 part 'wapp_maps.dart';
+part 'wapp_graph.dart';
 
 /// Generic wapp page — loads .ui.json screens from a wapp directory,
 /// instantiates the WASM module, and renders screens as tabs.
@@ -324,6 +326,15 @@ class _WappPageState extends State<WappPage>
   int _mapZoom = 2;
   String _tileUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
   bool _hasMap = false;
+  // Native graph state (generic `$type:"graph"` GeoUI group). The wapp pushes a
+  // {nodes,edges} snapshot via `ui.graph.set`; the host lays it out on a
+  // background isolate and paints it on a CustomPainter canvas. See wapp_graph.dart.
+  final ValueNotifier<Map<String, dynamic>?> _graphData =
+      ValueNotifier<Map<String, dynamic>?>(null);
+  // Configured bootstrap hubs [{endpoint,connected}] pushed via ui.graph.hubs,
+  // rendered by the native bootstrap-manager panel inside _GraphView.
+  final ValueNotifier<List<dynamic>?> _graphHubs =
+      ValueNotifier<List<dynamic>?>(null);
   // Pins pushed by the wapp via `ui.map.marker`, keyed by id (e.g. a
   // callsign). Rendered as an overlay by [_SlippyMap]; tapping a pin
   // dispatches a `marker_tap` command back to the wapp.
@@ -1178,6 +1189,49 @@ class _WappPageState extends State<WappPage>
           if (c != null && c.isNotEmpty) {
             Future.microtask(() { if (mounted) _sendCommand(c); });
           }
+        } else if (type == 'rns.hub.add') {
+          // Reticulum bootstrap-hub management (non-disruptive config from the
+          // reticulum wapp). Endpoint is "host:port". Async; fire-and-forget.
+          final ep = (data['endpoint'] as String? ?? '').trim();
+          if (ep.isNotEmpty) {
+            // ignore: discarded_futures
+            RnsService.instance.addBootstrap(ep);
+          }
+        } else if (type == 'rns.hub.remove') {
+          final ep = (data['endpoint'] as String? ?? '').trim();
+          if (ep.isNotEmpty) RnsService.instance.removeBootstrap(ep);
+        } else if (type == 'rns.hub.connect') {
+          final ep = (data['endpoint'] as String? ?? '').trim();
+          if (ep.isNotEmpty) {
+            // ignore: discarded_futures
+            RnsService.instance.connectBootstrap(ep);
+          }
+        } else if (type == 'rns.hub.disconnect') {
+          final ep = (data['endpoint'] as String? ?? '').trim();
+          final i = ep.lastIndexOf(':');
+          if (i > 0) {
+            final host = ep.substring(0, i).trim();
+            final port = int.tryParse(ep.substring(i + 1).trim()) ?? 4242;
+            if (host.isNotEmpty) {
+              RnsService.instance.disconnectUplink(host, port);
+            }
+          }
+        } else if (type == 'rns.passive.set') {
+          RnsService.instance.setPassive(data['value'] == true);
+        } else if (type == 'ui.graph.set') {
+          // The wapp pushes a {nodes,edges} snapshot for the native `$type:
+          // "graph"` widget. We just hand it to the ValueNotifier the _GraphView
+          // listens to; it diffs the topology and (re)lays-out off the main
+          // thread only when the node/edge set actually changed.
+          final payload = data['payload'];
+          if (payload is Map) {
+            _graphData.value = payload.cast<String, dynamic>();
+          }
+        } else if (type == 'ui.graph.hubs') {
+          // The wapp forwards the raw bootstrap-hub list for the native
+          // bootstrap-manager panel.
+          final payload = data['payload'];
+          if (payload is List) _graphHubs.value = payload;
         } else if (type == 'ui.chat.append') {
           // Append one message to a $type:"chat" field's buffer. Each
           // message is a map {dir:'in'|'out', from, text, time}. Backing
@@ -2775,6 +2829,8 @@ class _WappPageState extends State<WappPage>
     }
     _searchCtl.clear();
     _videoCurrentPath = null;
+    _graphData.dispose();
+    _graphHubs.dispose();
     _engine.dispose();
     // Page closed: restart the background service if the user enabled autostart
     // for this wapp (so it keeps receiving once its engine ref is released).
@@ -3212,6 +3268,14 @@ class _WappPageState extends State<WappPage>
         .where((c) => c.keyword == 'group' && c.type == 'map')
         .firstOrNull;
     if (mapGroup != null) return _buildMapScreen(screen, mapGroup);
+
+    // Native graph group — a generic `$type:"graph"` node-link surface, drawn
+    // full-bleed on a CustomPainter canvas with layout computed off the main
+    // thread. Mirrors the map full-bleed branch.
+    final graphGroup = screen.children
+        .where((c) => c.keyword == 'group' && c.type == 'graph')
+        .firstOrNull;
+    if (graphGroup != null) return _buildGraphScreen(screen, graphGroup);
 
     // Conversations (generic, data-driven messenger primitive) — host renders
     // the contact list + chat view from the wapp-pushed ConversationStore.

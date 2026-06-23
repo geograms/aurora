@@ -1,0 +1,37 @@
+name: test
+
+# Runs the Aurora unit tests on every push/PR (the content-transfer, folder,
+# media-archive and update suites). Aurora depends on reticulum-dart through a
+# path dependency (../reticulum-dart), so we check that repo out as a sibling
+# before resolving packages.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aurora
+        uses: actions/checkout@v4
+        with:
+          path: aurora
+
+      - name: Checkout reticulum-dart (path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: geograms/reticulum-dart
+          path: reticulum-dart
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Test
+        working-directory: aurora
+        run: |
+          flutter pub get
+          flutter test

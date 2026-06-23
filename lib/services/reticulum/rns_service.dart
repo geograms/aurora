@@ -210,6 +210,9 @@ class RnsService {
 
   bool _up = false;
   bool _starting = false;
+  // Wall-clock the node first came up this run; drives the advertised uptime
+  // (relay announce + /api/rns/status) peers use to rank stable nodes.
+  DateTime? _startedAt;
   // Count of verified inbound announces — proves a link really speaks Reticulum.
   int _rxAnnounces = 0;
   // callsign -> that peer's chat dest hex (learned from chat announces), for
@@ -488,9 +491,19 @@ class RnsService {
     }
   }
 
+  /// Seconds this node's Reticulum stack has been up this run (0 when down).
+  /// Advertised on the wire (relay announce) and the API so peers can prefer
+  /// stable, long-running nodes (likely indexers) when warm-starting discovery.
+  int get uptimeSeconds {
+    final t = _startedAt;
+    if (!_up || t == null) return 0;
+    return DateTime.now().difference(t).inSeconds;
+  }
+
   Map<String, dynamic> status() => {
         'up': _up,
         'starting': _starting,
+        'uptimeSeconds': uptimeSeconds,
         'mode': _mode,
         'identity': identityHex,
         'dest': destHex,
@@ -569,6 +582,7 @@ class RnsService {
               n.services.any((s) => s != 'lxmf' && s != 'lxmf-prop') ? 1 : 0,
           'hops': n.hops,
           'via': n.via,
+          'uptime': n.uptimeSeconds,
           'firstSeen': n.firstSeenMs,
           'lastSeen': n.lastSeenMs,
         });
@@ -577,6 +591,40 @@ class RnsService {
       _obDirty.clear();
     }
     _obStats = st.stats();
+  }
+
+  /// Warm-start discovery from the persistent observed-node cache: seed the DHT
+  /// routing table from the public keys of known geogram peers (so resolve /
+  /// publish act immediately), then pull transport paths to the steadiest peers
+  /// (highest advertised uptime → likely indexers) FIRST, so the first folder /
+  /// file lookup is routable within seconds instead of waiting minutes for live
+  /// announces to re-converge. Runs once on boot, after the node is up.
+  Future<void> _warmStartFromCache() async {
+    final st = _obStore;
+    final f = _files;
+    if (st == null || f == null || !_up) return;
+    final rows = st.topGeogramPeers(limit: 64);
+    if (rows.isEmpty) return;
+    final pubs = <Uint8List>[];
+    for (final r in rows) {
+      final pub = _bytesFromHex((r['pubkey'] as String?) ?? '');
+      if (pub != null && pub.length == 64) pubs.add(pub);
+    }
+    final seeded = f.seedPeers(pubs);
+    // Rows are already ordered uptime-desc, last-seen-desc. Path-request the top
+    // few (the steadiest) — a cheap PULL their hub answers — so they're reachable
+    // first; don't flood the mesh with a request for every cached node.
+    var pathed = 0;
+    for (final r in rows.take(8)) {
+      final pub = _bytesFromHex((r['pubkey'] as String?) ?? '');
+      if (pub == null || pub.length != 64) continue;
+      try {
+        f.requestPeerPaths(RnsIdentity.fromPublicKey(pub));
+        pathed++;
+      } catch (_) {/* skip a malformed key */}
+    }
+    LogService.instance.add(
+        'RNS: warm-start seeded $seeded cached peer(s), path-requested top $pathed');
   }
 
   // (serviceLabel, app, aspects) tuples. A destination hash binds an identity to
@@ -643,6 +691,11 @@ class RnsService {
         if (cs.isNotEmpty && cs.length <= 20 && !cs.contains(' ')) {
           n.callsign = cs;
         }
+      } else if (svc == 'relay') {
+        // The relay announce carries the peer's advertised uptime — capture it so
+        // the cache can rank stable nodes first when warm-starting next boot.
+        final ra = RelayAnnouncement.decode(ann.appData);
+        if (ra != null && ra.uptimeSeconds > 0) n.uptimeSeconds = ra.uptimeSeconds;
       }
     }
     // Mark for the next periodic flush to disk.
@@ -1124,6 +1177,7 @@ class RnsService {
         _relayRole = (p?.hostEnabled ?? true)
             ? RelayRoleManager(
                 selfPubkey: selfPubHex,
+                uptimeProvider: () => uptimeSeconds,
                 onChanged: (_) => _announceRelayDest(),
               )
             : null;
@@ -1377,6 +1431,7 @@ class RnsService {
       }
 
       _up = true;
+      _startedAt ??= DateTime.now();
       await announce(announceName);
       await _announceServiceDests();
 
@@ -1404,6 +1459,11 @@ class RnsService {
 
       LogService.instance
           .add('RNS: node up mode=$mode id=${_id!.hexHash} dest=$destHex');
+      // Warm-start discovery from the persistent peer cache: seed the DHT overlay
+      // and pull paths to the steadiest known geogram nodes first, so folder/file
+      // discovery works within seconds instead of waiting minutes for live
+      // announces to converge.
+      unawaited(_warmStartFromCache());
       _scheduleAnnounce();
       _republishTimer?.cancel();
       _republishTimer = Timer.periodic(_republishEvery, (_) {
@@ -1923,6 +1983,52 @@ class RnsService {
     if (!_up) return 0;
     return _files?.publishProvider(fileHash, capacity: capacity ?? selfCapacity) ??
         0;
+  }
+
+  /// THE single content-addressed fetch path over Reticulum, used by folders /
+  /// updates / the wapp store AND APRS shared media. Given a file's [sha] (32B):
+  ///   1. return a local copy if we already hold it (instant, no network);
+  ///   2. if [fromCallsign] is set, fetch DIRECTLY from that sender (the most
+  ///      reliable cross-network path — it's exactly who referenced the file);
+  ///   3. otherwise / on miss, discover providers via the DHT and multi-source
+  ///      fetch.
+  /// The bytes are sha256-verified by the file layer (every chunk + the whole
+  /// file), then stored in the serve archive under [ext] and re-advertised (a
+  /// provider record) so this node becomes a holder others can pull from — every
+  /// downloader becomes a seeder. Returns the verified bytes, or null on failure.
+  Future<Uint8List?> fetchContentAddressed(
+    Uint8List sha, {
+    String ext = '',
+    String? fromCallsign,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    // 1) Local hit — content is addressed by sha, so a copy we hold is identical
+    // and instant. Lets a mirror answer when the owner is offline. Already a
+    // holder, so no re-seed needed.
+    final local = localFileBytes(sha);
+    if (local != null) return local;
+    if (!_up) return null;
+    Uint8List? bytes;
+    // 2) Direct from the named sender (route learned from its chat announce).
+    if (fromCallsign != null && fromCallsign.isNotEmpty) {
+      bytes = await fetchFileFromCallsign(sha, fromCallsign, timeout: timeout);
+    }
+    // 3) DHT discovery + multi-source fetch.
+    if (bytes == null || bytes.isEmpty) {
+      bytes = await dhtResolveFetch(sha, timeout: timeout);
+    }
+    if (bytes == null || bytes.isEmpty) return null;
+    _archiveAndReseed(sha, bytes, ext);
+    return bytes;
+  }
+
+  /// Store verified content-addressed [bytes] in the serve archive and advertise
+  /// ourselves as a provider so peers can fetch them from us (re-seed).
+  void _archiveAndReseed(Uint8List sha, Uint8List bytes, String ext) {
+    final src = fileServeSource;
+    if (src is MediaFileSource) src.archive.putBytes(bytes, ext);
+    // ignore: discarded_futures
+    _files?.publishProvider(sha, capacity: selfCapacity); // become a provider
   }
 
   /// This node's LXMF delivery destination hash (peers address messages here).
@@ -2671,7 +2777,11 @@ class RnsService {
     final enabled = PreferencesService.instanceSync?.hostEnabled ?? true;
     _relay!.serve = enabled; // responder on unless hosting is fully disabled
     if (enabled && _relayRole == null) {
-      _relayRole = RelayRoleManager(onChanged: (_) => _announceRelayDest());
+      _relayRole = RelayRoleManager(
+        selfPubkey: selfPubHex,
+        uptimeProvider: () => uptimeSeconds,
+        onChanged: (_) => _announceRelayDest(),
+      );
       final prof = CapacityGovernor.instance.lastProfile;
       if (prof != null) _relayRole!.applyCapacity(prof);
       _announceRelayDest();
@@ -3057,19 +3167,10 @@ class RnsService {
       {String ext = ''}) async {
     final shaB = _bytesFromHex(shaHex);
     if (shaB == null) return null;
-    // Serve a copy we already hold (mirrored / previously fetched) WITHOUT going
-    // to the network — content is addressed by sha, so a local hit is identical
-    // and instant. This is what lets a mirror answer when the owner is offline,
-    // and lets the wapp store read its index from a folder it has cached.
-    final local = localFileBytes(shaB);
-    if (local != null) return local;
-    final bytes = await _files?.resolveAndFetch(shaB);
-    if (bytes == null) return null;
-    final src = fileServeSource;
-    if (src is MediaFileSource) src.archive.putBytes(bytes, ext);
-    // ignore: discarded_futures
-    _files?.publishProvider(shaB, capacity: selfCapacity); // become a provider
-    return bytes;
+    // One content-addressed path for everything: local hit → DHT multi-source →
+    // verify → archive → re-seed. (No fromCallsign: a folder file is discovered
+    // via the DHT, not tied to a specific sender.)
+    return fetchContentAddressed(shaB, ext: ext);
   }
 
   /// Like [folderBrowse] but awaits a fresh network fetch of the folder's
@@ -3268,6 +3369,10 @@ class _ObservedNode {
   final Set<String> services = {};
   int hops = 0;
   String via = '';
+  // Last advertised uptime (seconds since the peer's RNS stack started), from
+  // its relay announce. 0 = not advertised. Drives warm-start ranking: stable
+  // (high-uptime) nodes are likely indexers and are tried first on next boot.
+  int uptimeSeconds = 0;
   // Transport-id (hex) of the relayer we reach this node through; null = direct
   // neighbour of ours. Other nodes' relayer == a hub's identity.
   String? relayerHex;

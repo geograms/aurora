@@ -128,26 +128,18 @@ Future<bool> _resolve(MediaRef ref, String? ih, MediaArchive archive,
   // arrival. Tried first because it needs no server, no LAN, and no router config.
   final shaBytes = _sha256Bytes(ref.sha256);
   if (shaBytes != null && RnsService.instance.isUp) {
-    // R1: fetch DIRECTLY from the sender (we learned its route from its chat
-    // announce). The most reliable cross-network path — no DHT, and the sender
-    // is exactly who holds the file it just referenced.
-    if (fromCallsign != null && fromCallsign.isNotEmpty) {
-      final direct = await RnsService.instance.fetchFileFromCallsign(
-          shaBytes, fromCallsign,
-          timeout: const Duration(seconds: 180));
-      if (direct != null && direct.isNotEmpty) {
-        archive.putBytes(direct, ref.ext);
-        LogService.instance.add(
-            'SharedMedia: ${ref.sha256Hex} fetched over Reticulum from $fromCallsign');
-        return true;
-      }
-    }
-    // R2: DHT discovery (works among Aurora nodes that form the overlay).
-    final bytes = await RnsService.instance.dhtResolveFetch(shaBytes);
+    // The single content-addressed RNS path: direct-from-sender (when we know the
+    // callsign), else DHT multi-source; verifies sha256, archives, and re-seeds.
+    // Shared with folders/updates/the wapp store (RnsService.fetchContentAddressed).
+    final bytes = await RnsService.instance.fetchContentAddressed(
+      shaBytes,
+      ext: ref.ext,
+      fromCallsign: fromCallsign,
+      timeout: const Duration(seconds: 180),
+    );
     if (bytes != null && bytes.isNotEmpty) {
-      archive.putBytes(bytes, ref.ext);
       LogService.instance
-          .add('SharedMedia: ${ref.sha256Hex} fetched over Reticulum (DHT)');
+          .add('SharedMedia: ${ref.sha256Hex} fetched over Reticulum');
       return true;
     }
   }

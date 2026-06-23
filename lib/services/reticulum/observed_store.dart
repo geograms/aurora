@@ -41,10 +41,18 @@ class ObservedStore {
           geogram    INTEGER NOT NULL DEFAULT 0,
           hops       INTEGER NOT NULL DEFAULT 0,
           via        TEXT,
+          uptime     INTEGER NOT NULL DEFAULT 0,
           first_seen INTEGER NOT NULL,
           last_seen  INTEGER NOT NULL
         );
       ''');
+      // Migration: add the uptime column to a pre-existing DB (older schema).
+      final cols = {
+        for (final r in db.select('PRAGMA table_info(nodes)')) r['name'] as String
+      };
+      if (!cols.contains('uptime')) {
+        db.execute('ALTER TABLE nodes ADD COLUMN uptime INTEGER NOT NULL DEFAULT 0;');
+      }
       db.execute('CREATE INDEX IF NOT EXISTS idx_nodes_geo ON nodes(geogram);');
       db.execute('CREATE INDEX IF NOT EXISTS idx_nodes_last ON nodes(last_seen);');
       _db = db;
@@ -81,8 +89,8 @@ class ObservedStore {
     try {
       db.execute('BEGIN');
       stmt = db.prepare('''
-        INSERT INTO nodes(id,pubkey,callsign,services,geogram,hops,via,first_seen,last_seen)
-        VALUES(?,?,?,?,?,?,?,?,?)
+        INSERT INTO nodes(id,pubkey,callsign,services,geogram,hops,via,uptime,first_seen,last_seen)
+        VALUES(?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
           pubkey=excluded.pubkey,
           callsign=COALESCE(NULLIF(excluded.callsign,''), nodes.callsign),
@@ -90,6 +98,7 @@ class ObservedStore {
           geogram=MAX(nodes.geogram, excluded.geogram),
           hops=excluded.hops,
           via=excluded.via,
+          uptime=CASE WHEN excluded.uptime>0 THEN excluded.uptime ELSE nodes.uptime END,
           last_seen=excluded.last_seen
       ''');
       for (final r in rows) {
@@ -101,6 +110,7 @@ class ObservedStore {
           r['geogram'] ?? 0,
           r['hops'] ?? 0,
           r['via'] ?? '',
+          r['uptime'] ?? 0,
           r['firstSeen'] ?? 0,
           r['lastSeen'] ?? 0,
         ]);
@@ -113,6 +123,39 @@ class ObservedStore {
       LogService.instance.add('ObservedStore: upsert failed: $e');
     } finally {
       stmt?.dispose();
+    }
+  }
+
+  /// The best-known geogram peers to warm-start discovery from: those running
+  /// geogram software with a usable public key, ranked by advertised uptime
+  /// (stable nodes — likely indexers — first) then recency. Each row carries
+  /// {id, pubkey, services, uptime, lastSeen}. Used on boot to seed the DHT
+  /// routing table + relay directory and path-request/ping the steadiest peers
+  /// first, instead of waiting minutes for live announces to converge.
+  List<Map<String, Object?>> topGeogramPeers({int limit = 64}) {
+    final db = _db;
+    if (db == null) return const [];
+    try {
+      final rows = db.select('''
+        SELECT id, pubkey, services, uptime, last_seen
+        FROM nodes
+        WHERE geogram=1 AND pubkey IS NOT NULL AND pubkey<>''
+        ORDER BY uptime DESC, last_seen DESC
+        LIMIT ?
+      ''', [limit]);
+      return [
+        for (final r in rows)
+          {
+            'id': r['id'],
+            'pubkey': r['pubkey'],
+            'services': r['services'],
+            'uptime': r['uptime'],
+            'lastSeen': r['last_seen'],
+          }
+      ];
+    } catch (e) {
+      LogService.instance.add('ObservedStore: topGeogramPeers failed: $e');
+      return const [];
     }
   }
 

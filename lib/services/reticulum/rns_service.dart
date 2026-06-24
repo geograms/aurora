@@ -1224,7 +1224,10 @@ class RnsService {
             },
             resolveProviders: (key) async =>
                 (await _files?.resolveProviders(key)) ?? const [],
-            queryProvider: (p, f) async => (await _relay?.query(p, f)) ?? const [],
+            queryProvider: (p, f) async =>
+                (await _relay?.query(p, f,
+                        timeout: const Duration(seconds: 12))) ??
+                    const [],
             log: (m) => LogService.instance.add('RNS/folders: $m'),
           );
           _folders = FolderService(
@@ -2055,7 +2058,18 @@ class RnsService {
   /// ourselves as a provider so peers can fetch them from us (re-seed).
   void _archiveAndReseed(Uint8List sha, Uint8List bytes, String ext) {
     final src = fileServeSource;
-    if (src is MediaFileSource) src.archive.putBytes(bytes, ext);
+    if (src is MediaFileSource) {
+      try {
+        src.archive.putBytes(bytes, ext);
+      } catch (e) {
+        // A missing/non-media extension (e.g. an empty ext) must NOT discard a
+        // file we already fetched successfully — the caller still gets the
+        // bytes. We just can't honestly re-seed what we couldn't store, so skip
+        // advertising ourselves as a provider in that case.
+        LogService.instance.add('RNS/files: archive skipped for ${_hex(sha).substring(0, 8)} ($e)');
+        return;
+      }
+    }
     // ignore: discarded_futures
     _files?.publishProvider(sha, capacity: selfCapacity); // become a provider
   }
@@ -3193,13 +3207,13 @@ class RnsService {
   /// which verifies sha256(bytes)==shaHex and writes the binary itself).
   /// Returns null on failure.
   Future<Uint8List?> folderFetchBytes(String folderId, String shaHex,
-      {String ext = ''}) async {
+      {String ext = '', Duration timeout = const Duration(seconds: 30)}) async {
     final shaB = _bytesFromHex(shaHex);
     if (shaB == null) return null;
     // One content-addressed path for everything: local hit → DHT multi-source →
     // verify → archive → re-seed. (No fromCallsign: a folder file is discovered
     // via the DHT, not tied to a specific sender.)
-    return fetchContentAddressed(shaB, ext: ext);
+    return fetchContentAddressed(shaB, ext: ext, timeout: timeout);
   }
 
   /// Like [folderBrowse] but awaits a fresh network fetch of the folder's

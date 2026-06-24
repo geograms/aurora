@@ -30,6 +30,9 @@ import 'log_service.dart';
 import 'reticulum/rns_service.dart';
 import 'preferences_service.dart';
 import 'torrent_service.dart';
+import 'update_service.dart';
+import 'update_models.dart';
+import 'update_native.dart';
 
 class RemoteApiService {
   RemoteApiService._();
@@ -560,6 +563,76 @@ class RemoteApiService {
       if (req.method == 'GET' && path == '/api/rns/folder/owned') {
         return _json(res, {'owned': RnsService.instance.ownedDiskFolders()});
       }
+      // ── Update Center (drives the real UpdateService) ──────────────────────
+      if (req.method == 'POST' && path == '/api/update/config') {
+        // {"betaFolder":"<npub|hex>","beta":true} — point the beta channel at a
+        // folder and enable it (self-hoster / test config).
+        final data = await _body(req);
+        final u = UpdateService.instance;
+        await u.load();
+        if (data['betaFolder'] != null) {
+          await u.setBetaFolder('${data['betaFolder']}'.trim());
+        }
+        if (data['stableFolder'] != null) {
+          await u.setStableFolder('${data['stableFolder']}'.trim());
+        }
+        if (data['beta'] != null) await u.setBetaEnabled(data['beta'] == true);
+        return _json(res, {
+          'ok': true,
+          'betaFolder': u.betaFolder,
+          'betaEnabled': u.betaEnabled,
+          'currentVersion': u.currentVersion,
+        });
+      }
+      if (req.method == 'POST' && path == '/api/update/check') {
+        // Browse the channel folders over Reticulum and report the newest
+        // release + whether it is newer than what's running (the auto-discovery
+        // step the Update Center runs on open / at startup).
+        final u = UpdateService.instance;
+        await u.load();
+        await u.checkForUpdates();
+        final sel = u.selectedRelease;
+        return _json(res, {
+          'ok': true,
+          'currentVersion': u.currentVersion,
+          'status': u.status.value.name,
+          'betaEnabled': u.betaEnabled,
+          'beta': _releaseJson(u.beta.value),
+          'stable': _releaseJson(u.stable.value),
+          'selected': _releaseJson(sel),
+          'updateAvailable': u.isNewer(sel),
+          'error': u.error,
+        });
+      }
+      if (req.method == 'POST' && path == '/api/update/download') {
+        // Fetch the selected release's artifact over Reticulum, verify sha,
+        // write to disk. Returns once downloaded (or on error).
+        final u = UpdateService.instance;
+        final sel = u.selectedRelease;
+        if (sel == null || !u.isNewer(sel)) {
+          return _json(res, {'ok': false, 'error': 'no newer release selected'});
+        }
+        final ok = await u.download(sel);
+        return _json(res, {
+          'ok': ok,
+          'version': sel.version,
+          'status': u.status.value.name,
+          'downloadedPath': u.downloadedPath,
+          'canInstall': await UpdateNative.canInstall(),
+          'error': u.error,
+        });
+      }
+      if (req.method == 'GET' && path == '/api/update/status') {
+        final u = UpdateService.instance;
+        return _json(res, {
+          'currentVersion': u.currentVersion,
+          'status': u.status.value.name,
+          'progress': u.progress.value,
+          'downloadedPath': u.downloadedPath,
+          'canInstall': await UpdateNative.canInstall(),
+          'error': u.error,
+        });
+      }
       if (req.method == 'GET' && path == '/api/ble/status') {
         return _json(res, BleService.instance.gattStatus());
       }
@@ -702,6 +775,16 @@ class RemoteApiService {
     res.write(const JsonEncoder.withIndent('  ').convert(data));
     await res.close();
   }
+
+  Map<String, dynamic>? _releaseJson(ReleaseInfo? r) => r == null
+      ? null
+      : {
+          'version': r.version,
+          'prerelease': r.isPrerelease,
+          'assets': [
+            for (final a in r.assets) {'name': a.name, 'sha': a.url, 'size': a.size},
+          ],
+        };
 
   Future<Map<String, dynamic>> _status() async {
     final p = ProfileService.instance.activeProfile;

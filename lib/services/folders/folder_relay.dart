@@ -48,14 +48,22 @@ class FolderRelay {
     if (key != null) {
       try {
         final providers = await resolveProviders(key);
-        var used = 0;
-        for (final p in providers) {
-          if (used++ >= maxProviders) break;
-          final events = await queryProvider(p, f);
-          for (final e in events) {
-            store.put(e); // verifies + dedups + applies replaceable
-          }
-        }
+        // Query providers CONCURRENTLY, not one-after-another. A single stale or
+        // offline provider (e.g. a node that used to host this folder but has
+        // since gone away) otherwise blocks discovery for its whole relay-query
+        // timeout, and a few stacked serially run to minutes — the cause of the
+        // multi-minute "check for updates" hang. In parallel the slowest dead
+        // provider costs one timeout, not the sum, and a live holder's events
+        // still merge in. Each provider is isolated so one failure can't sink
+        // the others.
+        await Future.wait(providers.take(maxProviders).map((p) async {
+          try {
+            final events = await queryProvider(p, f);
+            for (final e in events) {
+              store.put(e); // verifies + dedups + applies replaceable
+            }
+          } catch (_) {/* skip an unreachable provider; others still answer */}
+        }));
       } catch (e) {
         log?.call('folder discovery query failed: $e');
       }

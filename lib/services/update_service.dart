@@ -75,6 +75,7 @@ class UpdateService {
 
   String get currentVersion => kAppVersion;
   bool get supported => UpdateNative.supported;
+  String? get downloadedPath => _downloadedPath;
 
   Future<void> _prefs(void Function(SharedPreferences p) fn) async {
     final p = await SharedPreferences.getInstance();
@@ -210,7 +211,13 @@ class UpdateService {
     UpdateNative.serviceStart('Downloading Aurora ${release.version}');
     try {
       final shaHex = asset.url.toLowerCase();
-      final bytes = await RnsService.instance.folderFetchBytes(folder, shaHex);
+      // Pass the artifact's extension (e.g. "apk") so the content-addressed
+      // fetch can archive + re-seed it. Without it the archive step rejected the
+      // empty extension and discarded the already-fetched bytes.
+      final dot = asset.name.lastIndexOf('.');
+      final ext = dot >= 0 ? asset.name.substring(dot + 1) : '';
+      final bytes = await RnsService.instance.folderFetchBytes(folder, shaHex,
+          ext: ext, timeout: const Duration(minutes: 5));
       if (bytes == null) {
         error = 'Could not fetch the update over Reticulum (no provider yet)';
         status.value = UpdateStatus.error;

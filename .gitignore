@@ -50,3 +50,7 @@ esp32/rns_ble5/src/igate_secrets.h
 
 # Reference RNS clone for protocol comparison (re-cloneable; has its own .git)
 archive/
+
+# Local Reticulum update-host test folder (.folder.json holds the master
+# private key — must never be committed)
+updates-host/

@@ -1037,6 +1037,10 @@ class RnsService {
         // which dropped it (the silent device-to-device link failure).
         nextHopForDest: (h) => _transport?.pathFor(h)?.nextHop,
         hasPathForDest: (h) => _transport?.hasPath(h) ?? false,
+        // Link MTU discovery: offer the next-hop interface's HW MTU so file
+        // links over TCP negotiate large resource parts (much higher throughput).
+        nextHopMtuForDest: (h) =>
+            _transport?.nextHopInterfaceHwMtu(h) ?? kRnsMtu,
         // Pull a path to a peer we know by identity but have no cached route to
         // (its announce was never flooded to us) so DHT resolve + file fetch
         // links are routable — the fix that makes device-to-device folder
@@ -1762,7 +1766,12 @@ class RnsService {
     // Link / file-transfer packets (link requests + link-addressed data) are
     // handled by the files node, not the announce path.
     if (p.packetType != RnsPacketType.announce) {
-      if (await _files?.handlePacket(p) ?? false) return;
+      // Pass the arrival interface's HW MTU so the responder caps the link MTU
+      // it confirms to what this return path can actually carry (MTU discovery).
+      final arrivalMtu = _transport?.hwMtuForVia(via) ?? kRnsMtu;
+      if (await _files?.handlePacket(p, arrivalHwMtu: arrivalMtu) ?? false) {
+        return;
+      }
       if (await _lxmf?.handlePacket(p) ?? false) return;
       if (await _relay?.handlePacket(p) ?? false) return;
       if (_rvInboundDests.isNotEmpty && await _handleRvInbound(p)) return;

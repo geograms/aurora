@@ -1029,6 +1029,17 @@ class RnsService {
         send: (raw) => _transport?.sendLinkAware(raw),
         log: (m) => LogService.instance.add('RNS/files: $m'),
         enableDht: true,
+        // Run DHT RPC links over the CHAT destination, not the dedicated
+        // geogram/dht dest. Public hubs rate-limit announces and routinely drop
+        // the geogram/dht announce, so peers have no transport path to each
+        // other's dht dest and STOREs never land (replication failed; resolve
+        // only worked because the holder kept its own record + k=96). The chat
+        // announce is the most reliably propagated one, so routing RPC there
+        // makes any chat-reachable peer DHT-reachable. The Kademlia node id is
+        // still derived from geogram/dht locally and is unaffected. Updated nodes
+        // also dual-accept on the legacy dht dest for the mixed-fleet migration.
+        rpcApp: _app, // 'geogram'
+        rpcAspects: _aspects, // ['chat']
         nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
         // Per-destination routing (Reticulum routes per-dest, not per-identity):
         // the files/dht dests of a node may be reached via different hubs, so the

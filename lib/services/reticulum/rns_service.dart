@@ -516,6 +516,8 @@ class RnsService {
         'interfaces': _ifaces.length + (_server != null ? 1 : 0),
         'inbox': _inbox.length,
         'provided': _files?.providedCount ?? 0,
+        'dhtStored': _files?.dhtStoredKeys ?? 0,
+        'dhtReplicas': _files?.dhtReplicasStored ?? 0,
         'dhtPeers': _files?.dhtRoutingSize ?? 0,
         'dhtPeerIds': _files?.dhtPeerHexes ?? const <String>[],
         'lxmfDest': lxmfDeliveryHex,

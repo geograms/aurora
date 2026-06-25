@@ -2960,6 +2960,10 @@ class RnsService {
     for (final ev in collected) {
       final id = ev.id;
       if (id == null || !seen.add(id)) continue;
+      // Verify the kind-4 BIP-340 signature: the author claim (ev.pubkey, which
+      // we map to a callsign + show as verified) is only trustworthy if signed.
+      // Drop forgeries rather than deliver them.
+      if (!ev.verify()) continue;
       final authorX = _hexToBytes(ev.pubkey);
       if (authorX == null || authorX.length != 32) continue;
       final pt = AprxSign.nip04Decrypt(d, authorX, ev.content);

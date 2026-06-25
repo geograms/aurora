@@ -56,6 +56,7 @@ import '../../profile/profile_service.dart';
 import '../preferences_service.dart';
 import '../../util/nostr_crypto.dart';
 import '../../util/nostr_event.dart';
+import '../../util/aprx_sign.dart';
 import 'lxmf/lxmf.dart'
     show kLxmfApp, kLxmfDeliveryAspects, kLxmfPropagationAspects;
 import 'lxmf/lxmf_message.dart';
@@ -1227,6 +1228,10 @@ class RnsService {
           // monthly note / storage caps. Text notes only here (isMedia false).
           admitEvent: (ev, tier) {
             if (tier == Tier.self.index) return null;
+            // kind-4 (NIP-04 DM) is a small, transient store-and-forward mailbox
+            // item — admit it regardless of the author's stranger quota; the
+            // recipient deletes it (recipient-authorized DROP) once received.
+            if (ev.kind == NostrEventKind.encryptedDirectMessage) return null;
             final store = _relayStore;
             if (store == null) return null;
             final u = store.hostUsage();
@@ -2826,6 +2831,183 @@ class RnsService {
 
   /// Known peer indexers (for diagnostics / UI).
   int get relayIndexerCount => _relayDir.indexers().length;
+
+  // ── NOSTR-relay store-and-forward DM backup (kind-4 NIP-04) ───────────────
+  // The APRS wapp uses these (via hal_relay_*) to back up 1:1 messages to up to
+  // 3 NOSTR relays reachable over Reticulum: publish each message as a kind-4
+  // encrypted DM (BIP-340-signed by the profile key, NIP-04 content), poll the
+  // pre-agreed relays for DMs addressed to us, and delete them once received.
+
+  /// Up to [max] reachable relays (their RNS identity hashes, hex) that store +
+  /// serve events — i.e. peers we've heard announce a relay role (they run with
+  /// hosting on, so serve=true). Indexers are preferred, then any relay entry.
+  List<String> relayReachable({int max = 3}) {
+    final out = <String>[];
+    final seen = <String>{};
+    void take(Iterable<RelayEntry> es) {
+      for (final e in es) {
+        if (out.length >= max) return;
+        final h = e.identity.hexHash;
+        if (seen.add(h)) out.add(h);
+      }
+    }
+    take(_relayDir.indexers());
+    if (out.length < max) take(_relayDir.entries());
+    return out;
+  }
+
+  RnsIdentity? _relayIdentity(String hexHash) {
+    for (final e in _relayDir.entries()) {
+      if (e.identity.hexHash == hexHash) return e.identity;
+    }
+    return null;
+  }
+
+  BigInt _scalarFromHex(String hex) {
+    var d = BigInt.zero;
+    final b = _hexToBytes(hex);
+    if (b == null) return d;
+    for (final x in b) {
+      d = (d << 8) | BigInt.from(x);
+    }
+    return d;
+  }
+
+  /// Decode a base64url (no-pad) x-only pubkey — the wapp's `hal_identity_pubkey`
+  /// / pk-store format — to raw bytes. Returns null on error.
+  Uint8List? _b64urlToBytes(String s) {
+    try {
+      final pad = (4 - s.length % 4) % 4;
+      return base64Url.decode(s + ('=' * pad));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Publish a kind-4 (NIP-04) DM of [plaintext] to recipient [recipientNpubB64]
+  /// (base64url x-only pubkey, the wapp's pk-store format), signed by the active
+  /// profile key, to each relay in [relayDestsHex] (+ stored locally). [msgId] is
+  /// carried in a `d` tag so the recipient can dedup the relay copy against the
+  /// directly-delivered copy. Returns the event id, or null.
+  Future<String?> relayDmSend(String recipientNpubB64, String plaintext,
+      {required List<String> relayDestsHex, String msgId = ''}) async {
+    final pub = selfPubHex;
+    final privHex = _profilePrivHex();
+    if (pub == null || privHex == null) return null;
+    final rpub = _b64urlToBytes(recipientNpubB64);
+    if (rpub == null || rpub.length != 32) return null;
+    final recipientPubHex = _hex(rpub);
+    final content = AprxSign.nip04Encrypt(
+        _scalarFromHex(privHex), rpub, utf8.encode(plaintext));
+    if (content == null) return null;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: NostrEventKind.encryptedDirectMessage,
+      tags: [
+        ['p', recipientPubHex.toLowerCase()],
+        if (msgId.isNotEmpty) ['d', msgId],
+      ],
+      content: content,
+    );
+    try {
+      ev.sign(privHex);
+    } catch (e) {
+      LogService.instance.add('RNS/relay: DM sign failed: $e');
+      return null;
+    }
+    await relayPublish(ev.toJson()); // local store + best-indexer fan-out
+    for (final hex in relayDestsHex) {
+      final id = _relayIdentity(hex);
+      if (id != null && _relay != null) {
+        // ignore: discarded_futures
+        _relay!.publish(id, ev);
+      }
+    }
+    return ev.id;
+  }
+
+  /// Fetch kind-4 DMs addressed to us (p-tag == our pubkey) with created_at >=
+  /// [sinceSec] from [relayDestsHex] (+ the local store), decrypt them with the
+  /// profile key, and return `[{id, from(hex), ts, text, mid}]` (deduped by id).
+  Future<List<Map<String, dynamic>>> relayDmFetch(int sinceSec,
+      {required List<String> relayDestsHex}) async {
+    final pub = selfPubHex;
+    final privHex = _profilePrivHex();
+    if (pub == null || privHex == null) return const [];
+    final d = _scalarFromHex(privHex);
+    final filter = NostrFilter(
+      kinds: [NostrEventKind.encryptedDirectMessage],
+      tags: {
+        'p': [pub]
+      },
+      since: sinceSec,
+      limit: 200,
+    );
+    final collected = <NostrEvent>[];
+    for (final hex in relayDestsHex) {
+      final id = _relayIdentity(hex);
+      if (id != null && _relay != null) {
+        try {
+          collected.addAll(await _relay!
+              .query(id, filter, timeout: const Duration(seconds: 12)));
+        } catch (_) {}
+      }
+    }
+    collected.addAll(_relayStore?.query(filter) ?? const []);
+    final seen = <String>{};
+    final out = <Map<String, dynamic>>[];
+    for (final ev in collected) {
+      final id = ev.id;
+      if (id == null || !seen.add(id)) continue;
+      final authorX = _hexToBytes(ev.pubkey);
+      if (authorX == null || authorX.length != 32) continue;
+      final pt = AprxSign.nip04Decrypt(d, authorX, ev.content);
+      if (pt == null) continue;
+      var mid = '';
+      for (final t in ev.tags) {
+        if (t.length >= 2 && t[0] == 'd') mid = t[1];
+      }
+      out.add({
+        'id': id,
+        // base64url (the wapp's pk-store format) so the wapp can map author→callsign
+        'from': base64Url.encode(authorX).replaceAll('=', ''),
+        'ts': ev.createdAt,
+        'text': utf8.decode(pt, allowMalformed: true),
+        'mid': mid,
+      });
+    }
+    return out;
+  }
+
+  /// Recipient-authorized delete of our received DMs [ids] from [relayDestsHex]
+  /// (+ the local store). Signs sha256(ids.join(',')) with the profile key so a
+  /// relay can verify we're the p-tagged recipient. Returns the count dropped.
+  Future<int> relayDmDrop(List<String> ids,
+      {required List<String> relayDestsHex}) async {
+    final pub = selfPubHex;
+    final privHex = _profilePrivHex();
+    if (pub == null || privHex == null || ids.isEmpty) return 0;
+    final digest = crypto.sha256.convert(utf8.encode(ids.join(','))).bytes;
+    final msgHex = _hex(Uint8List.fromList(digest));
+    final String sig;
+    try {
+      sig = NostrCrypto.schnorrSign(msgHex, privHex);
+    } catch (_) {
+      return 0;
+    }
+    _relayStore?.dropForRecipient(ids, pub); // local copy
+    var n = 0;
+    for (final hex in relayDestsHex) {
+      final id = _relayIdentity(hex);
+      if (id != null && _relay != null) {
+        try {
+          n += await _relay!.dropForRecipient(id, ids, pub, sig);
+        } catch (_) {}
+      }
+    }
+    return n;
+  }
 
   // ── Store-and-forward follow set (NOSTR-follow tier) ──────────────────────
   /// Mark [key] (hex / npub / base64url pubkey) as followed — its hosted notes

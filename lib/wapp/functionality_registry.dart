@@ -252,6 +252,32 @@ class FunctionalityRegistry {
         ParamDef('filter', 'string', 'JSON {service,geogramOnly,search} (empty = none)'),
       ], ReturnDef('int', 'Bytes written, negated required size if too small')),
     ]),
+    'hal.relay': FunctionalityDef('hal.relay',
+        'NOSTR-relay store-and-forward DM backup (kind-4 over Reticulum)', [
+      EndpointDef('hal_relay_reachable',
+          'Up to 3 reachable relay identity hashes (JSON array)', [],
+          ReturnDef('uint32', 'Bytes written, 0 if none/too small')),
+      EndpointDef('hal_relay_dm_send',
+          'Publish a kind-4 NIP-04 DM to relays (signed by the profile key)', [
+        ParamDef('npub', 'string', 'recipient pubkey (base64url)'),
+        ParamDef('text', 'string', 'plaintext'),
+        ParamDef('relays', 'string', 'JSON array of relay hashes'),
+        ParamDef('mid', 'string', 'dedup message id'),
+      ], ReturnDef('int', '1 if queued, -1 on error')),
+      EndpointDef('hal_relay_dm_fetch',
+          'Trigger an async fetch of DMs addressed to us from the given relays', [
+        ParamDef('since', 'uint32', 'created_at lower bound (unix seconds)'),
+        ParamDef('relays', 'string', 'JSON array of relay hashes'),
+      ], ReturnDef('int', '1 if queued')),
+      EndpointDef('hal_relay_dm_recv',
+          'Pop next fetched DM JSON {id,from,ts,text,mid}', [],
+          ReturnDef('uint32', 'Bytes written, 0 if none')),
+      EndpointDef('hal_relay_dm_drop',
+          'Recipient-authorized delete of received DMs from relays', [
+        ParamDef('ids', 'string', 'JSON array of event ids'),
+        ParamDef('relays', 'string', 'JSON array of relay hashes'),
+      ], ReturnDef('int', '1 if queued')),
+    ]),
     'hal.contacts': FunctionalityDef(
         'hal.contacts', 'Known people (reusable contact picker source)', [
       EndpointDef('hal_contacts_query', 'List known contacts (APRS-seen + follows)', [

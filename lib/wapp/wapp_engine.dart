@@ -256,6 +256,9 @@ class WappEngine {
   // Local staging buffer for inbound RNS datagrams (JSON envelopes), drained from
   // RnsService one datagram at a time to give hal_rns_available/recv semantics.
   final List<String> _rnsRx = [];
+  // Staging buffer for NOSTR-relay DMs fetched by hal_relay_dm_fetch (async),
+  // drained one JSON entry at a time by hal_relay_dm_recv.
+  final List<String> _relayDmRx = [];
 
   // hal_socket_*_sync state — blocking sockets for synchronous test code
   // (the wasm test runner can't await async I/O). Keyed by handle.
@@ -2448,6 +2451,93 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // ── NOSTR-relay DM store-and-forward backup HAL ──────────────────────────
+    // Lets a wapp back up 1:1 messages to up to 3 NOSTR relays reachable over
+    // Reticulum: publish each as a kind-4 (NIP-04) DM signed by the profile key,
+    // poll the pre-agreed relays for DMs addressed to us, and delete them once
+    // received. The host owns the profile key (sign/encrypt/decrypt); the wapp
+    // passes the recipient npub (base64url) + plaintext.
+    List<String> jsonStrList(String s) {
+      try {
+        final v = jsonDecode(s);
+        if (v is List) return [for (final e in v) e.toString()];
+      } catch (_) {}
+      return const [];
+    }
+
+    // Reachable relays (RNS identity hashes hex) as a JSON array, up to 3.
+    final halRelayReachable = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(
+            jsonEncode(RnsService.instance.relayReachable(max: 3)));
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Publish a kind-4 DM (npub=base64url recipient, text=plaintext, relays=JSON
+    // array of relay hashes, mid=dedup id). Fire-and-forget; returns 1 if queued.
+    final halRelayDmSend = WasmFunction(
+      (int npubPtr, int npubLen, int textPtr, int textLen, int relaysPtr,
+          int relaysLen, int midPtr, int midLen) {
+        final npub = _readStr(npubPtr, npubLen);
+        final text = _readStr(textPtr, textLen);
+        if (npub.isEmpty || text.isEmpty) return -1;
+        final relays = jsonStrList(_readStr(relaysPtr, relaysLen));
+        final mid = midLen > 0 ? _readStr(midPtr, midLen) : '';
+        // ignore: discarded_futures
+        RnsService.instance
+            .relayDmSend(npub, text, relayDestsHex: relays, msgId: mid);
+        return 1;
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    // Trigger an async fetch of kind-4 DMs addressed to us (created_at >= since)
+    // from the given relays; results land on _relayDmRx for hal_relay_dm_recv.
+    final halRelayDmFetch = WasmFunction(
+      (int sinceSec, int relaysPtr, int relaysLen) {
+        final relays = jsonStrList(_readStr(relaysPtr, relaysLen));
+        RnsService.instance
+            .relayDmFetch(sinceSec, relayDestsHex: relays)
+            .then((dms) {
+          for (final m in dms) {
+            _relayDmRx.add(jsonEncode(m));
+          }
+        }).ignore();
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Pop the next fetched DM JSON {id, from(b64url), ts, text, mid}; 0 if none.
+    final halRelayDmRecv = WasmFunction(
+      (int outPtr, int outCap) {
+        if (_relayDmRx.isEmpty || outCap <= 0) return 0;
+        final bytes = utf8.encode(_relayDmRx.first);
+        _relayDmRx.removeAt(0); // pop regardless (drop oversized to avoid a stall)
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Recipient-authorized delete of received DMs [ids] from [relays]. Fire-and-
+    // forget; returns 1 if queued.
+    final halRelayDmDrop = WasmFunction(
+      (int idsPtr, int idsLen, int relaysPtr, int relaysLen) {
+        final ids = jsonStrList(_readStr(idsPtr, idsLen));
+        if (ids.isEmpty) return 0;
+        final relays = jsonStrList(_readStr(relaysPtr, relaysLen));
+        // ignore: discarded_futures
+        RnsService.instance.relayDmDrop(ids, relayDestsHex: relays);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // ── Reticulum visualization/management HAL (read-only) ───────────────────
     // These expose the node's observed network + status + bootstrap hubs as JSON
     // so the "reticulum" wapp can render an interactive graph. Config (add/remove/
@@ -2690,6 +2780,11 @@ class WappEngine {
       WasmImport('hal', 'rns_rv_send', halRnsRvSend),
       WasmImport('hal', 'rns_available', halRnsAvailable),
       WasmImport('hal', 'rns_recv', halRnsRecv),
+      WasmImport('hal', 'relay_reachable', halRelayReachable),
+      WasmImport('hal', 'relay_dm_send', halRelayDmSend),
+      WasmImport('hal', 'relay_dm_fetch', halRelayDmFetch),
+      WasmImport('hal', 'relay_dm_recv', halRelayDmRecv),
+      WasmImport('hal', 'relay_dm_drop', halRelayDmDrop),
       WasmImport('hal', 'rns_status', halRnsStatus),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),

@@ -398,6 +398,12 @@ class _ConversationsFieldState extends State<ConversationsField> {
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600)),
                           ),
+                        if (it.private)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 6),
+                            child: Icon(Icons.lock,
+                                size: 13, color: ChatPalette.accent),
+                          ),
                         if (it.muted)
                           Padding(
                             padding: const EdgeInsets.only(left: 6),
@@ -528,12 +534,31 @@ class _ConversationsFieldState extends State<ConversationsField> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(it.title.isEmpty ? it.id : it.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 15)),
-                    if (it.badge.isNotEmpty)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(
+                          child: Text(it.title.isEmpty ? it.id : it.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w700, fontSize: 15)),
+                        ),
+                        if (it.private)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 6),
+                            child: Icon(Icons.lock,
+                                size: 14, color: ChatPalette.accent),
+                          ),
+                      ],
+                    ),
+                    if (it.private)
+                      const Text('Reticulum only',
+                          style: TextStyle(
+                              color: ChatPalette.accent,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600))
+                    else if (it.badge.isNotEmpty)
                       Text(it.badge,
                           style: TextStyle(
                               color: cs.onSurfaceVariant, fontSize: 11.5)),

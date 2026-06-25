@@ -253,6 +253,23 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
+  /// Private badge: this message travelled Reticulum-only (never over APRS) —
+  /// tags it as distinct from public APRS traffic. The wapp sets `private`.
+  Widget _privBadge(Map<String, dynamic> m) {
+    if (m['private'] != true) return const SizedBox.shrink();
+    const color = ChatPalette.accent;
+    return const Padding(
+      padding: EdgeInsets.only(left: 8),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.shield_outlined, size: 12, color: color),
+        SizedBox(width: 2),
+        Text('private · Reticulum',
+            style: TextStyle(
+                color: color, fontSize: 9.5, fontWeight: FontWeight.w600)),
+      ]),
+    );
+  }
+
   static const _likeColor = Color(0xFFE8638F);
 
   /// Heart + like count for a message. Interactive on others' messages;
@@ -722,6 +739,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
                 ),
               _encBadge(m),
               _authBadge(m),
+              _privBadge(m),
               if (threadable) ...[
                 const SizedBox(width: 8),
                 InkWell(

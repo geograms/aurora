@@ -21,6 +21,11 @@ class ConversationItem {
   /// incoming message arrives.
   bool closed;
 
+  /// Private: a wapp-defined flag the wapp sets per conversation (e.g. APRS's
+  /// "Reticulum-only" mode). Purely a display hint here — the host shows a lock
+  /// indicator; the wapp owns the routing behaviour.
+  bool private;
+
   /// Host wall-clock (ms) of the last real activity (message / pin / new
   /// unread) — the primary sort key so the most recently active conversations
   /// sit on top. 0 for legacy rows that predate this field; the list sort then
@@ -40,6 +45,7 @@ class ConversationItem {
     this.activityTs = 0,
     this.muted = false,
     this.closed = false,
+    this.private = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -52,6 +58,7 @@ class ConversationItem {
         'activityTs': activityTs,
         'muted': muted,
         'closed': closed,
+        'private': private,
         'messages': messages,
       };
 
@@ -66,6 +73,7 @@ class ConversationItem {
       activityTs: (j['activityTs'] as num?)?.toInt() ?? 0,
       muted: j['muted'] == true,
       closed: j['closed'] == true,
+      private: j['private'] == true,
     );
     final msgs = j['messages'];
     if (msgs is List) {
@@ -120,6 +128,7 @@ class ConversationStore {
     if (d.containsKey('subtitle')) it.subtitle = (d['subtitle'] ?? '').toString();
     if (d.containsKey('badge')) it.badge = (d['badge'] ?? '').toString();
     if (d.containsKey('icon')) it.icon = (d['icon'] ?? 'chat').toString();
+    if (d.containsKey('private')) it.private = d['private'] == true;
     if (d.containsKey('unread')) {
       final nv = (d['unread'] as num?)?.toInt() ?? it.unread;
       if (nv > it.unread) it.activityTs = _nowMs(); // new unread = activity

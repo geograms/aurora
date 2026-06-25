@@ -163,6 +163,9 @@ class ConversationStore {
       if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
       if ((d['auth'] ?? '').toString().isNotEmpty) 'auth': d['auth'].toString(),
       if (d['enc'] == true) 'enc': true,
+      // Reticulum-only (private) message — the wapp tags it so the bubble is
+      // visibly distinct from public APRS traffic (which can also be encrypted).
+      if (d['private'] == true) 'private': true,
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     });

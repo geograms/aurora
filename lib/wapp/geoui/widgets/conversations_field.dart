@@ -85,6 +85,10 @@ IconData convIcon(String name) {
       return Icons.edit_square;
     case 'repeat':
       return Icons.repeat;
+    case 'lock':
+      return Icons.lock;
+    case 'lock_outline':
+      return Icons.lock_outline;
     case 'delete':
       return Icons.delete_outline;
     case 'people':

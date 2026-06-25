@@ -3033,40 +3033,20 @@ class _WappPageState extends State<WappPage>
                 )
               : null,
           actions: [
-            // The thread's room actions collapse into a single top-right gear
-            // menu (instead of a row of always-visible icons).
-            if (thread != null && convGroup != null)
-              ...(() {
-                final roomActs = convGroup
-                    .childrenOf('action')
-                    .where((a) => (a.getString('slot') ?? 'list') == 'room')
-                    .toList();
-                if (roomActs.isEmpty) return const <Widget>[];
-                return <Widget>[
-                  PopupMenuButton<String>(
-                    icon: const Icon(Icons.settings_outlined),
-                    tooltip: 'Settings',
-                    onSelected: (name) {
-                      _fieldValues['${convField}_convo'] = _convOpenId;
-                      _sendCommand(name);
-                    },
-                    itemBuilder: (_) => [
-                      for (final a in roomActs)
-                        PopupMenuItem<String>(
-                          value: a.name ?? '',
-                          child: Row(children: [
-                            Icon(convIcon(a.getString('icon') ?? 'settings'),
-                                size: 20),
-                            const SizedBox(width: 10),
-                            Text(_i18n.resolve(a.getString('label') ?? a.name ?? '')),
-                          ]),
-                        ),
-                    ],
-                  ),
-                ];
-              })(),
             ..._channelIndicators(),
-            _buildWappOptionsMenu(),
+            // A single top-right options menu (☰). When a conversation thread is
+            // open its room actions (e.g. Recurring bulletin, Private) are folded
+            // in at the top — no separate gear icon.
+            _buildWappOptionsMenu(
+              roomActions: (thread != null && convGroup != null)
+                  ? convGroup
+                      .childrenOf('action')
+                      .where((a) => (a.getString('slot') ?? 'list') == 'room')
+                      .toList()
+                  : const [],
+              roomConvField: convField,
+              roomConvId: _convOpenId,
+            ),
           ],
         ),
         body: tabView,
@@ -3206,7 +3186,11 @@ class _WappPageState extends State<WappPage>
 
   /// Top-right options menu: the active screen's actions (for people screens),
   /// then any screens flagged `"menu": true` (open as panels), plus "Edit".
-  Widget _buildWappOptionsMenu() {
+  Widget _buildWappOptionsMenu({
+    List<GeoUiBlock> roomActions = const [],
+    String roomConvField = '',
+    String? roomConvId,
+  }) {
     final actions = _activeScreenMenuActions();
     return PopupMenuButton<String>(
       icon: const Icon(Icons.menu),
@@ -3214,6 +3198,11 @@ class _WappPageState extends State<WappPage>
       onSelected: (value) {
         if (value == 'edit') {
           _editThisWapp();
+        } else if (value.startsWith('room:')) {
+          // A conversation room action (e.g. Private, Recurring): tell the wapp
+          // which conversation it applies to, then fire it.
+          _fieldValues['${roomConvField}_convo'] = roomConvId;
+          _sendCommand(value.substring(5));
         } else if (value.startsWith('action:')) {
           _sendCommand(value.substring(7));
         } else if (value.startsWith('panel:')) {
@@ -3224,6 +3213,17 @@ class _WappPageState extends State<WappPage>
         }
       },
       itemBuilder: (_) => [
+        for (final a in roomActions)
+          PopupMenuItem<String>(
+            value: 'room:${a.name ?? ''}',
+            child: ListTile(
+              leading: Icon(convIcon(a.getString('icon') ?? 'settings')),
+              title: Text(_i18n.resolve(a.getString('label') ?? a.name ?? '')),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            ),
+          ),
+        if (roomActions.isNotEmpty) const PopupMenuDivider(),
         for (final a in actions)
           PopupMenuItem<String>(
             value: 'action:${a.name ?? ''}',

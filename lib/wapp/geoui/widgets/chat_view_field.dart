@@ -240,6 +240,9 @@ class _ChatViewFieldState extends State<ChatViewField> {
   /// Lock badge (APRX): the message was end-to-end encrypted to/from this peer.
   Widget _encBadge(Map<String, dynamic> m) {
     if (m['enc'] != true) return const SizedBox.shrink();
+    // A private (Reticulum-only) message is labelled "private" by _privBadge —
+    // don't also say "encrypted" (clearer, and avoids a redundant double badge).
+    if (m['private'] == true) return const SizedBox.shrink();
     const color = Color(0xFF63B0E8);
     return const Padding(
       padding: EdgeInsets.only(left: 8),
@@ -261,9 +264,9 @@ class _ChatViewFieldState extends State<ChatViewField> {
     return const Padding(
       padding: EdgeInsets.only(left: 8),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.shield_outlined, size: 12, color: color),
+        Icon(Icons.lock, size: 12, color: color),
         SizedBox(width: 2),
-        Text('private · Reticulum',
+        Text('private',
             style: TextStyle(
                 color: color, fontSize: 9.5, fontWeight: FontWeight.w600)),
       ]),

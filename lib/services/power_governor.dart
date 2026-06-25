@@ -44,14 +44,19 @@ class PowerGovernor {
     try {
       final level = await _battery.batteryLevel;
       final state = await _battery.batteryState;
-      final charging =
-          state == BatteryState.charging || state == BatteryState.full;
-      if (!_throttled && !charging && level <= lowThreshold) {
+      // A device with no battery (most desktops) reports state `unknown` and a
+      // bogus 0% level — treat that as mains power, never throttle. Otherwise a
+      // desktop would permanently pause its background tasks (e.g. the APRS
+      // wapp's APRS-IS/Reticulum receive loop) at a phantom "0%".
+      final powered = state == BatteryState.charging ||
+          state == BatteryState.full ||
+          state == BatteryState.unknown;
+      if (!_throttled && !powered && level <= lowThreshold) {
         _throttled = true;
         final n = TaskMonitorService.instance.pauseAllNonCritical();
         LogService.instance
             .add('PowerGovernor: low battery $level%, paused $n background task(s)');
-      } else if (_throttled && (charging || level >= resumeThreshold)) {
+      } else if (_throttled && (powered || level >= resumeThreshold)) {
         _throttled = false;
         final n = TaskMonitorService.instance.resumeAll();
         LogService.instance

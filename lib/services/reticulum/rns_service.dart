@@ -1669,7 +1669,13 @@ class RnsService {
   /// (The chat dest is announced separately by [announce] with the callsign.)
   Future<void> _announceServiceDests() async {
     if (!_up || _id == null) return;
-    for (final aspects in [_aspectsFiles, _aspectsDht]) {
+    // No geogram/dht announce: DHT RPC rides the chat dest now (the dht dest is
+    // never dialled), and overlay membership is learned from the chat/files
+    // announces. Dropping it removes one of the per-cycle service announces so the
+    // ones that matter are less likely to hit the hubs' announce budget. The
+    // Kademlia node id is still derived from geogram/dht locally — it needs no
+    // announce.
+    for (final aspects in [_aspectsFiles]) {
       final pkt = await RnsAnnounceBuilder.build(_id!, _app, aspects,
           appData: Uint8List(0));
       _transport!.sendOnAll(pkt.pack());

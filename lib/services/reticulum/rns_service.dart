@@ -519,6 +519,7 @@ class RnsService {
         'dhtStored': _files?.dhtStoredKeys ?? 0,
         'dhtReplicas': _files?.dhtReplicasStored ?? 0,
         'dhtDemoted': _files?.dhtProvidersDemoted ?? 0,
+        'dhtRejected': _files?.dhtStoresRejected ?? 0,
         'dhtPeers': _files?.dhtRoutingSize ?? 0,
         'dhtPeerIds': _files?.dhtPeerHexes ?? const <String>[],
         'lxmfDest': lxmfDeliveryHex,

@@ -1034,6 +1034,15 @@ class RnsService {
         send: (raw) => _transport?.sendLinkAware(raw),
         log: (m) => LogService.instance.add('RNS/files: $m'),
         enableDht: true,
+        // Relaxed Kademlia fanout, now that persistence anchors (below) guarantee
+        // findability independent of XOR distance/k: resolve queries the always-on
+        // anchors FIRST and publish stores to them, so the XOR-walk is only a
+        // secondary/redundancy path. We therefore no longer need k to span the
+        // whole overlay (the old k=96 was a workaround for records living only on
+        // their holder). k=20/alpha=6 (vs the library's safe 96/12 default for
+        // consumers WITHOUT anchors) cuts per-lookup RPCs and burst substantially.
+        dhtK: 20,
+        dhtAlpha: 6,
         // Run DHT RPC links over the CHAT destination, not the dedicated
         // geogram/dht dest. Public hubs rate-limit announces and routinely drop
         // the geogram/dht announce, so peers have no transport path to each

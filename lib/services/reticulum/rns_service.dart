@@ -26,7 +26,8 @@ import '../../connections/bluetooth/ble5_radio.dart';
 import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
-import '../files/dht/provider_record.dart' show kCapUnknown;
+import '../files/dht/provider_record.dart'
+    show kCapUnknown, kCapArchive, kCapHomeWifi;
 import '../files/composite_file_source.dart';
 import '../files/disk_index.dart';
 import '../files/file_node.dart';
@@ -1044,6 +1045,31 @@ class RnsService {
         // also dual-accept on the legacy dht dest for the mixed-fleet migration.
         rpcApp: _app, // 'geogram'
         rpcAspects: _aspects, // ['chat']
+        // Persistence anchors: the always-on relay indexers. The DHT also STOREs
+        // provider records to them and queries them FIRST on resolve, so records
+        // survive churn of the ephemeral k-closest and stay findable regardless
+        // of XOR distance (the enabler for shrinking k later). We pick the most
+        // stable (lowest kCap) fresh indexers, excluding ourselves, capped to a
+        // few to bound the extra traffic. Empty when none are known → unchanged.
+        stableAnchors: () {
+          final selfHash = _id?.hash;
+          final list = _relayDir
+              .indexers()
+              .where((e) {
+                final c = e.announcement.capacity;
+                return c >= kCapArchive && c <= kCapHomeWifi;
+              })
+              .where((e) =>
+                  selfHash == null ||
+                  !RnsCrypto.constantTimeEquals(e.identity.hash, selfHash))
+              .toList()
+            ..sort((a, b) {
+              final c =
+                  a.announcement.capacity.compareTo(b.announcement.capacity);
+              return c != 0 ? c : b.lastSeenMs.compareTo(a.lastSeenMs);
+            });
+          return [for (final e in list.take(6)) e.identity];
+        },
         nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
         // Per-destination routing (Reticulum routes per-dest, not per-identity):
         // the files/dht dests of a node may be reached via different hubs, so the

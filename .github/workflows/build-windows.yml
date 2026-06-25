@@ -41,7 +41,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PUBCACHE="${PUB_CACHE:-$(cygpath "$LOCALAPPDATA")/Pub/Cache}"
+          # cygpath the WHOLE path so it's unix-style (/c/Users/…): a C:\ path
+          # makes GNU tar treat "C:" as a remote rmt host ("cannot connect to C:").
+          PUBCACHE="$(cygpath "${PUB_CACHE:-$LOCALAPPDATA/Pub/Cache}")"
           PLUGIN=$(ls -d "$PUBCACHE"/hosted/*/wasm_run_flutter-*/windows 2>/dev/null | head -1)
           if [ -z "${PLUGIN:-}" ]; then echo "wasm_run_flutter not in pub cache?"; exit 1; fi
           VER=$(grep -oE 'wasm_run-v[0-9.]+' "$PLUGIN/CMakeLists.txt" | head -1)

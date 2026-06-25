@@ -796,6 +796,20 @@ class RemoteApiService {
       'apiPort': _port,
       'profile': p?.nickname,
       'callsign': p?.callsign,
+      'npub': p?.npub,
+      // Diagnostic: does the active profile's stored npub actually correspond to
+      // its nsec? A mismatch means anything peers encrypt to our advertised npub
+      // is undecryptable by us (and our signatures won't verify).
+      'keyOk': (() {
+        try {
+          if (p == null || p.nsec.isEmpty || p.npub.isEmpty) return false;
+          final privHex = NostrCrypto.decodeNsec(p.nsec);
+          final pubHex = NostrCrypto.derivePublicKey(privHex);
+          return NostrCrypto.encodeNpub(pubHex) == p.npub;
+        } catch (_) {
+          return false;
+        }
+      })(),
       'wappCount': wapps.length,
       'wapps': [for (final w in wapps) w['id']],
     };

@@ -42,6 +42,11 @@ class ProfileRoute extends StatefulWidget {
   /// bytes aren't held yet; may kick off a swarm fetch as a side effect).
   final ImageProvider? Function(String token)? resolveAvatar;
 
+  /// Fetch the Reticulum devices this user has been seen on, each
+  /// {dest, hops, ageSec, online, services, via}. Shown as a "Reticulum devices"
+  /// section in the panel; null hides the section.
+  final Future<List<Map<String, dynamic>>> Function()? fetchDevices;
+
   const ProfileRoute({
     super.key,
     required this.callsign,
@@ -60,6 +65,7 @@ class ProfileRoute extends StatefulWidget {
     this.onEdit,
     this.fetchMetadata,
     this.resolveAvatar,
+    this.fetchDevices,
   });
 
   @override
@@ -70,6 +76,7 @@ class _ProfileRouteState extends State<ProfileRoute> {
   String? _name;
   String? _about;
   ImageProvider? _avatar;
+  List<Map<String, dynamic>>? _devices; // null = still loading / not requested
 
   @override
   void initState() {
@@ -79,6 +86,15 @@ class _ProfileRouteState extends State<ProfileRoute> {
     } else {
       _fetchRemote();
     }
+    _loadDevices();
+  }
+
+  Future<void> _loadDevices() async {
+    final fetch = widget.fetchDevices;
+    if (fetch == null) return;
+    final d = await fetch();
+    if (!mounted) return;
+    setState(() => _devices = d);
   }
 
   void _applySelf() {
@@ -130,6 +146,8 @@ class _ProfileRouteState extends State<ProfileRoute> {
       avatarImage: _avatar,
       isSelf: widget.isSelf,
       onEdit: widget.isSelf && widget.onEdit != null ? _edit : null,
+      devices: _devices,
+      showDevices: widget.fetchDevices != null,
     );
   }
 }

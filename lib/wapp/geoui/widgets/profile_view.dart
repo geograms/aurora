@@ -37,6 +37,13 @@ class ProfileView extends StatefulWidget {
   final bool isSelf;
   final VoidCallback? onEdit;
 
+  /// Reticulum devices this user has been seen announcing from, each
+  /// {dest, hops, ageSec, online, services, via}. When [showDevices] is true a
+  /// "Reticulum devices" section renders: null = still loading, empty = none
+  /// heard. Ignored when [showDevices] is false.
+  final List<Map<String, dynamic>>? devices;
+  final bool showDevices;
+
   const ProfileView({
     super.key,
     required this.callsign,
@@ -55,6 +62,8 @@ class ProfileView extends StatefulWidget {
     this.avatarImage,
     this.isSelf = false,
     this.onEdit,
+    this.devices,
+    this.showDevices = false,
   });
 
   @override
@@ -127,6 +136,10 @@ class _ProfileViewState extends State<ProfileView> {
             children: [
               _header(context, cs),
               Divider(height: 1, color: cs.outlineVariant.withAlpha(60)),
+              if (widget.showDevices) ...[
+                _devicesSection(cs),
+                Divider(height: 1, color: cs.outlineVariant.withAlpha(60)),
+              ],
               if (newest.isEmpty)
                 Padding(
                   padding: const EdgeInsets.all(24),
@@ -144,6 +157,134 @@ class _ProfileViewState extends State<ProfileView> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  // ── Reticulum devices ──────────────────────────────────────────────
+  static String _relAge(int sec) {
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return '${sec ~/ 60}m ago';
+    if (sec < 86400) return '${sec ~/ 3600}h ago';
+    return '${sec ~/ 86400}d ago';
+  }
+
+  Widget _devicesSection(ColorScheme cs) {
+    final devices = widget.devices;
+    Widget body;
+    if (devices == null) {
+      body = Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: cs.onSurfaceVariant)),
+            const SizedBox(width: 10),
+            Text('Looking for devices on the network…',
+                style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+          ],
+        ),
+      );
+    } else if (devices.isEmpty) {
+      body = Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+        child: Text('No devices seen on the Reticulum network yet.',
+            style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+      );
+    } else {
+      final onlineN = devices.where((d) => d['online'] == true).length;
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+                '$onlineN of ${devices.length} online',
+                style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
+          ),
+          for (final d in devices) _deviceRow(cs, d),
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+          child: Text('Reticulum devices',
+              style: TextStyle(
+                  color: cs.onSurface,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14)),
+        ),
+        body,
+      ],
+    );
+  }
+
+  Widget _deviceRow(ColorScheme cs, Map<String, dynamic> d) {
+    final online = d['online'] == true;
+    final dest = (d['dest'] ?? '').toString();
+    final shortDest =
+        dest.length > 12 ? '${dest.substring(0, 12)}…' : dest;
+    final hops = (d['hops'] is int) ? d['hops'] as int : 0;
+    final ageSec = (d['ageSec'] is int) ? d['ageSec'] as int : 0;
+    final services = (d['services'] ?? '').toString();
+    final status = online ? 'online' : 'last seen ${_relAge(ageSec)}';
+    final detail = [
+      if (hops > 0) '$hops hop${hops == 1 ? '' : 's'}',
+      if (services.isNotEmpty) services,
+    ].join(' · ');
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              color: online
+                  ? const Color(0xFF4CAF50)
+                  : cs.onSurfaceVariant.withAlpha(90),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Icon(Icons.devices_other, size: 18, color: cs.onSurfaceVariant),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(shortDest,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        color: cs.onSurface,
+                        fontSize: 13,
+                        fontFamily: 'monospace',
+                        fontFeatures: const [FontFeature.tabularFigures()])),
+                if (detail.isNotEmpty)
+                  Text(detail,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          TextStyle(color: cs.onSurfaceVariant, fontSize: 11.5)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(status,
+              style: TextStyle(
+                  color: online
+                      ? const Color(0xFF4CAF50)
+                      : cs.onSurfaceVariant,
+                  fontSize: 12,
+                  fontWeight: online ? FontWeight.w600 : FontWeight.w400)),
+        ],
       ),
     );
   }

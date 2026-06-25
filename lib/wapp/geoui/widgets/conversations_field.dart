@@ -179,6 +179,15 @@ class ConversationsField extends StatefulWidget {
   final List<Map<String, dynamic>> roomRail;
   final void Function(String id)? onRoomRailTap;
 
+  /// People search for the conversation list. When non-null, a search icon
+  /// appears in the list header; typing a callsign queries this (the local
+  /// database + the Reticulum network) and the matches replace the list.
+  /// Each result map: {npub, callsign, nick, online, devices}.
+  final List<Map<String, dynamic>> Function(String query)? onSearchPeople;
+
+  /// Open the full profile panel for a tapped search result.
+  final void Function(String callsign, String npub)? onOpenProfile;
+
   const ConversationsField({
     super.key,
     required this.store,
@@ -203,6 +212,8 @@ class ConversationsField extends StatefulWidget {
     this.showRoomHeader = true,
     this.roomRail = const [],
     this.onRoomRailTap,
+    this.onSearchPeople,
+    this.onOpenProfile,
   });
 
   @override
@@ -211,6 +222,32 @@ class ConversationsField extends StatefulWidget {
 
 class _ConversationsFieldState extends State<ConversationsField> {
   String? _internalOpenId;
+
+  // People search (only when widget.onSearchPeople is wired).
+  bool _searching = false;
+  final TextEditingController _searchCtrl = TextEditingController();
+  List<Map<String, dynamic>> _results = const [];
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  void _runSearch(String q) {
+    final fn = widget.onSearchPeople;
+    setState(() => _results = fn == null ? const [] : fn(q));
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _searching = !_searching;
+      if (!_searching) {
+        _searchCtrl.clear();
+        _results = const [];
+      }
+    });
+  }
 
   /// Effective open conversation: host-owned in controlled mode, else local.
   String? get _openId =>
@@ -268,47 +305,201 @@ class _ConversationsFieldState extends State<ConversationsField> {
   // ── list ───────────────────────────────────────────────────────────
   Widget _list(BuildContext context, {required bool wide}) {
     final items = widget.store.ordered();
+    final canSearch = widget.onSearchPeople != null;
     return Container(
       color: ChatPalette.windowBg,
       child: Column(
       children: [
         Container(
           padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
-          child: Row(
-            children: [
-              // The narrow (phone) layout already shows the screen name in the
-              // app bar tab, so the in-list title would just repeat it — only
-              // show it in the wide side-by-side layout where the list is its
-              // own column.
-              if (wide)
-                Text(widget.title,
-                    style: Theme.of(context)
-                        .textTheme
-                        .titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w700)),
-              const Spacer(),
-              for (final a in widget.listActions)
-                IconButton(
-                  tooltip: a.tooltip,
-                  icon: Icon(convIcon(a.icon), size: 22),
-                  color: ChatPalette.accent,
-                  onPressed: () => widget.onAction(a.name, _openId ?? ''),
+          child: _searching
+              ? _searchHeader(context)
+              : Row(
+                  children: [
+                    // The narrow (phone) layout already shows the screen name in
+                    // the app bar tab, so the in-list title would just repeat it —
+                    // only show it in the wide side-by-side layout where the list
+                    // is its own column.
+                    if (wide)
+                      Text(widget.title,
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w700)),
+                    const Spacer(),
+                    if (canSearch)
+                      IconButton(
+                        tooltip: 'Find a user',
+                        icon: const Icon(Icons.search, size: 22),
+                        color: ChatPalette.accent,
+                        onPressed: _toggleSearch,
+                      ),
+                    for (final a in widget.listActions)
+                      IconButton(
+                        tooltip: a.tooltip,
+                        icon: Icon(convIcon(a.icon), size: 22),
+                        color: ChatPalette.accent,
+                        onPressed: () => widget.onAction(a.name, _openId ?? ''),
+                      ),
+                  ],
                 ),
-            ],
-          ),
         ),
         const Divider(height: 1),
         Expanded(
-          child: items.isEmpty
-              ? _empty(context)
-              : ListView.separated(
-                  itemCount: items.length,
-                  separatorBuilder: (_, _) =>
-                      const Divider(height: 1, indent: 72),
-                  itemBuilder: (context, i) => _tile(context, items[i]),
-                ),
+          child: _searching
+              ? _searchResults(context)
+              : items.isEmpty
+                  ? _empty(context)
+                  : ListView.separated(
+                      itemCount: items.length,
+                      separatorBuilder: (_, _) =>
+                          const Divider(height: 1, indent: 72),
+                      itemBuilder: (context, i) => _tile(context, items[i]),
+                    ),
         ),
       ],
+      ),
+    );
+  }
+
+  // ── people search ──────────────────────────────────────────────────
+  Widget _searchHeader(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _searchCtrl,
+            autofocus: true,
+            textInputAction: TextInputAction.search,
+            onChanged: _runSearch,
+            style: const TextStyle(color: ChatPalette.text, fontSize: 15),
+            decoration: const InputDecoration(
+              isDense: true,
+              border: InputBorder.none,
+              hintText: 'Find a user by callsign…',
+              hintStyle: TextStyle(color: ChatPalette.secondary, fontSize: 15),
+              prefixIcon: Icon(Icons.search, size: 20, color: ChatPalette.secondary),
+            ),
+          ),
+        ),
+        IconButton(
+          tooltip: 'Close search',
+          icon: const Icon(Icons.close, size: 22),
+          color: ChatPalette.accent,
+          onPressed: _toggleSearch,
+        ),
+      ],
+    );
+  }
+
+  Widget _searchResults(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    if (_searchCtrl.text.trim().isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text('Type a callsign to search your contacts and the network.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+        ),
+      );
+    }
+    if (_results.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text('No users found for “${_searchCtrl.text.trim()}”.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+        ),
+      );
+    }
+    return ListView.separated(
+      itemCount: _results.length,
+      separatorBuilder: (_, _) => const Divider(height: 1, indent: 72),
+      itemBuilder: (context, i) => _resultTile(context, _results[i]),
+    );
+  }
+
+  Widget _resultTile(BuildContext context, Map<String, dynamic> r) {
+    final callsign = (r['callsign'] ?? '').toString();
+    final nick = (r['nick'] ?? '').toString();
+    final npub = (r['npub'] ?? '').toString();
+    final online = r['online'] == true;
+    final devices = (r['devices'] is int) ? r['devices'] as int : 0;
+    final title = nick.isNotEmpty ? '$callsign ($nick)' : callsign;
+    final sub = devices == 0
+        ? (npub.isNotEmpty ? 'Known contact' : 'Seen on the network')
+        : online
+            ? '$devices device${devices == 1 ? '' : 's'} · online'
+            : '$devices device${devices == 1 ? '' : 's'} · offline';
+    final color = _hashColor(callsign);
+    final letter = callsign.isNotEmpty ? callsign[0].toUpperCase() : '?';
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => widget.onOpenProfile?.call(callsign, npub),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              Stack(
+                children: [
+                  CircleAvatar(
+                    radius: 22,
+                    backgroundColor: color.withAlpha(60),
+                    child: Text(letter,
+                        style: TextStyle(
+                            color: color,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 18)),
+                  ),
+                  if (online)
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF4CAF50),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: ChatPalette.windowBg, width: 2),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: ChatPalette.text,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14)),
+                    const SizedBox(height: 2),
+                    Text(sub,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: online
+                                ? const Color(0xFF4CAF50)
+                                : ChatPalette.secondary,
+                            fontSize: 12.5)),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right,
+                  size: 20, color: ChatPalette.secondary),
+            ],
+          ),
+        ),
       ),
     );
   }

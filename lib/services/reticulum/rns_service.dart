@@ -315,6 +315,104 @@ class RnsService {
     return list;
   }
 
+  /// People search for the Messages "find a user" box: the union of our local
+  /// database ([contacts] — callsign↔pubkey + follows) and everyone currently
+  /// visible on the Reticulum network (the observed-announce registry, matched by
+  /// callsign). [query] is a case-insensitive callsign/nick/npub substring; an
+  /// empty query returns nothing (the caller shows the conversation list). Each
+  /// entry is {npub, callsign, nick, online, devices}: `online` is true when at
+  /// least one of the person's devices announced within [_onlineWindowMs] and
+  /// `devices` is how many distinct Reticulum identities announce under the
+  /// callsign. Sorted online-first, then by callsign. Generic (people/RNS), so it
+  /// belongs on the host, not in any one wapp.
+  List<Map<String, dynamic>> searchPeople(String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    // Aggregate the observed-announce registry (the live network) by callsign:
+    // device count + whether any device is currently online, keyed by uppercased
+    // callsign with the original case preserved for display.
+    final devCount = <String, int>{};
+    final anyOnline = <String, bool>{};
+    final callCase = <String, String>{};
+    for (final n in _observed.values) {
+      final cs = (n.callsign ?? '').trim();
+      if (cs.isEmpty) continue;
+      final key = cs.toUpperCase();
+      callCase[key] = cs;
+      devCount[key] = (devCount[key] ?? 0) + 1;
+      if (now - n.lastSeenMs < _onlineWindowMs) anyOnline[key] = true;
+    }
+
+    final byCall = <String, Map<String, dynamic>>{};
+    void put(String callsign, String npub, String nick) {
+      final key = callsign.trim().toUpperCase();
+      if (key.isEmpty) return;
+      final e = byCall.putIfAbsent(
+          key,
+          () => <String, dynamic>{
+                'npub': npub,
+                'callsign': callsign.trim(),
+                'nick': nick,
+                'online': anyOnline[key] ?? false,
+                'devices': devCount[key] ?? 0,
+              });
+      if ((e['npub'] as String).isEmpty && npub.isNotEmpty) e['npub'] = npub;
+      if ((e['nick'] as String).isEmpty && nick.isNotEmpty) e['nick'] = nick;
+    }
+
+    // 1) Local database (already query-filtered, carries npub + nick).
+    for (final e in contacts(query)) {
+      put(e['callsign'] as String, (e['npub'] as String?) ?? '',
+          (e['nick'] as String?) ?? '');
+    }
+    // 2) Reticulum network: observed callsigns matching the query (npub only when
+    //    we happen to also know it locally — announces carry the callsign, not the
+    //    NOSTR key).
+    for (final entry in callCase.entries) {
+      if (!entry.value.toLowerCase().contains(q)) continue;
+      final pub = pubkeyForCallsign(entry.value);
+      put(entry.value, pub != null ? NostrCrypto.encodeNpub(pub) : '', '');
+    }
+
+    final list = byCall.values.toList();
+    list.sort((a, b) {
+      final ao = (a['online'] as bool) ? 0 : 1;
+      final bo = (b['online'] as bool) ? 0 : 1;
+      if (ao != bo) return ao - bo;
+      return (a['callsign'] as String).compareTo(b['callsign'] as String);
+    });
+    return list;
+  }
+
+  /// The Reticulum devices a user is using, for the profile panel's device list.
+  /// [callsign] is matched against the observed-announce registry — each distinct
+  /// identity that announces under the callsign is one device (a user's phone,
+  /// dongle, desktop … all beacon the same callsign). Returns, freshest-first,
+  /// {dest, hops, ageSec, online, services, via}: `dest` is the short identity
+  /// hash, `ageSec` is seconds since its last announce, `online` is true within
+  /// the freshness window. Empty when we've never heard the callsign on the mesh.
+  List<Map<String, dynamic>> devicesForCallsign(String callsign) {
+    final want = callsign.trim().toUpperCase();
+    if (want.isEmpty) return const [];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final out = <Map<String, dynamic>>[];
+    for (final n in _observed.values) {
+      if ((n.callsign ?? '').trim().toUpperCase() != want) continue;
+      out.add(<String, dynamic>{
+        'dest': n.identityHex,
+        'hops': n.hops,
+        'ageSec': ((now - n.lastSeenMs) / 1000).round(),
+        'online': now - n.lastSeenMs < _onlineWindowMs,
+        'services': (n.services.toList()..sort()).join(', '),
+        'via': n.via,
+      });
+    }
+    out.sort((a, b) => (a['ageSec'] as int).compareTo(b['ageSec'] as int));
+    return out;
+  }
+
   // Local services (identity, store, folders, disk-folder adoption) are built
   // once and survive failed/slow bootstrap connects, so the user's own shared
   // folders are usable offline and a reconnect doesn't rebuild/rescan them.
@@ -550,6 +648,11 @@ class RnsService {
   // ─────────────────────────────────────────────────────────────────────────
   static const int _observedCap = 4096;
   static const int _observedStaleMs = 30 * 60 * 1000; // drop entries idle >30min
+  // A device counts as "online" if it announced within this window. The periodic
+  // re-announce cadence is 30s (charging+wifi) … 5min (battery/cellular), so this
+  // is a little over 2× the slow cadence to avoid flapping a battery peer offline
+  // between announces, while staying well under the 30-min stale sweep.
+  static const int _onlineWindowMs = 11 * 60 * 1000;
   final Map<String, _ObservedNode> _observed = {};
 
   // Persistent on-disk cache of observed nodes (set [observedStorePath] before

@@ -2451,6 +2451,12 @@ class _WappPageState extends State<WappPage>
       onToggle: (name, value) => setState(() => _fieldValues[name] = value),
       onLocate: _locateFromMessage,
       onSenderTap: _showProfile,
+      // Find-a-user search: the local database (known callsign↔key contacts +
+      // follows) unioned with everyone currently visible on the Reticulum
+      // network (observed announces). Tapping a result opens the full profile.
+      onSearchPeople: (q) => RnsService.instance.searchPeople(q),
+      onOpenProfile: (callsign, npub) =>
+          _openProfile(callsign, npub: npub.isEmpty ? null : npub),
       onAttach: _attachFileToChat,
       onSelect: (id) {
         setState(() => store.clearUnread(id));
@@ -3955,7 +3961,7 @@ class _WappPageState extends State<WappPage>
         'from': from,
         'text': text,
         'time': hhmm,
-        'via': 'RNS',
+        'via': 'RET', // Reticulum over the internet (matches the wapp's RET tag)
         'mid': mid,
         'parent': (n['parent'] ?? '').toString(),
         't': ts * 1000,
@@ -4036,7 +4042,7 @@ class _WappPageState extends State<WappPage>
 
   /// Open a full, Twitter-style profile page for [callsign]: identity details
   /// (npub, first seen, post count) + the posts they've written.
-  void _openProfile(String callsign) {
+  void _openProfile(String callsign, {String? npub}) {
     final c = callsign.trim();
     if (c.isEmpty) return;
     final arch = _activityArchive;
@@ -4044,14 +4050,16 @@ class _WappPageState extends State<WappPage>
     final isSelf =
         self != null && c.toUpperCase() == self.callsign.toUpperCase();
     // For our own profile, prefer the local identity's npub (we may not have a
-    // learned callsign->key mapping for ourselves).
-    final npub = isSelf
+    // learned callsign->key mapping for ourselves). Otherwise use the caller's
+    // hint (e.g. from a network search result) before falling back to the local
+    // callsign→key map.
+    final resolvedNpub = isSelf
         ? (self.npub.isNotEmpty ? self.npub : null)
-        : RnsService.instance.npubForCallsign(c);
+        : (npub ?? RnsService.instance.npubForCallsign(c));
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => ProfileRoute(
         callsign: c,
-        npub: npub,
+        npub: resolvedNpub,
         isSelf: isSelf,
         firstSeenMs: arch?.firstSeenMs(c),
         postCount: arch?.postCount(c) ?? 0,
@@ -4094,9 +4102,13 @@ class _WappPageState extends State<WappPage>
               },
         loadSelf: isSelf ? _loadSelfProfile : null,
         onEdit: isSelf ? _editOwnProfile : null,
-        fetchMetadata: isSelf || npub == null
+        fetchMetadata: isSelf || resolvedNpub == null
             ? null
-            : () => RnsService.instance.fetchProfileMetadata(npub),
+            : () => RnsService.instance.fetchProfileMetadata(resolvedNpub),
+        // The Reticulum devices this user has been seen announcing from, with a
+        // live online/last-seen status — resolved by callsign (each device
+        // beacons the same callsign). Refreshed each time the panel opens.
+        fetchDevices: () async => RnsService.instance.devicesForCallsign(c),
         resolveAvatar: _imageForPicture,
       ),
     ));

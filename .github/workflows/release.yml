@@ -17,6 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # pubspec.yaml has a path dependency on ../reticulum-dart (a sibling repo
+      # not checked out by default). Clone it next to the workspace so the very
+      # first `pub get` (run by flutter-action's setup) can resolve it.
+      - name: Fetch reticulum-dart (path dependency)
+        shell: bash
+        run: git clone --depth 1 https://github.com/geograms/reticulum-dart.git ../reticulum-dart
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -46,6 +52,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch reticulum-dart (path dependency)
+        shell: bash
+        run: git clone --depth 1 https://github.com/geograms/reticulum-dart.git ../reticulum-dart
       - name: Install Linux build deps
         run: |
           sudo apt-get update
@@ -79,6 +88,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch reticulum-dart (path dependency)
+        shell: bash
+        run: git clone --depth 1 https://github.com/geograms/reticulum-dart.git ../reticulum-dart
       - uses: subosito/flutter-action@v2
         with:
           channel: stable

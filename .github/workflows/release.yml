@@ -104,6 +104,29 @@ jobs:
           sed -i "s/^version:.*/version: ${VER}+${CODE}/" pubspec.yaml
           dart run tool/update_version.dart
       - run: flutter pub get
+      # wasm_run_flutter's CMake downloads a native runtime tarball and extracts
+      # it with `cmake -E tar` (libarchive), but the extract path runs through the
+      # .plugin_symlinks/wasm_run_flutter symlink — libarchive refuses to extract
+      # through a symlink, failing the build. Its CMake skips the download+extract
+      # when the DLL already exists, so pre-extract it into the REAL pub-cache
+      # location (no symlink in that path); CMake's EXISTS check then resolves
+      # through the symlink, finds it, and skips its own broken extraction.
+      - name: Pre-fetch wasm_run native runtime (avoid CMake extract-through-symlink)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUBCACHE="${PUB_CACHE:-$(cygpath "$LOCALAPPDATA")/Pub/Cache}"
+          PLUGIN=$(ls -d "$PUBCACHE"/hosted/*/wasm_run_flutter-*/windows 2>/dev/null | head -1)
+          if [ -z "${PLUGIN:-}" ]; then echo "wasm_run_flutter not in pub cache?"; exit 1; fi
+          VER=$(grep -oE 'wasm_run-v[0-9.]+' "$PLUGIN/CMakeLists.txt" | head -1)
+          LIBROOT="$PLUGIN/$VER"
+          if [ ! -f "$LIBROOT/windows-x64/wasm_run_dart.dll" ]; then
+            mkdir -p "$LIBROOT"
+            curl -fL -o "$PLUGIN/$VER.tar.gz" \
+              "https://github.com/juancastillo0/wasm_run/releases/download/$VER/other.tar.gz"
+            tar -xzf "$PLUGIN/$VER.tar.gz" -C "$LIBROOT"
+          fi
+          ls -la "$LIBROOT/windows-x64/"
       # MSVC 14.51 (VS 2022 18.x on windows-latest) turns <experimental/coroutine>
       # into a hard error (STL1011); several BLE/permission plugins still include
       # it. CL prepends this define to every cl.exe call so the plugins compile.
@@ -120,13 +143,12 @@ jobs:
           path: build/installer/aurora-windows-x64-setup.exe
 
   publish:
-    # Windows is intentionally NOT a hard dependency: its build currently fails on
-    # a wasm_run_flutter plugin-symlink issue (tracked separately), and we don't
-    # want that to block shipping the Android + Linux artifacts. The Windows
-    # installer is attached opportunistically if/when that job is green again.
-    needs: [android, linux]
+    # Wait for all three so the Windows installer is attached when its build is
+    # green, but only REQUIRE Android + Linux: a Windows failure must never block
+    # shipping them (its build has been fragile — wasm_run_flutter plugin symlinks).
+    needs: [android, linux, windows]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.android.result == 'success' && needs.linux.result == 'success' }}
     permissions:
       contents: write        # create a GitHub Release on THIS repo (no secret)
     steps:

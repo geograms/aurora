@@ -34,6 +34,25 @@ jobs:
           dart run tool/update_version.dart
 
       - run: flutter pub get
+      # wasm_run_flutter's CMake extracts a downloaded tarball through the
+      # .plugin_symlinks symlink, which libarchive refuses. Pre-extract the DLL
+      # into the real pub-cache path so its CMake skips that (see release.yml).
+      - name: Pre-fetch wasm_run native runtime (avoid CMake extract-through-symlink)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUBCACHE="${PUB_CACHE:-$(cygpath "$LOCALAPPDATA")/Pub/Cache}"
+          PLUGIN=$(ls -d "$PUBCACHE"/hosted/*/wasm_run_flutter-*/windows 2>/dev/null | head -1)
+          if [ -z "${PLUGIN:-}" ]; then echo "wasm_run_flutter not in pub cache?"; exit 1; fi
+          VER=$(grep -oE 'wasm_run-v[0-9.]+' "$PLUGIN/CMakeLists.txt" | head -1)
+          LIBROOT="$PLUGIN/$VER"
+          if [ ! -f "$LIBROOT/windows-x64/wasm_run_dart.dll" ]; then
+            mkdir -p "$LIBROOT"
+            curl -fL -o "$PLUGIN/$VER.tar.gz" \
+              "https://github.com/juancastillo0/wasm_run/releases/download/$VER/other.tar.gz"
+            tar -xzf "$PLUGIN/$VER.tar.gz" -C "$LIBROOT"
+          fi
+          ls -la "$LIBROOT/windows-x64/"
       # MSVC 14.51 hard-errors on <experimental/coroutine> (STL1011) used by some
       # plugins; CL prepends this define to every cl.exe call so they compile.
       - run: flutter build windows --release

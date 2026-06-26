@@ -47,6 +47,7 @@ Future<void> ensureRnsAutostart() async {
     // Persist the social relay/index DB + folder key-store / disk-folder
     // registry / subscriptions under the shared wapp-data root.
     rns.relayStorePath = ws.getAbsolutePath('social.sqlite3');
+    rns.partialStoreDir = ws.getAbsolutePath('partials'); // resumable downloads
     rns.folderStorePath = ws.getAbsolutePath('folders.json');
     rns.diskFoldersPath = ws.getAbsolutePath('disk_folders.json');
     rns.subscriptionsPath = ws.getAbsolutePath('folder_subscriptions.json');

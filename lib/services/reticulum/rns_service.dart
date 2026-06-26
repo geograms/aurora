@@ -34,6 +34,7 @@ import '../files/file_node.dart';
 import '../files/file_transfer.dart';
 import '../files/media_file_source.dart';
 import '../files/open_path.dart';
+import '../files/partial_store.dart';
 import '../files/serve_quota.dart';
 import '../files/serve_stats.dart';
 import '../log_service.dart';
@@ -133,6 +134,11 @@ class RnsService {
   // role, and LXMF store-and-forward. The DB path is set by the app before start
   // (persistent); if unset we fall back to an in-memory store.
   String? relayStorePath;
+  /// Directory for resumable-download partials (set by the app before start). When
+  /// set, fetches survive a drop/app-restart by resuming from the last completed
+  /// segment; unset = today's in-memory, all-or-nothing behaviour.
+  String? partialStoreDir;
+  PartialStore? _partialStore;
   RelayEventStore? _relayStore;
   RelayNode? _relay;
   final RelayDirectory _relayDir = RelayDirectory();
@@ -1132,12 +1138,19 @@ class RnsService {
       // folders (added later by the DiskFolderManager) — disk bytes are never
       // copied into sqlite.
       _composite = CompositeFileSource([fileServeSource ?? const EmptyFileSource()]);
+      // Resumable downloads: persist completed segments so a fetch resumes after a
+      // drop or app restart. Generic — every fetch consumer (media, folders, wapp
+      // store, updates, profiles) inherits it through fetch/resolveAndFetch.
+      _partialStore = partialStoreDir == null
+          ? null
+          : FilePartialStore(Directory(partialStoreDir!));
       _files = FileTransferNode(
         identity: _id!,
         source: _composite!,
         send: (raw) => _transport?.sendLinkAware(raw),
         log: (m) => LogService.instance.add('RNS/files: $m'),
         enableDht: true,
+        partialStore: _partialStore,
         // Relaxed Kademlia fanout, now that persistence anchors (below) guarantee
         // findability independent of XOR distance/k: resolve queries the always-on
         // anchors FIRST and publish stores to them, so the XOR-walk is only a
@@ -1648,6 +1661,11 @@ class RnsService {
       _republishTimer?.cancel();
       _republishTimer = Timer.periodic(_republishEvery, (_) {
         if (_up) _files?.republishAll();
+        // Reclaim stale/abandoned resumable-download partials (week-old or over a
+        // 2 GB budget) so they don't accumulate on disk.
+        // ignore: discarded_futures
+        _partialStore?.gc(
+            maxAge: const Duration(days: 7), maxBytes: 2 * 1024 * 1024 * 1024);
       });
       // Pull newer versions of files the user downloaded from auto-sync folders.
       _autoSyncTimer?.cancel();

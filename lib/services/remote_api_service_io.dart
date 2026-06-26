@@ -293,6 +293,8 @@ class RemoteApiService {
         if (prefs != null) {
           RnsService.instance.relayStorePath =
               wappsDataStorage(prefs).getAbsolutePath('social.sqlite3');
+          RnsService.instance.partialStoreDir =
+              wappsDataStorage(prefs).getAbsolutePath('partials');
           RnsService.instance.folderStorePath =
               wappsDataStorage(prefs).getAbsolutePath('folders.json');
           RnsService.instance.diskFoldersPath =

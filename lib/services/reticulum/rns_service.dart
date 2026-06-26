@@ -3079,6 +3079,10 @@ class RnsService {
         'id': id,
         // base64url (the wapp's pk-store format) so the wapp can map author→callsign
         'from': base64Url.encode(authorX).replaceAll('=', ''),
+        // Derived callsign fallback so a relay DM is still delivered when the
+        // recipient has never heard the sender (e.g. APRS-IS was down, so no
+        // public copy taught it the callsign). The wapp prefers a known callsign.
+        'callsign': 'X1${NostrCrypto.deriveCallsign(ev.pubkey)}',
         'ts': ev.createdAt,
         'text': utf8.decode(pt, allowMalformed: true),
         'mid': mid,

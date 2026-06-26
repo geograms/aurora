@@ -2422,6 +2422,9 @@ class _WappPageState extends State<WappPage>
       final cur = _fieldValues[name];
       final value = cur is bool ? cur : (f.getBool('default') ?? false);
       _fieldValues[name] = value;
+      // slot:"menu" → rendered as a checkable item in the room options menu
+      // (top-right ☰), not as a checkbox above the composer.
+      if ((f.getString('slot') ?? '') == 'menu') continue;
       toggles.add(ComposerToggle(name, f.getString('label') ?? name, value,
           localOnly: f.getBool('localOnly') ?? false));
     }
@@ -3050,6 +3053,16 @@ class _WappPageState extends State<WappPage>
                       .where((a) => (a.getString('slot') ?? 'list') == 'room')
                       .toList()
                   : const [],
+              // Per-conversation toggles (e.g. Include my location) folded into the
+              // same menu, checkable, when a conversation room is open.
+              roomToggles: (thread != null && convGroup != null)
+                  ? convGroup
+                      .childrenOf('field')
+                      .where((f) =>
+                          f.type == 'bool' &&
+                          (f.getString('slot') ?? '') == 'menu')
+                      .toList()
+                  : const [],
               roomConvField: convField,
               roomConvId: _convOpenId,
             ),
@@ -3194,6 +3207,7 @@ class _WappPageState extends State<WappPage>
   /// then any screens flagged `"menu": true` (open as panels), plus "Edit".
   Widget _buildWappOptionsMenu({
     List<GeoUiBlock> roomActions = const [],
+    List<GeoUiBlock> roomToggles = const [],
     String roomConvField = '',
     String? roomConvId,
   }) {
@@ -3204,6 +3218,11 @@ class _WappPageState extends State<WappPage>
       onSelected: (value) {
         if (value == 'edit') {
           _editThisWapp();
+        } else if (value.startsWith('toggle:')) {
+          // A per-conversation local toggle (e.g. Include my location): flip the
+          // field value the next conversations_send will read.
+          final n = value.substring(7);
+          setState(() => _fieldValues[n] = !(_fieldValues[n] == true));
         } else if (value.startsWith('room:')) {
           // A conversation room action (e.g. Private, Recurring): tell the wapp
           // which conversation it applies to, then fire it.
@@ -3219,6 +3238,15 @@ class _WappPageState extends State<WappPage>
         }
       },
       itemBuilder: (_) => [
+        for (final f in roomToggles)
+          CheckedPopupMenuItem<String>(
+            value: 'toggle:${f.name ?? ''}',
+            checked: _fieldValues[f.name] == true,
+            child: Text(_i18n.resolve(f.getString('label') ?? f.name ?? '')),
+          ),
+        if (roomToggles.isNotEmpty &&
+            (roomActions.isNotEmpty))
+          const PopupMenuDivider(),
         for (final a in roomActions)
           PopupMenuItem<String>(
             value: 'room:${a.name ?? ''}',
@@ -3229,7 +3257,8 @@ class _WappPageState extends State<WappPage>
               dense: true,
             ),
           ),
-        if (roomActions.isNotEmpty) const PopupMenuDivider(),
+        if (roomActions.isNotEmpty || roomToggles.isNotEmpty)
+          const PopupMenuDivider(),
         for (final a in actions)
           PopupMenuItem<String>(
             value: 'action:${a.name ?? ''}',
@@ -3973,7 +4002,12 @@ class _WappPageState extends State<WappPage>
       _maybeFetchSharedMedia(text, 'in', from);
       added++;
     }
-    _lastFeedBackfillSec = nowSec;
+    // Only advance the high-water mark once a sweep actually returned notes. A
+    // fresh node usually comes up before any relay/peer is reachable; advancing on
+    // an empty sweep would lock us out of ever re-fetching the 7-day history (the
+    // bug that left Activity empty for new users). Keep retrying the full week
+    // until the first real pull, then switch to incremental.
+    if (notes.isNotEmpty) _lastFeedBackfillSec = nowSec;
     if (added > 0) {
       _activityRev.value++;
       if (mounted) setState(() {});

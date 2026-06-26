@@ -631,6 +631,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 
+  // Shrink-wrap a text bubble's column to its content width so the meta line can
+  // right-align under the text. Media bubbles skip this (Wrap has no intrinsics).
+  Widget _maybeIntrinsicWidth(bool tight, Widget child) =>
+      tight ? IntrinsicWidth(child: child) : child;
+
   Widget _bubble(Map<String, dynamic> m, {bool inThread = false}) {
     // System note: a centered, muted status line (no avatar/name/bubble/badges).
     if (m['sys'] == true) {
@@ -661,6 +666,10 @@ class _ChatViewFieldState extends State<ChatViewField> {
     if (mediaRefs.isNotEmpty) {
       maybeFetchSharedMedia(text, m['dir']?.toString() ?? 'in', from: from);
     }
+    // A text-only bubble can shrink-wrap to its content width (via IntrinsicWidth),
+    // which lets the meta line (time + ⋮) right-align under the text. Media bubbles
+    // keep the simple layout (Wrap doesn't support intrinsic sizing).
+    final tight = mediaRefs.isEmpty;
     final time = m['time']?.toString() ?? '';
     final via = m['via']?.toString() ?? '';
     final parent = (m['parent'] ?? '').toString();
@@ -682,8 +691,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
           bottomRight: Radius.circular(outgoing ? 4 : 14),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: _maybeIntrinsicWidth(
+        tight,
+        Column(
+        crossAxisAlignment:
+            tight ? CrossAxisAlignment.stretch : CrossAxisAlignment.start,
         children: [
           // Forum-style thread view: don't re-quote the root on every reply.
           // Nested replies (parent != root) keep their quote for context.
@@ -746,6 +758,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
             _metaLine(m),
           Row(
             mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.end,
             children: [
               if (time.isNotEmpty)
                 Padding(
@@ -818,6 +831,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
             ],
           ),
         ],
+      ),
       ),
     );
     final align = outgoing ? Alignment.centerRight : Alignment.centerLeft;

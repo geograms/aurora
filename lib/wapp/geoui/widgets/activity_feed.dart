@@ -5,6 +5,7 @@
 // just renders the post maps it's given and reports compose/attach/taps back.
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
@@ -409,12 +410,26 @@ String activityMid(String from, String text) {
 }
 
 final _activityFileRe = RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}');
+// An embedded preview thumbnail: `tn:<base64url-png>` (carries padding `=`).
+final _activityTnRe = RegExp(r'\btn:([A-Za-z0-9_-]+=*)');
 String activityStrip(String s) => s
     .replaceAll(_activityFileRe, '')
+    .replaceAll(_activityTnRe, '')
     .replaceAll(RegExp(r'\bih:[0-9a-fA-F]{40}\b'), '')
     .replaceAll(RegExp(r'\bsz:\d+\b'), '')
     .replaceAll(RegExp(r'\s+'), ' ')
     .trim();
+
+/// Decode the embedded `tn:` preview thumbnail from a post body, or null.
+Uint8List? activityInlineThumb(String raw) {
+  final m = _activityTnRe.firstMatch(raw);
+  if (m == null) return null;
+  try {
+    return base64Url.decode(m.group(1)!);
+  } catch (_) {
+    return null;
+  }
+}
 
 Widget _activityAvatar(String call, {ImageProvider? image, double radius = 18}) {
   if (image != null) return CircleAvatar(radius: radius, backgroundImage: image);
@@ -601,9 +616,15 @@ class ActivityPostCard extends StatelessWidget {
                         spacing: 8,
                         runSpacing: 8,
                         children: [
-                          for (final r in refs)
+                          for (int i = 0; i < refs.length; i++)
                             MediaThumbnail(
-                                ref: r, size: mediaSizeHint(raw), from: from),
+                                key: ValueKey('media-${refs[i].sha256}'),
+                                ref: refs[i],
+                                size: mediaSizeHint(raw),
+                                from: from,
+                                tapOnly: true,
+                                inlineThumb:
+                                    i == 0 ? activityInlineThumb(raw) : null),
                         ],
                       ),
                     ),

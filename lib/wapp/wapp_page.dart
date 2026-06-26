@@ -1239,8 +1239,13 @@ class _WappPageState extends State<WappPage>
           final fieldName = data['field'] as String? ?? 'messages';
           final msg = data['message'];
           if (msg is Map) {
-            _maybeFetchSharedMedia(msg['text']?.toString() ?? '',
-                (msg['dir']?.toString() ?? 'in'), msg['from']?.toString());
+            // Activity/FEED media is tap-to-download (posts can carry large
+            // images/videos the user should choose to fetch) — don't auto-pull it
+            // here; the Activity card shows its size + a one-click download button.
+            if (fieldName != 'activity') {
+              _maybeFetchSharedMedia(msg['text']?.toString() ?? '',
+                  (msg['dir']?.toString() ?? 'in'), msg['from']?.toString());
+            }
             if (fieldName == 'geochat') {
               // Split into Live vs Beacons (repeat detection).
               _geoChatAdd(msg);
@@ -1449,9 +1454,14 @@ class _WappPageState extends State<WappPage>
           final topic = (data['topic'] ?? '').toString();
           final parent = (data['parent'] ?? '').toString();
           if (text.isNotEmpty) {
-            unawaited(RnsService.instance.publishNote(text,
-                topic: topic.isEmpty ? null : topic,
-                parent: parent.isEmpty ? null : parent));
+            unawaited(() async {
+              // Embed a tiny preview thumbnail so peers can show a picture for
+              // this post without downloading the full media first.
+              final enriched = await _embedNoteThumbnail(text);
+              await RnsService.instance.publishNote(enriched,
+                  topic: topic.isEmpty ? null : topic,
+                  parent: parent.isEmpty ? null : parent);
+            }());
           }
         } else if (type == 'ui.toast') {
           // Legacy message shape — route through the unified service
@@ -3995,11 +4005,9 @@ class _WappPageState extends State<WappPage>
         'parent': (n['parent'] ?? '').toString(),
         't': ts * 1000,
       });
-      // Older posts can reference media (file:<sha>). Kick off the fetch from
-      // the poster (by callsign) just like live posts do, so a joining device
-      // downloads the images/videos of the history it just pulled, not only the
-      // text.
-      _maybeFetchSharedMedia(text, 'in', from);
+      // Backfilled posts can reference large media. Do NOT auto-download it during
+      // backfill — the Activity card shows the size + a one-click download button
+      // so the user decides (a week of history could be many GB otherwise).
       added++;
     }
     // Only advance the high-water mark once a sweep actually returned notes. A
@@ -4241,6 +4249,34 @@ class _WappPageState extends State<WappPage>
     }
     await RnsService.instance.publishMetadata(
         name: p.nickname, about: p.description, picture: picture);
+  }
+
+  /// If [text] references a held IMAGE via a `file:` token, embed a tiny PNG
+  /// preview as a `tn:<base64url>` token so peers can render a thumbnail for the
+  /// post WITHOUT downloading the full file. Only the first image, only when the
+  /// encoded preview stays small; otherwise [text] is returned unchanged.
+  Future<String> _embedNoteThumbnail(String text) async {
+    try {
+      if (text.contains(' tn:')) return text; // already carries a preview
+      final archive = sharedMediaArchive();
+      if (archive == null) return text;
+      for (final r in MediaRef.findAll(text)) {
+        if (r.kind != MediaKind.image) continue;
+        // Reuse a cached preview if one exists, else generate + cache it.
+        var png = archive.getScreenshot(r.sha256);
+        if (png == null) {
+          final full = archive.get(r.sha256);
+          if (full == null) continue; // not held — can't make a preview
+          png = await _thumbnailPng(full, 128);
+          if (png == null) continue;
+          archive.setScreenshot(r.sha256, png);
+        }
+        final b64 = base64Url.encode(png);
+        if (b64.length > 40000) return text; // too large to inline
+        return '$text tn:$b64';
+      }
+    } catch (_) {}
+    return text;
   }
 
   /// Downscale [src] image bytes to a square-ish PNG at most [size] px wide, for

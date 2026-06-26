@@ -55,7 +55,21 @@ class MediaThumbnail extends StatefulWidget {
   final int? size;
   /// Sender callsign — lets a tap-to-download fetch directly from them over RNS.
   final String? from;
-  const MediaThumbnail({super.key, required this.ref, this.size, this.from});
+  /// Never auto-download — always show a size + tap-to-download card until the
+  /// user taps. Used on the Activity feed, where posts can carry large media the
+  /// user should choose to fetch.
+  final bool tapOnly;
+  /// A tiny PNG preview embedded with the post (`tn:` token). When the full file
+  /// isn't local yet, this is shown as the thumbnail so the user sees a preview
+  /// WITHOUT downloading; tapping fetches the full-resolution media.
+  final Uint8List? inlineThumb;
+  const MediaThumbnail(
+      {super.key,
+      required this.ref,
+      this.size,
+      this.from,
+      this.tapOnly = false,
+      this.inlineThumb});
 
   @override
   State<MediaThumbnail> createState() => _MediaThumbnailState();
@@ -70,8 +84,17 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
   // re-renders, so a chat tick (or scrolling the message back into view) doesn't
   // restart the spinner. This is what keeps the icon from rotating forever.
   static const int _windowSec = 300; // active attempt window (5 min)
+  static const int _findSec = 60; // give up finding a peer after 1 min (no bytes)
   static const int _cooldownMs = 24 * 60 * 60 * 1000; // auto-retry once a day
   static final Map<String, int> _windowStartMs = {}; // sha256 -> window start ms
+
+  // True once the attempt window ended without ever receiving a byte — i.e. no
+  // peer holding this file was reachable. Drives a clear "no peers" card.
+  bool _findFailed = false;
+  // Highest received-byte count seen + when it last increased (transfer-stall
+  // detection: a started transfer that stops making progress is abandoned).
+  int _lastReceived = 0;
+  int _lastByteMs = 0;
 
   MediaRef get ref => widget.ref;
   Timer? _poll;
@@ -153,8 +176,27 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
     final a = sharedMediaArchive();
     final have = a != null && a.getMeta(ref.sha256) != null;
     // Auto-fetching (small/unknown size) → run/resume an attempt window. Large
-    // files wait for an explicit tap (download chip; no auto window).
-    if (!have && !_tooLargeForAuto) _maybeBeginWindow();
+    // files — and anything in tap-only mode (Activity) — wait for an explicit
+    // tap (download chip; no auto window).
+    if (!have && !_tooLargeForAuto && !widget.tapOnly) _maybeBeginWindow();
+  }
+
+  @override
+  void didUpdateWidget(covariant MediaThumbnail old) {
+    super.didUpdateWidget(old);
+    // If this State gets reused for a DIFFERENT file (list rebuilds can recycle
+    // State objects when widgets lack a stable key), drop the cached preview and
+    // playback so we don't render the previous file's image for the new ref.
+    if (old.ref.sha256 != widget.ref.sha256) {
+      _preview = null;
+      _playing = false;
+      _requested = false;
+      _poll?.cancel();
+      _poll = null;
+      final a = sharedMediaArchive();
+      final have = a != null && a.getMeta(ref.sha256) != null;
+      if (!have && !_tooLargeForAuto && !widget.tapOnly) _maybeBeginWindow();
+    }
   }
 
   /// Decide whether to (re)start the 5-minute attempt window for this file,
@@ -175,6 +217,9 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
   /// the next 5 minutes. The spinner is shown during this window only.
   void _beginWindow() {
     _windowStartMs[ref.sha256] = _nowMs;
+    _findFailed = false;
+    _lastReceived = 0;
+    _lastByteMs = _nowMs;
     // ignore: discarded_futures
     resolveSharedMedia(ref.sha256, ref.ext, fromCallsign: widget.from);
     _startPoll();
@@ -184,23 +229,52 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
     _poll?.cancel();
     _poll = Timer.periodic(const Duration(seconds: 1), (t) {
       final arch = sharedMediaArchive();
-      final have = arch != null && arch.getMeta(ref.sha256) != null;
-      final start = _windowStartMs[ref.sha256] ?? 0;
-      final windowEnded = _nowMs - start >= _windowSec * 1000;
-      if (have || windowEnded) {
-        t.cancel();
+      if (arch != null && arch.getMeta(ref.sha256) != null) {
+        t.cancel(); // complete — the bytes are local now
         if (mounted) setState(() {});
         return;
       }
-      // Re-attempt the fetch every ~60s within the window: a seeder may come
-      // online, or the Reticulum node may finish starting, mid-window. (The
-      // resolve is content-addressed + guarded, so repeats are harmless.)
-      if (t.tick % 60 == 0) {
-        // ignore: discarded_futures
-        resolveSharedMedia(ref.sha256, ref.ext, fromCallsign: widget.from);
+      final received = _progress()?.received ?? 0;
+      if (received > _lastReceived) {
+        _lastReceived = received;
+        _lastByteMs = _nowMs; // bytes are still flowing
+      }
+      final start = _windowStartMs[ref.sha256] ?? _nowMs;
+      if (received <= 0) {
+        // Peer-find phase: no holder has answered yet. Give up after 1 minute so
+        // the user isn't left watching an endless spinner; they can tap retry.
+        if (_nowMs - start >= _findSec * 1000) {
+          t.cancel();
+          _findFailed = true;
+          if (mounted) setState(() {});
+          return;
+        }
+        // Re-attempt discovery periodically — a holder may come online (the
+        // resolve is content-addressed + guarded, so repeats are harmless).
+        if (t.tick % 20 == 0) {
+          // ignore: discarded_futures
+          resolveSharedMedia(ref.sha256, ref.ext, fromCallsign: widget.from);
+        }
+      } else if (_nowMs - _lastByteMs >= _windowSec * 1000) {
+        // Transfer started but stalled (no new bytes for 5 min) — abandon.
+        t.cancel();
+        _findFailed = true;
+        if (mounted) setState(() {});
+        return;
       }
       if (mounted) setState(() {});
     });
+  }
+
+  /// Current download progress (received bytes; total from the live transfer or,
+  /// failing that, the message's `sz:` hint), or null if none yet.
+  ({int received, int total})? _progress() {
+    final sha = _shaBytes();
+    if (sha == null) return null;
+    final p = RnsService.instance.fileFetchProgress(sha);
+    if (p == null) return null;
+    final total = p.total > 0 ? p.total : (widget.size ?? 0);
+    return (received: p.received, total: total);
   }
 
   /// Explicitly fetch a large file the user tapped to download.
@@ -240,25 +314,30 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
 
   /// A terse "received/total (pct)" label while the bytes stream in over
   /// Reticulum, or null when no transfer progress is available yet.
-  String? _progressLabel() {
-    final sha = _shaBytes();
-    if (sha == null) return null;
-    final p = RnsService.instance.fileFetchProgress(sha);
-    if (p == null || p.total <= 0) return null;
-    final pct = ((p.received / p.total) * 100).clamp(0, 100).round();
-    String kb(int b) => '${(b / 1024).round()}';
-    if (p.total < 1024 * 1024) {
-      return '${kb(p.received)}/${kb(p.total)} KB ($pct%)';
+  // Two lines: a title (phase) + a subtitle (detail). While no bytes have
+  // arrived we're still finding a holder (with a 1-min countdown); once bytes
+  // flow we show a live percentage + received/total.
+  (String, String) _statusLines() {
+    final p = _progress();
+    final received = p?.received ?? 0;
+    final total = p?.total ?? 0;
+    if (received <= 0) {
+      final start = _windowStartMs[ref.sha256] ?? _nowMs;
+      final left = (_findSec - (_nowMs - start) ~/ 1000).clamp(0, _findSec);
+      return ('Looking for a peer…', 'no holder yet · ${left}s left');
     }
-    String mb(int b) => (b / (1024 * 1024)).toStringAsFixed(1);
-    return '${mb(p.received)}/${mb(p.total)} MB ($pct%)';
+    if (total > 0) {
+      final pct = ((received / total) * 100).clamp(0, 100).round();
+      return ('Downloading $pct%',
+          '${formatBytes(received)} / ${formatBytes(total)}');
+    }
+    return ('Downloading…', formatBytes(received));
   }
 
-  // A compact one-line "looking / downloading" chip: a small spinner plus a
-  // short label — the live byte progress when a transfer is under way, else a
-  // brief "Downloading…".
+  // A two-line "finding / downloading" card: spinner + a phase title and a
+  // detail line (peer-find countdown, or live percentage + bytes).
   Widget _lookingChip(ColorScheme cs) {
-    final label = _progressLabel() ?? 'Downloading…';
+    final (title, sub) = _statusLines();
     return Container(
       width: _w,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -276,9 +355,18 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
           ),
           const SizedBox(width: 10),
           Flexible(
-            child: Text(label,
-                style: const TextStyle(
-                    fontSize: 12.5, fontWeight: FontWeight.w600)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(title,
+                    style: const TextStyle(
+                        fontSize: 12.5, fontWeight: FontWeight.w600)),
+                Text(sub,
+                    style:
+                        TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+              ],
+            ),
           ),
         ],
       ),
@@ -298,7 +386,7 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.image_not_supported_outlined,
+            Icon(_findFailed ? Icons.cloud_off : Icons.image_not_supported_outlined,
                 size: 22, color: cs.onSurfaceVariant),
             const SizedBox(width: 8),
             Expanded(
@@ -306,10 +394,13 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text('Image not available',
-                      style: TextStyle(
+                  Text(_findFailed ? 'No peers have this file' : 'Image not available',
+                      style: const TextStyle(
                           fontSize: 12.5, fontWeight: FontWeight.w600)),
-                  Text('.${ref.ext} · tap retry to look again',
+                  Text(
+                      _findFailed
+                          ? '${_sizeLabel == null ? '' : '$_sizeLabel · '}none online now · tap retry'
+                          : '.${ref.ext} · tap retry to look again',
                       style:
                           TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
                 ],
@@ -349,7 +440,7 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('Tap to download image',
+                    const Text('Tap to download',
                         style: TextStyle(
                             fontSize: 12.5, fontWeight: FontWeight.w600)),
                     Text(
@@ -366,17 +457,121 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
         ),
       );
 
+  /// The embedded `tn:` preview shown as a real thumbnail while the full file
+  /// isn't local. A download badge (or live progress when fetching) overlays it;
+  /// tapping fetches the full-resolution media.
+  Widget _inlinePreview(ColorScheme cs) {
+    final fetching = _poll?.isActive ?? false;
+    final (title, sub) = fetching ? _statusLines() : ('', '');
+    final isClip =
+        ref.kind == MediaKind.video || ref.kind == MediaKind.audio;
+    return InkWell(
+      onTap: fetching ? null : _download,
+      borderRadius: BorderRadius.circular(10),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(
+          width: _w,
+          height: _h,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.memory(
+                widget.inlineThumb!,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => _iconBox(cs),
+              ),
+              // Dim the preview so the overlay reads clearly.
+              Container(color: Colors.black.withAlpha(fetching ? 110 : 60)),
+              if (fetching)
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white)),
+                      const SizedBox(height: 8),
+                      Text(title,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w700)),
+                      Text(sub,
+                          style: TextStyle(
+                              color: Colors.white.withAlpha(220),
+                              fontSize: 10.5)),
+                    ],
+                  ),
+                )
+              else
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withAlpha(140),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(isClip ? Icons.play_arrow : Icons.download,
+                            size: 18, color: Colors.white),
+                        const SizedBox(width: 6),
+                        Text(isClip ? 'Play' : 'Download',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700)),
+                      ],
+                    ),
+                  ),
+                ),
+              // Size badge.
+              if (_sizeLabel != null)
+                Positioned(
+                  right: 4,
+                  bottom: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withAlpha(150),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(_sizeLabel!,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final archive = sharedMediaArchive();
     final meta = archive?.getMeta(ref.sha256);
 
-    // Not in the local archive yet: spinner while fetching, a tap-to-download
-    // card for large files we haven't fetched, else "not available".
+    // Not in the local archive yet. If the post embedded a tiny preview (`tn:`),
+    // ALWAYS show it as a real thumbnail (with a download overlay / progress) so
+    // media posts have a picture even before the full file is fetched.
     if (archive == null || meta == null) {
+      if (widget.inlineThumb != null) return _inlinePreview(cs);
       if (_poll?.isActive ?? false) return _lookingChip(cs);
-      if (_tooLargeForAuto && !_requested) return _downloadChip(cs);
+      if ((_tooLargeForAuto || widget.tapOnly) && !_requested) {
+        return _downloadChip(cs);
+      }
       return _notAvailableChip(cs);
     }
 

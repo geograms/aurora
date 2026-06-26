@@ -277,6 +277,21 @@ class FunctionalityRegistry {
         ParamDef('ids', 'string', 'JSON array of event ids'),
         ParamDef('relays', 'string', 'JSON array of relay hashes'),
       ], ReturnDef('int', '1 if queued')),
+      EndpointDef('hal_relay_identity_publish',
+          'Publish our callsign→npub+dests identity (kind-30078) to relays', [
+        ParamDef('callsign', 'string', 'our callsign'),
+        ParamDef('deliv', 'string', 'our RNS delivery dest (hex)'),
+        ParamDef('prop', 'string', 'our RNS propagation dest (hex)'),
+        ParamDef('relays', 'string', 'JSON array of relay hashes'),
+      ], ReturnDef('int', '1 if queued, -1 on error')),
+      EndpointDef('hal_relay_resolve',
+          'Trigger an async callsign→npub resolve by querying relays', [
+        ParamDef('callsign', 'string', 'callsign to resolve'),
+        ParamDef('relays', 'string', 'JSON array of relay hashes'),
+      ], ReturnDef('int', '1 if queued, -1 on error')),
+      EndpointDef('hal_relay_resolve_recv',
+          'Pop next resolution JSON {callsign,npub,deliv,prop}', [],
+          ReturnDef('uint32', 'Bytes written, 0 if none')),
     ]),
     'hal.contacts': FunctionalityDef(
         'hal.contacts', 'Known people (reusable contact picker source)', [

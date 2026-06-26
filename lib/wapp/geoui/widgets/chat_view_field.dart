@@ -632,6 +632,22 @@ class _ChatViewFieldState extends State<ChatViewField> {
       .trim();
 
   Widget _bubble(Map<String, dynamic> m, {bool inThread = false}) {
+    // System note: a centered, muted status line (no avatar/name/bubble/badges).
+    if (m['sys'] == true) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
+        child: Center(
+          child: Text(
+            m['text']?.toString() ?? '',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+                color: ChatPalette.secondary,
+                fontSize: 12,
+                fontStyle: FontStyle.italic),
+          ),
+        ),
+      );
+    }
     final outgoing = (m['dir']?.toString() ?? 'in') == 'out';
     final from = m['from']?.toString() ?? '';
     final text = m['text']?.toString() ?? '';

@@ -260,6 +260,10 @@ class WappEngine {
   // drained one JSON entry at a time by hal_relay_dm_recv.
   final List<String> _relayDmRx = [];
 
+  // Staging buffer for callsign→npub resolutions from hal_relay_resolve (async),
+  // drained one JSON entry at a time by hal_relay_resolve_recv.
+  final List<String> _relayResolveRx = [];
+
   // hal_socket_*_sync state — blocking sockets for synchronous test code
   // (the wasm test runner can't await async I/O). Keyed by handle.
   final Map<int, RawSynchronousSocket> _syncSockets = {};
@@ -2538,6 +2542,57 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Publish OUR identity (callsign → npub + Reticulum dests) to [relays] as a
+    // signed, replaceable kind-30078 event, so peers can resolve us by callsign.
+    // Fire-and-forget; returns 1 if queued.
+    final halRelayIdentityPublish = WasmFunction(
+      (int callPtr, int callLen, int delivPtr, int delivLen, int propPtr,
+          int propLen, int relaysPtr, int relaysLen) {
+        final call = _readStr(callPtr, callLen);
+        if (call.isEmpty) return -1;
+        final deliv = delivLen > 0 ? _readStr(delivPtr, delivLen) : '';
+        final prop = propLen > 0 ? _readStr(propPtr, propLen) : '';
+        final relays = jsonStrList(_readStr(relaysPtr, relaysLen));
+        // ignore: discarded_futures
+        RnsService.instance
+            .publishIdentityToRelays(call, deliv, prop, relayDestsHex: relays);
+        return 1;
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    // Trigger an async resolve of a callsign → npub by querying [relays] for the
+    // identity event; the result (if any) lands on _relayResolveRx for
+    // hal_relay_resolve_recv. Fire-and-forget; returns 1 if queued.
+    final halRelayResolve = WasmFunction(
+      (int callPtr, int callLen, int relaysPtr, int relaysLen) {
+        final call = _readStr(callPtr, callLen);
+        if (call.isEmpty) return -1;
+        final relays = jsonStrList(_readStr(relaysPtr, relaysLen));
+        RnsService.instance
+            .relayResolveCallsign(call, relayDestsHex: relays)
+            .then((m) {
+          if (m != null) _relayResolveRx.add(jsonEncode(m));
+        }).ignore();
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Pop the next resolution JSON {callsign, npub(b64url), deliv, prop}; 0 if none.
+    final halRelayResolveRecv = WasmFunction(
+      (int outPtr, int outCap) {
+        if (_relayResolveRx.isEmpty || outCap <= 0) return 0;
+        final bytes = utf8.encode(_relayResolveRx.first);
+        _relayResolveRx.removeAt(0); // pop regardless (drop oversized)
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     // ── Reticulum visualization/management HAL (read-only) ───────────────────
     // These expose the node's observed network + status + bootstrap hubs as JSON
     // so the "reticulum" wapp can render an interactive graph. Config (add/remove/
@@ -2785,6 +2840,9 @@ class WappEngine {
       WasmImport('hal', 'relay_dm_fetch', halRelayDmFetch),
       WasmImport('hal', 'relay_dm_recv', halRelayDmRecv),
       WasmImport('hal', 'relay_dm_drop', halRelayDmDrop),
+      WasmImport('hal', 'relay_identity_publish', halRelayIdentityPublish),
+      WasmImport('hal', 'relay_resolve', halRelayResolve),
+      WasmImport('hal', 'relay_resolve_recv', halRelayResolveRecv),
       WasmImport('hal', 'rns_status', halRnsStatus),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),

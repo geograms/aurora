@@ -163,6 +163,10 @@ class ConversationStore {
       if ((d['parent'] ?? '').toString().isNotEmpty) 'parent': d['parent'].toString(),
       if ((d['auth'] ?? '').toString().isNotEmpty) 'auth': d['auth'].toString(),
       if (d['enc'] == true) 'enc': true,
+      // System note (not a real message): rendered as a centered, muted line —
+      // no avatar/name/bubble. Used for in-chat status like "key unknown — sent
+      // public; checking relays".
+      if (d['sys'] == true) 'sys': true,
       // Reticulum-only (private) message — the wapp tags it so the bubble is
       // visibly distinct from public APRS traffic (which can also be encrypted).
       if (d['private'] == true) 'private': true,
@@ -175,7 +179,7 @@ class ConversationStore {
     // A like may have arrived before this message — seed its tally now.
     final mid = (d['mid'] ?? '').toString();
     if (mid.isNotEmpty && reactions.containsKey(mid)) _applyReaction(mid);
-    if (dir == 'in' && id != openId) it.unread++;
+    if (dir == 'in' && id != openId && d['sys'] != true) it.unread++;
     it.activityTs = _nowMs();
     _bump(id);
   }

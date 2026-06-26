@@ -3116,6 +3116,110 @@ class RnsService {
     return n;
   }
 
+  // ── Identity directory on relays (callsign ↔ npub, for cold-start 1:1) ──────
+  // A node publishes a signed, replaceable kind-30078 (NIP-78 app-data) event so
+  // peers can resolve its callsign → npub (+ Reticulum dests) by querying relays,
+  // even if they have never heard its key beacon. Queryable by the `d` tag
+  // (= the callsign), which the relay store indexes like any other tag.
+  static const int _kIdentityKind = 30078;
+
+  /// Publish OUR identity (callsign → our npub + Reticulum delivery/propagation
+  /// dests) to [relayDestsHex] (+ the local store) as a signed kind-30078 event,
+  /// keyed (replaceable) by the uppercased callsign, so others can resolve us by
+  /// callsign later. No-op without a profile key / callsign.
+  Future<void> publishIdentityToRelays(
+      String callsign, String delivHex, String propHex,
+      {required List<String> relayDestsHex}) async {
+    final pub = selfPubHex;
+    final privHex = _profilePrivHex();
+    final call = callsign.trim().toUpperCase();
+    if (pub == null || privHex == null || call.isEmpty) return;
+    final content =
+        jsonEncode({'callsign': call, 'deliv': delivHex, 'prop': propHex});
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: _kIdentityKind,
+      tags: [
+        ['d', call],
+        ['callsign', call],
+      ],
+      content: content,
+    );
+    try {
+      ev.sign(privHex);
+    } catch (e) {
+      LogService.instance.add('RNS/relay: identity sign failed: $e');
+      return;
+    }
+    await relayPublish(ev.toJson()); // local store + best-indexer fan-out
+    for (final hex in relayDestsHex) {
+      final id = _relayIdentity(hex);
+      if (id != null && _relay != null) {
+        // ignore: discarded_futures
+        _relay!.publish(id, ev);
+      }
+    }
+  }
+
+  /// Resolve [callsign] → identity by querying [relayDestsHex] (+ the local
+  /// store) for the newest verified kind-30078 event keyed by that callsign.
+  /// Returns `{callsign, npub(base64url), deliv, prop}` (npub in the wapp's
+  /// pk-store format so it can be stored directly) or null if none is found.
+  Future<Map<String, dynamic>?> relayResolveCallsign(String callsign,
+      {required List<String> relayDestsHex}) async {
+    final call = callsign.trim().toUpperCase();
+    if (call.isEmpty) return null;
+    final filter = NostrFilter(
+      kinds: [_kIdentityKind],
+      tags: {
+        'd': [call]
+      },
+      limit: 4,
+    );
+    final collected = <NostrEvent>[];
+    for (final hex in relayDestsHex) {
+      final id = _relayIdentity(hex);
+      if (id != null && _relay != null) {
+        try {
+          collected.addAll(await _relay!
+              .query(id, filter, timeout: const Duration(seconds: 12)));
+        } catch (_) {}
+      }
+    }
+    collected.addAll(_relayStore?.query(filter) ?? const []);
+    NostrEvent? best;
+    for (final ev in collected) {
+      if (!ev.verify()) continue;
+      var ok = false;
+      for (final t in ev.tags) {
+        if (t.length >= 2 && t[0] == 'd' && t[1].toUpperCase() == call) {
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) continue;
+      if (best == null || ev.createdAt > best.createdAt) best = ev;
+    }
+    if (best == null) return null;
+    final authorX = _hexToBytes(best.pubkey);
+    if (authorX == null || authorX.length != 32) return null;
+    var deliv = '', prop = '';
+    try {
+      final m = jsonDecode(best.content);
+      if (m is Map) {
+        deliv = (m['deliv'] ?? '').toString();
+        prop = (m['prop'] ?? '').toString();
+      }
+    } catch (_) {}
+    return {
+      'callsign': call,
+      'npub': base64Url.encode(authorX).replaceAll('=', ''),
+      'deliv': deliv,
+      'prop': prop,
+    };
+  }
+
   // ── Store-and-forward follow set (NOSTR-follow tier) ──────────────────────
   /// Mark [key] (hex / npub / base64url pubkey) as followed — its hosted notes
   /// and files get the "followed" retention tier (kept; media evicted only under

@@ -610,6 +610,47 @@ class RnsService {
     }
   }
 
+  // True once this node holds a BLE edge interface and relays it onto the hubs.
+  bool _bleBridge = false;
+
+  /// Bring up this node's BLE radio as an EDGE interface and turn on scoped
+  /// edge-bridge relaying, so BLE-only peers (no internet) become reachable from
+  /// across the world through us (A —BLE→ us —TCP→ hubs → C). Only the
+  /// announces/packets for those BLE peers cross to/from the hubs — the internet
+  /// announce flood is never re-aired onto BLE (see [RnsTransport.edgeBridge]),
+  /// so BLE air and the APRS traffic sharing it are protected. Automatic,
+  /// idempotent, non-fatal: a device without BLE5 (e.g. desktop) just stays a
+  /// leaf.
+  Future<void> _enableBleBridge() async {
+    if (_bleBridge || _transport == null || _id == null) return;
+    try {
+      final radio = Ble5Radio();
+      if (!await radio.supported()) return; // no BLE5 here — remain a leaf
+      await radio.startScan();
+      final iface = RnsBleInterface(
+        radio: radio,
+        edge: true,
+        onPacket: (raw) => _onInbound(raw, 'ble5'),
+        log: (m) => LogService.instance.add('RNS/ble5: $m'),
+      );
+      _transport!
+        ..addInterface(iface)
+        ..transportId = _id!.hash // 16-byte relay id (truncated identity hash)
+        ..edgeBridge = true
+        // Scoped relay work is tiny; never auto-shed it (would stop bridging).
+        ..setPassive(false, auto: false);
+      _ifaces.add(iface);
+      _bleBridge = true;
+      LogService.instance.add(
+          'RNS: BLE edge-bridge ON (relaying BLE peers onto the hubs)');
+    } catch (e) {
+      LogService.instance.add('RNS: BLE edge-bridge unavailable: $e');
+    }
+  }
+
+  /// Whether this node is acting as a BLE↔internet edge-bridge.
+  bool get isBleBridge => _bleBridge && (_transport?.edgeBridge ?? false);
+
   /// Seconds this node's Reticulum stack has been up this run (0 when down).
   /// Advertised on the wire (relay announce) and the API so peers can prefer
   /// stable, long-running nodes (likely indexers) when warm-starting discovery.
@@ -627,6 +668,8 @@ class RnsService {
         'identity': identityHex,
         'dest': destHex,
         'paths': _transport?.pathCount ?? 0,
+        // Edge-bridge: this node relays BLE-only peers onto the internet hubs.
+        'bridge': isBleBridge,
         // Passive = shedding relay work under CPU load (still meshed + sending/
         // receiving our own traffic); annRate = inbound announces/sec driving it.
         'passive': _transport?.passive ?? false,
@@ -846,6 +889,12 @@ class RnsService {
           if (ra.uptimeSeconds > 0) n.uptimeSeconds = ra.uptimeSeconds;
           if (ra.pubkey != null && ra.pubkey!.isNotEmpty) {
             n.nostrPubHex = ra.pubkey;
+            // Once a peer is genuinely reachable (re-announced), pull its kind-0
+            // profile directly from it so we can show its real nickname. Gating
+            // on heardCount keeps the connect-flood from spamming queries.
+            if (n.heardCount >= 2) {
+              _maybeFetchObservedProfile(ra.pubkey!.toLowerCase());
+            }
           }
         }
       }
@@ -882,6 +931,16 @@ class RnsService {
     } catch (_) {
       return '';
     }
+  }
+
+  /// A peer's friendly name from its cached kind-0 profile (display_name/name),
+  /// or '' if we haven't fetched one. Used as the device "nickname".
+  String _profileNameFor(String? pubHex) {
+    if (pubHex == null || pubHex.length != 64) return '';
+    final m = _parseProfileContent(_relayStore?.profileOf(pubHex)?.content);
+    if (m == null) return '';
+    final n = m['display_name'] ?? m['name'];
+    return (n is String) ? n.trim() : '';
   }
 
   static const List<(int, String)> _capNames = [
@@ -962,9 +1021,37 @@ class RnsService {
           if (relay.announcement.caps & bit != 0) caps.add(name);
         }
       }
+      // Identity for display. In geogram the CALLSIGN is derived from the npub
+      // (X1<4>), not the announced text — many devices announce the generic
+      // nickname "aurora", so that alone is useless. The NICKNAME is the peer's
+      // kind-0 display_name when we've fetched it, else its announced text.
+      final pub = n.nostrPubHex;
+      var callsign = '';
+      if (pub != null && pub.length == 64) {
+        try {
+          callsign = 'X1${NostrCrypto.deriveCallsign(pub)}';
+        } catch (_) {}
+      }
+      final announced = (n.callsign ?? '').trim();
+      final profileName = _profileNameFor(pub);
+      final nickname = profileName.isNotEmpty ? profileName : announced;
+      // Title: "nickname (callsign)" when both are known and differ; otherwise
+      // whichever we have, falling back to the short identity hex.
+      final String label;
+      if (callsign.isNotEmpty &&
+          nickname.isNotEmpty &&
+          nickname.toUpperCase() != callsign.toUpperCase()) {
+        label = '$nickname ($callsign)';
+      } else if (callsign.isNotEmpty) {
+        label = callsign;
+      } else if (nickname.isNotEmpty) {
+        label = nickname;
+      } else {
+        label = shortHex(n.identityHex);
+      }
       return {
         'id': n.identityHex,
-        'label': n.callsign ?? shortHex(n.identityHex),
+        'label': label,
         'kind': kind,
         'services': n.services.toList()..sort(),
         // How this node can be reached for a 1:1 message, derived from what it
@@ -987,7 +1074,11 @@ class RnsService {
         'via': n.via,
         'relayer': n.relayerHex ?? '',
         'meta': {
-          'callsign': n.callsign ?? '',
+          // Callsign = npub-derived (the stable geogram id); nickname = friendly
+          // name (kind-0 display_name, else announced text). Both surfaced so the
+          // detail panel can show them separately.
+          'callsign': callsign.isNotEmpty ? callsign : announced,
+          'nickname': nickname,
           'pubkey': n.publicKeyHex,
           // NOSTR npub (from the peer's relay announce) so same-nickname devices
           // are distinguishable; empty if the peer never advertised one.
@@ -1659,6 +1750,16 @@ class RnsService {
           break;
         default:
           throw StateError('unknown mode $mode');
+      }
+
+      // Edge-bridge: an internet-connected node ALSO brings up its BLE radio and
+      // relays BLE-side peers onto the hubs, so a BLE-only phone becomes
+      // reachable from across the world (A —BLE→ us —TCP→ hubs → C). Automatic
+      // and non-fatal: skipped where BLE5 is unsupported (e.g. desktop), leaving
+      // a normal leaf. BLE-only nodes (ble/ble5 modes) are the leaf being
+      // bridged, so they don't add a second BLE interface here.
+      if (mode == 'tcpclient' || mode == 'tcpserver') {
+        await _enableBleBridge();
       }
 
       // Local loopback gateway: let other geogram apps on this device share this
@@ -2977,6 +3078,49 @@ class RnsService {
     if (id == null) return; // can't reach it directly yet — retried on announce
     _profileInFlight.add(cs);
     unawaited(_fetchProfileDirect(cs, id, pub));
+  }
+
+  // De-dup / TTL state for observed-peer profile fetches (keyed by pubkey hex),
+  // kept separate from the followed-callsign maps above.
+  final Set<String> _obProfileInFlight = {};
+  final Map<String, int> _obProfileFetchedAt = {};
+
+  /// Best-effort fetch of an OBSERVED peer's kind-0 profile DIRECTLY from it (it
+  /// runs a relay), so the reticulum wapp can show its real nickname instead of
+  /// the generic announced text. Unlike [_maybeFetchFollowedProfile] this isn't
+  /// gated on follow — any reachable geogram device. Deduped + TTL'd; the result
+  /// lands in [_relayStore] where [_profileNameFor] reads it next snapshot.
+  void _maybeFetchObservedProfile(String pubHex) {
+    final r = _relay;
+    if (r == null || pubHex.length != 64) return;
+    if (_obProfileInFlight.contains(pubHex)) return;
+    final last = _obProfileFetchedAt[pubHex] ?? 0;
+    final haveFresh = _relayStore?.profileOf(pubHex) != null &&
+        DateTime.now().millisecondsSinceEpoch - last < _profileTtlMs;
+    if (haveFresh) return;
+    final id = _relayDir.identityForPubkey(pubHex);
+    if (id == null) return; // can't reach it directly yet
+    _obProfileInFlight.add(pubHex);
+    unawaited(() async {
+      try {
+        final evs = await r.query(
+            id, NostrFilter(authors: [pubHex], kinds: const [0], limit: 1));
+        if (evs.isNotEmpty) {
+          final ev = evs.first;
+          _relayStore?.put(ev,
+              tier: tierOf(ev.pubkey,
+                      selfPubHex: selfPubHex, followsHex: _follows.asSet)
+                  .index);
+          _obProfileFetchedAt[pubHex] = DateTime.now().millisecondsSinceEpoch;
+          LogService.instance.add(
+              'RNS/relay: fetched observed profile ${pubHex.substring(0, 8)}');
+        }
+      } catch (_) {
+        // best-effort — retried on the next announce
+      } finally {
+        _obProfileInFlight.remove(pubHex);
+      }
+    }());
   }
 
   /// Like [_maybeFetchFollowedProfile] but keyed by pubkey (resolves to the

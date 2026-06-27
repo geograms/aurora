@@ -979,6 +979,10 @@ class _GraphViewState extends State<_GraphView>
         ),
       if (n.kind != 'self') _dmSection(n),
       if (n.services.isNotEmpty) _chips(n.services),
+      if ((m['nickname'] ?? '').toString().isNotEmpty &&
+          (m['nickname'] ?? '').toString().toUpperCase() !=
+              (m['callsign'] ?? '').toString().toUpperCase())
+        _kv('Nickname', m['nickname'].toString()),
       if ((m['callsign'] ?? '').toString().isNotEmpty)
         _kv('Callsign', m['callsign'].toString()),
       if ((m['role'] ?? '').toString().isNotEmpty)

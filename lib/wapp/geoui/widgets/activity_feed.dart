@@ -14,6 +14,7 @@ import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart' show mediaSizeHint;
 import 'chat_palette.dart';
 import 'chat_view_field.dart' show viaTagColor;
+import 'generated_avatar.dart';
 import 'media_view.dart';
 
 class ActivityFeed extends StatefulWidget {
@@ -56,6 +57,13 @@ class ActivityFeed extends StatefulWidget {
   /// Callsigns we follow (for the Following filter).
   final Set<String> followedCalls;
 
+  /// Callsigns to hide from the feed (blocked + muted), pushed by the wapp.
+  final Set<String> hiddenCalls;
+
+  /// Block / mute a callsign from a post's "…" menu.
+  final void Function(String from)? onBlock;
+  final void Function(String from)? onMute;
+
   final String hint;
 
   const ActivityFeed({
@@ -77,6 +85,9 @@ class ActivityFeed extends StatefulWidget {
     this.replyCount,
     this.onOpenThread,
     this.followedCalls = const {},
+    this.hiddenCalls = const {},
+    this.onBlock,
+    this.onMute,
     this.hint = "What's happening?",
   });
 
@@ -156,6 +167,13 @@ class _ActivityFeedState extends State<ActivityFeed> {
             .toList();
         break;
     }
+    // Hide posts from blocked/muted callsigns (the wapp pushes the set).
+    if (widget.hiddenCalls.isNotEmpty) {
+      posts = posts
+          .where((p) =>
+              !widget.hiddenCalls.contains((p['from'] ?? '').toString().toUpperCase()))
+          .toList();
+    }
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 640),
@@ -185,6 +203,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
                         isSaved: widget.isSaved,
                         onSave: widget.onSave,
                         replyCount: widget.replyCount,
+                        onBlock: widget.onBlock,
+                        onMute: widget.onMute,
                         onTap: () => widget.onOpenThread?.call(posts[i]),
                         onReply: () => widget.onOpenThread?.call(posts[i]),
                       ),
@@ -390,11 +410,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
     if (widget.selfAvatar != null) {
       return CircleAvatar(radius: 18, backgroundImage: widget.selfAvatar);
     }
-    return const CircleAvatar(
-      radius: 18,
-      backgroundColor: ChatPalette.accent,
-      child: Icon(Icons.person, size: 20, color: Colors.white),
-    );
+    return GeneratedAvatar(seed: call.isNotEmpty ? call : 'me', size: 36);
   }
 }
 
@@ -461,23 +477,7 @@ Uint8List? activityInlineThumb(String raw) {
 
 Widget _activityAvatar(String call, {ImageProvider? image, double radius = 18}) {
   if (image != null) return CircleAvatar(radius: radius, backgroundImage: image);
-  final initials = call.isEmpty
-      ? '?'
-      : call
-          .replaceAll(RegExp(r'[^A-Za-z0-9]'), '')
-          .padRight(2)
-          .substring(0, 2)
-          .toUpperCase();
-  final hue = (call.codeUnits.fold<int>(0, (a, b) => a + b) * 47) % 360;
-  return CircleAvatar(
-    radius: radius,
-    backgroundColor: HSLColor.fromAHSL(1, hue.toDouble(), 0.5, 0.4).toColor(),
-    child: Text(initials,
-        style: TextStyle(
-            color: Colors.white,
-            fontSize: radius * 0.66,
-            fontWeight: FontWeight.bold)),
-  );
+  return GeneratedAvatar(seed: call, size: radius * 2);
 }
 
 Widget _activityViaChip(String via) {
@@ -515,6 +515,10 @@ class ActivityPostCard extends StatelessWidget {
   /// Tapping the reply action. Null hides the reply action.
   final VoidCallback? onReply;
 
+  /// Block / mute the post's author (from a "…" menu). Null hides the menu.
+  final void Function(String from)? onBlock;
+  final void Function(String from)? onMute;
+
   /// Left indent for a nested reply, and whether to draw a thread connector.
   final double indent;
   final bool connector;
@@ -530,11 +534,44 @@ class ActivityPostCard extends StatelessWidget {
     this.isSaved,
     this.onSave,
     this.replyCount,
+    this.onBlock,
+    this.onMute,
     this.onTap,
     this.onReply,
     this.indent = 0,
     this.connector = false,
   });
+
+  /// Per-post "…" menu: mute or block the author (only for others' posts).
+  Widget _menu(String from) => PopupMenuButton<String>(
+        icon: const Icon(Icons.more_horiz, size: 18, color: Colors.white54),
+        tooltip: 'Options',
+        padding: EdgeInsets.zero,
+        onSelected: (v) {
+          if (v == 'mute') onMute?.call(from);
+          if (v == 'block') onBlock?.call(from);
+        },
+        itemBuilder: (_) => [
+          if (onMute != null)
+            PopupMenuItem(
+              value: 'mute',
+              child: Row(children: [
+                const Icon(Icons.notifications_off_outlined, size: 18),
+                const SizedBox(width: 10),
+                Text('Mute $from'),
+              ]),
+            ),
+          if (onBlock != null)
+            PopupMenuItem(
+              value: 'block',
+              child: Row(children: [
+                const Icon(Icons.block, size: 18, color: Colors.red),
+                const SizedBox(width: 10),
+                Text('Block $from'),
+              ]),
+            ),
+        ],
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -627,6 +664,13 @@ class ActivityPostCard extends StatelessWidget {
                       if (via.isNotEmpty) ...[
                         const SizedBox(width: 6),
                         _activityViaChip(via),
+                      ],
+                      if (from.isNotEmpty &&
+                          (p['dir'] ?? '') != 'out' &&
+                          (onBlock != null || onMute != null)) ...[
+                        const Spacer(),
+                        SizedBox(
+                            height: 22, width: 28, child: _menu(from)),
                       ],
                     ],
                   ),

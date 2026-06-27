@@ -363,6 +363,9 @@ class _WappPageState extends State<WappPage>
   /// Persistent Activity feed (shared with the background engine), so posts
   /// received while the app was closed appear when the user opens Activity.
   ActivityArchive? _activityArchive;
+  /// Callsigns to hide from the Activity feed (blocked + muted), pushed by the
+  /// wapp via ui.activity.filter. Uppercased.
+  Set<String> _activityHidden = const {};
   CoinHostBridge? _coinBridge;
   AtmHostBridge? _atmBridge;
 
@@ -1328,6 +1331,18 @@ class _WappPageState extends State<WappPage>
         } else if (type == 'ui.convo.upsert') {
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).upsert(data);
+          // The wapp can ask to OPEN the conversation it just upserted (e.g. the
+          // "New message" flow, which should drop the user straight into the new
+          // 1:1 instead of leaving them on the list). Honour `select:true` by
+          // making it the open thread host-side.
+          if (data['select'] == true) {
+            final id = (data['id'] ?? '').toString();
+            if (id.isNotEmpty) {
+              _convOpenId = id;
+              _convStore(field).clearUnread(id);
+              _syncAppBadge();
+            }
+          }
           _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.msg') {
@@ -1459,6 +1474,14 @@ class _WappPageState extends State<WappPage>
             _activityRev.value++; // refresh any open thread page
             changed = true;
           }
+        } else if (type == 'ui.activity.filter') {
+          // The wapp pushes the set of callsigns to hide from Activity (blocked
+          // + muted). Existing + future posts from them are filtered out.
+          final calls = (data['calls'] as List?) ?? const [];
+          _activityHidden = {
+            for (final c in calls) c.toString().toUpperCase(),
+          };
+          changed = true;
         } else if (type == 'social.note') {
           // A wapp (APRS) tells the host to store one of OUR posts (a group
           // bulletin or Activity message) as a signed NOSTR note, so peers can
@@ -3827,6 +3850,17 @@ class _WappPageState extends State<WappPage>
         onSenderTap: _openProfile,
         npubFor: (c) => RnsService.instance.npubForCallsign(c),
         followedCalls: _followedCalls,
+        hiddenCalls: _activityHidden,
+        onBlock: (from) {
+          if (from.isEmpty) return;
+          _fieldValues['activity_call'] = from;
+          _sendCommand('activity_block');
+        },
+        onMute: (from) {
+          if (from.isEmpty) return;
+          _fieldValues['activity_call'] = from;
+          _sendCommand('activity_mute');
+        },
         likeInfo: (mid) =>
             _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false),
         isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,

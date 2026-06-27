@@ -12,6 +12,8 @@
 
 import 'package:flutter/material.dart';
 
+import 'generated_avatar.dart';
+
 class PeopleViewField extends StatefulWidget {
   final String fieldName;
 
@@ -44,21 +46,6 @@ class PeopleViewField extends StatefulWidget {
 
 class _PeopleViewFieldState extends State<PeopleViewField> {
   int _section = 0;
-
-  // Stable avatar colour from the id (same idea as the conversations list).
-  Color _avatarColor(String id) {
-    var h = 0;
-    for (final c in id.codeUnits) {
-      h = (h * 31 + c) & 0x7fffffff;
-    }
-    const palette = [
-      Color(0xFF2D6A4F), Color(0xFF40916C), Color(0xFF1D3557),
-      Color(0xFF457B9D), Color(0xFF5A189A), Color(0xFF7B2CBF),
-      Color(0xFF9D0208), Color(0xFFBA4F00), Color(0xFF6C584C),
-      Color(0xFF364958),
-    ];
-    return palette[h % palette.length];
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -144,8 +131,6 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
   Widget _row(ColorScheme cs, Map<String, dynamic> it) {
     final id = (it['id'] ?? '').toString();
     final title = (it['title'] ?? id).toString();
-    // Optional glyph (emoji / symbol) shown in the avatar instead of an initial.
-    final avatar = (it['avatar'] ?? '').toString();
     final subtitle = (it['subtitle'] ?? '').toString();
     final tags = ((it['tags'] as List?) ?? const [])
         .map((t) => t.toString())
@@ -179,19 +164,7 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            CircleAvatar(
-              radius: 22,
-              backgroundColor: _avatarColor(id),
-              child: Text(
-                avatar.isNotEmpty
-                    ? avatar
-                    : (title.isEmpty ? '?' : title[0].toUpperCase()),
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 17),
-              ),
-            ),
+            GeneratedAvatar(seed: id, size: 44),
             const SizedBox(width: 12),
             Expanded(
               child: Column(

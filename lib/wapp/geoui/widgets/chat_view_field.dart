@@ -19,6 +19,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart';
 import 'chat_palette.dart';
+import 'generated_avatar.dart';
 import 'media_view.dart';
 
 /// Stable colour for a transport/channel label ("NET", "BLE", "LORA", …),
@@ -708,6 +709,10 @@ class _ChatViewFieldState extends State<ChatViewField> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (from.isNotEmpty) ...[
+                    GeneratedAvatar(seed: from, size: 16),
+                    const SizedBox(width: 5),
+                  ],
                   if (from.isNotEmpty)
                     Flexible(
                       // The sender name opens their profile when the host

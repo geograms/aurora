@@ -538,11 +538,12 @@ class _ConversationsFieldState extends State<ConversationsField> {
       child: InkWell(
         onTap: () => _select(it.id),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          // Tighter rows so more conversations fit (~30% less height).
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           child: Row(
             children: [
-              _avatar(it, 44),
-              const SizedBox(width: 12),
+              _avatar(it, 36),
+              const SizedBox(width: 11),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -614,9 +615,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
                   ],
                 ),
               ),
-              if (widget.onMute != null ||
-                  widget.onClose != null ||
-                  widget.roomActions.isNotEmpty)
+              if (widget.onMute != null || widget.onClose != null)
                 _convMenu(context, it),
             ],
           ),
@@ -625,8 +624,8 @@ class _ConversationsFieldState extends State<ConversationsField> {
     );
   }
 
-  /// The per-conversation "…" menu — the wapp's room actions (e.g. Edit, People,
-  /// Share) followed by the built-in Mute/Unmute and Close.
+  /// The per-conversation "…" menu — the built-in Mute/Unmute and Close. (The
+  /// wapp's room actions live in the OPEN conversation's header, not here.)
   Widget _convMenu(BuildContext context, ConversationItem it) {
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_vert, size: 20),
@@ -636,25 +635,9 @@ class _ConversationsFieldState extends State<ConversationsField> {
           widget.onMute?.call(it.id, !it.muted);
         } else if (v == 'close') {
           widget.onClose?.call(it.id);
-        } else if (v.startsWith('action:')) {
-          widget.onAction(v.substring(7), it.id);
         }
       },
       itemBuilder: (_) => [
-        for (final a in widget.roomActions)
-          PopupMenuItem(
-            value: 'action:${a.name}',
-            child: Row(
-              children: [
-                Icon(convIcon(a.icon)),
-                const SizedBox(width: 10),
-                Text(a.label.isNotEmpty ? a.label : a.tooltip),
-              ],
-            ),
-          ),
-        if (widget.roomActions.isNotEmpty &&
-            (widget.onMute != null || widget.onClose != null))
-          const PopupMenuDivider(),
         if (widget.onMute != null)
           PopupMenuItem(
             value: 'mute',
@@ -747,8 +730,17 @@ class _ConversationsFieldState extends State<ConversationsField> {
                   ],
                 ),
               ),
-              // Room actions live in each conversation's "…" menu (with
-              // Mute/Close), not as header icons.
+              // Room actions (e.g. recurring bulletin, private toggle) live in
+              // the OPEN conversation's header — inside the chat for that group/
+              // person — matching the narrow-layout AppBar. Mute/Close stay in
+              // the list-row "…" menu.
+              for (final a in widget.roomActions)
+                IconButton(
+                  icon: Icon(convIcon(a.icon), size: 20),
+                  tooltip: a.label.isNotEmpty ? a.label : a.tooltip,
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => widget.onAction(a.name, id),
+                ),
             ],
           ),
         ),

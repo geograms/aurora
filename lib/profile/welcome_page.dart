@@ -19,8 +19,11 @@ import 'dart:isolate';
 import 'package:flutter/material.dart';
 
 import 'iwi_profile.dart';
+import 'identity_backup.dart';
 import 'profile_service.dart';
 import '../util/nostr_key_generator.dart';
+import '../services/android_permissions_service.dart';
+import '../services/preferences_service.dart';
 
 /// Background isolate that brute-forces vanity callsigns. The main isolate
 /// sends `{pattern, batchSize}`; we generate that many keypairs and reply with
@@ -89,6 +92,204 @@ class _WelcomePageState extends State<WelcomePage> {
 
   bool _isFinalizing = false;
   String? _error;
+
+  // ── Restore-from-backup (survives-uninstall identity) ──────────────────
+  /// Identities found in the survives-uninstall backup, auto-loaded on init
+  /// when the file is plaintext and reachable. Drives the restore card.
+  List<RestorableIdentity> _restorable = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadRestorable();
+  }
+
+  /// Auto-detect a reachable, plaintext backup so we can offer one-tap restore.
+  /// Encrypted or permission-gated backups are reached via [_restoreFromBackup].
+  Future<void> _loadRestorable() async {
+    try {
+      if (!await IdentityBackup.instance.backupExists()) return;
+      if (await IdentityBackup.instance.isEncrypted()) return;
+      final list = await IdentityBackup.instance.readBackup();
+      if (mounted && list.isNotEmpty) setState(() => _restorable = list);
+    } catch (_) {
+      // Best-effort — the manual "Restore from a backup" button still works.
+    }
+  }
+
+  /// Save a restored identity and hand off to the launcher. Reuses
+  /// [ProfileService.buildFromNsec] so the callsign/npub are re-derived.
+  Future<void> _restore(RestorableIdentity id) async {
+    if (_vanityRunning) _stopVanity();
+    setState(() {
+      _isFinalizing = true;
+      _error = null;
+    });
+    try {
+      final profile = ProfileService.instance.buildFromNsec(
+        id.nsec,
+        nickname: id.nickname,
+      );
+      await ProfileService.instance.saveAndActivate(profile);
+      await _ensureBackupAccess();
+      if (!mounted) return;
+      widget.onComplete();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isFinalizing = false;
+          _error = e.toString();
+        });
+      }
+    }
+  }
+
+  /// Manual restore: grant storage access if needed, unlock an encrypted backup
+  /// with a passphrase, then restore (or pick when several identities exist).
+  Future<void> _restoreFromBackup() async {
+    if (_vanityRunning) _stopVanity();
+    // Android: the backup lives on public storage behind all-files-access.
+    if (!await AndroidPermissionsService.instance.hasAllFilesAccess()) {
+      final ok =
+          await AndroidPermissionsService.instance.requestAllFilesAccess();
+      if (!ok) {
+        if (mounted) {
+          setState(() => _error =
+              'Storage access is needed to read the backup on this phone.');
+        }
+        return;
+      }
+    }
+    if (!await IdentityBackup.instance.backupExists()) {
+      if (mounted) setState(() => _error = 'No backup found on this device.');
+      return;
+    }
+    var passphrase = '';
+    if (await IdentityBackup.instance.isEncrypted()) {
+      final entered = await _promptPassphrase();
+      if (entered == null || entered.isEmpty) return;
+      passphrase = entered;
+    }
+    List<RestorableIdentity> list;
+    try {
+      list = await IdentityBackup.instance.readBackup(passphrase: passphrase);
+    } on BadPassphrase catch (e) {
+      if (mounted) setState(() => _error = e.message);
+      return;
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+      return;
+    }
+    if (list.isEmpty) {
+      if (mounted) setState(() => _error = 'Backup held no identities.');
+      return;
+    }
+    // Keep encrypting future auto-backups with the same passphrase.
+    if (passphrase.isNotEmpty) {
+      PreferencesService.instanceSync?.identityBackupPassphrase = passphrase;
+    }
+    if (list.length == 1) {
+      await _restore(list.first);
+      return;
+    }
+    if (!mounted) return;
+    final chosen = await showDialog<RestorableIdentity>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Restore which identity?'),
+        children: [
+          for (final id in list)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, id),
+              child: Text(
+                  '${id.callsign}${id.nickname.isNotEmpty ? '  (${id.nickname})' : ''}'),
+            ),
+        ],
+      ),
+    );
+    if (chosen != null) await _restore(chosen);
+  }
+
+  Future<String?> _promptPassphrase() async {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Unlock backup'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          obscureText: true,
+          decoration: const InputDecoration(
+            hintText: 'Backup passphrase',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Unlock'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _restoreCard(ThemeData theme, ColorScheme cs) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 24),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: cs.secondaryContainer,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.restore, color: cs.onSecondaryContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Restore your previous identity',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: cs.onSecondaryContainer,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'A backup from a previous install was found on this phone.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: cs.onSecondaryContainer,
+            ),
+          ),
+          const SizedBox(height: 12),
+          for (final id in _restorable)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: FilledButton.icon(
+                onPressed: _isFinalizing ? null : () => _restore(id),
+                icon: const Icon(Icons.badge),
+                label: Text(
+                  'Restore ${id.callsign}'
+                  '${id.nickname.isNotEmpty ? '  (${id.nickname})' : ''}',
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
   // ── Vanity callsign generator ──────────────────────────────────────
   final _patternController = TextEditingController();
@@ -279,6 +480,7 @@ class _WelcomePageState extends State<WelcomePage> {
         nickname: _nicknameController.text.trim(),
       );
       await ProfileService.instance.saveAndActivate(profile);
+      await _ensureBackupAccess();
       if (!mounted) return;
       widget.onComplete();
     } catch (e) {
@@ -288,6 +490,51 @@ class _WelcomePageState extends State<WelcomePage> {
           _error = e.toString();
         });
       }
+    }
+  }
+
+  /// One-time nudge so the automatic identity backup can write to the
+  /// survives-uninstall location. Android-only; no-op once access is granted
+  /// (and on desktop). Skipping is fine — the profile editor can enable it
+  /// later, and the auto-backup just stays idle until then.
+  Future<void> _ensureBackupAccess() async {
+    if (await AndroidPermissionsService.instance.hasAllFilesAccess()) {
+      // Already granted (or desktop) — make sure the first backup is written.
+      final pass =
+          PreferencesService.instanceSync?.identityBackupPassphrase ?? '';
+      await IdentityBackup.instance
+          .backupAll(ProfileService.instance.profiles, passphrase: pass);
+      return;
+    }
+    if (!mounted) return;
+    final allow = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Protect your identity'),
+        content: const Text(
+          'Allow storage access so Aurora can keep a backup of your secret '
+          'key on this phone. It lets you restore this identity if you '
+          'reinstall the app or clear its data.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Allow'),
+          ),
+        ],
+      ),
+    );
+    if (allow != true) return;
+    final ok = await AndroidPermissionsService.instance.requestAllFilesAccess();
+    if (ok) {
+      final pass =
+          PreferencesService.instanceSync?.identityBackupPassphrase ?? '';
+      await IdentityBackup.instance
+          .backupAll(ProfileService.instance.profiles, passphrase: pass);
     }
   }
 
@@ -369,6 +616,9 @@ class _WelcomePageState extends State<WelcomePage> {
                       ),
                       const SizedBox(height: 32),
 
+                      // Restore-from-backup card (only when a backup was found).
+                      if (_restorable.isNotEmpty) _restoreCard(theme, cs),
+
                       // Callsign card
                       Text(
                         'Your callsign',
@@ -444,6 +694,12 @@ class _WelcomePageState extends State<WelcomePage> {
                                   onPressed: _isFinalizing ? null : _importNsec,
                                   icon: const Icon(Icons.key, size: 18),
                                   label: const Text('Import nsec'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed:
+                                      _isFinalizing ? null : _restoreFromBackup,
+                                  icon: const Icon(Icons.restore, size: 18),
+                                  label: const Text('Restore from backup'),
                                 ),
                                 FilledButton.icon(
                                   onPressed: _isFinalizing ? null : _finalize,

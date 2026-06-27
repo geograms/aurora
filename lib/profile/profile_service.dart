@@ -19,6 +19,8 @@ import 'package:flutter/foundation.dart';
 
 import 'iwi_profile.dart';
 import '../util/nostr_key_generator.dart';
+import '../services/preferences_service.dart';
+import 'identity_backup.dart';
 import 'profile_storage.dart';
 import 'storage_paths.dart';
 
@@ -101,6 +103,14 @@ class ProfileService {
     }
     _loaded = true;
     activeProfileNotifier.value = _activeId;
+    // Ensure existing identities are mirrored to survives-uninstall storage on
+    // boot too (not only when a profile changes), so users who installed before
+    // this feature — or who never edit their profile — still get the safety net.
+    if (_profiles.isNotEmpty) {
+      final pass =
+          PreferencesService.instanceSync?.identityBackupPassphrase ?? '';
+      unawaited(IdentityBackup.instance.backupAll(_profiles, passphrase: pass));
+    }
   }
 
   /// Generate a fresh key pair and return an unpersisted preview.
@@ -207,6 +217,13 @@ class ProfileService {
       'profiles': _profiles.map((p) => p.toJson()).toList(),
       _activeKey: _activeId,
     });
+    // Mirror the identity (nsec) to survives-uninstall storage so a reinstall /
+    // data wipe can restore it. Best-effort and fire-and-forget — a missing
+    // storage permission must never break a profile save.
+    final pass =
+        PreferencesService.instanceSync?.identityBackupPassphrase ?? '';
+    unawaited(
+        IdentityBackup.instance.backupAll(_profiles, passphrase: pass));
   }
 
   /// Absolute path to the active profile's per-profile storage root

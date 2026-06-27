@@ -13,8 +13,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'iwi_profile.dart';
+import 'identity_backup.dart';
 import 'profile_avatar.dart';
 import 'profile_service.dart';
+import '../services/android_permissions_service.dart';
+import '../services/preferences_service.dart';
 
 class ProfileEditPage extends StatefulWidget {
   final IwiProfile profile;
@@ -31,12 +34,105 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
   bool _revealKey = false;
   bool _saving = false;
 
+  // Survives-uninstall identity backup status.
+  String? _backupPath;
+  bool _backupExists = false;
+  bool _backupEncrypted = false;
+  bool _backupBusy = false;
+
   @override
   void initState() {
     super.initState();
     _p = widget.profile;
     _nickname = TextEditingController(text: _p.nickname);
     _description = TextEditingController(text: _p.description);
+    _refreshBackupStatus();
+  }
+
+  Future<void> _refreshBackupStatus() async {
+    final path = await IdentityBackup.instance.backupPath();
+    final exists = await IdentityBackup.instance.backupExists();
+    final enc = exists ? await IdentityBackup.instance.isEncrypted() : false;
+    if (!mounted) return;
+    setState(() {
+      _backupPath = path;
+      _backupExists = exists;
+      _backupEncrypted = enc;
+    });
+  }
+
+  Future<void> _backupNow() async {
+    setState(() => _backupBusy = true);
+    if (!await AndroidPermissionsService.instance.hasAllFilesAccess()) {
+      final ok =
+          await AndroidPermissionsService.instance.requestAllFilesAccess();
+      if (!ok) {
+        if (mounted) {
+          setState(() => _backupBusy = false);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Storage access is needed to save the backup.')));
+        }
+        return;
+      }
+    }
+    final pass =
+        PreferencesService.instanceSync?.identityBackupPassphrase ?? '';
+    await IdentityBackup.instance
+        .backupAll(ProfileService.instance.profiles, passphrase: pass);
+    await _refreshBackupStatus();
+    if (!mounted) return;
+    setState(() => _backupBusy = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Identity backed up')));
+  }
+
+  /// Set/clear the backup passphrase, then re-write the backup. An empty
+  /// passphrase removes encryption (plaintext backup).
+  Future<void> _changePassphrase() async {
+    final prefs = PreferencesService.instanceSync;
+    final controller =
+        TextEditingController(text: prefs?.identityBackupPassphrase ?? '');
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Backup passphrase'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Encrypt the backup with a passphrase. Leave blank for a '
+              'plaintext backup. If you forget it, the backup cannot be '
+              'restored — there is no recovery.',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              obscureText: true,
+              decoration: const InputDecoration(
+                hintText: 'Passphrase (blank = none)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result == null) return; // cancelled
+    prefs?.identityBackupPassphrase = result;
+    await _backupNow();
   }
 
   @override
@@ -234,6 +330,77 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                   const Text(
                     'Anyone with this key controls this identity. Back it up '
                     'somewhere safe and never share it.',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          // Survives-uninstall backup: keeps the nsec on phone storage so a
+          // reinstall / data wipe can restore the identity.
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.backup_outlined, size: 18),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text('Identity backup',
+                            style: TextStyle(fontWeight: FontWeight.w600)),
+                      ),
+                      Text(
+                        _backupExists
+                            ? (_backupEncrypted ? 'Encrypted' : 'Plaintext')
+                            : 'Not yet saved',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _backupPath == null
+                        ? 'Grant storage access to keep a copy that survives '
+                            'uninstalling the app.'
+                        : 'Saved to:\n$_backupPath',
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: _backupBusy ? null : _backupNow,
+                        icon: _backupBusy
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.save_alt, size: 16),
+                        label: const Text('Back up now'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _backupBusy ? null : _changePassphrase,
+                        icon: const Icon(Icons.lock_outline, size: 16),
+                        label: Text(_backupEncrypted
+                            ? 'Change passphrase'
+                            : 'Add passphrase'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'A plaintext backup holds your secret key in the clear — '
+                    'anyone with access to this phone\'s storage can read it. '
+                    'Add a passphrase to encrypt it.',
                     style: TextStyle(fontSize: 11),
                   ),
                 ],

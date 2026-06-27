@@ -221,6 +221,20 @@ class PreferencesService {
     }
   }
 
+  // Identity-backup passphrase. Empty (default) means the survives-uninstall
+  // identity backup is written in plaintext; non-empty means it is AES-encrypted
+  // with this passphrase. Stored app-private (wiped on uninstall) so auto-backup
+  // can encrypt silently; the user must re-enter it to restore on a fresh install.
+  String get identityBackupPassphrase =>
+      _prefs.getString('identityBackup.passphrase') ?? '';
+  set identityBackupPassphrase(String v) {
+    if (v.isEmpty) {
+      _prefs.remove('identityBackup.passphrase');
+    } else {
+      _prefs.setString('identityBackup.passphrase', v);
+    }
+  }
+
   // Wapp data directory — root folder for per-wapp user data
   String? get wappDataDir => _prefs.getString('wapp.dataDir');
   set wappDataDir(String? v) {

@@ -15,6 +15,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../wapp/geoui/widgets/generated_avatar.dart';
 import 'iwi_profile.dart';
 import 'profile_service.dart';
 
@@ -71,21 +72,9 @@ class ProfileAvatar extends StatelessWidget {
   }
 
   Widget _build(BuildContext context) {
-    final bg = profileColor(profile);
-    final fallback = Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
-      child: Text(
-        profileInitials(profile),
-        style: TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.w700,
-          fontSize: size * 0.38,
-        ),
-      ),
-    );
+    // No uploaded picture → the same deterministic identicon used across the
+    // app, seeded by the callsign so the user's own icon matches everywhere.
+    final fallback = GeneratedAvatar(seed: profile.callsign, size: size);
 
     if (profile.avatar.isEmpty) return fallback;
 

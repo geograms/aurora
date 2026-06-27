@@ -159,6 +159,42 @@ class ObservedStore {
     }
   }
 
+  /// The most recently-heard nodes (last_seen ≥ [sinceMs]), newest first, capped
+  /// at [limit]. Used on boot to hydrate RnsService's live registry so the wapp's
+  /// graph shows the last-known network immediately instead of starting blank;
+  /// live announces then refresh it in the background. Row shape mirrors
+  /// [upsertMany]'s input so the caller can rebuild nodes without remapping.
+  List<Map<String, Object?>> loadRecent(int sinceMs, {int limit = 4096}) {
+    final db = _db;
+    if (db == null) return const [];
+    try {
+      final rows = db.select('''
+        SELECT id, pubkey, callsign, services, hops, via, uptime, first_seen, last_seen
+        FROM nodes
+        WHERE last_seen >= ?
+        ORDER BY last_seen DESC
+        LIMIT ?
+      ''', [sinceMs, limit]);
+      return [
+        for (final r in rows)
+          {
+            'id': r['id'],
+            'pubkey': r['pubkey'],
+            'callsign': r['callsign'],
+            'services': r['services'],
+            'hops': r['hops'],
+            'via': r['via'],
+            'uptime': r['uptime'],
+            'firstSeen': r['first_seen'],
+            'lastSeen': r['last_seen'],
+          }
+      ];
+    } catch (e) {
+      LogService.instance.add('ObservedStore: loadRecent failed: $e');
+      return const [];
+    }
+  }
+
   /// Summary counts over everything ever persisted: total nodes, how many are
   /// geogram software, the earliest first-seen, and recent activity.
   Map<String, dynamic> stats() {

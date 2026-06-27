@@ -1218,6 +1218,19 @@ class _WappPageState extends State<WappPage>
           }
         } else if (type == 'rns.passive.set') {
           RnsService.instance.setPassive(data['value'] == true);
+        } else if (type == 'rns.lxmf.send') {
+          // Send a 1:1 LXMF message to an observed node the reticulum wapp picked
+          // in the graph. The peer is addressed by its public key (meta.pubkey);
+          // the service derives the LXMF delivery dest. Fire-and-forget — the
+          // graph shows an optimistic "queued" toast (LXMF stores-and-forwards).
+          final pubkey = (data['pubkey'] as String? ?? '').trim();
+          final content = (data['content'] as String? ?? '');
+          final title = (data['title'] as String? ?? '');
+          if (pubkey.isNotEmpty && content.isNotEmpty) {
+            // ignore: discarded_futures
+            RnsService.instance
+                .sendLxmfToPubkey(pubkeyHex: pubkey, title: title, content: content);
+          }
         } else if (type == 'ui.graph.set') {
           // The wapp pushes a {nodes,edges} snapshot for the native `$type:
           // "graph"` widget. We just hand it to the ValueNotifier the _GraphView

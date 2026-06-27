@@ -99,6 +99,72 @@ Map<String, dynamic> _computeGraphLayout(Map<String, dynamic> req) {
 }
 
 // ── Parsed node/edge ───────────────────────────────────────────────────────
+// Compose a 1:1 message. Owns its own controllers (disposed in dispose, after
+// the route is fully gone) so closing it can't trip a controller-lifecycle
+// assertion. Pops a (subject, body) record on Send, or null on Cancel.
+class _ComposeDialog extends StatefulWidget {
+  const _ComposeDialog({required this.to});
+  final String to;
+  @override
+  State<_ComposeDialog> createState() => _ComposeDialogState();
+}
+
+class _ComposeDialogState extends State<_ComposeDialog> {
+  final _subject = TextEditingController();
+  final _body = TextEditingController();
+
+  @override
+  void dispose() {
+    _subject.dispose();
+    _body.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: _gPanel,
+      title: Text('Message ${widget.to}',
+          style: const TextStyle(color: _gFg, fontSize: 16)),
+      content: SizedBox(
+        width: 360,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: _subject,
+            style: const TextStyle(color: _gFg, fontSize: 13),
+            decoration: const InputDecoration(
+              labelText: 'Subject (optional)',
+              labelStyle: TextStyle(color: _gMuted),
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _body,
+            autofocus: true,
+            minLines: 3,
+            maxLines: 6,
+            style: const TextStyle(color: _gFg, fontSize: 13),
+            decoration: const InputDecoration(
+              labelText: 'Message',
+              labelStyle: TextStyle(color: _gMuted),
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ]),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel')),
+        FilledButton(
+            onPressed: () => Navigator.of(context)
+                .pop((subject: _subject.text, body: _body.text)),
+            child: const Text('Send')),
+      ],
+    );
+  }
+}
+
 class _GNode {
   final String id;
   final String label;
@@ -110,10 +176,17 @@ class _GNode {
   final String via;
   final Map<String, dynamic> meta;
   final int childCount;
+  // 1:1 reachability hint from the host: 'lxmf' | 'sf' | 'chat' | '' (see
+  // graphSnapshot). Drives the detail-panel indicator + Message button.
+  final String dm;
+  // NOSTR npub (from meta), for distinguishing same-nickname devices. '' if none.
+  final String npub;
   _GNode(Map<String, dynamic> m)
       : id = (m['id'] ?? '').toString(),
         label = (m['label'] ?? m['id'] ?? '').toString(),
         kind = (m['kind'] ?? 'leaf').toString(),
+        dm = (m['dm'] ?? '').toString(),
+        npub = ((m['meta'] as Map?)?['npub'] ?? '').toString(),
         geogram = m['geogram'] == true,
         relayer = (m['relayer'] ?? '').toString(),
         services =
@@ -152,7 +225,7 @@ class _GraphView extends StatefulWidget {
 }
 
 // Which side panel is open.
-enum _Panel { none, detail, hubDevices, hubs, settings }
+enum _Panel { none, detail, hubDevices, geogramDevices, hubs, settings }
 
 class _GraphViewState extends State<_GraphView>
     with SingleTickerProviderStateMixin {
@@ -473,6 +546,7 @@ class _GraphViewState extends State<_GraphView>
           ),
           if (_vis.where((n) => n.kind != 'self').isEmpty) _buildEmpty(),
           _buildTopBar(),
+          _buildReachBadge(),
           _buildLegend(),
           _buildPanel(),
         ]),
@@ -656,6 +730,104 @@ class _GraphViewState extends State<_GraphView>
     );
   }
 
+  // ── Reachable-devices badge (top-right) ──
+  // Headline count: devices reachable right now across the connected hubs. The
+  // device count is the host's unfiltered `online` (heard within the online
+  // window); the hub count is how many bootstrap hubs we currently hold a link
+  // to. Tapping opens the bootstrap-hubs panel.
+  Widget _buildReachBadge() {
+    final d = widget.data.value ?? const {};
+    final online = (d['online'] as num?)?.toInt() ??
+        (d['observed'] as num?)?.toInt() ??
+        _allNodes.where((n) => n.kind != 'self').length;
+    final hubs = _hubList.where((h) => h['connected'] == true).length;
+    final geo = (d['geogramReachable'] as num?)?.toInt() ??
+        _allNodes.where((n) => n.kind != 'self' && n.geogram).length;
+    return Positioned(
+      top: 54,
+      right: 10,
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          decoration: BoxDecoration(
+            color: const Color(0xE6161B22),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: _gBorder),
+          ),
+          // Positioned has no width; IntrinsicWidth bounds the column to its
+          // widest line so the stretch + Divider can lay out.
+          child: IntrinsicWidth(
+            child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Line 1 — reachable-now devices + connected hubs → bootstrap panel.
+              InkWell(
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(8)),
+                onTap: () => setState(() => _panel = _Panel.hubs),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.lan_outlined, size: 15, color: _gSelf),
+                    const SizedBox(width: 6),
+                    Text('$online',
+                        style: const TextStyle(
+                            color: _gFg,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700)),
+                    const SizedBox(width: 4),
+                    Text(online == 1 ? 'device' : 'devices',
+                        style: const TextStyle(color: _gMuted, fontSize: 12)),
+                    const SizedBox(width: 8),
+                    const Text('·',
+                        style: TextStyle(color: _gMuted, fontSize: 12)),
+                    const SizedBox(width: 8),
+                    Text('$hubs',
+                        style: const TextStyle(
+                            color: _gFg,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600)),
+                    const SizedBox(width: 4),
+                    Text(hubs == 1 ? 'hub' : 'hubs',
+                        style: const TextStyle(color: _gMuted, fontSize: 12)),
+                  ]),
+                ),
+              ),
+              const Divider(height: 1, thickness: 1, color: _gBorder),
+              // Line 2 — geogram-reachable devices → list + 1:1 messaging.
+              InkWell(
+                borderRadius:
+                    const BorderRadius.vertical(bottom: Radius.circular(8)),
+                onTap: () => setState(() => _panel = _Panel.geogramDevices),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.hub_outlined, size: 15, color: _gGeo),
+                    const SizedBox(width: 6),
+                    Text('$geo',
+                        style: const TextStyle(
+                            color: _gFg,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700)),
+                    const SizedBox(width: 4),
+                    const Text('geogram',
+                        style: TextStyle(color: _gMuted, fontSize: 12)),
+                    const SizedBox(width: 6),
+                    const Icon(Icons.chevron_right, size: 15, color: _gMuted),
+                  ]),
+                ),
+              ),
+            ],
+          ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildEmpty() => const Positioned.fill(
         child: IgnorePointer(
           child: Center(
@@ -682,6 +854,10 @@ class _GraphViewState extends State<_GraphView>
         final hub = _allNodes.where((e) => e.id == _panelHubId).firstOrNull;
         title = hub == null ? 'Devices' : 'Devices · ${hub.label}';
         content = _hubDevicesBody(_panelHubId ?? '');
+        break;
+      case _Panel.geogramDevices:
+        title = 'Geogram devices';
+        content = _geogramDevicesBody();
         break;
       case _Panel.hubs:
         title = 'Bootstrap hubs';
@@ -739,6 +915,21 @@ class _GraphViewState extends State<_GraphView>
         ]),
       );
 
+  // Short stable identifier for a device row: its npub (preferred — the geogram
+  // cross-transport identity) abbreviated, else its RNS identity hex. Lets two
+  // devices that announce the same nickname be told apart.
+  String _idLabel(_GNode n) {
+    if (n.npub.isNotEmpty) return _shorten(n.npub, head: 10, tail: 6);
+    return 'id ${_shorten(n.id, head: 8, tail: 0)}';
+  }
+
+  String _shorten(String s, {int head = 10, int tail = 6}) {
+    if (s.length <= head + tail + 1) return s;
+    return tail > 0
+        ? '${s.substring(0, head)}…${s.substring(s.length - tail)}'
+        : s.substring(0, head);
+  }
+
   String _ago(dynamic ms) {
     final v = (ms as num?)?.toInt() ?? 0;
     if (v == 0) return '—';
@@ -759,6 +950,18 @@ class _GraphViewState extends State<_GraphView>
     return ListView(padding: const EdgeInsets.all(14), children: [
       Text(kindName + (n.geogram ? ' · geogram' : ''),
           style: const TextStyle(color: _gMuted, fontSize: 12)),
+      // Prominent "Last seen" right at the top — the first thing you want when
+      // opening a device (don't make the user scroll past services/caps for it).
+      if (n.kind != 'self' && m['lastSeen'] != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Row(children: [
+            const Icon(Icons.schedule, size: 14, color: _gMuted),
+            const SizedBox(width: 6),
+            Text('Last seen ${_ago(m['lastSeen'])}',
+                style: const TextStyle(color: _gFg, fontSize: 13)),
+          ]),
+        ),
       const SizedBox(height: 12),
       if (n.kind == 'hub' && n.childCount > 0)
         Padding(
@@ -774,6 +977,7 @@ class _GraphViewState extends State<_GraphView>
             }),
           ),
         ),
+      if (n.kind != 'self') _dmSection(n),
       if (n.services.isNotEmpty) _chips(n.services),
       if ((m['callsign'] ?? '').toString().isNotEmpty)
         _kv('Callsign', m['callsign'].toString()),
@@ -785,10 +989,75 @@ class _GraphViewState extends State<_GraphView>
       if (n.via.isNotEmpty) _kv('Via', n.via),
       if (n.kind == 'hub' && n.childCount > 0)
         _kv('Peers heard', '≈ ${n.childCount} (sample)'),
-      if (m['lastSeen'] != null) _kv('Last seen', _ago(m['lastSeen'])),
       if (m['firstSeen'] != null) _kv('First seen', _ago(m['firstSeen'])),
+      if (n.npub.isNotEmpty) _kv('npub', n.npub),
       if (n.id.isNotEmpty) _kv('Identity', n.id),
     ]);
+  }
+
+  // 1:1 messaging reachability + a Message action. The 'dm' hint comes from the
+  // host (graphSnapshot): 'lxmf' = LXMF delivery (direct), 'sf' = LXMF
+  // propagation only (store-and-forward), 'chat' = geogram chat, '' = none heard.
+  // The Message button derives the LXMF delivery dest from meta.pubkey, so it
+  // needs a key; synthetic hubs we never heard announce have none.
+  Widget _dmSection(_GNode n) {
+    final pubkey = (n.meta['pubkey'] ?? '').toString();
+    final (String text, Color color) = switch (n.dm) {
+      'lxmf' => ('LXMF · direct', _gGeo),
+      'sf' => ('LXMF · store-and-forward', _gHub),
+      'chat' => ('Geogram chat', _gSelf),
+      _ => ('No 1:1 messaging heard', _gMuted),
+    };
+    final canMessage = n.dm.isNotEmpty && pubkey.isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('DIRECT MESSAGE',
+            style: TextStyle(color: _gMuted, fontSize: 10, letterSpacing: 0.4)),
+        const SizedBox(height: 3),
+        Row(children: [
+          Icon(canMessage ? Icons.check_circle : Icons.do_not_disturb_on,
+              size: 14, color: color),
+          const SizedBox(width: 6),
+          Expanded(
+              child: Text(text, style: TextStyle(color: color, fontSize: 13))),
+        ]),
+        if (canMessage)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: FilledButton.icon(
+              icon: const Icon(Icons.send, size: 16),
+              label: const Text('Message'),
+              onPressed: () => _composeMessage(n, pubkey),
+            ),
+          ),
+      ]),
+    );
+  }
+
+  Future<void> _composeMessage(_GNode n, String pubkey) async {
+    final to = n.label.isNotEmpty ? n.label : n.id;
+    // Resolve the messenger BEFORE awaiting — looking it up via `context` after
+    // the dialog closes can register an inherited dependency on a deactivated
+    // element. The dialog owns its own controllers (disposed in its State) so we
+    // never tear a controller down while the route is still animating out.
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final result = await showDialog<({String subject, String body})>(
+      context: context,
+      builder: (ctx) => _ComposeDialog(to: to),
+    );
+    if (result == null || result.body.trim().isEmpty) return;
+    widget.onCommand({
+      'command': 'node_message',
+      'id': n.id,
+      'pubkey': pubkey,
+      'title': result.subject.trim(),
+      'content': result.body.trim(),
+    });
+    // Fire-and-forget host action (LXMF stores-and-forwards) — optimistic toast.
+    messenger?.showSnackBar(
+      SnackBar(content: Text('Message queued for $to via LXMF')),
+    );
   }
 
   Widget _chips(List<String> svcs) => Padding(
@@ -870,6 +1139,94 @@ class _GraphViewState extends State<_GraphView>
         );
       },
     );
+  }
+
+  // All reachable-now geogram devices (hubs + leaves), with a one-tap 1:1
+  // message for any that announced a way to receive it. Opened from the badge's
+  // "geogram" line. Tapping a row opens that node's detail panel.
+  Widget _geogramDevicesBody() {
+    final peers = _allNodes
+        .where((n) => n.kind != 'self' && n.geogram)
+        .toList()
+      ..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+    if (peers.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('No geogram devices reachable right now.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: _gMuted, fontSize: 13)),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: peers.length,
+      itemBuilder: (_, i) {
+        final p = peers[i];
+        final pubkey = (p.meta['pubkey'] ?? '').toString();
+        final canMessage = p.dm.isNotEmpty && pubkey.isNotEmpty;
+        return InkWell(
+          onTap: () => _openDeviceDetail(p),
+          child: Container(
+            padding: const EdgeInsets.only(left: 14, right: 4, top: 9, bottom: 9),
+            child: Row(children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: const BoxDecoration(
+                    color: _gGeo, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(p.label,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: _gFg, fontSize: 13)),
+                      Text(_idLabel(p),
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: _gSelf,
+                              fontSize: 11,
+                              fontFamily: 'monospace')),
+                      if (p.services.isNotEmpty)
+                        Text(p.services.join(' · '),
+                            overflow: TextOverflow.ellipsis,
+                            style:
+                                const TextStyle(color: _gMuted, fontSize: 11)),
+                      if (p.meta['lastSeen'] != null)
+                        Text('seen ${_ago(p.meta['lastSeen'])}',
+                            style: const TextStyle(
+                                color: _gMuted, fontSize: 10)),
+                    ]),
+              ),
+              if (canMessage)
+                IconButton(
+                  icon: const Icon(Icons.send, size: 17),
+                  color: _gSelf,
+                  tooltip: 'Message',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _composeMessage(p, pubkey),
+                ),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
+  // Open a node's detail panel from a list. Expand its hub first so the node is
+  // part of the visible set the detail panel reads from.
+  void _openDeviceDetail(_GNode p) {
+    setState(() {
+      _selectedId = p.id;
+      if (p.relayer.isNotEmpty) _expanded.add(p.relayer);
+      _panel = _Panel.detail;
+    });
+    _rebuildVisible();
+    _centerOn(p.id);
   }
 
   // Bootstrap-hub manager.
@@ -980,6 +1337,8 @@ class _GraphViewState extends State<_GraphView>
     final seen24h = (stats['seen24h'] as num?)?.toInt() ?? 0;
     final oldest = (stats['oldest'] as num?)?.toInt() ?? 0;
     final live = (d['observed'] as num?)?.toInt() ?? _allNodes.length;
+    final online = (d['online'] as num?)?.toInt() ?? 0;
+    final lxmfReach = (d['lxmfReachable'] as num?)?.toInt() ?? 0;
     String date(int ms) {
       if (ms <= 0) return '—';
       final t = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -1009,6 +1368,8 @@ class _GraphViewState extends State<_GraphView>
       stat('Running geogram', '$geo', color: _gGeo),
       stat('Active (24h)', '$seen24h'),
       stat('Live now', '$live'),
+      stat('Online now', '$online'),
+      stat('Messageable now (LXMF)', '$lxmfReach', color: _gGeo),
       stat('First ever seen', date(oldest)),
       const SizedBox(height: 4),
       const Text(

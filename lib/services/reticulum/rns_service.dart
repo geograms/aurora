@@ -563,6 +563,32 @@ class RnsService {
     if (cb != null) cb();
   }
 
+  /// Build, connect and register a single TCP uplink — the ONE place a Reticulum
+  /// TCP connection is created. Both initial start (tcpclient mode) and later
+  /// mesh additions ([connectUplink]) route through here so the connect + wiring
+  /// (clients / connectedHubs / transport / ifaces) never drift apart. Throws on
+  /// connect failure; the caller decides how to react.
+  Future<RnsTcpInterface> _attachTcpUplink(String host, int port,
+      {Duration timeout = const Duration(seconds: 8)}) async {
+    final key = '$host:$port';
+    final tag = 'tcp:$key';
+    late final RnsTcpInterface c;
+    c = RnsTcpInterface(
+      host: host,
+      port: port,
+      label: tag,
+      onPacket: (raw) => _onInbound(raw, tag),
+      log: (m) => LogService.instance.add('RNS/tcp: $m'),
+      onDisconnect: () => _onUplinkDown(c, 'socket closed'),
+    );
+    await c.connect(timeout: timeout);
+    _clients.add(c);
+    _connectedHubs.add(key);
+    _transport!.addInterface(c);
+    _ifaces.add(c);
+    return c;
+  }
+
   /// Add an extra hub uplink to the already-up node (the mesh). Idempotent per
   /// host:port. Best-effort: a hub that won't connect is just skipped. Returns
   /// true if an uplink to [host]:[port] is now held.
@@ -571,20 +597,7 @@ class RnsService {
     final key = '$host:$port';
     if (_connectedHubs.contains(key)) return true;
     try {
-      late final RnsTcpInterface c;
-      c = RnsTcpInterface(
-        host: host,
-        port: port,
-        label: 'tcp:$key',
-        onPacket: (raw) => _onInbound(raw, 'tcp:$key'),
-        log: (m) => LogService.instance.add('RNS/tcp: $m'),
-        onDisconnect: () => _onUplinkDown(c, 'socket closed'),
-      );
-      await c.connect(timeout: const Duration(seconds: 8));
-      _clients.add(c);
-      _connectedHubs.add(key);
-      _transport!.addInterface(c);
-      _ifaces.add(c);
+      await _attachTcpUplink(host, port);
       LogService.instance.add('RNS: added hub uplink $key (mesh)');
       // Announce on the new interface so this hub (and peers reachable via it)
       // learn our destinations promptly instead of waiting for the next cycle.
@@ -659,6 +672,11 @@ class RnsService {
   // is a little over 2× the slow cadence to avoid flapping a battery peer offline
   // between announces, while staying well under the 30-min stale sweep.
   static const int _onlineWindowMs = 11 * 60 * 1000;
+  // A node counts as reachable only once we've heard it RE-announce — at least
+  // two announces spread over this span. Bursty connect-flood replays (the hub
+  // dumping its cached announce table on link-up) all land within a second or
+  // two, so they never clear this bar even though their lastSeen looks recent.
+  static const int _reannounceMinSpanMs = 25 * 1000;
   final Map<String, _ObservedNode> _observed = {};
 
   // Persistent on-disk cache of observed nodes (set [observedStorePath] before
@@ -707,6 +725,12 @@ class RnsService {
     }
     _obStats = st.stats();
   }
+
+  // Note: the observed registry is NOT hydrated from disk on boot. Cache entries
+  // can't be confirmed reachable (no live re-announce), and showing them led to
+  // ghost devices that had long gone away. The graph now fills only from live
+  // re-announces; the on-disk cache still backs the persistent stats and the DHT
+  // warm-start ([_warmStartFromCache], which reads the cache directly).
 
   /// Warm-start discovery from the persistent observed-node cache: seed the DHT
   /// routing table from the public keys of known geogram peers (so resolve /
@@ -795,6 +819,14 @@ class RnsService {
       );
       _observed[key] = n;
     }
+    // Liveness tracking (this run). A genuinely-reachable node RE-announces on
+    // its periodic cadence; a node we only know from the hub's connect-flood (it
+    // dumps its cached announce table when we link) is heard exactly ONCE and
+    // then goes silent — yet we stamp lastSeen=now on receipt, so "heard
+    // recently" alone wrongly marks it reachable. So we require a re-announce
+    // spread over time before treating a node as reachable (see graphSnapshot).
+    if (n.firstHeardMs == 0) n.firstHeardMs = now;
+    n.heardCount++;
     n.lastSeenMs = now;
     n.hops = wireHops + 1;
     n.via = via;
@@ -807,10 +839,15 @@ class RnsService {
           n.callsign = cs;
         }
       } else if (svc == 'relay') {
-        // The relay announce carries the peer's advertised uptime — capture it so
-        // the cache can rank stable nodes first when warm-starting next boot.
+        // The relay announce carries the peer's advertised uptime (warm-start
+        // ranking) and its NOSTR pubkey (for the npub shown per device).
         final ra = RelayAnnouncement.decode(ann.appData);
-        if (ra != null && ra.uptimeSeconds > 0) n.uptimeSeconds = ra.uptimeSeconds;
+        if (ra != null) {
+          if (ra.uptimeSeconds > 0) n.uptimeSeconds = ra.uptimeSeconds;
+          if (ra.pubkey != null && ra.pubkey!.isNotEmpty) {
+            n.nostrPubHex = ra.pubkey;
+          }
+        }
       }
     }
     // Mark for the next periodic flush to disk.
@@ -835,6 +872,16 @@ class RnsService {
   void sweepObserved() {
     final cutoff = DateTime.now().millisecondsSinceEpoch - _observedStaleMs;
     _observed.removeWhere((_, v) => v.lastSeenMs < cutoff);
+  }
+
+  /// Encode a NOSTR pubkey hex to an npub for display, or '' if absent/malformed.
+  String _npubOrEmpty(String? pubHex) {
+    if (pubHex == null || pubHex.isEmpty) return '';
+    try {
+      return NostrCrypto.encodeNpub(pubHex);
+    } catch (_) {
+      return '';
+    }
   }
 
   static const List<(int, String)> _capNames = [
@@ -862,9 +909,23 @@ class RnsService {
     for (final e in _relayDir.entries()) {
       relayByHex[e.idHex] = e;
     }
-    // Hub set = every identity that is a relayer for some other observed node.
+    // The graph shows only nodes REACHABLE NOW. "Reachable" needs more than a
+    // recent lastSeen: when we link a hub it floods its cached announce table at
+    // us, so every long-dead node it ever heard gets stamped "now" once. A truly
+    // reachable peer instead RE-announces on its cadence — so we require ≥2
+    // announces spread over [_reannounceMinSpanMs] within the online window.
+    // This drops the connect-flood ghosts the user saw. One definition, used for
+    // the canvas, the hub child counts, and the headline badges alike.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    bool isFresh(_ObservedNode n) =>
+        n.heardCount >= 2 &&
+        nowMs - n.lastSeenMs <= _onlineWindowMs &&
+        n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
+
+    // Hub set = every identity that is a relayer for some node reachable now.
     final hubIds = <String>{};
     for (final n in _observed.values) {
+      if (!isFresh(n)) continue;
       final r = n.relayerHex;
       if (r != null && r.isNotEmpty) hubIds.add(r);
     }
@@ -906,6 +967,21 @@ class RnsService {
         'label': n.callsign ?? shortHex(n.identityHex),
         'kind': kind,
         'services': n.services.toList()..sort(),
+        // How this node can be reached for a 1:1 message, derived from what it
+        // announced: 'lxmf' = LXMF delivery dest (direct, the cross-Reticulum
+        // standard) · 'sf' = LXMF propagation only (store-and-forward) · 'chat' =
+        // geogram-native chat · '' = no 1:1 messaging heard. The wapp renders an
+        // indicator + a Message button from this (delivery dest derived from
+        // meta.pubkey). 'self' kind never carries one.
+        'dm': kind == 'self'
+            ? ''
+            : n.services.contains('lxmf')
+                ? 'lxmf'
+                : n.services.contains('lxmf-prop')
+                    ? 'sf'
+                    : n.services.contains('chat')
+                        ? 'chat'
+                        : '',
         'geogram': isGeogram(n),
         'hops': n.hops,
         'via': n.via,
@@ -913,6 +989,9 @@ class RnsService {
         'meta': {
           'callsign': n.callsign ?? '',
           'pubkey': n.publicKeyHex,
+          // NOSTR npub (from the peer's relay announce) so same-nickname devices
+          // are distinguishable; empty if the peer never advertised one.
+          'npub': _npubOrEmpty(n.nostrPubHex),
           'role': relay?.announcement.role.name ?? '',
           'caps': caps,
           'capacity': relay?.announcement.capacity ?? 0,
@@ -948,8 +1027,9 @@ class RnsService {
     });
     emitted.add(identityHex ?? 'self');
 
-    // Pass 1: emit hubs (always shown — they're the structure) + count children.
+    // Pass 1: emit hubs (the structure) + count their reachable-now children.
     for (final n in _observed.values) {
+      if (!isFresh(n)) continue;
       final r = n.relayerHex;
       if (r != null && r.isNotEmpty) childCount[r] = (childCount[r] ?? 0) + 1;
     }
@@ -981,9 +1061,10 @@ class RnsService {
       }
     }
 
-    // Pass 2: emit the filtered leaves / direct neighbours and their edges.
+    // Pass 2: emit the reachable-now leaves / direct neighbours and their edges.
     for (final n in _observed.values) {
       if (hubIds.contains(n.identityHex)) continue; // already a hub
+      if (!isFresh(n)) continue; // gone quiet — keep it off the canvas
       if (!matchesFilters(n)) continue;
       final r = n.relayerHex;
       if (r != null && r.isNotEmpty) {
@@ -999,11 +1080,28 @@ class RnsService {
       }
     }
 
+    // Headline counts for the wapp: devices reachable right now (the same fresh
+    // set the canvas shows) and how many of those accept LXMF. Deliberately
+    // UNFILTERED so the search/service/geogram chips don't shrink them.
+    var online = 0;
+    var lxmfReachable = 0; // online peers that announced an LXMF delivery dest
+    var geogramReachable = 0; // online peers running geogram software
+    for (final n in _observed.values) {
+      if (isFresh(n)) {
+        online++;
+        if (n.services.contains('lxmf')) lxmfReachable++;
+        if (isGeogram(n)) geogramReachable++;
+      }
+    }
+
     return {
       'nodes': nodes,
       'edges': edges,
       'sample': true, // honest: this is what we heard, not a full roster
       'observed': _observed.length,
+      'online': online,
+      'lxmfReachable': lxmfReachable,
+      'geogramReachable': geogramReachable,
       'passive': _transport?.passive ?? false,
       // Persistent all-time counts from the on-disk cache (total/geogram/oldest).
       'stats': _obStats,
@@ -1533,20 +1631,7 @@ class RnsService {
           await _server!.bind();
           break;
         case 'tcpclient':
-          late final RnsTcpInterface c;
-          c = RnsTcpInterface(
-            host: host,
-            port: port,
-            label: 'tcp',
-            onPacket: (raw) => _onInbound(raw, 'tcp'),
-            log: (m) => LogService.instance.add('RNS/tcp: $m'),
-            onDisconnect: () => _onUplinkDown(c, 'socket closed'),
-          );
-          await c.connect();
-          _clients.add(c);
-          _connectedHubs.add('$host:$port');
-          _transport!.addInterface(c);
-          _ifaces.add(c);
+          await _attachTcpUplink(host, port);
           break;
         case 'ble':
           final radio = BleServiceRnsRadio();
@@ -2296,6 +2381,35 @@ class RnsService {
       fields: fields,
     );
     return r.send_(msg);
+  }
+
+  /// Send a 1:1 LXMF message to a peer identified by its 64-byte public key hex
+  /// (as carried in graphSnapshot's meta.pubkey). Derives the peer's LXMF
+  /// delivery destination from the key — the same way the peer computes its own
+  /// ([LxmfRouter.deliveryDestHash]) — then delegates to [sendLxmf]. Lets the
+  /// reticulum wapp message an observed node straight from the graph without it
+  /// ever announcing a pre-computed delivery hash. Returns false on a malformed
+  /// key or when the stack is down.
+  Future<bool> sendLxmfToPubkey({
+    required String pubkeyHex,
+    String title = '',
+    String content = '',
+  }) async {
+    final pub = _bytesFromHex(pubkeyHex);
+    if (pub == null || pub.length != 64) return false;
+    final RnsIdentity id;
+    try {
+      id = RnsIdentity.fromPublicKey(pub);
+    } catch (_) {
+      return false;
+    }
+    final destHex = _hex(RnsDestination.hash(id, kLxmfApp, kLxmfDeliveryAspects));
+    LogService.instance.add(
+        'RNS: lxmf.send -> $destHex (pubkey ${pubkeyHex.substring(0, 8)})');
+    final ok = await sendLxmf(destHex: destHex, title: title, content: content);
+    LogService.instance
+        .add('RNS: lxmf.send ${ok ? 'ok' : 'failed'} -> $destHex');
+    return ok;
   }
 
   /// This node's LXMF propagation (cooperative mailbox) destination hash, hex.
@@ -3890,6 +4004,15 @@ class _ObservedNode {
   // Transport-id (hex) of the relayer we reach this node through; null = direct
   // neighbour of ours. Other nodes' relayer == a hub's identity.
   String? relayerHex;
+  // This node's NOSTR pubkey (hex), learned from its relay announce — encoded to
+  // an npub for display so peers with the same callsign/nickname are tellable
+  // apart. Null until we hear a relay announce carrying it.
+  String? nostrPubHex;
+  // Liveness this run (NOT persisted): how many announces we've heard and when
+  // the first arrived. Used to separate a genuine re-announcing peer from a
+  // one-shot hub connect-flood replay. Reset every run (cache hydration removed).
+  int heardCount = 0;
+  int firstHeardMs = 0;
 
   _ObservedNode({
     required this.identityHex,

@@ -11,6 +11,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../conversation_store.dart';
 import 'chat_palette.dart';
 import 'chat_view_field.dart';
+import 'generated_avatar.dart';
 
 /// Render a folder/rail icon the way it is actually stored: a built-in control
 /// id ("__up"/"__add"/"__edit"/"__access") → a real Material icon; an inline
@@ -523,25 +524,11 @@ class _ConversationsFieldState extends State<ConversationsField> {
     );
   }
 
-  Widget _avatar(ConversationItem it, double size) {
-    final generic = it.icon != 'person' && it.icon != 'chat';
-    if (generic) {
-      return CircleAvatar(
-        radius: size / 2,
-        backgroundColor: const Color(0xFF5A8F7B),
-        child: Icon(convIcon(it.icon), color: Colors.white, size: size * 0.5),
-      );
-    }
-    final color = _hashColor(it.id);
-    final letter = it.title.isNotEmpty ? it.title[0].toUpperCase() : '?';
-    return CircleAvatar(
-      radius: size / 2,
-      backgroundColor: color.withAlpha(60),
-      child: Text(letter,
-          style: TextStyle(
-              color: color, fontWeight: FontWeight.w700, fontSize: size * 0.4)),
-    );
-  }
+  // A deterministic identicon for every conversation — groups and people alike,
+  // no initials. Seeded by the title so the same group/person shows the same
+  // generated icon (design + colour) on every install.
+  Widget _avatar(ConversationItem it, double size) =>
+      GeneratedAvatar(seed: it.title.isNotEmpty ? it.title : it.id, size: size);
 
   Widget _tile(BuildContext context, ConversationItem it) {
     final cs = Theme.of(context).colorScheme;

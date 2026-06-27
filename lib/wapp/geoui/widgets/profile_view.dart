@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart' show mediaSizeHint;
 import 'chat_view_field.dart' show viaTagColor;
+import 'generated_avatar.dart';
 import 'media_view.dart';
 
 class ProfileView extends StatefulWidget {
@@ -498,32 +499,18 @@ class _ProfileViewState extends State<ProfileView> {
 
   Widget _avatar(String call, double radius) {
     // A real avatar image (from the profile's kind-0 "picture") wins; otherwise
-    // fall back to coloured initials.
+    // the same deterministic identicon used in the Messages list.
     if (widget.avatarImage != null) {
       return CircleAvatar(radius: radius, backgroundImage: widget.avatarImage);
     }
-    final initials = call.isEmpty
-        ? '?'
-        : call
-            .replaceAll(RegExp(r'[^A-Za-z0-9]'), '')
-            .padRight(2)
-            .substring(0, 2)
-            .toUpperCase();
-    final hue = (call.codeUnits.fold<int>(0, (a, b) => a + b) * 47) % 360;
-    return CircleAvatar(
-      radius: radius,
-      backgroundColor: HSLColor.fromAHSL(1, hue.toDouble(), 0.5, 0.4).toColor(),
-      child: Text(initials,
-          style: TextStyle(
-              color: Colors.white,
-              fontSize: radius * 0.7,
-              fontWeight: FontWeight.bold)),
-    );
+    return GeneratedAvatar(seed: call, size: radius * 2);
   }
 
   static final _fileRe = RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}');
   static String _stripTokens(String s) => s
       .replaceAll(_fileRe, '')
+      // Inline thumbnail preview: tn:<base64url> (may carry '=' padding).
+      .replaceAll(RegExp(r'\btn:[A-Za-z0-9_-]+=*'), '')
       .replaceAll(RegExp(r'\bih:[0-9a-fA-F]{40}\b'), '')
       .replaceAll(RegExp(r'\bsz:\d+\b'), '')
       .replaceAll(RegExp(r'\s+'), ' ')

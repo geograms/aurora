@@ -394,7 +394,7 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(_findFailed ? 'No peers have this file' : 'Image not available',
+                  Text(_findFailed ? "Reachable peers don't have this file" : 'Image not available',
                       style: const TextStyle(
                           fontSize: 12.5, fontWeight: FontWeight.w600)),
                   Text(

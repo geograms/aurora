@@ -4,7 +4,44 @@ part of 'launcher.dart';
 
 /// Folder names always auto-installed on first run, on top of every
 /// `kind: "system"` wapp. Keeps the default set in one place.
-const _kDefaultSeedNames = {'install', 'aprs', 'mp4player', 'circles', 'reticulum'};
+const _kDefaultSeedNames = {'install', 'chat', 'mp4player', 'circles', 'reticulum'};
+
+/// One-time migration for the wapp rename aprs -> chat (folder name 'aprs' was
+/// the comms wapp's install key). Renames the installed folder and moves its
+/// autostart preference, so an existing profile transitions to the renamed
+/// "Chat" wapp instead of keeping the old "APRS" one (or losing it). Idempotent:
+/// a no-op once 'chat' exists / 'aprs' is gone. Runs before seeding + the
+/// bundled-wapp upgrade, so the renamed install then upgrades to the new bundle
+/// (new id/title/icon).
+Future<void> migrateAprsToChat() async {
+  if (ProfileService.instance.activeProfile == null) return;
+  final prefs = await PreferencesService.instance();
+  // Program dir (wapps/aprs -> wapps/chat): the extracted .wapp package.
+  try {
+    final installed = installedAppsStorage();
+    if (await installed.directoryExists('aprs') &&
+        !await installed.directoryExists('chat')) {
+      await installed.renameDirectory('aprs', 'chat');
+      debugPrint('migrateAprsToChat: program aprs -> chat');
+    }
+  } catch (e) {
+    debugPrint('migrateAprsToChat program: $e');
+  }
+  // Data dir (data/aprs -> data/chat): the wapp's messages, settings and
+  // activity archive — keyed by wapp name, so it must move too or history is
+  // lost. Honours the user's wappDataDir override via wappsDataStorage.
+  try {
+    final data = wappsDataStorage(prefs);
+    if (await data.directoryExists('aprs') &&
+        !await data.directoryExists('chat')) {
+      await data.renameDirectory('aprs', 'chat');
+      debugPrint('migrateAprsToChat: data aprs -> chat');
+    }
+  } catch (e) {
+    debugPrint('migrateAprsToChat data: $e');
+  }
+  await prefs.migrateWappAutostart('aprs', 'chat');
+}
 
 /// First-run bootstrap, run as a boot task BEFORE the UI so the launcher
 /// never renders an empty grid mid-seed. Installs the curated default

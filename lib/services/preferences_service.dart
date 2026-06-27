@@ -147,16 +147,27 @@ class PreferencesService {
 
   // Per-wapp autostart: when on, the wapp runs as a background service
   // (started at boot) and keeps its engine ticking even while its UI page is
-  // closed — e.g. APRS staying connected to BLE/APRS-IS to receive messages.
-  // The APRS wapp hosts the messaging (groups, direct messages, Activity feed,
-  // beacons), so it autostarts BY DEFAULT — it must keep receiving + notifying
-  // in the background even when its page (or the whole app) is closed. Other
-  // wapps default off. The user can still turn APRS autostart off explicitly.
-  static const String _commsWappId = 'aprs';
+  // closed — e.g. Chat staying connected to BLE/APRS-IS to receive messages.
+  // The Chat wapp (folder 'chat', formerly 'aprs') hosts the messaging (groups,
+  // direct messages, Activity feed, beacons), so it autostarts BY DEFAULT — it
+  // must keep receiving + notifying in the background even when its page (or the
+  // whole app) is closed. Other wapps default off. The user can still turn it
+  // off explicitly.
+  static const String _commsWappId = 'chat';
   bool getWappAutostart(String wappId) =>
       _prefs.getBool('wapp.autostart.$wappId') ?? (wappId == _commsWappId);
   Future<void> setWappAutostart(String wappId, bool v) =>
       _prefs.setBool('wapp.autostart.$wappId', v);
+
+  /// Move a wapp's autostart preference from [oldId] to [newId] (used once when a
+  /// wapp folder is renamed, e.g. aprs -> chat). No-op if nothing was stored.
+  Future<void> migrateWappAutostart(String oldId, String newId) async {
+    final oldKey = 'wapp.autostart.$oldId';
+    if (!_prefs.containsKey(oldKey)) return;
+    final v = _prefs.getBool(oldKey) ?? false;
+    await _prefs.setBool('wapp.autostart.$newId', v);
+    await _prefs.remove(oldKey);
+  }
 
   /// Ids of all wapps that should autostart (explicitly enabled, plus the comms
   /// wapp by default unless the user turned it off).

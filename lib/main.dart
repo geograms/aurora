@@ -137,6 +137,17 @@ Future<void> main() async {
     init: ensureEditorInstalled,
   );
   BootOrchestrator.instance.register(
+    id: 'migrate-aprs-to-chat',
+    name: 'Migrate aprs wapp to chat',
+    description:
+        'One-time rename of the comms wapp folder aprs->chat (and its '
+        'autostart preference) so existing profiles transition to the renamed '
+        '"Chat" wapp. Idempotent; runs before seeding + bundled-wapp upgrade so '
+        'the renamed install picks up the new bundle.',
+    mode: BootStart.sequential,
+    init: migrateAprsToChat,
+  );
+  BootOrchestrator.instance.register(
     id: 'seed-default-wapps',
     name: 'Seed default wapps',
     description:

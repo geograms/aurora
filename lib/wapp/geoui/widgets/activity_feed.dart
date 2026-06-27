@@ -409,6 +409,34 @@ String activityMid(String from, String text) {
   return '${hx[d[0] >> 4]}${hx[d[0] & 15]}${hx[d[1] >> 4]}${hx[d[1] & 15]}';
 }
 
+const _activityMonths = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+];
+
+/// Human label for a post's time. The wapp sends a same-day clock string
+/// (`time`, HH:MM[:SS]); for posts from earlier days that alone is ambiguous, so
+/// when an absolute epoch (`t`, ms) is present we prefix a date ("yesterday HH:MM",
+/// "Jun 26 HH:MM", or "Jun 26 2024 HH:MM" for other years). Today's posts keep the
+/// plain clock string. Falls back to `time` if no epoch is available.
+String activityTimeLabel(Map<String, dynamic> p) {
+  final time = (p['time'] ?? '').toString();
+  final t = (p['t'] as num?)?.toInt() ?? 0;
+  if (t <= 0) return time; // no absolute time — keep the wapp's clock string
+  final dt = DateTime.fromMillisecondsSinceEpoch(t);
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(dt.year, dt.month, dt.day);
+  if (!day.isBefore(today)) return time; // today (or future-skew) — clock only
+  String two(int v) => v.toString().padLeft(2, '0');
+  final hm = '${two(dt.hour)}:${two(dt.minute)}';
+  if (day == today.subtract(const Duration(days: 1))) return 'yesterday $hm';
+  final mon = _activityMonths[dt.month - 1];
+  return dt.year == now.year
+      ? '$mon ${dt.day} $hm'
+      : '$mon ${dt.day} ${dt.year} $hm';
+}
+
 final _activityFileRe = RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}');
 // An embedded preview thumbnail: `tn:<base64url-png>` (carries padding `=`).
 final _activityTnRe = RegExp(r'\btn:([A-Za-z0-9_-]+=*)');
@@ -519,7 +547,7 @@ class ActivityPostCard extends StatelessWidget {
       mid = activityMid(from, raw);
       p['mid'] = mid;
     }
-    final time = (p['time'] ?? '').toString();
+    final time = activityTimeLabel(p);
     final via = (p['via'] ?? '').toString();
     final body = activityStrip(raw);
     final refs = MediaRef.findAll(raw);

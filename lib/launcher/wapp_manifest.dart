@@ -25,6 +25,9 @@ class WappManifest {
 
   final String kind;
   final String? icon;
+  /// Optional launcher tile colour from `manifest.color` (a hex string like
+  /// "#B71C1C" / "0xFFB71C1C" / "B71C1C"). Null → auto-pick from the id hash.
+  final String? colorHex;
   final String dirPath;
 
   /// Publisher npub extracted from this wapp's `signature.json`
@@ -83,6 +86,7 @@ class WappManifest {
     this.summary = '',
     required this.kind,
     this.icon,
+    this.colorHex,
     required this.dirPath,
     this.publisherNpub = '',
     this.providedFunctionalities = const [],
@@ -195,6 +199,7 @@ class WappManifest {
       summary: manifestSummary,
       kind: json['kind'] as String? ?? 'app',
       icon: json['icon'] as String?,
+      colorHex: json['color'] as String?,
       dirPath: dirPath,
       publisherNpub: publisherNpub,
       providedFunctionalities: funcIds,
@@ -240,8 +245,11 @@ class WappManifest {
     return '$dirPath${platform.pathSeparator}$raw';
   }
 
-  /// Pick a color based on the id hash.
+  /// Launcher tile colour: an explicit `manifest.color` if given, else picked
+  /// deterministically from the id hash.
   Color get color {
+    final override = _parseHexColor(colorHex);
+    if (override != null) return override;
     final colors = [
       const Color(0xFF0F3460),
       const Color(0xFF533483),
@@ -253,6 +261,19 @@ class WappManifest {
       const Color(0xFF2E4053),
     ];
     return colors[id.hashCode.abs() % colors.length];
+  }
+
+  /// Parse a manifest colour string ("#RRGGBB", "RRGGBB", "0xAARRGGBB" or
+  /// "AARRGGBB") into a [Color], or null if absent/malformed. 6-digit values are
+  /// assumed fully opaque.
+  static Color? _parseHexColor(String? raw) {
+    if (raw == null) return null;
+    var s = raw.trim().replaceAll('#', '');
+    if (s.toLowerCase().startsWith('0x')) s = s.substring(2);
+    if (s.length == 6) s = 'ff$s';
+    if (s.length != 8) return null;
+    final v = int.tryParse(s, radix: 16);
+    return v == null ? null : Color(v);
   }
 }
 

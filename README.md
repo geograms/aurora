@@ -20,6 +20,22 @@ platform does.
 
 ---
 
+## Download
+
+Direct downloads of the latest stable build:
+
+| Platform | Download |
+|----------|----------|
+| Linux (x64) | [aurora-linux-x64.tar.gz](https://github.com/geograms/aurora/releases/latest/download/aurora-linux-x64.tar.gz) |
+| Windows (x64) | [aurora-windows-x64-setup.exe](https://github.com/geograms/aurora/releases/latest/download/aurora-windows-x64-setup.exe) |
+| Android | [aurora.apk](https://github.com/geograms/aurora/releases/latest/download/aurora.apk) |
+
+All releases (including betas) are on the
+[releases page](https://github.com/geograms/aurora/releases). macOS builds from
+source — see [Build & run](#build--run).
+
+---
+
 ## What it does
 
 - **Multi-transport messaging** — one message goes out over internet (APRS-IS),

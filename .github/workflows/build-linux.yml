@@ -13,6 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pubspec.yaml has a path dependency on ../reticulum-dart; clone it next to
+      # the workspace so pub get (incl. flutter-action's setup) can resolve it.
+      - name: Fetch reticulum-dart (path dependency)
+        shell: bash
+        run: git clone --depth 1 https://github.com/geograms/reticulum-dart.git ../reticulum-dart
+
       - name: Install Linux build deps
         run: |
           sudo apt-get update

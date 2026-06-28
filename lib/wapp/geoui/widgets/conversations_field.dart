@@ -751,6 +751,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
             label: '',
             messages: it.messages,
             fill: true,
+            safeBottom: true,
             composerAccessory: _toggleBar(context, id),
             onLocate: widget.onLocate,
             onSenderTap: widget.onSenderTap,

@@ -930,7 +930,9 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                   },
                 ),
               ),
-              _composer(cs),
+              // Clear the Android gesture/navigation bar so the reply box isn't
+              // hidden behind it.
+              SafeArea(top: false, child: _composer(cs)),
             ],
           ),
         ),

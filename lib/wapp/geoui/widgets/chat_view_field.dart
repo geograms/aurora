@@ -51,6 +51,12 @@ class ChatViewField extends StatefulWidget {
   /// box, no label/tip chrome) — used inside the map's floating overlay.
   final bool fill;
 
+  /// When true the compose bar pads its bottom by the system inset
+  /// (MediaQuery.viewPadding.bottom) so it clears the Android gesture/navigation
+  /// bar. Set only for a full-screen chat that sits at the screen's bottom edge;
+  /// leave false for floating/embedded chats (e.g. the map overlay).
+  final bool safeBottom;
+
   /// Optional widget rendered just above the compose bar (a generic slot for
   /// composer extras — e.g. host-declared toggles). No semantics here.
   final Widget? composerAccessory;
@@ -89,6 +95,7 @@ class ChatViewField extends StatefulWidget {
     this.tip,
     this.hint = 'Message…',
     this.fill = false,
+    this.safeBottom = false,
     this.composerAccessory,
     this.onLocate,
     this.onSenderTap,
@@ -870,6 +877,16 @@ class _ChatViewFieldState extends State<ChatViewField> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
+              leading: Icon((m['private'] == true || m['enc'] == true)
+                  ? Icons.lock_outline
+                  : Icons.public),
+              title: const Text('Info'),
+              onTap: () {
+                Navigator.pop(sheet);
+                _showInfo(m);
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.copy),
               title: const Text('Copy'),
               onTap: () {
@@ -911,6 +928,102 @@ class _ChatViewFieldState extends State<ChatViewField> {
       ),
     );
   }
+
+  /// Message "Info": explain whether the message is public (sent as clear text
+  /// over APRS) or private/encrypted (kept encrypted, Reticulum-only), plus the
+  /// transport it travelled and its signature status. Works for any message —
+  /// group, geochat or 1:1 — since all share this menu.
+  void _showInfo(Map<String, dynamic> m) {
+    final private = m['private'] == true;
+    final enc = m['enc'] == true;
+    final via = (m['via'] ?? '').toString();
+    final auth = (m['auth'] ?? '').toString();
+    final from = (m['from'] ?? '').toString();
+    final time = (m['time'] ?? '').toString();
+
+    final IconData icon;
+    final Color color;
+    final String title;
+    final String detail;
+    if (private) {
+      icon = Icons.lock;
+      color = ChatPalette.accent;
+      title = 'Private';
+      detail =
+          'Kept encrypted and sent only over Reticulum. It was never broadcast '
+          'as clear text on the APRS network — only the recipient can read it.';
+    } else if (enc) {
+      icon = Icons.lock;
+      color = const Color(0xFF63B0E8);
+      title = 'Encrypted';
+      detail =
+          'End-to-end encrypted to the recipient. It is not readable on the '
+          'public APRS network — only the recipient can decrypt it.';
+    } else {
+      icon = Icons.public;
+      color = const Color(0xFFE0A030);
+      title = 'Public';
+      detail =
+          'Sent as clear text over the APRS network. Anyone on the network — '
+          'on radio or over the internet — can read it.';
+    }
+
+    final String? sig = switch (auth) {
+      'verified' => 'Signed — author verified',
+      'bad' => 'Signature invalid (forged)',
+      '' => null,
+      _ => 'Signed — author key unknown',
+    };
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: 8),
+            Text(title, style: TextStyle(color: color)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(detail),
+            const SizedBox(height: 12),
+            if (via.isNotEmpty) _infoRow('Transport', via.toUpperCase()),
+            if (from.isNotEmpty) _infoRow('From', from),
+            if (time.isNotEmpty) _infoRow('Time', time),
+            if (sig != null) _infoRow('Signature', sig),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) => Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 84,
+              child: Text(label,
+                  style: TextStyle(
+                      color: Colors.white.withAlpha(140), fontSize: 12.5)),
+            ),
+            Expanded(
+              child: Text(value, style: const TextStyle(fontSize: 12.5)),
+            ),
+          ],
+        ),
+      );
 
   /// Copy a message's human-readable text (media tokens stripped) to the
   /// clipboard, with a brief confirmation.
@@ -1150,9 +1263,13 @@ class _ChatViewFieldState extends State<ChatViewField> {
   }
 
   Widget _composeRow(ColorScheme cs) {
+    // On a full-screen chat, pad past the Android nav bar so the input isn't
+    // hidden behind it; embedded/floating chats keep a flush 6px bottom.
+    final extraBottom =
+        widget.safeBottom ? MediaQuery.of(context).viewPadding.bottom : 0.0;
     final row = Container(
       color: ChatPalette.windowBg,
-      padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
+      padding: EdgeInsets.fromLTRB(8, 6, 6, 6 + extraBottom),
       child: Row(
         children: [
           if (widget.onAttach != null)

@@ -26,6 +26,8 @@ class UpdateNative {
   ) async =>
       null;
 
+  static Future<List<String>> supportedAbis() async => const [];
+
   static Future<bool> canInstall() async => false;
   static Future<void> openInstallSettings() async {}
 

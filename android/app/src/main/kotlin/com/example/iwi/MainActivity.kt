@@ -142,6 +142,8 @@ class MainActivity : FlutterActivity() {
                 result.success(installApk(path))
             }
             "canInstallPackages" -> result.success(canInstallPackages())
+            "getSupportedAbis" ->
+                result.success(android.os.Build.SUPPORTED_ABIS.toList())
             "openInstallPermissionSettings" -> {
                 openInstallPermissionSettings(); result.success(true)
             }

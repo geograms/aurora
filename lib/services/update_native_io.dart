@@ -100,6 +100,18 @@ class UpdateNative {
     }
   }
 
+  /// The device's supported ABIs in preference order (Android Build.SUPPORTED_ABIS),
+  /// used to pick the matching per-ABI split APK. Empty on non-Android / on error.
+  static Future<List<String>> supportedAbis() async {
+    if (!Platform.isAndroid) return const [];
+    try {
+      final abis = await _channel.invokeMethod<List<dynamic>>('getSupportedAbis');
+      return abis?.map((e) => e.toString()).toList() ?? const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
   static Future<bool> canInstall() async {
     if (!Platform.isAndroid) return true;
     try {

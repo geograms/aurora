@@ -19,9 +19,11 @@
  */
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../version.dart';
@@ -53,12 +55,29 @@ class UpdateService {
   String get stableFolder => _stableFolder;
   String get betaFolder => _betaFolder;
 
+  // Preferred, authoritative source: the self-hosted geogram.radio feed (no
+  // github.com at runtime — required by the F-Droid policy). Each channel is a
+  // small JSON document with relative asset URLs resolved against this base; the
+  // binaries are served from the same site. Reticulum (the folders above) is the
+  // decentralized fallback used only when the website can't be reached.
+  // Overridable at runtime for self-hosters.
+  static const String defaultUpdateFeedBase = 'https://geogram.radio/updates';
+  String _feedBase = defaultUpdateFeedBase;
+  String get feedBase => _feedBase;
+
+  /// Device ABIs in preference order (Android), cached; drives per-ABI split-APK
+  /// selection. Empty on non-Android.
+  List<String>? _androidAbis;
+  Future<List<String>> _abis() async =>
+      _androidAbis ??= await UpdateNative.supportedAbis();
+
   // Persisted settings keys (SharedPreferences, "flutter." prefixed on disk).
   static const _kBeta = 'update.betaEnabled';
   static const _kAutoCheck = 'update.autoCheck';
   static const _kNotified = 'update.lastNotifiedVersion';
   static const _kStableFolder = 'update.folder.stable';
   static const _kBetaFolder = 'update.folder.beta';
+  static const _kFeedBase = 'update.feed.base';
 
   final ValueNotifier<UpdateStatus> status =
       ValueNotifier(UpdateStatus.idle);
@@ -91,6 +110,17 @@ class UpdateService {
     _stableFolder =
         (s != null && s.isNotEmpty) ? s : defaultUpdateFolderStableNpub;
     _betaFolder = (b != null && b.isNotEmpty) ? b : defaultUpdateFolderBetaNpub;
+    final f = p.getString(_kFeedBase);
+    _feedBase = (f != null && f.isNotEmpty) ? f : defaultUpdateFeedBase;
+  }
+
+  /// Change the website feed base URL (e.g. https://geogram.radio/updates). Pass
+  /// empty to reset to the default. Returns the normalised value stored.
+  Future<String> setFeedBase(String input) async {
+    final v = input.trim();
+    _feedBase = v.isEmpty ? defaultUpdateFeedBase : v;
+    await _prefs((p) => p.setString(_kFeedBase, _feedBase));
+    return _feedBase;
   }
 
   Future<void> setBetaEnabled(bool v) async {
@@ -137,18 +167,46 @@ class UpdateService {
     status.value = UpdateStatus.checking;
     error = null;
     try {
-      stable.value = await _newestFromFolder(_stableFolder, prereleaseOk: false);
-      // The beta channel falls back to the newest stable when the beta folder
-      // is empty/unreachable (mirrors the old stable<-beta feed fallback).
-      beta.value =
+      // Website first (preferred, authoritative), Reticulum folder as fallback.
+      stable.value =
+          await _newestFromFeed('stable.json', prereleaseOk: false) ??
+              await _newestFromFolder(_stableFolder, prereleaseOk: false);
+      // The beta channel falls back to the newest stable when there's no beta
+      // build on either source.
+      beta.value = await _newestFromFeed('beta.json', prereleaseOk: true) ??
           await _newestFromFolder(_betaFolder, prereleaseOk: true) ??
-              stable.value;
+          stable.value;
       final sel = selectedRelease;
       status.value =
           isNewer(sel) ? UpdateStatus.available : UpdateStatus.idle;
     } catch (e) {
       error = e.toString();
       status.value = UpdateStatus.error;
+    }
+  }
+
+  /// Fetch one channel from the geogram.radio feed over HTTP and parse it. The
+  /// feed's relative asset URLs are resolved against the feed base. Returns null
+  /// on any error / non-200 / empty so the caller falls back to Reticulum. With
+  /// [prereleaseOk] false, a prerelease document is ignored.
+  Future<ReleaseInfo?> _newestFromFeed(String channelFile,
+      {required bool prereleaseOk}) async {
+    final raw = _feedBase.trim();
+    if (raw.isEmpty) return null;
+    final base = raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
+    try {
+      final resp = await http
+          .get(Uri.parse('$base/$channelFile'))
+          .timeout(const Duration(seconds: 8));
+      if (resp.statusCode != 200) return null;
+      final json = jsonDecode(utf8.decode(resp.bodyBytes));
+      if (json is! Map<String, dynamic>) return null;
+      final r = ReleaseInfo.fromFeed(json, baseUrl: base);
+      if (r.version.isEmpty) return null;
+      if (!prereleaseOk && r.isPrerelease) return null;
+      return r;
+    } catch (_) {
+      return null; // unreachable / malformed → fall back to Reticulum
     }
   }
 
@@ -190,60 +248,78 @@ class UpdateService {
     ));
   }
 
-  /// Download the artifact for [release] on the current platform — fetched
-  /// peer-to-peer over Reticulum by its content hash, then verified before it
-  /// is written to disk.
+  /// Download the artifact for [release] on the current platform. A website
+  /// (http/https) asset is streamed over HTTPS from geogram.radio; a Reticulum
+  /// asset (sha256 handle) is fetched peer-to-peer and sha-verified. The right
+  /// per-ABI split APK is chosen on Android.
   Future<bool> download(ReleaseInfo release) async {
     if (!supported) return false;
     final platform = currentUpdatePlatform();
-    final asset = release.assetFor(platform);
+    final abis =
+        platform == UpdatePlatform.android ? await _abis() : const <String>[];
+    final asset = release.assetFor(platform, androidAbis: abis);
     if (asset == null || asset.url.isEmpty) {
       error = 'No download for this platform in ${release.version}';
       status.value = UpdateStatus.error;
       return false;
     }
-    // asset.url holds the sha256 hex of the binary (the fetch handle) for the
-    // folder source. The matching channel folder is where we look it up.
-    final folder = release.isPrerelease ? _betaFolder : _stableFolder;
     status.value = UpdateStatus.downloading;
     progress.value = 0;
     error = null;
     UpdateNative.serviceStart('Downloading Aurora ${release.version}');
     try {
-      final shaHex = asset.url.toLowerCase();
-      // Pass the artifact's extension (e.g. "apk") so the content-addressed
-      // fetch can archive + re-seed it. Without it the archive step rejected the
-      // empty extension and discarded the already-fetched bytes.
-      final dot = asset.name.lastIndexOf('.');
-      final ext = dot >= 0 ? asset.name.substring(dot + 1) : '';
-      final bytes = await RnsService.instance.folderFetchBytes(folder, shaHex,
-          ext: ext, timeout: const Duration(minutes: 5));
-      if (bytes == null) {
-        error = 'Could not fetch the update over Reticulum (no provider yet)';
-        status.value = UpdateStatus.error;
-        return false;
-      }
-      // Integrity: the entry hash is content-addressed, but assert it anyway —
-      // strictly stronger than the old unverified HTTPS download.
-      final got = crypto.sha256.convert(bytes).toString();
-      if (got != shaHex) {
-        error = 'Update failed integrity check (sha mismatch)';
-        status.value = UpdateStatus.error;
-        return false;
-      }
-      final path = await UpdateNative.writeBytes(asset.name, bytes,
-          (received, total) {
+      void onProgress(int received, int total) {
         if (total > 0) {
           final v = received / total;
           progress.value = v;
           UpdateNative.serviceProgress(
               (v * 100).round(), 'Downloading ${release.version}');
         }
-      });
-      if (path == null) {
-        error = 'Could not write the update to disk';
-        status.value = UpdateStatus.error;
-        return false;
+      }
+
+      final lower = asset.url.toLowerCase();
+      final isHttp =
+          lower.startsWith('http://') || lower.startsWith('https://');
+      String? path;
+      if (isHttp) {
+        // Website source (geogram.radio): stream the binary over HTTPS. Trust is
+        // the TLS connection to the authoritative site; a size mismatch (when the
+        // feed advertised one) is treated as a failed/partial download.
+        path = await UpdateNative.download(asset.url, asset.name, onProgress);
+        if (path == null) {
+          error = 'Could not download the update from the website';
+          status.value = UpdateStatus.error;
+          return false;
+        }
+      } else {
+        // Reticulum source: asset.url holds the sha256 hex (content-addressed
+        // fetch handle). The matching channel folder is where we look it up.
+        final folder = release.isPrerelease ? _betaFolder : _stableFolder;
+        final shaHex = lower;
+        // Pass the artifact's extension (e.g. "apk") so the content-addressed
+        // fetch can archive + re-seed it.
+        final dot = asset.name.lastIndexOf('.');
+        final ext = dot >= 0 ? asset.name.substring(dot + 1) : '';
+        final bytes = await RnsService.instance.folderFetchBytes(folder, shaHex,
+            ext: ext, timeout: const Duration(minutes: 5));
+        if (bytes == null) {
+          error = 'Could not fetch the update over Reticulum (no provider yet)';
+          status.value = UpdateStatus.error;
+          return false;
+        }
+        // Integrity: the entry hash is content-addressed; assert it anyway.
+        final got = crypto.sha256.convert(bytes).toString();
+        if (got != shaHex) {
+          error = 'Update failed integrity check (sha mismatch)';
+          status.value = UpdateStatus.error;
+          return false;
+        }
+        path = await UpdateNative.writeBytes(asset.name, bytes, onProgress);
+        if (path == null) {
+          error = 'Could not write the update to disk';
+          status.value = UpdateStatus.error;
+          return false;
+        }
       }
       _downloadedPath = path;
       progress.value = 1;

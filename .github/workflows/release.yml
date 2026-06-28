@@ -39,14 +39,23 @@ jobs:
           sed -i "s/^version:.*/version: ${VER}+${CODE}/" pubspec.yaml
           dart run tool/update_version.dart
       - run: flutter pub get
+      # Universal APK (direct sideload / GitHub-API marketing page) AND per-ABI
+      # splits (~40 MB each) — the website (GitHub Pages, 100 MB/file git limit)
+      # hosts only the splits; the app downloads the one matching its ABI.
       - run: flutter build apk --release
+      - run: flutter build apk --release --split-per-abi
       - run: |
           mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk dist/aurora.apk
+          apk=build/app/outputs/flutter-apk
+          cp "$apk/app-release.apk" dist/aurora.apk
+          cp "$apk/app-arm64-v8a-release.apk"   dist/aurora-android-arm64-v8a.apk
+          cp "$apk/app-armeabi-v7a-release.apk" dist/aurora-android-armeabi-v7a.apk
+          cp "$apk/app-x86_64-release.apk"      dist/aurora-android-x86_64.apk
+          ls -lh dist
       - uses: actions/upload-artifact@v4
         with:
           name: aurora-android
-          path: dist/aurora.apk
+          path: dist/
 
   linux:
     runs-on: ubuntu-latest
@@ -161,7 +170,7 @@ jobs:
       - name: Collect assets
         run: |
           mkdir -p dist
-          cp artifacts/aurora-android/aurora.apk dist/
+          cp artifacts/aurora-android/*.apk dist/
           cp artifacts/aurora-linux/aurora-linux-x64.tar.gz dist/
           # Windows is optional (see the publish job's needs) — attach it only if
           # its job produced the installer this run.

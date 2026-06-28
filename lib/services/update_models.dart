@@ -140,7 +140,13 @@ class ReleaseInfo {
 
   /// The asset to download for [platform], or null if this release has none.
   /// Prefers the canonical `aurora-*` names but falls back to extension match.
-  ReleaseAsset? assetFor(UpdatePlatform platform) {
+  ///
+  /// [androidAbis] is the device's supported ABIs in preference order
+  /// (Build.SUPPORTED_ABIS): when set, the matching per-ABI split APK
+  /// (`aurora-<ver>-android-<abi>.apk`) is chosen; otherwise (or if no split
+  /// matches) it falls back to any non-debug `.apk` (e.g. a universal build).
+  ReleaseAsset? assetFor(UpdatePlatform platform,
+      {List<String> androidAbis = const []}) {
     bool ext(String s) => assets.any((a) => a.name.toLowerCase().endsWith(s));
     ReleaseAsset? pick(bool Function(String name) test) {
       for (final a in assets) {
@@ -151,7 +157,14 @@ class ReleaseInfo {
 
     switch (platform) {
       case UpdatePlatform.android:
-        // Prefer the release apk; never the debug one.
+        // Prefer the split APK matching the device's ABI (most-preferred first).
+        for (final abi in androidAbis) {
+          final a = abi.toLowerCase();
+          final hit = pick((n) =>
+              n.endsWith('.apk') && !n.contains('debug') && n.contains(a));
+          if (hit != null) return hit;
+        }
+        // Fallback: any non-debug apk (a universal build).
         return pick((n) => n.endsWith('.apk') && !n.contains('debug'));
       case UpdatePlatform.linux:
         return pick((n) => n.endsWith('linux-x64.tar.gz')) ??
@@ -173,6 +186,10 @@ class ReleaseInfo {
 const List<String> _kArtifactSuffixes = [
   '-linux-x64.tar.gz',
   '-setup.exe',
+  // Per-ABI Android splits (most-specific first so the version splits cleanly).
+  '-android-arm64-v8a.apk',
+  '-android-armeabi-v7a.apk',
+  '-android-x86_64.apk',
   '.apk',
   '.tar.gz',
   '.zip',

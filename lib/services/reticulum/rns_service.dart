@@ -134,6 +134,13 @@ class RnsService {
   // role, and LXMF store-and-forward. The DB path is set by the app before start
   // (persistent); if unset we fall back to an in-memory store.
   String? relayStorePath;
+  /// JSON sidecar persisting the discovered callsign->identity map across
+  /// restarts (set by the app before start). Without it, a joining/returning node
+  /// re-pays minutes of announce-discovery before it can query peers for their
+  /// notes (group/Activity backfill); restoring it lets backfill query known
+  /// posters immediately on launch.
+  String? callPeersPath;
+  Timer? _callPeersSaveTimer;
   /// Directory for resumable-download partials (set by the app before start). When
   /// set, fetches survive a drop/app-restart by resuming from the last completed
   /// segment; unset = today's in-memory, all-or-nothing behaviour.
@@ -1571,6 +1578,10 @@ class RnsService {
         _relay = null;
       }
 
+      // Restore discovered peers (callsign->identity) so backfill can query
+      // known posters immediately instead of re-waiting for their announces.
+      _loadCallPeers();
+
       // Mutable folders: owned-key store + service. Discovery is peer-to-peer via
       // the DHT (no indexer): any holder advertises itself under the folder key
       // and a browser resolves providers by that key — exactly like sha256 files.
@@ -2241,8 +2252,12 @@ class RnsService {
       _files?.addPeerFromAnnounce(ann.identity);
       final cs = text.trim();
       if (cs.isNotEmpty && cs.length <= 20 && !cs.contains(' ')) {
+        final isNewPeer = _callIdentity[cs]?.hexHash != ann.identity.hexHash;
         _callsignDest[cs] = _hex(ann.destHash);
         _callIdentity[cs] = ann.identity;
+        // Persist the discovered peer so backfill can query it on the next
+        // launch without re-waiting for its announce.
+        if (isNewPeer) _scheduleCallPeersSave();
         // Now that we can reach this peer directly, fetch its profile if we
         // follow it and don't have it yet.
         _maybeFetchFollowedProfile(cs);
@@ -2774,18 +2789,71 @@ class RnsService {
     // re-publish keeps the followed tier.
     final tier = tierOf(ev.pubkey, selfPubHex: selfPubHex, followsHex: _follows.asSet);
     final stored = store.put(ev, tier: tier.index);
-    // Best-effort fan-out to an indexer that would hold it.
-    final topics = [
-      for (final t in ev.tags)
-        if (t.length >= 2 && t[0] == 't') t[1]
-    ];
-    final best = _relayDir.bestIndexer(
-        topic: topics.isEmpty ? null : topics.first, author: ev.pubkey);
-    if (best != null && _relay != null) {
-      // ignore: discarded_futures
-      _relay!.publish(best.identity, ev);
+    // Replicate to EVERY known indexer (freshest first, capped), not just the
+    // single "best" one. Redundant holders are the reliability fix: a joiner
+    // queries indexers in parallel, so the more that hold this note, the more
+    // likely at least one answers over the flaky public mesh (a single-holder
+    // query frequently gets no response back).
+    if (_relay != null) {
+      final seen = <String>{};
+      var fanned = 0;
+      for (final ix in _relayDir.indexers()) {
+        if (!seen.add(ix.identity.hexHash)) continue;
+        // ignore: discarded_futures
+        _relay!.publish(ix.identity, ev);
+        if (++fanned >= 5) break; // bound the fan-out
+      }
     }
     return stored;
+  }
+
+  /// Schedule a debounced write of the discovered callsign->identity map.
+  void _scheduleCallPeersSave() {
+    _callPeersSaveTimer?.cancel();
+    _callPeersSaveTimer = Timer(const Duration(seconds: 5), _saveCallPeers);
+  }
+
+  /// Persist the discovered callsign->identity map (callsign -> 64B public key
+  /// hex) so a returning node can query known posters immediately on launch.
+  Future<void> _saveCallPeers() async {
+    final path = callPeersPath;
+    if (path == null || path.isEmpty) return;
+    try {
+      final m = <String, String>{};
+      _callIdentity.forEach((cs, id) => m[cs] = _hex(id.getPublicKey()));
+      await File(path).writeAsString(jsonEncode(m), flush: true);
+    } catch (_) {
+      // best-effort cache; ignore write errors
+    }
+  }
+
+  /// Restore the persisted callsign->identity map on start. Stale entries are
+  /// harmless (a query to a peer that moved simply gets no answer + is refreshed
+  /// by the next live announce).
+  void _loadCallPeers() {
+    final path = callPeersPath;
+    if (path == null || path.isEmpty) return;
+    try {
+      final f = File(path);
+      if (!f.existsSync()) return;
+      final m = jsonDecode(f.readAsStringSync());
+      if (m is! Map) return;
+      var n = 0;
+      m.forEach((cs, ph) {
+        if (cs is! String || ph is! String) return;
+        final pub = _hexToBytes(ph);
+        if (pub == null || pub.length != 64) return;
+        final id = RnsIdentity.fromPublicKey(pub);
+        _callIdentity[cs] = id;
+        _callsignDest[cs] = _hex(RnsDestination.hash(id, _app, _aspects));
+        n++;
+      });
+      if (n > 0) {
+        LogService.instance.add('RNS: restored $n known peer(s) from cache');
+      }
+    } catch (_) {
+      // corrupt cache — start clean
+    }
   }
 
   /// Backfill the FEED stream from Reticulum: ask every known relay peer (and

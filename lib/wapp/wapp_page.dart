@@ -4004,10 +4004,103 @@ class _WappPageState extends State<WappPage>
     if (_backfillRunning) return 0;
     _backfillRunning = true;
     try {
-      return await _backfillFeedInner(arch);
+      final a = await _backfillFeedInner(arch);
+      // Same sweep also backfills the subscribed group conversations (Messages
+      // tab) so a fresh install sees previous group messages, not just Activity.
+      final g = await _backfillGroups();
+      return a + g;
     } finally {
       _backfillRunning = false;
     }
+  }
+
+  /// Backfill the Messages-tab group conversations from Reticulum: for each
+  /// subscribed group (`#NAME` / `#NAME*`), ask peers for that group's kind-1
+  /// notes and add any we don't already have. Mirrors [_backfillFeedInner] but
+  /// targets conversations instead of the Activity feed. Idempotent: dedups on
+  /// the message id (sha1(from|text)[:2], identical to the wapp's group msg_id),
+  /// which also collapses a backfilled post against its live copy. Runs on the
+  /// same fast/slow timers, so a just-joined device fills group history once RNS
+  /// is up and a relay/peer is reachable.
+  Future<int> _backfillGroups() async {
+    final store = _convStores['conversations'];
+    if (store == null || !RnsService.instance.isUp) return 0;
+    // Distinct group topics from the subscribed (open) group conversations.
+    final topics = <String>{};
+    for (final entry in store.items.entries) {
+      final id = entry.key;
+      if (!id.startsWith('#') || entry.value.closed) continue;
+      var t = id.substring(1);
+      final star = t.indexOf('*');
+      if (star >= 0) t = t.substring(0, star);
+      if (t.isNotEmpty) topics.add(t);
+    }
+    if (topics.isEmpty) return 0;
+    final selfPub = RnsService.instance.selfPubHex?.toLowerCase();
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final since = nowSec - 7 * 24 * 3600; // last week, like the FEED backfill
+    var added = 0;
+    for (final topic in topics) {
+      List<Map<String, dynamic>> notes;
+      try {
+        notes = await RnsService.instance.fetchFeedBackfill(since, topic: topic);
+      } catch (_) {
+        continue;
+      }
+      if (!mounted) return added;
+      if (notes.isEmpty) continue;
+      // Deliver to whichever ids the user actually has (global and/or local).
+      final convIds = <String>[
+        for (final cand in ['#$topic*', '#$topic'])
+          if (store.items[cand] != null && !store.items[cand]!.closed) cand
+      ];
+      for (final convId in convIds) {
+        final it = store.items[convId]!;
+        final existingMids = <String>{
+          for (final m in it.messages)
+            if ((m['mid'] ?? '').toString().isNotEmpty) m['mid'].toString(),
+        };
+        final preUnread = it.unread; // backfilled history shouldn't ring badges
+        // Oldest→newest so appended bubbles read in chronological order.
+        for (final n in notes.reversed) {
+          final pub = (n['pub'] ?? '').toString();
+          final text = (n['text'] ?? '').toString();
+          if (pub.isEmpty || text.isEmpty) continue;
+          if (selfPub != null && pub.toLowerCase() == selfPub) continue;
+          String from;
+          try {
+            from = 'X1${NostrCrypto.deriveCallsign(pub)}';
+          } catch (_) {
+            continue;
+          }
+          final mid = activityMid(from, text);
+          if (!existingMids.add(mid)) continue; // already present (live or prior)
+          final ts = (n['ts'] as int?) ?? nowSec;
+          final dt = DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+          final hhmm =
+              '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+          store.addMessage({
+            'id': convId,
+            'dir': 'in',
+            'from': from,
+            'text': text,
+            'time': hhmm,
+            'via': 'RET',
+            'mid': mid,
+            'key': mid,
+            'parent': (n['parent'] ?? '').toString(),
+            't': ts * 1000,
+          });
+          added++;
+        }
+        it.unread = preUnread;
+      }
+    }
+    if (added > 0) {
+      _scheduleConvoSave('conversations');
+      if (mounted) setState(() {});
+    }
+    return added;
   }
 
   Future<int> _backfillFeedInner(ActivityArchive arch) async {

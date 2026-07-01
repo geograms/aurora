@@ -252,6 +252,15 @@ class FunctionalityRegistry {
         ParamDef('filter', 'string', 'JSON {service,geogramOnly,search} (empty = none)'),
       ], ReturnDef('int', 'Bytes written, negated required size if too small')),
     ]),
+    'hal.mesh': FunctionalityDef(
+        'hal.mesh', 'BLE street-mesh registry (neighbors, routes, node status)', [
+      EndpointDef('hal_mesh_status',
+          'Mesh node status JSON (callsign,advertising,neighbors,routes,revision,\u2026)', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_mesh_devices',
+          'Devices in reach as people-widget sections [{title,items:[\u2026]}]', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+    ]),
     'hal.relay': FunctionalityDef('hal.relay',
         'NOSTR-relay store-and-forward DM backup (kind-4 over Reticulum)', [
       EndpointDef('hal_relay_reachable',

@@ -22,6 +22,7 @@ import 'package:flutter/widgets.dart' show WidgetsBinding, WidgetsBindingObserve
 
 import '../../profile/profile_service.dart';
 import '../../services/log_service.dart';
+import '../../services/mesh/mesh_service.dart';
 import '../../services/preferences_service.dart';
 import 'ble5_bus.dart';
 import 'ble_gatt_client.dart';
@@ -368,6 +369,10 @@ class BleService {
         ..startGattEvents();
       _dbg('BLE5 broadcast + native GATT enabled');
     }
+    // Street-mesh node (doc/mesh.md): rides the same BLE5 bus on its own
+    // subtype. Non-BLE5 devices still start it as a scan-only leaf so the
+    // Bluetooth wapp has a live (if empty) registry + self status.
+    unawaited(MeshService.instance.start(canAdvertise: _ble5));
   }
 
   // ── Native GATT event handlers (BLE5) ─────────────────────────────────────

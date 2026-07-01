@@ -23,6 +23,7 @@ import '../services/android_permissions_service.dart';
 import '../services/blossom_server.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
+import '../services/mesh/mesh_service.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -2644,6 +2645,26 @@ class WappEngine {
       results: [ValueTy.i32],
     );
 
+    // ── Mesh HAL (BLE street mesh, doc/mesh.md) ─────────────────────────────
+    final halMeshStatus = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(MeshService.instance.statusJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halMeshDevices = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(MeshService.instance.peopleSectionsJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+
     // ── Contacts HAL (reusable people picker source) ────────────────────────
     final halContactsQuery = WasmFunction(
       (int qPtr, int qLen, int outPtr, int outCap) {
@@ -2844,6 +2865,8 @@ class WappEngine {
       WasmImport('hal', 'relay_resolve', halRelayResolve),
       WasmImport('hal', 'relay_resolve_recv', halRelayResolveRecv),
       WasmImport('hal', 'rns_status', halRnsStatus),
+      WasmImport('hal', 'mesh_status', halMeshStatus),
+      WasmImport('hal', 'mesh_devices', halMeshDevices),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),
       // Contacts (reusable people picker source)

@@ -98,6 +98,18 @@ Future<int> upgradeBundledWapps() async {
   var upgraded = 0;
   const prefix = 'assets/wapps/';
   final installed = installedAppsStorage();
+  // Names ever offered to this profile: a wapp newly ADDED to the bundle is
+  // installed once even for existing profiles (seeding only runs at profile
+  // creation, so it would otherwise never appear), while a wapp the user
+  // uninstalled stays gone (its name is already recorded here).
+  final offered = <String>{};
+  var offeredChanged = false;
+  try {
+    final j = jsonDecode(await installed.readString('.seed_offered.json') ?? '');
+    if (j is Map && j['offered'] is List) {
+      offered.addAll((j['offered'] as List).whereType<String>());
+    }
+  } catch (_) {}
   try {
     final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
     final bundles = manifest
@@ -107,7 +119,21 @@ Future<int> upgradeBundledWapps() async {
       final name =
           asset.substring(prefix.length, asset.length - '.wapp'.length);
       final instManifest = await installed.readJson('$name/manifest.json');
-      if (instManifest == null) continue; // not installed — leave to seeding
+      if (instManifest == null) {
+        // Not installed: first-time bundle addition → install once.
+        if (!offered.add(name)) continue; // previously offered → respect uninstall
+        offeredChanged = true;
+        final data = await rootBundle.load(asset);
+        final res = await WappInstallerService.instance.installFromBytes(
+            wappId: name, zipBytes: data.buffer.asUint8List());
+        if (res.ok) {
+          upgraded++;
+          debugPrint('upgradeBundledWapps: installed new bundled wapp $name');
+        }
+        continue;
+      }
+      // Installed wapps count as offered — a later uninstall then sticks.
+      if (offered.add(name)) offeredChanged = true;
       if (instManifest['user_modified'] == true) continue; // keep user edits
       final instVer = (instManifest['version'] as String?) ?? '0.0.0';
 
@@ -129,6 +155,12 @@ Future<int> upgradeBundledWapps() async {
     }
   } catch (_) {
     // No bundled wapps / asset manifest unavailable — nothing to upgrade.
+  }
+  if (offeredChanged) {
+    try {
+      await installed.writeString(
+          '.seed_offered.json', jsonEncode({'offered': offered.toList()}));
+    } catch (_) {}
   }
   return upgraded;
 }

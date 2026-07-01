@@ -58,10 +58,14 @@ BLE5 bus (new subtype, e.g. `0x4D` MESH, alongside 0x41 APRS / 0x55 RNS / 0x47
 presence). It carries *only* control state — never message payloads:
 
 ```
-[ver1][callsign≤9][cond1][flags1][ dv: (hash3, cost·4bits)×K ][ have: bloom ]
+[ver1][callsign≤9][cond1][class1][ dv: (hash3, cost·4bits)×K ][ have: bloom ]
 ```
 
 - **callsign** — sender, plain (same identity as APRS/chat).
+- **class byte** — device type, self-declared: phone / tablet / computer /
+  router-hub / ESP32-dongle / base-station appliance / other. Shown in the
+  Bluetooth wapp (§12) and an input to custodian scoring (a router or dongle
+  is stationary and powered by definition; a phone is not).
 - **cond byte** — node conditions:
   - bit 0: powered/charging → may scan continuously, accept many GATT sessions
   - bits 1–3: uptime, log bucket (<10 min … >3 days) → stability
@@ -249,21 +253,67 @@ readable by carriers:
 - TTL byte in the compact wire format (foundational even for the fallback).
 - Read receipts / `?ACK` unchanged.
 
+**Bluetooth wapp (`wapps/bluetooth`, new):** devices/mesh/settings UI (§12);
+owns the mesh preferences (quota, retention, roles, battery, politeness).
+
 **ESP32 (later):** dongles can join as fixed base stations (always powered,
 stationary by definition) — out of scope for M1–M3.
 
-## 12. Milestones
+## 12. Bluetooth wapp
 
-- **M1 — see the street.** Condition-byte + DV beacon, neighbor table,
-  bidirectional check, contact tracking. 3 phones: verify each shows correct
-  2-hop routes + conditions. No data plane yet.
+A new **Bluetooth** wapp (`wapps/bluetooth`), the mesh's face — same pattern as
+the Reticulum wapp (observed-only registry surfaced by the host, native
+rendering, no webview, layout off the UI thread):
+
+**Devices view** — everything within reach, live from the gossip plane:
+- Per device: callsign, **device-type icon** (phone / tablet / computer /
+  router / ESP32 / base station / other, from the beacon class byte),
+  condition chips (⚡ powered, uptime, 📍 stationary/moving, storage headroom),
+  hop count/cost, last-heard recency, contact ratio, link quality (RSSI,
+  bidirectional-confirmed or one-way), and current role (leaf / relay / base
+  station).
+- Tap a device → detail panel: its advertised DV digest (who *it* reaches),
+  neighbors in common, SCF state (messages we hold for it / it holds for us).
+- **Actions**: send message (opens the existing 1:1 chat for that callsign),
+  ping/reach-test, "prefer as custodian", forget.
+
+**Mesh view** — street-level picture: neighbor graph (nodes = devices with
+type icons, edges = confirmed links weighted by contact ratio), channel-load
+meter (adverts/s heard → the politeness governor's input, §7), and counters:
+routes known, messages in transit / archived, store usage vs quota.
+
+**Settings** — the mesh's preferences live HERE (host mesh service reads them;
+single source of truth):
+- SCF retention: max age (default **7 days**) and store quota (default
+  **100 MB**), current usage + a purge-now action.
+- Device class override (auto-detected from platform, user-correctable — e.g.
+  a plugged-in tablet on a wall declares itself a base station).
+- Role cap: allow/deny base-station promotion; relay on/off (leaf-only mode).
+- Battery policy: scan aggressiveness on battery (balanced / opportunistic),
+  beacon interval bounds.
+- Politeness thresholds (advanced): busy / saturated adverts-per-second cutoffs.
+- Privacy: encrypt-or-don't-carry toggle (default on, §8).
+
+Host stays generic (mesh service exposes registry/stats/prefs via HAL; all
+Bluetooth-specific presentation lives in the wapp) — same split as the
+Reticulum wapp.
+
+## 13. Milestones
+
+- **M1 — see the street.** Condition/class-byte + DV beacon, neighbor table,
+  bidirectional check, contact tracking, and the **Bluetooth wapp devices
+  view** (it doubles as M1's verification instrument). 3 phones: each shows
+  correct 2-hop routes, conditions, device types. No data plane yet.
 - **M2 — move a message.** GATT custody transfer + sqlite SCF + in-session
-  ack + `?ACK` purge + have-digest. 3 phones in a line (A–B–C, A and C out of
-  range of each other): A→C delivers via B; C offline → parks at B → delivers
-  when C returns; verify no duplicate delivery after return.
+  ack + `?ACK` purge + have-digest; wapp gains actions (send message, ping)
+  + SCF counters. 3 phones in a line (A–B–C, A and C out of range of each
+  other): A→C delivers via B; C offline → parks at B → delivers when C
+  returns; verify no duplicate delivery after return.
 - **M3 — behave in a crowd.** Base-station scoring, custodian selection,
-  politeness backoff, battery scan policy, broadcast fallback. Soak test:
-  all available devices + ESP32 scanners measuring channel load.
+  politeness backoff, battery scan policy, broadcast fallback; wapp settings
+  (quota/retention/roles/battery/politeness) + mesh view with channel-load
+  meter. Soak test: all available devices + ESP32 scanners measuring channel
+  load.
 - **M4 — harden.** Signed beacons, encrypt-or-don't-carry for key-unknown 1:1,
   quota tuning, village-scale field test.
 

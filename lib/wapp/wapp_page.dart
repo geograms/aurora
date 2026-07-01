@@ -1360,6 +1360,13 @@ class _WappPageState extends State<WappPage>
           _convStore(field).react(data);
           _scheduleConvoSave(field);
           changed = true;
+        } else if (type == 'ui.convo.status') {
+          // Delivery/read receipt: advance an outgoing 1:1 message's tick state
+          // (sent → delivered → read), keyed by its correlation id `rid`.
+          final field = data['field'] as String? ?? 'conversations';
+          _convStore(field).setStatus(data);
+          _scheduleConvoSave(field);
+          changed = true;
         } else if (type == 'ui.convo.clear') {
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).clear(data['id'] as String?);

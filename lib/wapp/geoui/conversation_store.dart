@@ -99,6 +99,17 @@ class ConversationStore {
   /// survives message ordering and applies across conversations sharing a mid.
   final Map<String, Map<String, dynamic>> reactions = {};
 
+  /// Delivery/read status per message correlation id (`rid`): 'sent' →
+  /// 'delivered' → 'read' (WhatsApp-style ticks on our own 1:1 messages). Kept
+  /// out-of-band + mirrored onto every message carrying that `rid` (like
+  /// reactions) so an out-of-order receipt still lands. Never downgrades.
+  final Map<String, String> _statuses = {};
+  static const Map<String, int> _statusRank = {
+    'sent': 1,
+    'delivered': 2,
+    'read': 3,
+  };
+
   /// The conversation currently shown (set by the widget) so the store can
   /// auto-manage unread counts. Null when no conversation is open.
   String? openId;
@@ -170,6 +181,11 @@ class ConversationStore {
       // Reticulum-only (private) message — the wapp tags it so the bubble is
       // visibly distinct from public APRS traffic (which can also be encrypted).
       if (d['private'] == true) 'private': true,
+      // Delivery-receipt correlation id + tick state for 1:1 outgoing messages
+      // (WhatsApp-style sent/delivered/read). The wapp stamps `rid` (a small
+      // per-message id echoed back in receipts); `status` advances via setStatus.
+      if ((d['rid'] ?? '').toString().isNotEmpty) 'rid': d['rid'].toString(),
+      if ((d['status'] ?? '').toString().isNotEmpty) 'status': d['status'].toString(),
       if (d['lat'] != null) 'lat': d['lat'],
       if (d['lon'] != null) 'lon': d['lon'],
     });
@@ -179,6 +195,9 @@ class ConversationStore {
     // A like may have arrived before this message — seed its tally now.
     final mid = (d['mid'] ?? '').toString();
     if (mid.isNotEmpty && reactions.containsKey(mid)) _applyReaction(mid);
+    // A receipt may have arrived before this bubble — apply the latest status.
+    final rid = (d['rid'] ?? '').toString();
+    if (rid.isNotEmpty && _statuses.containsKey(rid)) _applyStatus(rid);
     if (dir == 'in' && id != openId && d['sys'] != true) it.unread++;
     it.activityTs = _nowMs();
     _bump(id);
@@ -265,6 +284,30 @@ class ConversationStore {
     }
   }
 
+  /// Advance a message's delivery/read status. [d]: `{rid, status}` where status
+  /// is 'sent' | 'delivered' | 'read'. Monotonic — a later, lower-ranked receipt
+  /// (e.g. a delivered arriving after read) is ignored.
+  void setStatus(Map d) {
+    final rid = (d['rid'] ?? '').toString();
+    final s = (d['status'] ?? '').toString();
+    if (rid.isEmpty || !_statusRank.containsKey(s)) return;
+    final cur = _statuses[rid];
+    if (cur != null && (_statusRank[cur] ?? 0) >= (_statusRank[s] ?? 0)) return;
+    _statuses[rid] = s;
+    _applyStatus(rid);
+  }
+
+  /// Mirror a rid's status onto every stored message carrying that rid.
+  void _applyStatus(String rid) {
+    final s = _statuses[rid];
+    if (s == null) return;
+    for (final it in items.values) {
+      for (final m in it.messages) {
+        if ((m['rid'] ?? '') == rid) m['status'] = s;
+      }
+    }
+  }
+
   void clearUnread(String id) {
     items[id]?.unread = 0;
   }
@@ -321,6 +364,7 @@ class ConversationStore {
         'order': order,
         'items': {for (final e in items.entries) e.key: e.value.toJson()},
         'reactions': reactions,
+        'statuses': _statuses,
       };
 
   /// Replace the store's contents from a previously [toJson]-ed map.
@@ -362,6 +406,18 @@ class ConversationStore {
       });
       for (final mid in reactions.keys) {
         _applyReaction(mid);
+      }
+    }
+    // Restore delivery/read statuses and re-mirror onto loaded messages.
+    _statuses.clear();
+    final st = j['statuses'];
+    if (st is Map) {
+      st.forEach((k, v) {
+        final s = v.toString();
+        if (_statusRank.containsKey(s)) _statuses[k.toString()] = s;
+      });
+      for (final rid in _statuses.keys) {
+        _applyStatus(rid);
       }
     }
   }

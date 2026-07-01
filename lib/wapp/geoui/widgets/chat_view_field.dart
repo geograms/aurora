@@ -281,6 +281,33 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
+  /// Delivery/read ticks on our own 1:1 messages (WhatsApp-style): sent (✓),
+  /// delivered (✓✓ grey), read (✓✓ blue). The wapp only sets `status` on
+  /// outgoing 1:1 messages, so groups/geochat/Activity never show it.
+  Widget _statusBadge(Map<String, dynamic> m) {
+    final s = (m['status'] ?? '').toString();
+    if (s.isEmpty) return const SizedBox.shrink();
+    final IconData icon;
+    final Color color;
+    switch (s) {
+      case 'read':
+        icon = Icons.done_all;
+        color = const Color(0xFF63B0E8); // blue = read
+        break;
+      case 'delivered':
+        icon = Icons.done_all;
+        color = Colors.white.withAlpha(140); // grey = delivered
+        break;
+      default: // sent
+        icon = Icons.done;
+        color = Colors.white.withAlpha(140);
+    }
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: Icon(icon, size: 13, color: color),
+    );
+  }
+
   static const _likeColor = Color(0xFFE8638F);
 
   /// Heart + like count for a message. Interactive on others' messages;
@@ -636,6 +663,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
       .replaceAll(RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}'), '')
       .replaceAll(RegExp(r'\bih:[0-9a-fA-F]{40}\b'), '') // BitTorrent hint
       .replaceAll(RegExp(r'\bsz:\d+\b'), '') // media size hint
+      .replaceAll(RegExp(r'\bam:[0-9a-f]{6}\b'), '') // receipt correlation id
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 
@@ -784,6 +812,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
               _encBadge(m),
               _authBadge(m),
               _privBadge(m),
+              if (outgoing) _statusBadge(m),
               if (threadable) ...[
                 const SizedBox(width: 8),
                 InkWell(

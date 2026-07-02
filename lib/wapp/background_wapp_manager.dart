@@ -30,6 +30,7 @@ import '../profile/storage_paths.dart';
 import '../services/background_service.dart';
 import 'geoui/geo_chat_archive.dart';
 import 'geoui/activity_archive.dart';
+import 'geoui/conversation_store.dart';
 import 'shared_media_fetch.dart';
 import '../services/notification_service.dart';
 import '../services/wapp_unread_service.dart';
@@ -220,8 +221,56 @@ class _WappBackgroundService extends BackgroundService {
   late final ActivityArchive _activityArchive =
       ActivityArchive.forStorage(wappDataStorageFor(prefs, name));
 
+  // Conversation stores shared with the foreground page via the SAME
+  // messages/<field>.json files. Without this, a 1:1 received while running
+  // headless fires its notification but never lands in the store the Messages
+  // tab renders — the message "arrives" yet the conversation stays empty.
+  // No concurrency with the page: it suspends this engine while open.
+  final Map<String, ConversationStore> _convStores = {};
+  final Set<String> _convDirty = {};
+  Timer? _convSaveTimer;
+  static const String _convDir = 'messages';
+
+  ConversationStore _convStore(String field) =>
+      _convStores.putIfAbsent(field, () => ConversationStore());
+
+  Future<void> _loadConversations() async {
+    final data = wappDataStorageFor(prefs, name);
+    try {
+      if (!await data.directoryExists(_convDir)) return;
+      for (final entry in await data.listDirectory(_convDir)) {
+        if (entry.isDirectory || !entry.path.endsWith('.json')) continue;
+        final field = entry.name.substring(0, entry.name.length - 5);
+        final json = await data.readJson(entry.path);
+        if (json != null) {
+          _convStores[field] = ConversationStore()..loadJson(json);
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _scheduleConvoSave(String field) {
+    _convDirty.add(field);
+    _convSaveTimer?.cancel();
+    _convSaveTimer = Timer(const Duration(milliseconds: 800), () async {
+      final data = wappDataStorageFor(prefs, name);
+      final fields = _convDirty.toList();
+      _convDirty.clear();
+      try {
+        await data.createDirectory(_convDir);
+        for (final f in fields) {
+          final store = _convStores[f];
+          if (store != null) await data.writeJson('$_convDir/$f.json', store.toJson());
+        }
+      } catch (_) {
+        _convDirty.addAll(fields);
+      }
+    });
+  }
+
   @override
   Future<void> onStart() async {
+    await _loadConversations(); // before the first frame can arrive
     engine.init();
     _drain(); // handle the init outbox (e.g. APRS host.run_command:connect)
   }
@@ -234,6 +283,20 @@ class _WappBackgroundService extends BackgroundService {
 
   @override
   Future<void> onStop() async {
+    // Flush pending conversation saves NOW: the page engine is about to load
+    // the same files and would otherwise miss the last-arrived messages.
+    _convSaveTimer?.cancel();
+    if (_convDirty.isNotEmpty) {
+      final data = wappDataStorageFor(prefs, name);
+      try {
+        await data.createDirectory(_convDir);
+        for (final f in _convDirty) {
+          final store = _convStores[f];
+          if (store != null) await data.writeJson('$_convDir/$f.json', store.toJson());
+        }
+      } catch (_) {}
+      _convDirty.clear();
+    }
     try {
       engine.dispose();
     } catch (_) {}
@@ -296,6 +359,28 @@ class _WappBackgroundService extends BackgroundService {
           // other (NAT'd) networks can fetch them over the internet.
           maybePublishSharedMedia(mtext, mdir);
         }
+      } else if (type == 'ui.convo.upsert' ||
+          type == 'ui.convo.msg' ||
+          type == 'ui.convo.remove' ||
+          type == 'ui.convo.react' ||
+          type == 'ui.convo.status') {
+        // Keep the persisted conversation stores current while headless so the
+        // Messages tab shows what arrived in the background.
+        final field = data['field'] as String? ?? 'conversations';
+        final store = _convStore(field);
+        switch (type) {
+          case 'ui.convo.upsert':
+            store.upsert(data);
+          case 'ui.convo.msg':
+            store.addMessage(data);
+          case 'ui.convo.remove':
+            store.remove(data);
+          case 'ui.convo.react':
+            store.react(data);
+          case 'ui.convo.status':
+            store.setStatus(data);
+        }
+        _scheduleConvoSave(field);
       } else if (type == 'ui.activity.react') {
         // Tally like votes received while headless so they show on next open.
         final mid = (data['mid'] ?? '').toString();

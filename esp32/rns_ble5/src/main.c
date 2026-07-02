@@ -44,6 +44,11 @@
 #include "wifi_bsp.h"
 #include "aprsis.h"
 
+/* BLE street mesh (aurora doc/mesh.md): route beacon + DV table + SCF. */
+#include <sys/stat.h>
+#include "blemesh.h"
+#include "sdcard.h"
+
 /* Provisioning defaults (WiFi creds + callsign). The real file is gitignored;
  * values are written to NVS on first boot and NVS is the source of truth after.
  * Builds fine without the file (creds then come only from NVS). */
@@ -68,6 +73,7 @@ static uint8_t s_own_addr_type;
 #define MARKER     0x3E
 #define SUBTYPE      0x55   /* Reticulum packet */
 #define SUBTYPE_APRS 0x41   /* APRS broadcast parcel ('A') — plaintext */
+#define SUBTYPE_MESH BLEMESH_SUBTYPE /* 0x4D street-mesh route beacon ('M') */
 
 #define RNS_PKT_ANNOUNCE 0x01
 #define DST_HASH_LEN     16
@@ -103,6 +109,13 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi);
 static void ui_log_aprs(const char *from, const char *text);
 /* iGate: remember a callsign heard over BLE5 (for the APRS-IS filter). */
 static void igate_heard_add(const char *call);
+/* Street mesh: beacon TX + ingest + store-and-forward delivery. */
+static void handle_mesh(const uint8_t *payload, int len, int rssi);
+static void mesh_beacon_air(void);
+static void mesh_deliver_pending(const char *target);
+static volatile bool s_mesh_dirty;      /* topology changed -> beacon early */
+static bool s_mesh_up;
+static char s_aprs_call[10];            /* tentative; defined with iGate below */
 
 /* TweetNaCl entropy hook. */
 void randombytes(unsigned char *p, unsigned long long n)
@@ -194,6 +207,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                     maybe_relay(&m[4], mlen - 4, d->rssi);       /* repeater + UI */
                 } else if (m[3] == SUBTYPE_APRS) { /* APRS (plaintext) */
                     handle_aprs(&m[4], mlen - 4, d->rssi);       /* show + relay */
+                } else if (m[3] == SUBTYPE_MESH) { /* street-mesh route beacon */
+                    handle_mesh(&m[4], mlen - 4, d->rssi);
                 }
             }
         }
@@ -524,12 +539,43 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
     ESP_LOGI(TAG, "RX APRS  rssi=%d  %s>%s: \"%s\"", rssi, from, to, text);
     ui_log_aprs(from, text);
 
+    /* Receipt id: 1:1 messages carry a PREPENDED "am:<6hex> " token; receipts
+     * come back as "?ACK <6hex> d|r" control frames (aurora receipts design). */
+    char am[8] = "";
+    const char *body = text;
+    if (strncmp(text, "am:", 3) == 0 && strlen(text) >= 9) {
+        memcpy(am, text + 3, 6); am[6] = 0;
+        body = text + 9;
+        while (*body == ' ') body++;
+    }
+    if (aurora && strncmp(text, "?ACK ", 5) == 0 && strlen(text) >= 11) {
+        char ack_am[8]; memcpy(ack_am, text + 5, 6); ack_am[6] = 0;
+        int purged = blemesh_scf_ack(ack_am);
+        if (purged) ESP_LOGI(TAG, "SCF: ack %s purged %d", ack_am, purged);
+    }
+
     /* iGate uplink (RF -> Internet): remember the sender and gate it to APRS-IS.
-     * No-op if WiFi/APRS-IS is down. Skip ?PING/?MAIL/etc. control frames. */
+     * No-op if WiFi/APRS-IS is down. Skip control frames (text starting '?',
+     * e.g. ?ACK/?PING/?MAIL) and ENCRYPTED payloads — the phones deliberately
+     * keep ENC1 ciphertext OFF APRS-IS (7-bit air mangles it into
+     * "cannot decrypt" garbage on every receiver). */
     if (aurora) {
         igate_heard_add(from);
-        if (to[0] && to[0] != '?')
+        if (to[0] && to[0] != '?' && text[0] != '?' &&
+            strncmp(body, "ENC1:", 5) != 0)
             aprsis_uplink(from, to, text);
+    }
+
+    /* Store-and-forward custody (doc/mesh.md §6): park heard 1:1 messages so a
+     * receiver that is out of range / asleep gets them when it reappears. The
+     * sender was just heard transmitting — deliver anything parked for IT too. */
+    if (aurora && s_mesh_up) {
+        bool one2one = to[0] && to[0] != '#' && to[0] != '?' && to[0] != '!' &&
+                       text[0] != '?' && strcmp(to, s_aprs_call) != 0;
+        if (one2one && blemesh_scf_offer(to, am, payload, len, now_sec()))
+            ESP_LOGI(TAG, "SCF: parked %dB for %s (am=%s, %d held)",
+                     len, to, am[0] ? am : "-", blemesh_scf_count());
+        mesh_deliver_pending(from);
     }
 
     /* Relay (extend reach). Re-air the same plaintext frame, deduped above. */
@@ -543,6 +589,76 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
     }
 }
 
+/* ---- street mesh (aurora doc/mesh.md): beacon + DV + SCF ----------------- */
+
+/* Re-air every parked frame for [target] (it was just seen). Each goes back on
+ * the normal relay rotation as a plain 0x41 broadcast; the receiver dedups. */
+static void mesh_deliver_pending(const char *target)
+{
+    static uint8_t frames[4][BLEMESH_SCF_FRAME_MAX];
+    static int lens[4];
+    int n = blemesh_scf_pop_for(target, now_sec(), frames, lens, 4);
+    for (int i = 0; i < n; i++) {
+        uint8_t ad[256];
+        int an = build_aprs_ad(frames[i], lens[i], ad);
+        if (an > 0) { relay_enqueue(ad, an); s_relayed_count++; }
+    }
+    if (n > 0)
+        ESP_LOGI(TAG, "SCF: %s back in range -> re-airing %d parked frame(s)", target, n);
+}
+
+/* A phone's (or another dongle's) route beacon: learn it, and treat the sender
+ * as "in range" for parked mail. */
+static void handle_mesh(const uint8_t *payload, int len, int rssi)
+{
+    if (!s_mesh_up) return;
+    blemesh_beacon_t b;
+    if (!blemesh_beacon_decode(payload, len, &b)) return;
+    bool changed = blemesh_table_ingest(&b, rssi, now_sec());
+    if (changed) {
+        s_mesh_dirty = true;
+        ESP_LOGI(TAG, "mesh: %s (%s%s, %ddBm, reaches %d) — %d neighbor(s)",
+                 b.callsign,
+                 b.dev_class == BLEMESH_CLASS_PHONE ? "phone" :
+                 b.dev_class == BLEMESH_CLASS_ESP32 ? "esp32" : "node",
+                 b.powered ? ", powered" : "", rssi, b.dv_count,
+                 blemesh_neighbor_count());
+    }
+    mesh_deliver_pending(b.callsign);
+}
+
+/* Build + air our route beacon: class esp32, always powered + stationary (a
+ * plugged dongle is the street's natural base station), storage headroom from
+ * the SD card, DV digest from the table. */
+static void mesh_beacon_air(void)
+{
+    if (!s_mesh_up) return;
+    blemesh_beacon_t b = {0};
+    snprintf(b.callsign, sizeof(b.callsign), "%s",
+             s_aprs_call[0] ? s_aprs_call : "TDONGLE");
+    b.dev_class = BLEMESH_CLASS_ESP32;
+    b.powered = true;
+    b.uptime_bucket = blemesh_uptime_bucket(now_sec());
+    b.mobility = 1;                       /* stationary */
+    b.storage_bucket = sdcard_is_mounted() ? 3 : 0;
+    b.dv_count = (uint8_t)blemesh_table_export(b.dv, 48);
+
+    uint8_t payload[200];
+    int pn = blemesh_beacon_encode(&b, payload, sizeof(payload));
+    if (pn <= 0) return;
+    uint8_t ad[256];
+    int n = 0;
+    ad[n++] = 0;
+    ad[n++] = 0xFF;
+    ad[n++] = COMPANY_LO;
+    ad[n++] = COMPANY_HI;
+    ad[n++] = MARKER;
+    ad[n++] = SUBTYPE_MESH;
+    memcpy(ad + n, payload, pn); n += pn;
+    ad[0] = n - 1;
+    air_raw_ad(ad, n);
+}
+
 /* Owns ext-adv instance 0: rotates between queued relays and our own announce. */
 static void relay_task(void *arg)
 {
@@ -550,17 +666,50 @@ static void relay_task(void *arg)
     static uint8_t pick[256];
     announce("tdongle-s3 online", 17);   /* configures instance 0 + first announce */
     uint32_t last_own = now_sec();
+    uint32_t last_sweep = now_sec();
+    uint32_t last_beacon = 0;
     int tick = 0;
+    bool flip = false;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1500));
+        uint32_t t = now_sec();
+
+        /* Housekeeping: age out dead neighbors/routes + expired parked mail. */
+        if (t - last_sweep >= 60) {
+            last_sweep = t;
+            blemesh_table_sweep(t);
+            blemesh_scf_sweep(t);
+        }
+        /* Triggered update: topology changed -> beacon early (light debounce
+         * via the 1.5 s loop period), same as the phones. */
+        if (s_mesh_dirty && t - last_beacon >= 4) {
+            s_mesh_dirty = false;
+            last_beacon = t;
+            mesh_beacon_air();
+            continue;
+        }
+
+        /* Our own frames get a GUARANTEED slot every 8 s — a busy street keeps
+         * the relay queue non-empty for minutes at a time, and a beacon that
+         * only airs when idle is never heard (the phones then never learn we
+         * exist, so no routes ever point through us). Alternate the mesh route
+         * beacon and the signed RNS announce; relays fill every other slot. */
+        if (t - last_own >= 8) {
+            flip = !flip;
+            if (flip && s_mesh_up) {
+                mesh_beacon_air();
+                last_beacon = t;
+            } else {
+                char msg[48];
+                int l = snprintf(msg, sizeof(msg), "tdongle-s3 #%d", ++tick);
+                announce(msg, l);         /* keep our own announce fresh (re-signs) */
+            }
+            last_own = t;
+            continue;
+        }
         int n = relay_pick(pick);
         if (n > 0) {
             air_raw_ad(pick, n);          /* re-air a relayed packet */
-        } else if (now_sec() - last_own >= 8) {
-            char msg[48];
-            int l = snprintf(msg, sizeof(msg), "tdongle-s3 #%d", ++tick);
-            announce(msg, l);             /* keep our own announce fresh (re-signs) */
-            last_own = now_sec();
         }
     }
 }
@@ -854,6 +1003,70 @@ static void igate_start(void)
     geogram_wifi_connect(&cfg);
 }
 
+/* ---- serial console (USB-Serial-JTAG stdin) ------------------------------ *
+ * Debug/control without the app: type into `pio device monitor` / serial.sh.
+ *   status                   dump identity, neighbors, routes, parked mail
+ *   msg <to> <text...>       air a compact APRS 1:1/group frame from our call
+ *   beacon                   air the mesh route beacon now
+ *   ack <6hex>               simulate an overheard ?ACK (purges parked mail)
+ */
+static void console_handle(char *line)
+{
+    if (strcmp(line, "status") == 0) {
+        printf("callsign=%s mesh=%d neigh=%d routes=%d scf=%d sd=%d\n",
+               s_aprs_call[0] ? s_aprs_call : "TDONGLE", (int)s_mesh_up,
+               blemesh_neighbor_count(), blemesh_route_count(),
+               blemesh_scf_count(), (int)sdcard_is_mounted());
+        for (int i = 0; i < blemesh_neighbor_count(); i++) {
+            const blemesh_neighbor_t *n = blemesh_neighbor_at(i);
+            printf("  neigh %-9s class=%d rssi=%d bidi=%d reach=%d age=%us\n",
+                   n->callsign, n->dev_class, n->rssi, (int)n->bidirectional,
+                   n->reach, (unsigned)(now_sec() - n->last_heard));
+        }
+        return;
+    }
+    if (strncmp(line, "msg ", 4) == 0) {
+        char *to = line + 4;
+        char *sp = strchr(to, ' ');
+        if (!sp) { printf("usage: msg <to> <text>\n"); return; }
+        *sp = 0;
+        const char *text = sp + 1;
+        uint8_t payload[BLEMESH_SCF_FRAME_MAX];
+        int n = snprintf((char *)payload, sizeof(payload), "%s\x1f%s\x1f%s",
+                         s_aprs_call[0] ? s_aprs_call : "TDONGLE", to, text);
+        if (n <= 0 || n >= (int)sizeof(payload)) { printf("too long\n"); return; }
+        uint8_t ad[256];
+        int an = build_aprs_ad(payload, n, ad);
+        if (an > 0) {
+            relay_enqueue(ad, an);
+            printf("queued %dB to %s\n", n, to);
+        }
+        return;
+    }
+    if (strcmp(line, "beacon") == 0) { mesh_beacon_air(); printf("beacon aired\n"); return; }
+    if (strncmp(line, "ack ", 4) == 0) {
+        printf("purged %d\n", blemesh_scf_ack(line + 4));
+        return;
+    }
+    printf("commands: status | msg <to> <text> | beacon | ack <am>\n");
+}
+
+static void console_task(void *arg)
+{
+    (void)arg;
+    static char line[220];
+    int n = 0;
+    for (;;) {
+        int c = fgetc(stdin);
+        if (c == EOF) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+        if (c == '\r' || c == '\n') {
+            if (n > 0) { line[n] = 0; console_handle(line); n = 0; }
+            continue;
+        }
+        if (n < (int)sizeof(line) - 1) line[n++] = (char)c;
+    }
+}
+
 void app_main(void)
 {
     /* model_init() initialises NVS + the ST7735 LCD. */
@@ -877,6 +1090,22 @@ void app_main(void)
     /* WiFi STA + APRS-IS iGate, started BEFORE the BLE host runs so the uplink
      * queue exists for the first frames heard during the WiFi connect window. */
     igate_start();
+
+    /* Street mesh: identity from the iGate callsign (NVS). SD card (if present)
+     * persists parked store-and-forward mail across reboots; RAM-only without. */
+    blemesh_table_init(s_aprs_call[0] ? s_aprs_call : "TDONGLE");
+    const char *scf_path = NULL;
+    if (sdcard_init() == ESP_OK && sdcard_is_mounted()) {
+        mkdir("/sdcard/mesh", 0775);
+        scf_path = "/sdcard/mesh/pending.bin";
+        ESP_LOGI(TAG, "mesh: SD store-and-forward at %s", scf_path);
+    } else {
+        ESP_LOGW(TAG, "mesh: no SD card — store-and-forward is RAM-only");
+    }
+    blemesh_scf_init(scf_path);
+    s_mesh_up = true;
+
+    xTaskCreate(console_task, "console", 4096, NULL, 3, NULL);
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;

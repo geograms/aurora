@@ -1143,6 +1143,11 @@ static void console_handle(char *line)
         uint8_t ad[256];
         int an = build_aprs_ad(payload, n, ad);
         if (an > 0) {
+            /* Remember our own content hash BEFORE airing: when a phone
+             * re-airs (bridges) this frame back to us, handle_aprs must treat
+             * it as already-handled — otherwise the echo gets uplinked to
+             * APRS-IS and the "BLE-only" message leaks onto the internet. */
+            relay_remember(fnv1a(payload, n));
             relay_enqueue(ad, an);
             printf("queued %dB to %s\n", n, to);
         }

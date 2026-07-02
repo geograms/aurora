@@ -32,6 +32,7 @@ import 'geoui/geo_chat_archive.dart';
 import 'geoui/activity_archive.dart';
 import 'geoui/conversation_store.dart';
 import 'shared_media_fetch.dart';
+import '../services/log_service.dart';
 import '../services/notification_service.dart';
 import '../services/wapp_unread_service.dart';
 import '../services/preferences_service.dart';
@@ -78,9 +79,16 @@ class BackgroundWappManager {
   }
 
   /// Start a wapp as a background service. No-op if already running.
+  final Set<String> _startingNames = {};
+
   Future<void> start(String wappDir) async {
     final name = folderName(wappDir);
-    if (_running.containsKey(name)) return;
+    // The load below awaits (wasm read + compile) — without the in-flight
+    // guard two concurrent callers (boot autostart + a page-close resume)
+    // both pass the containsKey check and TWO engines end up running: BLE
+    // frames then queue into the orphan engine and never reach the one being
+    // ticked, so background messages silently vanish.
+    if (_running.containsKey(name) || !_startingNames.add(name)) return;
     try {
       final pkg = wappPackageStorage(wappDir);
       final wasm = await pkg.readBytes('app.wasm');
@@ -104,6 +112,8 @@ class BackgroundWappManager {
     } catch (e) {
       debugPrint('BackgroundWapp: failed to start $name: $e');
       _running.remove(name);
+    } finally {
+      _startingNames.remove(name);
     }
   }
 
@@ -324,6 +334,15 @@ class _WappBackgroundService extends BackgroundService {
   /// re-run self-issued commands (with the user's saved settings), surface
   /// notifications, and ignore all UI-only messages.
   void _drain() {
+    // Surface the wapp's own hal_log lines in the app log (/api/log): headless
+    // wapps otherwise log into an engine buffer nobody reads, which made every
+    // background delivery bug a blind hunt.
+    if (engine.logs.isNotEmpty) {
+      for (final l in engine.logs) {
+        LogService.instance.add('[$name] ${l.message}');
+      }
+      engine.logs.clear();
+    }
     for (final raw in engine.drainOutbox()) {
       Map<String, dynamic> data;
       try {

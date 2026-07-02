@@ -23,6 +23,7 @@ import '../services/android_permissions_service.dart';
 import '../services/blossom_server.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
+import '../services/log_service.dart';
 import '../services/mesh/mesh_service.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
@@ -2076,6 +2077,7 @@ class WappEngine {
       () {
         if (!_bleScanning) {
           _bleScanning = true;
+          LogService.instance.add('WappEngine[$_appId]: BLE scan subscribe');
           _bleSub = ble.inbound.listen((f) {
             _bleRx.add(jsonEncode({
               'from': f.from,

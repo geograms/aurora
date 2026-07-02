@@ -443,7 +443,11 @@ class BleService {
     final seen = _ble5Seen[key];
     if (seen != null && now.difference(seen) < kBleBcastDedup) return;
     _ble5Seen[key] = now;
-    _dbg('BLE5 APRS rx ${f.data.length}B from ${f.addr} rssi=${f.rssi}');
+    // Always logged (post-dedup = once per unique frame, low rate): the one
+    // line that proves whether a peer's APRS frame reached this phone at all —
+    // the exact visibility we lacked when dongle messages vanished en route.
+    LogService.instance
+        .add('BLE5 rx aprs ${f.data.length}B rssi=${f.rssi}');
     _inbound.add(BleInboundFrame(f.addr, f.rssi, f.data));
   }
 

@@ -51,9 +51,20 @@ class MeshService {
 
   /// Start the mesh node. Idempotent; safe to call again when the profile
   /// (callsign) changes — the table is rebuilt for the new identity.
+  Timer? _startRetry;
+
   Future<void> start({required bool canAdvertise}) async {
     final cs = (ProfileService.instance.activeProfile?.callsign ?? '').trim();
-    if (cs.isEmpty) return;
+    if (cs.isEmpty) {
+      // BLE can come up before the profile finishes loading on slow devices —
+      // a silent no-op here would leave the mesh dead for the whole session.
+      _startRetry ??= Timer(const Duration(seconds: 10), () {
+        _startRetry = null;
+        // ignore: discarded_futures
+        start(canAdvertise: canAdvertise);
+      });
+      return;
+    }
     if (_running && _table?.selfCallsign == cs) {
       _canAdvertise = canAdvertise || _canAdvertise;
       return;

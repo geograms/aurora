@@ -345,6 +345,9 @@ class BleService {
     }
     if (_ble5 && !_ble5Wired) {
       _ble5Wired = true;
+      // Surface scan self-healing events in the app log (the bus watchdog
+      // re-registers a scan that a vendor power manager silently killed).
+      Ble5Bus.instance.onLog = (m) => LogService.instance.add(m);
       Ble5Bus.instance.onFrame(Ble5Subtype.aprs, _onBle5Aprs);
       // Any legacy broadcast chunks aired during the brief startup window before
       // BLE5 was confirmed must be dropped now — otherwise their rotation keeps

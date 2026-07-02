@@ -80,6 +80,30 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     private val main = Handler(Looper.getMainLooper())
+
+    // Scan watchdog: vendor power managers (and BT adapter restarts) silently
+    // kill long-running BLE scans — the callback stays registered but no result
+    // ever arrives again. Track the last delivery and force a native
+    // stop+start when the air has been silent implausibly long (our own mesh
+    // beacons alone guarantee traffic every ~30 s when peers are near). The
+    // 2-minute threshold keeps restarts far below Android's 5-starts/30 s cap.
+    @Volatile private var lastScanResultMs = 0L
+    @Volatile private var scanStartedMs = 0L
+    private var scanWatchdogOn = false
+    private val scanWatchdog = object : Runnable {
+        override fun run() {
+            if (scanCallback != null) {
+                val now = System.currentTimeMillis()
+                val lastSeen = maxOf(lastScanResultMs, scanStartedMs)
+                if (now - lastSeen > 120_000) {
+                    android.util.Log.w(TAG, "scan silent ${(now - lastSeen) / 1000}s — restarting")
+                    stopScan()
+                    startScan()
+                }
+            }
+            if (scanWatchdogOn) main.postDelayed(this, 60_000)
+        }
+    }
     private var events: EventChannel.EventSink? = null
 
     private var advertisingSet: AdvertisingSet? = null
@@ -350,6 +374,13 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             .setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
             .build()
         val cb = object : ScanCallback() {
+            override fun onScanFailed(errorCode: Int) {
+                // e.g. APPLICATION_REGISTRATION_FAILED after a BT restart —
+                // drop the dead callback so the watchdog (or next startScan)
+                // can register a fresh one.
+                android.util.Log.e(TAG, "scan failed code=$errorCode — will re-register")
+                scanCallback = null
+            }
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 val mfg = result?.scanRecord?.getManufacturerSpecificData(COMPANY_ID)
                     ?: return
@@ -358,6 +389,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 val payload = mfg.copyOfRange(2, mfg.size)
                 val addr = result.device?.address ?: ""
                 val rssi = result.rssi
+                lastScanResultMs = System.currentTimeMillis()
                 main.post {
                     events?.success(
                         mapOf(
@@ -374,6 +406,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         return try {
             s.startScan(listOf(filter), settings, cb)
             scanner = s
+            scanStartedMs = System.currentTimeMillis()
+            if (!scanWatchdogOn) {
+                scanWatchdogOn = true
+                main.postDelayed(scanWatchdog, 60_000)
+            }
             true
         } catch (e: Exception) {
             android.util.Log.e(TAG, "startScan: ${e.message}")

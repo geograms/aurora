@@ -3303,6 +3303,34 @@ class RnsService {
     return out;
   }
 
+  /// Up to [max] relays chosen by RENDEZVOUS hashing on [pubkeyHexOrB64] (a
+  /// recipient x-only pubkey, hex or the wapp's base64url form): rank every
+  /// known relay by sha256(relayHash || pubkey) and take the top ranks. Both
+  /// ends compute the SAME set from their own directory view, so the sender's
+  /// publish set and the recipient's poll set meet without any control frame
+  /// (the one-shot ?RLY announce is exactly what an offline receiver misses).
+  List<String> relayDestsFor(String pubkeyHexOrB64, {int max = 3}) {
+    var key = pubkeyHexOrB64.trim();
+    // Accept the wapp's base64url npub form; normalize to lowercase hex.
+    if (key.length != 64 || key.contains(RegExp(r'[^0-9a-fA-F]'))) {
+      final b = _b64urlToBytes(key);
+      if (b != null && b.length == 32) key = _hex(b);
+    }
+    key = key.toLowerCase();
+    final seen = <String>{};
+    final all = <RelayEntry>[
+      for (final e in [..._relayDir.indexers(), ..._relayDir.entries()])
+        if (seen.add(e.identity.hexHash)) e,
+    ];
+    final ranked = all.map((e) {
+      final h = e.identity.hexHash;
+      final score = crypto.sha256.convert(utf8.encode('$h|$key')).toString();
+      return (h, score);
+    }).toList()
+      ..sort((a, b) => a.$2.compareTo(b.$2));
+    return [for (final r in ranked.take(max)) r.$1];
+  }
+
   RnsIdentity? _relayIdentity(String hexHash) {
     for (final e in _relayDir.entries()) {
       if (e.identity.hexHash == hexHash) return e.identity;
@@ -3364,13 +3392,21 @@ class RnsService {
       return null;
     }
     await relayPublish(ev.toJson()); // local store + best-indexer fan-out
+    var sent = 0;
+    final missing = <String>[];
     for (final hex in relayDestsHex) {
       final id = _relayIdentity(hex);
       if (id != null && _relay != null) {
         // ignore: discarded_futures
         _relay!.publish(id, ev);
+        sent++;
+      } else {
+        missing.add(hex.substring(0, hex.length < 8 ? hex.length : 8));
       }
     }
+    LogService.instance.add(
+        'RNS/relay: DM ${ev.id?.substring(0, 8)} published to $sent relay(s)'
+        '${missing.isEmpty ? '' : ' (unknown: ${missing.join(',')})'}');
     return ev.id;
   }
 
@@ -3392,14 +3428,25 @@ class RnsService {
       limit: 200,
     );
     final collected = <NostrEvent>[];
+    var polled = 0;
+    final missing = <String>[];
     for (final hex in relayDestsHex) {
       final id = _relayIdentity(hex);
       if (id != null && _relay != null) {
         try {
           collected.addAll(await _relay!
               .query(id, filter, timeout: const Duration(seconds: 12)));
+          polled++;
         } catch (_) {}
+      } else {
+        missing.add(hex.substring(0, hex.length < 8 ? hex.length : 8));
       }
+    }
+    if (collected.isNotEmpty || missing.isNotEmpty) {
+      LogService.instance.add(
+          'RNS/relay: DM poll $polled/${relayDestsHex.length} relay(s), '
+          '${collected.length} event(s)'
+          '${missing.isEmpty ? '' : ' (unknown: ${missing.join(',')})'}');
     }
     collected.addAll(_relayStore?.query(filter) ?? const []);
     final seen = <String>{};

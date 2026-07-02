@@ -2502,6 +2502,20 @@ class WappEngine {
       ],
       results: [ValueTy.i32],
     );
+    // Rendezvous relay set for a pubkey (hex or b64url) — sender and receiver
+    // derive the same relays from their own directory views (doc: relay DM).
+    final halRelayFor = WasmFunction(
+      (int keyPtr, int keyLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final key = _readStr(keyPtr, keyLen);
+        final list = RnsService.instance.relayDestsFor(key);
+        final bytes = utf8.encode(jsonEncode(list));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // Trigger an async fetch of kind-4 DMs addressed to us (created_at >= since)
     // from the given relays; results land on _relayDmRx for hal_relay_dm_recv.
     final halRelayDmFetch = WasmFunction(
@@ -2859,6 +2873,7 @@ class WappEngine {
       WasmImport('hal', 'relay_reachable', halRelayReachable),
       WasmImport('hal', 'relay_dm_send', halRelayDmSend),
       WasmImport('hal', 'relay_dm_fetch', halRelayDmFetch),
+      WasmImport('hal', 'relay_for', halRelayFor),
       WasmImport('hal', 'relay_dm_recv', halRelayDmRecv),
       WasmImport('hal', 'relay_dm_drop', halRelayDmDrop),
       WasmImport('hal', 'relay_identity_publish', halRelayIdentityPublish),

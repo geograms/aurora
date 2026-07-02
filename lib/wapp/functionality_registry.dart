@@ -273,6 +273,10 @@ class FunctionalityRegistry {
         ParamDef('relays', 'string', 'JSON array of relay hashes'),
         ParamDef('mid', 'string', 'dedup message id'),
       ], ReturnDef('int', '1 if queued, -1 on error')),
+      EndpointDef('hal_relay_for',
+          'Rendezvous relay set for a pubkey (sender and receiver derive the same set)', [
+        ParamDef('pubkey', 'string', 'x-only pubkey, hex or base64url'),
+      ], ReturnDef('int', 'Bytes written, negated required size if too small')),
       EndpointDef('hal_relay_dm_fetch',
           'Trigger an async fetch of DMs addressed to us from the given relays', [
         ParamDef('since', 'uint32', 'created_at lower bound (unix seconds)'),

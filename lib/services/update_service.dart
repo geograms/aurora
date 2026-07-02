@@ -241,7 +241,7 @@ class UpdateService {
     NotificationService.instance.show(GeogramNotification(
       level: NotificationLevel.info,
       title: 'Update available',
-      body: 'Geogram Aurora ${sel.version} is available. Open Settings → '
+      body: 'Geogram ${sel.version} is available. Open Settings → '
           'Updates to install.',
       source: 'host:updates',
       scope: NotificationScope.both,
@@ -266,7 +266,7 @@ class UpdateService {
     status.value = UpdateStatus.downloading;
     progress.value = 0;
     error = null;
-    UpdateNative.serviceStart('Downloading Aurora ${release.version}');
+    UpdateNative.serviceStart('Downloading Geogram ${release.version}');
     try {
       void onProgress(int received, int total) {
         if (total > 0) {
@@ -337,7 +337,7 @@ class UpdateService {
     final platform = currentUpdatePlatform();
     if (platform == UpdatePlatform.android && !await UpdateNative.canInstall()) {
       await UpdateNative.openInstallSettings();
-      error = 'Allow installing apps from Aurora, then tap Install again.';
+      error = 'Allow installing apps from Geogram, then tap Install again.';
       status.value = UpdateStatus.error;
       return false;
     }

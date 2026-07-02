@@ -51,7 +51,7 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application
-        android:label="Aurora"
+        android:label="Geogram"
         android:name=".AuroraApplication"
         android:icon="@mipmap/ic_launcher">
         <activity

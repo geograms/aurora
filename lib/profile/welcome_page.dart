@@ -512,7 +512,7 @@ class _WelcomePageState extends State<WelcomePage> {
       builder: (ctx) => AlertDialog(
         title: const Text('Protect your identity'),
         content: const Text(
-          'Allow storage access so Aurora can keep a backup of your secret '
+          'Allow storage access so Geogram can keep a backup of your secret '
           'key on this phone. It lets you restore this identity if you '
           'reinstall the app or clear its data.',
         ),

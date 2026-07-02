@@ -101,7 +101,7 @@ class _UpdatePageState extends State<UpdatePage> {
                   color: cs.surfaceContainerLow,
                   child: ListTile(
                     leading: const Icon(Icons.verified),
-                    title: const Text('Geogram Aurora'),
+                    title: const Text('Geogram'),
                     subtitle: Text('Installed version $kAppVersion'
                         ' (build $kBuildNumber)'),
                     trailing: ValueListenableBuilder<UpdateStatus>(

@@ -178,14 +178,16 @@ class MeshService {
               ' - ${n.lastRssi} dBm - heard ${ago(n.lastHeard)} ago'
               ' - contact ${(n.contactRatio * 100).round()}%',
           'tags': [
+            'seen ${ago(n.lastHeard)} ago',
             n.deviceClass.label,
             if (n.cond.powered) 'powered',
             'up ${MeshConditions.uptimeLabels[n.cond.uptimeBucket]}',
             '1 hop',
             'reaches ${n.digest.length}',
           ],
-          'action': 'message',
-          'actionLabel': 'Msg',
+          'buttons': [
+            {'icon': 'mail', 'action': 'message', 'tip': 'Send message'}
+          ],
         }
     ];
 
@@ -197,9 +199,17 @@ class MeshService {
             'id': t.names[r.destHashHex] ?? r.destHashHex,
             'title': t.names[r.destHashHex] ?? '#${r.destHashHex}',
             'subtitle': 'via ${r.viaCallsign} - ${r.cost} hops',
-            'tags': ['${r.cost} hops', 'via ${r.viaCallsign}'],
-            'action': 'message',
-            'actionLabel': 'Msg',
+            'tags': [
+              'seen ${ago(r.updated)} ago',
+              '${r.cost} hops',
+              'via ${r.viaCallsign}'
+            ],
+            // Envelope only when the destination's callsign is known (a bare
+            // routing hash can't address a conversation).
+            if (t.names.containsKey(r.destHashHex))
+              'buttons': [
+                {'icon': 'mail', 'action': 'message', 'tip': 'Send message'}
+              ],
           }
     ];
 

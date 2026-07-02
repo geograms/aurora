@@ -275,6 +275,9 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         return Icons.lock_outline;
       case 'settings':
         return Icons.settings_outlined;
+      case 'mail':
+      case 'message':
+        return Icons.mail_outline;
       default:
         return Icons.more_horiz;
     }

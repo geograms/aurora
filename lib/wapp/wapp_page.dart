@@ -109,6 +109,11 @@ class WappPage extends StatefulWidget {
   /// circles wapp can jump straight to the "apply to join" flow.
   final String? initialCommand;
 
+  /// Open this conversation id (e.g. a callsign) as soon as the wapp is up —
+  /// the host-side deep link other wapps use to jump into a 1:1 chat (e.g.
+  /// the Bluetooth wapp's envelope button).
+  final String? initialConvo;
+
   const WappPage({
     super.key,
     required this.wappDir,
@@ -117,6 +122,7 @@ class WappPage extends StatefulWidget {
     this.openFileMode = 'view',
     this.editWappDir,
     this.initialCommand,
+    this.initialConvo,
   });
 
   @override
@@ -1037,6 +1043,15 @@ class _WappPageState extends State<WappPage>
       EventBus().fire(WappLoadedEvent(wappId: _wappName, wappName: _wappName));
       setState(() => _status = 'Running');
 
+      // Deep link into a conversation (host-side UI state, after the screens
+      // exist): jump straight to the 1:1 thread.
+      final convo = widget.initialConvo;
+      if (convo != null && convo.isNotEmpty) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _openConvoById(convo);
+        });
+      }
+
       // Per-wapp "Edit" entry: this App Creator page was opened to edit
       // one specific wapp — jump straight into its editor.
       if (_isAppCreator && widget.editWappDir != null) {
@@ -1233,6 +1248,17 @@ class _WappPageState extends State<WappPage>
             // ignore: discarded_futures
             RnsService.instance
                 .sendLxmfToPubkey(pubkeyHex: pubkey, title: title, content: content);
+          }
+        } else if (type == 'mesh.message') {
+          // Bluetooth wapp envelope button: jump into the Chat wapp's 1:1
+          // conversation with that callsign (deep link via initialConvo).
+          final cs = (data['callsign'] as String? ?? '').trim();
+          if (cs.isNotEmpty && mounted) {
+            final dir = '${installedAppsDirPath()}/chat';
+            // ignore: discarded_futures
+            Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) =>
+                    WappPage(wappDir: dir, title: 'Chat', initialConvo: cs)));
           }
         } else if (type == 'ui.graph.set') {
           // The wapp pushes a {nodes,edges} snapshot for the native `$type:

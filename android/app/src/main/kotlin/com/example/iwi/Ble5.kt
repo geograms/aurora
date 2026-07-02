@@ -123,6 +123,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "supported" -> result.success(isSupported())
+                // Real per-frame payload cap for THIS controller: many chips
+                // report far less than the BLE5 spec max (e.g. 255 vs 1650),
+                // and an oversized frame is rejected, not truncated — the size
+                // router must know the true ceiling or messages silently drop.
+                "maxPayload" -> result.success(maxDataLen() - 8)
                 "gattConnect" -> {
                     val addr = call.argument<String>("address")
                     if (addr == null) result.error("ARG", "address required", null)

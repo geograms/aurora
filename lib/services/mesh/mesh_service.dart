@@ -136,9 +136,24 @@ class MeshService {
       ),
       dv: t.exportDv(),
     );
+    // Fit THIS controller's advert ceiling (often ~247 B, not the 450 B spec
+    // default) — an over-cap frame is rejected outright, so trim the DV digest
+    // (freshest neighbors were exported first) until the beacon fits.
+    var bytes = beacon.encode();
+    final cap = Ble5Bus.instance.maxPayload;
+    var dv = beacon.dv;
+    while (bytes.length > cap && dv.isNotEmpty) {
+      dv = dv.sublist(0, dv.length - 1);
+      bytes = MeshBeacon(
+              callsign: beacon.callsign,
+              deviceClass: beacon.deviceClass,
+              cond: beacon.cond,
+              dv: dv)
+          .encode();
+    }
     try {
       await Ble5Bus.instance
-          .advertiseFrame('mesh', Ble5Subtype.mesh, beacon.encode(), ttl: _beaconTtl);
+          .advertiseFrame('mesh', Ble5Subtype.mesh, bytes, ttl: _beaconTtl);
       _beaconsSent++;
     } catch (e) {
       LogService.instance.add('Mesh: beacon tx failed: $e');

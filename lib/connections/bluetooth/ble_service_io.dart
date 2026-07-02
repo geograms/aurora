@@ -788,7 +788,10 @@ class BleService {
     // Size router. SMALL → connectionless one-to-many broadcast (one sender,
     // many listeners, aired ONCE, never per-peer). LARGE → point-to-point GATT
     // (a binary file / RNS resource), which auto-pairs a transient link.
-    final smallCap = _ble5 ? Ble5Bus.maxFrame : kBleBcastMax;
+    // The BLE5 cap is THIS controller's real advert ceiling (many chips carry
+    // only ~247 B, far under the 450 B spec-side default) — an over-cap frame
+    // is rejected by the stack, not truncated, so it must go GATT instead.
+    final smallCap = _ble5 ? Ble5Bus.instance.maxPayload : kBleBcastMax;
     if (payload.length > smallCap) {
       _gattSend(payload);
       return;

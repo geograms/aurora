@@ -51,6 +51,10 @@ static char     s_msgs[MSG_MAX][MSG_CAP];
 static uint8_t  s_msg_cnt;
 static volatile bool s_msgs_dirty;
 
+/* Verbatim body text (dashboard mode; overrides the message ring) */
+static char     s_body[256];
+static volatile bool s_body_dirty;
+
 /* Device count / IP (written from any task, applied in LVGL task) */
 static int      s_dev_count;
 static bool     s_dev_dirty;
@@ -137,6 +141,17 @@ void tdongle_ui_update(void)
             lv_obj_t *parent = lv_obj_get_parent(s_msg_label);
             lv_obj_update_layout(parent);
             lv_obj_scroll_to_y(parent, LV_COORD_MAX, LV_ANIM_OFF);
+        }
+    }
+
+    /* Apply verbatim body text (dashboard mode) */
+    if (s_body_dirty) {
+        s_body_dirty = false;
+        if (s_msg_label) {
+            lv_label_set_text(s_msg_label, s_body);
+            lv_obj_t *parent = lv_obj_get_parent(s_msg_label);
+            lv_obj_update_layout(parent);
+            lv_obj_scroll_to_y(parent, 0, LV_ANIM_OFF);   /* read from the top */
         }
     }
 
@@ -302,6 +317,13 @@ void tdongle_ui_push_message(const char *from, const char *text)
     }
 
     s_msgs_dirty = true;
+}
+
+void tdongle_ui_set_body(const char *text)
+{
+    if (!text) return;
+    snprintf(s_body, sizeof(s_body), "%s", text);
+    s_body_dirty = true;
 }
 
 void tdongle_ui_set_device_count(int count)

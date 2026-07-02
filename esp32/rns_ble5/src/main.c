@@ -15,6 +15,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -26,6 +27,8 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "mbedtls/sha256.h"
+
+#include "driver/gpio.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -43,6 +46,9 @@
 /* APRS-IS iGate: WiFi STA + APRS-IS client (reused generic components). */
 #include "wifi_bsp.h"
 #include "aprsis.h"
+
+/* LAN presence: passive listener on the Aurora UDP discovery broadcast. */
+#include "lanwatch.h"
 
 /* BLE street mesh (aurora doc/mesh.md): route beacon + DV table + SCF. */
 #include <sys/stat.h>
@@ -104,9 +110,9 @@ static void maybe_relay(const uint8_t *pkt, int len, int rssi);
 static void ui_log_packet(const uint8_t *dest_hash, int hops, int rssi,
                           const char *name);
 static uint32_t now_sec(void);
-/* APRS (subtype 0x41) is plaintext broadcast chat — show + relay it. */
+/* APRS (subtype 0x41) is plaintext broadcast chat — relay it (not shown; the
+ * display is a reach dashboard now, never message content). */
 static void handle_aprs(const uint8_t *payload, int len, int rssi);
-static void ui_log_aprs(const char *from, const char *text);
 /* iGate: remember a callsign heard over BLE5 (for the APRS-IS filter). */
 static void igate_heard_add(const char *call);
 /* Street mesh: beacon TX + ingest + store-and-forward delivery. */
@@ -537,7 +543,6 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
         snprintf(from, sizeof from, "APRS");
     }
     ESP_LOGI(TAG, "RX APRS  rssi=%d  %s>%s: \"%s\"", rssi, from, to, text);
-    ui_log_aprs(from, text);
 
     /* Receipt id: 1:1 messages carry a PREPENDED "am:<6hex> " token; receipts
      * come back as "?ACK <6hex> d|r" control frames (aurora receipts design). */
@@ -725,18 +730,28 @@ static void start_scan(void)
     else ESP_LOGI(TAG, "extended scanning…");
 }
 
-/* ---- status / relay dashboard UI (metadata only; reuses tdongle_ui) ------ */
-/* name = the callsign the node broadcasts in its (plaintext) announce app_data.
- * count_peer: 1 = a Reticulum node (counts toward the in-range device tally),
- * 0 = an APRS message (shown in the log only; the same phone also announces over
- * RNS, so counting APRS too would double-count it). */
+/* ---- status / reach dashboard UI (metadata only; reuses tdongle_ui) ------ */
+/* The display body is a BLE/LAN coverage dashboard (NEVER message content).
+ * The BOOT button cycles it: counts -> BLE callsigns -> LAN callsigns.
+ * name = the callsign the node broadcasts in its (plaintext) announce app_data;
+ * every announce heard over BLE5 feeds the in-reach peer registry. */
 typedef struct {
     char name[CALLSIGN_MAX];
-    char text[40];
     uint8_t prefix[4];
-    uint8_t count_peer;
 } ui_msg_t;
 static QueueHandle_t s_ui_q;
+
+/* T-Dongle-S3 pushbutton = the BOOT strap pin (GPIO0, active low; no BTN_* in
+ * geogram_model_tdongle_s3 — the board has no other button). */
+#define UI_BTN_GPIO    GPIO_NUM_0
+#define UI_VIEW_COUNT  3            /* counts, BLE list, LAN list */
+#define UI_INRANGE_SEC 300          /* "in reach" = heard in the last 5 min */
+
+/* BLE reach registry: Reticulum announce peers, dest-hash keyed (the mesh
+ * route-beacon neighbors live in blemesh_table; the render merges both).
+ * Written only by ui_task (via s_ui_q), read only by ui_task. */
+#define UI_PEER_MAX 16
+static struct { uint8_t p[4]; uint32_t t; char name[CALLSIGN_MAX]; } s_ui_peers[UI_PEER_MAX];
 
 /* Called from the NimBLE host task — only enqueues (LVGL is single-task). [name]
  * is the announce's plaintext app_data (the device callsign); falls back to the
@@ -744,6 +759,7 @@ static QueueHandle_t s_ui_q;
 static void ui_log_packet(const uint8_t *dest_hash, int hops, int rssi,
                           const char *name)
 {
+    (void)hops; (void)rssi;
     if (!s_ui_q) return;
     ui_msg_t m;
     if (name && name[0]) {
@@ -751,72 +767,156 @@ static void ui_log_packet(const uint8_t *dest_hash, int hops, int rssi,
     } else {
         hexn(dest_hash, 4, m.name);
     }
-    snprintf(m.text, sizeof(m.text), "h%d  %ddBm", hops, rssi);
     memcpy(m.prefix, dest_hash, 4);
-    m.count_peer = 1;            /* Reticulum node → counts as an in-range device */
-    xQueueSend(s_ui_q, &m, 0);   /* drop if full; it's just a log */
+    xQueueSend(s_ui_q, &m, 0);   /* drop if full; the next announce refreshes */
 }
 
-/* Push an APRS message line to the rolling log (callsign + text). Does NOT count
- * as a peer (the sender is already counted via its Reticulum announce). */
-static void ui_log_aprs(const char *from, const char *text)
+/* Case-insensitive "is [name] already in the list" (dedup helper). */
+static bool ui_name_listed(char names[][CALLSIGN_MAX], int n, const char *name)
 {
-    if (!s_ui_q) return;
-    ui_msg_t m;
-    snprintf(m.name, sizeof(m.name), "%s", from);
-    snprintf(m.text, sizeof(m.text), "%s", text);
-    m.prefix[0] = m.prefix[1] = m.prefix[2] = m.prefix[3] = 0;
-    m.count_peer = 0;
-    xQueueSend(s_ui_q, &m, 0);
+    for (int k = 0; k < n; k++)
+        if (strcasecmp(names[k], name) == 0) return true;
+    return false;
 }
 
-/* Owns ALL LVGL/tdongle_ui calls. Drains the queue, tracks peers, updates the
- * three zones (top=uptime by tdongle_ui, chat=relay/RX log, bottom=peers + addr/
- * relayed). NEVER displays message content. */
+/* Collect the DISTINCT callsigns currently in BLE reach: RNS announce peers
+ * merged with the street-mesh beacon neighbors (a phone shows up on both, and
+ * announces SEVERAL destinations under one callsign — dedup by name,
+ * case-insensitive). Returns the count (<= max). */
+static int ble_reach_gather(char names[][CALLSIGN_MAX], int max)
+{
+    uint32_t now = now_sec();
+    int n = 0;
+    for (int i = 0; i < UI_PEER_MAX && n < max; i++) {
+        if (!s_ui_peers[i].t || now - s_ui_peers[i].t >= UI_INRANGE_SEC) continue;
+        if (ui_name_listed(names, n, s_ui_peers[i].name)) continue;
+        snprintf(names[n], CALLSIGN_MAX, "%s", s_ui_peers[i].name);
+        n++;
+    }
+    for (int i = 0; i < blemesh_neighbor_count() && n < max; i++) {
+        const blemesh_neighbor_t *nb = blemesh_neighbor_at(i);
+        if (!nb || now - nb->last_heard >= UI_INRANGE_SEC) continue;
+        if (ui_name_listed(names, n, nb->callsign)) continue;
+        snprintf(names[n], CALLSIGN_MAX, "%s", nb->callsign);
+        n++;
+    }
+    return n;
+}
+
+/* Append " name" entries to [body] until it is full (label wraps the rest). */
+static void append_names(char *body, int cap, char names[][CALLSIGN_MAX], int n)
+{
+    int used = strlen(body);
+    for (int i = 0; i < n; i++) {
+        int w = snprintf(body + used, cap - used, "%s%s",
+                         i ? "  " : "", names[i]);
+        if (w <= 0 || used + w >= cap - 1) break;
+        used += w;
+    }
+}
+
+/* Rebuild the dashboard body for [view] + the rotating bottom-left line.
+ * Runs in ui_task only (all tdongle_ui calls are deferred-safe anyway). */
+static void ui_render(int view, int *rot)
+{
+    static char names[UI_PEER_MAX + BLEMESH_NEIGH_MAX][CALLSIGN_MAX];
+    static lanwatch_peer_t lan[LANWATCH_PEERS_MAX];
+    int nble = ble_reach_gather(names, UI_PEER_MAX + BLEMESH_NEIGH_MAX);
+    int nlan = lanwatch_peers(lan, LANWATCH_PEERS_MAX, UI_INRANGE_SEC);
+
+    char body[224];
+    if (view == 1) {                       /* BLE callsigns in reach */
+        snprintf(body, sizeof(body), "BLE in reach (%d):\n%s",
+                 nble, nble ? "" : "--");
+        append_names(body, sizeof(body), names, nble);
+    } else if (view == 2) {                /* WiFi/LAN callsigns in reach */
+        snprintf(body, sizeof(body), "LAN in reach (%d):\n%s",
+                 nlan, nlan ? "" : "--");
+        for (int i = 0; i < nlan; i++) {   /* nameless peer -> its IP tail */
+            if (!lan[i].callsign[0]) {
+                const uint8_t *q = (const uint8_t *)&lan[i].ip; /* net order */
+                snprintf(lan[i].callsign, sizeof(lan[i].callsign),
+                         ".%u.%u", (unsigned)q[2], (unsigned)q[3]);
+            }
+        }
+        int used = strlen(body);
+        for (int i = 0; i < nlan; i++) {
+            int w = snprintf(body + used, sizeof(body) - used, "%s%s",
+                             i ? "  " : "", lan[i].callsign);
+            if (w <= 0 || used + w >= (int)sizeof(body) - 1) break;
+            used += w;
+        }
+    } else {                               /* default: reach counts */
+        snprintf(body, sizeof(body),
+                 "In reach\nBLE devices: %d\nLAN devices: %d", nble, nlan);
+    }
+    tdongle_ui_set_body(body);
+    tdongle_ui_set_device_count(nble);
+
+    /* Bottom-left rotates through the in-reach BLE callsigns, then a relay
+     * tally — readable at a glance even from the counts view. */
+    char line[24];
+    int sel = (*rot)++ % (nble + 1);
+    if (sel < nble)
+        snprintf(line, sizeof(line), "%s", names[sel]);
+    else
+        snprintf(line, sizeof(line), "relayed %u", (unsigned)s_relayed_count);
+    tdongle_ui_set_info(line);
+}
+
+/* Owns ALL LVGL/tdongle_ui calls. Drains the queue into the peer registry,
+ * polls the button, and refreshes the three zones (top=uptime by tdongle_ui,
+ * body=reach dashboard, bottom=rotating callsign/relayed + BLE count). */
 static void ui_task(void *arg)
 {
     (void)arg;
-    static struct { uint8_t p[4]; uint32_t t; char name[CALLSIGN_MAX]; } peers[16];
-    const uint32_t INRANGE_SEC = 300;    /* "in range" = heard in the last 5 min */
-    int last_ui = 0, rot = 0;
+    /* BOOT button: input + pull-up, plain debounced polling (no ISR needed). */
+    gpio_config_t btn = {
+        .pin_bit_mask = 1ULL << UI_BTN_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn);
+
+    int last_ui = 0, rot = 0, view = 0;
+    int btn_low = 0;
+    bool btn_fired = false, dirty = true;
     for (;;) {
         ui_msg_t m;
         while (xQueueReceive(s_ui_q, &m, 0) == pdTRUE) {
-            tdongle_ui_push_message(m.name, m.text);   /* rolling log */
-            if (!m.count_peer) continue;               /* APRS line: log only */
             uint32_t t = now_sec();
             int slot = -1, oldest = 0;
-            for (int i = 0; i < 16; i++) {
-                if (memcmp(peers[i].p, m.prefix, 4) == 0 && peers[i].t) { slot = i; break; }
-                if (peers[i].t == 0) { slot = i; break; }
-                if (peers[i].t < peers[oldest].t) oldest = i;
+            for (int i = 0; i < UI_PEER_MAX; i++) {
+                if (memcmp(s_ui_peers[i].p, m.prefix, 4) == 0 && s_ui_peers[i].t) { slot = i; break; }
+                if (s_ui_peers[i].t == 0) { slot = i; break; }
+                if (s_ui_peers[i].t < s_ui_peers[oldest].t) oldest = i;
             }
             if (slot < 0) slot = oldest;
-            memcpy(peers[slot].p, m.prefix, 4);
-            peers[slot].t = t ? t : 1;
-            snprintf(peers[slot].name, sizeof(peers[slot].name), "%s", m.name);
+            memcpy(s_ui_peers[slot].p, m.prefix, 4);
+            s_ui_peers[slot].t = t ? t : 1;
+            snprintf(s_ui_peers[slot].name, sizeof(s_ui_peers[slot].name), "%s", m.name);
         }
-        int now = (int)now_sec();
-        if (now - last_ui >= 2) {            /* refresh status ~every 2s */
-            last_ui = now;
-            /* Collect the callsigns currently in range (heard in INRANGE_SEC). */
-            int active = 0, idx[16];
-            for (int i = 0; i < 16; i++)
-                if (peers[i].t && (uint32_t)now - peers[i].t < INRANGE_SEC)
-                    idx[active++] = i;
-            tdongle_ui_set_device_count(active);
-            /* Bottom-left rotates through the in-range callsigns, then a relay
-             * tally — so you can read WHO is in range, not just how many. */
-            char line[24];
-            int slots = active + 1;          /* callsigns + the "relayed" entry */
-            int sel = (rot++) % slots;
-            if (sel < active) {
-                snprintf(line, sizeof(line), "%s", peers[idx[sel]].name);
-            } else {
-                snprintf(line, sizeof(line), "relayed %u",
-                         (unsigned)s_relayed_count);
+
+        /* Button poll (~10 ms period): 3 consecutive lows = pressed, fire once
+         * per press, re-arm on release. Cycles the dashboard view. */
+        if (gpio_get_level(UI_BTN_GPIO) == 0) {
+            if (++btn_low >= 3 && !btn_fired) {
+                btn_fired = true;
+                view = (view + 1) % UI_VIEW_COUNT;
+                dirty = true;
             }
-            tdongle_ui_set_info(line);
+        } else {
+            btn_low = 0;
+            btn_fired = false;
+        }
+
+        int now = (int)now_sec();
+        if (dirty || now - last_ui >= 2) {   /* refresh ~every 2s + on press */
+            dirty = false;
+            last_ui = now;
+            ui_render(view, &rot);
         }
         tdongle_ui_update();
         /* At the default 100 Hz tick pdMS_TO_TICKS(5) rounds to 0 ticks, so
@@ -1001,6 +1101,11 @@ static void igate_start(void)
     strncpy(cfg.password, pass, sizeof cfg.password - 1);
     cfg.callback = NULL;
     geogram_wifi_connect(&cfg);
+
+    /* LAN reach: listen for the Aurora UDP discovery broadcast (announces) so
+     * the dashboard can count geogram devices on the same network. Passive
+     * (receive-only); datagrams start flowing once the STA has an IP. */
+    lanwatch_start(LANWATCH_DEFAULT_PORT);
 }
 
 /* ---- serial console (USB-Serial-JTAG stdin) ------------------------------ *

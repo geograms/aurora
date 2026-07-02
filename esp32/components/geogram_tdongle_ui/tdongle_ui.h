@@ -35,6 +35,16 @@ void tdongle_ui_update(void);
 void tdongle_ui_push_message(const char *from, const char *text);
 
 /**
+ * @brief Replace the centre area with [text] verbatim (multi-line, wraps).
+ *
+ * Alternative to the rolling message feed: firmwares that render a status/
+ * dashboard body build the full text themselves and set it here. Overrides
+ * whatever the message ring last showed (and vice versa). Thread-safe:
+ * applied on the next tdongle_ui_update().
+ */
+void tdongle_ui_set_body(const char *text);
+
+/**
  * @brief Update the device-count shown in the bottom-right corner.
  */
 void tdongle_ui_set_device_count(int count);

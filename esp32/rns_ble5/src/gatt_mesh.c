@@ -56,6 +56,7 @@ static blemesh_session_t s_sess;
 static SemaphoreHandle_t s_lock;
 static uint32_t s_conn_since;    /* connect time (for the idle reaper) */
 static uint32_t s_last_msp;      /* last MSP frame from the central */
+static uint32_t s_last_ntx;      /* last NOTIFY_TX (in-flight watchdog) */
 
 static uint32_t now_s(void) { return (uint32_t)(esp_timer_get_time() / 1000000ULL); }
 
@@ -698,8 +699,7 @@ static void start_conn_advert(void)
     p.itvl_max = 0xC0;
     p.sid = 1;
 
-    int rc = ble_gap_ext_adv_configure(ADV_INSTANCE, &p, NULL,
-                                       conn_gap_event, NULL);
+    int rc = ble_gap_ext_adv_configure(ADV_INSTANCE, &p, NULL, NULL, NULL);
     if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "conn adv configure rc=%d", rc);
         return;
@@ -770,6 +770,7 @@ static int conn_gap_event(struct ble_gap_event *ev, void *arg)
         }
         break;
     case BLE_GAP_EVENT_NOTIFY_TX:
+        s_last_ntx = now_s();
         if (s_notify_inflight > 0) s_notify_inflight--;
         txq_pump();                      /* queued control/chunk frames first */
         if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -786,11 +787,19 @@ static int conn_gap_event(struct ble_gap_event *ev, void *arg)
     return 0;
 }
 
+static struct ble_gap_event_listener s_gap_listener;
+
 void gatt_mesh_start(const char *callsign, uint8_t own_addr_type)
 {
     snprintf(s_call, sizeof(s_call), "%s", callsign);
     s_addr_type = own_addr_type;
     bulk_cache_load();   /* one dir walk, before radio traffic ramps */
+    /* Global listener: NimBLE routes connection events to the spawning
+     * adv-instance's callback, but that routing proved flaky (whole boots
+     * with zero CONNECT/SUBSCRIBE/NOTIFY_TX delivered). The listener gets
+     * every GAP event unconditionally. The instance callback is left
+     * unregistered (NULL) so events are never double-processed. */
+    ble_gap_event_listener_register(&s_gap_listener, conn_gap_event, NULL);
     start_conn_advert();
 }
 
@@ -806,6 +815,18 @@ void gatt_mesh_conn_adv(bool on)
 void gatt_mesh_tick(void)
 {
     if (!s_lock) return;
+    /* In-flight watchdog: NimBLE's event routing can drop NOTIFY_TX
+     * confirmations (seen live: transfer froze at inflight cap after 18
+     * chunks). If the counter sits at the cap with no confirmation for 5 s,
+     * the events are lost — reset and pump; the ATT layer has long since
+     * drained the PDUs. */
+    if (s_notify_inflight >= NOTIFY_INFLIGHT_MAX &&
+        now_s() - s_last_ntx > 5) {
+        ESP_LOGW(TAG, "NOTIFY_TX lost (inflight %d, %lus) - unjamming",
+                 s_notify_inflight, (unsigned long)(now_s() - s_last_ntx));
+        s_notify_inflight = 0;
+        s_last_ntx = now_s();
+    }
     /* Drain any queued notifies even when no NOTIFY_TX is pending — a
      * first-send failure would otherwise deadlock the queue (nothing in
      * flight -> no NOTIFY_TX -> pump never runs). */

@@ -148,16 +148,23 @@ static void meta_write(const bulk_meta_t *m)
         sscanf(m->sha + i * 2, "%2x", &v);
         sha[i] = (uint8_t)v;
     }
+    /* RAM index FIRST — it is the authoritative queue; the file is only the
+     * reboot-persistence layer. (An early return on fopen failure used to
+     * skip the upsert: sendfile printed "queued" while the beacon kept
+     * advertising zero bulk — the classic silent SD failure.) */
+    bulk_cache_upsert(m);
     char p[160];
     meta_path_for(sha, p, sizeof(p));
     FILE *f = fopen(p, "w");
-    if (!f) return;
+    if (!f) {
+        ESP_LOGW(TAG, "meta write FAILED for %s (queued in RAM only)", m->name);
+        return;
+    }
     fprintf(f, "sha=%s\nsize=%llu\next=%s\nname=%s\norigin=%s\ntarget=%s\n"
                "src=%s\nstate=%s\npath=%s\n",
             m->sha, (unsigned long long)m->size, m->ext, m->name, m->origin,
             m->target, m->src, m->state, m->path);
     fclose(f);
-    bulk_cache_upsert(m);
 }
 
 static void hex_to_sha(const char *hx, uint8_t out[32])

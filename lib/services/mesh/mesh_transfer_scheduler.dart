@@ -40,6 +40,56 @@ class MeshTransferScheduler {
   String? _dialing;
   DateTime _dialStarted = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Last tick's decision, timestamped — the scheduler used to fail SILENT
+  /// (five different gates, identical no-op outcome); now every tick leaves
+  /// a trace and a changed decision is logged.
+  String lastDecision = 'never ticked';
+  DateTime lastDecisionAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime? _lastDialAttempt;
+
+  void _decide(String d) {
+    lastDecisionAt = DateTime.now();
+    if (d != lastDecision) {
+      lastDecision = d;
+      LogService.instance.add('Mesh/sched: $d');
+    }
+  }
+
+  Map<String, dynamic> statusJson() => {
+        'decision': lastDecision,
+        'at': lastDecisionAt.toIso8601String(),
+        'dialing': _dialing,
+        'backoff': {
+          for (final e in _nextTry.entries)
+            e.key: e.value.difference(DateTime.now()).inSeconds
+        },
+        'lastDialAttempt': _lastDialAttempt?.toIso8601String(),
+      };
+
+  /// Failsafe: visible work but no dial attempt for 5 min → the gate state
+  /// is wrong somewhere; wipe it and start clean (self-healing beats
+  /// perfect gate logic).
+  void _failsafe(bool workVisible) {
+    if (!workVisible) return;
+    final last = _lastDialAttempt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(minutes: 5)) {
+      return;
+    }
+    if (last == null) {
+      _lastDialAttempt = DateTime.now(); // arm the 5-min window
+      return;
+    }
+    LogService.instance
+        .add('Mesh/sched: FAILSAFE — work visible, no dial 5 min: reset gates');
+    _nextTry.clear();
+    _backoff.clear();
+    _pendingVisited.clear();
+    _dialing = null;
+    _starvedSince = null;
+    _lastDialAttempt = DateTime.now();
+  }
+
   void start() {
     _timer ??= Timer.periodic(_tick, (_) => _onTick());
   }
@@ -70,7 +120,10 @@ class MeshTransferScheduler {
     final hooks = mgr.hooks;
     final dial = hooks.dial;
     final dialable = hooks.dialable?.call();
-    if (dial == null || dialable == null || dialable.isEmpty) return;
+    if (dial == null || dialable == null || dialable.isEmpty) {
+      _decide('idle: no dialable peers');
+      return;
+    }
     mgr.reapClosed(); // belt: sweep timer-closed sessions every tick
     if (mgr.anyActive) {
       // Starvation watchdog: a session that has been "active" for far past
@@ -87,6 +140,8 @@ class MeshTransferScheduler {
         mgr.reapClosed();
         hooks.dropClientLink?.call();
       }
+      _decide('busy: session active with '
+          '${mgr.clientSession?.peerCallsign ?? mgr.servedSession?.peerCallsign ?? "?"}');
       return; // one session at a time — stay polite
     }
     _starvedSince = null;
@@ -98,6 +153,7 @@ class MeshTransferScheduler {
     if (d != null) {
       if (DateTime.now().difference(_dialStarted) <
           const Duration(seconds: 110)) {
+        _decide('waiting: connect to $d in flight');
         return; // connect still in flight
       }
       hooks.dropClientLink?.call(); // cancel the pending background connect
@@ -134,23 +190,35 @@ class MeshTransferScheduler {
 
     // 2) Neighbors advertising pending mail (pull — vital for server-only
     // nodes that cannot dial us).
+    final advertisers = <String>[];
     if (table != null) {
       for (final n in table.neighbors.values) {
         if (n.pendingMsgs == 0 && n.pendingBulk == 0) continue;
         final peer = n.callsign.toUpperCase();
+        advertisers.add(
+            '$peer(m${n.pendingMsgs}/b${n.pendingBulk}'
+            '${dialable.containsKey(peer) ? "" : ",undialable"}'
+            '${blocked(peer) ? ",backoff" : ""})');
         if (!dialable.containsKey(peer) || blocked(peer)) continue;
         final visited = _pendingVisited[peer];
         if (visited != null && now.difference(visited) < _pendingPeerQuiet) {
           continue;
         }
         _pendingVisited[peer] = now;
-        _dialTo(peer, dial, 'peer advertises ${n.pendingMsgs} pending');
+        _dialTo(peer, dial, 'peer advertises ${n.pendingMsgs}m/${n.pendingBulk}b pending');
         return;
       }
     }
+    final work = havePendingMsgs || havePendingBulk || advertisers.isNotEmpty;
+    _decide(advertisers.isEmpty
+        ? 'idle: no work (own pending: msgs=$havePendingMsgs bulk=$havePendingBulk)'
+        : 'gated: advertisers ${advertisers.join(" ")}');
+    _failsafe(work);
   }
 
   void _dialTo(String peer, bool Function(String) dial, String why) {
+    _lastDialAttempt = DateTime.now();
+    _decide('dialing $peer ($why)');
     LogService.instance.add('Mesh: dialing $peer ($why)');
     if (dial(peer)) {
       _dialing = peer.toUpperCase();

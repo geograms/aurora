@@ -16,6 +16,8 @@ import '../connections/bluetooth/ble_service.dart';
 import 'mesh/mesh_bulk_spool.dart';
 import 'mesh/mesh_service.dart';
 import 'mesh/mesh_store.dart';
+import 'mesh/mesh_table.dart';
+import 'mesh/mesh_transfer_scheduler.dart';
 import '../platform/platform.dart' as platform;
 import '../profile/profile_service.dart';
 import '../profile/storage_paths.dart';
@@ -834,6 +836,13 @@ class RemoteApiService {
         'transfers': MeshBulkSpool.instance.transfersJson(),
         'dialable': BleService.instance.meshDialable(),
         'gatt': BleService.instance.gattStatus(),
+        'scheduler': MeshTransferScheduler.instance.statusJson(),
+        'neighborPending': {
+          for (final n in MeshService.instance.table?.neighbors.values
+                  .toList() ??
+              <MeshNeighbor>[])
+            n.callsign: [n.pendingMsgs, n.pendingBulk]
+        },
       };
     } catch (e) {
       mesh = {'error': '$e'};

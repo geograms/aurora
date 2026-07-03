@@ -335,6 +335,28 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     }
   }
 
+  /// Outgoing chat-bubble tap (the PLAINTEXT side): when a 1:1 we sent
+  /// references media we host, queue the payload on the bulk lane. The wire
+  /// tap cannot do this for encrypted 1:1s — the file: token is inside the
+  /// ENC1 blob — but the wapp's ui.convo.msg carries the clear text.
+  static void onConvoOutMessage(Map<String, dynamic> data) {
+    try {
+      if (data['dir'] != 'out') return;
+      final id = data['id'] as String? ?? '';
+      final text = data['text'] as String? ?? '';
+      if (id.isEmpty || '#!?'.contains(id[0]) || !text.contains('file:')) {
+        return;
+      }
+      final self = MeshService.instance.tableCallsign;
+      if (self.isEmpty || !MeshBulkSpool.instance.ready) return;
+      for (final ref in MediaRef.findAll(text)) {
+        if (MeshBulkSpool.instance.enqueueFromArchive(ref.token, id, self)) {
+          LogService.instance.add('Mesh: bulk queued ${ref.token} -> $id');
+        }
+      }
+    } catch (_) {}
+  }
+
   /// Split a compact frame `from\x1Fto\x1Ftext` (returns null when not one).
   static (String, String, String)? _splitWire(Uint8List wire) {
     final s = utf8.decode(wire, allowMalformed: true);

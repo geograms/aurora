@@ -41,7 +41,6 @@ static const char *TAG = "gatt_mesh";
 #define CHR_WRITE_UUID  0xFFF1
 #define CHR_NOTIFY_UUID 0xFFF2
 #define ADV_INSTANCE    1
-#define NOTIFY_INFLIGHT_MAX 2
 #define BULK_DIR        "/sdcard/mesh/bulk"
 #define BULK_QUOTA_BYTES (200u * 1024u * 1024u)
 
@@ -50,7 +49,6 @@ static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t  s_addr_type;
 static char     s_call[10];
 static bool     s_subscribed;
-static volatile int s_notify_inflight;
 static bool     s_session_up;
 static blemesh_session_t s_sess;
 static SemaphoreHandle_t s_lock;
@@ -316,15 +314,21 @@ int gatt_mesh_sendfile(const char *to, const char *path)
 
 /* ---- session ops ----------------------------------------------------------- */
 
-/* Notify TX ring: a session burst (HELLO+GOSSIP+custody+FILE_OFFER right
- * after the peer's HELLO) far exceeds the in-flight credit — frames beyond
- * it must QUEUE, not drop (a dropped FILE_OFFER stalls the whole session:
- * the phone waits, idles out and disconnects — the exact failure seen in
- * the first live dongle session). */
-#define TXQ_CAP 16
+/* Notify TX queue + dedicated pump task.
+ *
+ * NimBLE's NOTIFY_TX confirmations proved undeliverable on this stack
+ * (neither the adv-instance callback nor a global listener receives them
+ * on many connections) — any pacing built on them crawls at watchdog
+ * speed and the session stall-timer kills the transfer (seen live:
+ * ~14 kB per session). So pacing depends on NOTHING from the stack: a
+ * 20 ms pump task drains the queue as fast as ble_gatts_notify_custom
+ * accepts frames; the mbuf pool's ENOMEM is the natural backpressure.
+ * ~50 frames/s ceiling ≈ 25 kB/s of chunks — phone-grade throughput. */
+#define TXQ_CAP 24
 static uint8_t s_txq[TXQ_CAP][512];
 static uint16_t s_txq_len[TXQ_CAP];
 static int s_txq_head, s_txq_n;
+static portMUX_TYPE s_txq_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static int notify_now(const uint8_t *frame, int len)
 {
@@ -333,17 +337,49 @@ static int notify_now(const uint8_t *frame, int len)
     return ble_gatts_notify_custom(s_conn, s_notify_handle, om);
 }
 
-static void txq_reset(void) { s_txq_head = 0; s_txq_n = 0; }
-
-/* Drain queued frames into the in-flight window (host task context). */
-static void txq_pump(void)
+static void txq_reset(void)
 {
-    while (s_txq_n > 0 && s_notify_inflight < NOTIFY_INFLIGHT_MAX) {
-        int rc = notify_now(s_txq[s_txq_head], s_txq_len[s_txq_head]);
-        if (rc != 0) break;              /* retry on the next NOTIFY_TX */
-        s_txq_head = (s_txq_head + 1) % TXQ_CAP;
-        s_txq_n--;
-        s_notify_inflight++;
+    portENTER_CRITICAL(&s_txq_mux);
+    s_txq_head = 0;
+    s_txq_n = 0;
+    portEXIT_CRITICAL(&s_txq_mux);
+}
+
+/* Pump task: drain the queue whenever a central is connected. On a send
+ * failure (mbufs exhausted / controller busy) back off briefly and retry —
+ * the frame stays queued, order preserved. */
+static void txq_pump_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (s_conn == BLE_HS_CONN_HANDLE_NONE || s_txq_n == 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        uint8_t frame[512];
+        int len;
+        portENTER_CRITICAL(&s_txq_mux);
+        len = s_txq_len[s_txq_head];
+        memcpy(frame, s_txq[s_txq_head], len);
+        portEXIT_CRITICAL(&s_txq_mux);
+        int rc = notify_now(frame, len);
+        if (rc == 0) {
+            portENTER_CRITICAL(&s_txq_mux);
+            if (s_txq_n > 0) {           /* txq_reset may have raced */
+                s_txq_head = (s_txq_head + 1) % TXQ_CAP;
+                s_txq_n--;
+            }
+            portEXIT_CRITICAL(&s_txq_mux);
+            /* Queue has room again: let the chunk pump refill it. */
+            if (s_txq_n <= TXQ_CAP / 2 && s_session_up &&
+                xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+                blemesh_session_tx_ready(&s_sess, now_s());
+                xSemaphoreGive(s_lock);
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(60)); /* mbufs busy: brief backoff */
+        }
     }
 }
 
@@ -352,27 +388,23 @@ static int op_send(void *ctx, const uint8_t *frame, int len)
     (void)ctx;
     /* NOT gated on s_subscribed: the SUBSCRIBE gap event can be lost on a
      * fringe link even though the central called setCharacteristicNotification
-     * locally (Android delivers incoming notify PDUs regardless of the CCCD
-     * round-trip). NimBLE transmits notify_custom without CCCD state. */
+     * locally. NimBLE transmits notify_custom without CCCD state. */
     if (s_conn == BLE_HS_CONN_HANDLE_NONE || len > 512) {
         return -1;
     }
-    if (s_txq_n == 0 && s_notify_inflight < NOTIFY_INFLIGHT_MAX) {
-        int rc = notify_now(frame, len);
-        if (rc == 0) {
-            s_notify_inflight++;
-            return BLEMESH_SEND_OK;
-        }
-        ESP_LOGW(TAG, "notify rc=%d (type 0x%02x, %dB) - queueing", rc,
-                 len >= 3 ? frame[2] : 0, len);
-        /* controller busy: fall through to the queue */
+    int rc;
+    portENTER_CRITICAL(&s_txq_mux);
+    if (s_txq_n >= TXQ_CAP) {
+        rc = BLEMESH_SEND_BUSY;          /* chunk pump pauses + resumes */
+    } else {
+        int slot = (s_txq_head + s_txq_n) % TXQ_CAP;
+        memcpy(s_txq[slot], frame, len);
+        s_txq_len[slot] = (uint16_t)len;
+        s_txq_n++;
+        rc = BLEMESH_SEND_OK;
     }
-    if (s_txq_n >= TXQ_CAP) return BLEMESH_SEND_BUSY; /* pump pauses+resumes */
-    int slot = (s_txq_head + s_txq_n) % TXQ_CAP;
-    memcpy(s_txq[slot], frame, len);
-    s_txq_len[slot] = (uint16_t)len;
-    s_txq_n++;
-    return BLEMESH_SEND_OK;
+    portEXIT_CRITICAL(&s_txq_mux);
+    return rc;
 }
 
 static int op_msg_pop(void *ctx, const char *peer, char am[7],
@@ -739,7 +771,7 @@ static int conn_gap_event(struct ble_gap_event *ev, void *arg)
             s_conn_since = now_s();
             s_last_msp = 0;
             s_subscribed = false;
-            s_notify_inflight = 0;
+            txq_reset();
             ESP_LOGI(TAG, "central connected (handle %d)", s_conn);
         } else {
             start_conn_advert();
@@ -757,7 +789,6 @@ static int conn_gap_event(struct ble_gap_event *ev, void *arg)
         }
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_subscribed = false;
-        s_notify_inflight = 0;
         txq_reset();
         start_conn_advert();            /* back on the air for the next dial */
         break;
@@ -770,13 +801,8 @@ static int conn_gap_event(struct ble_gap_event *ev, void *arg)
         }
         break;
     case BLE_GAP_EVENT_NOTIFY_TX:
-        s_last_ntx = now_s();
-        if (s_notify_inflight > 0) s_notify_inflight--;
-        txq_pump();                      /* queued control/chunk frames first */
-        if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(500)) == pdTRUE) {
-            if (s_session_up) blemesh_session_tx_ready(&s_sess, now_s());
-            xSemaphoreGive(s_lock);
-        }
+        s_last_ntx = now_s();            /* informational only: pacing no
+                                            longer depends on this event */
         break;
     case BLE_GAP_EVENT_MTU:
         ESP_LOGI(TAG, "MTU %d", ev->mtu.value);
@@ -800,6 +826,7 @@ void gatt_mesh_start(const char *callsign, uint8_t own_addr_type)
      * every GAP event unconditionally. The instance callback is left
      * unregistered (NULL) so events are never double-processed. */
     ble_gap_event_listener_register(&s_gap_listener, conn_gap_event, NULL);
+    xTaskCreate(txq_pump_task, "mesh_txq", 4096, NULL, 6, NULL);
     start_conn_advert();
 }
 
@@ -815,22 +842,7 @@ void gatt_mesh_conn_adv(bool on)
 void gatt_mesh_tick(void)
 {
     if (!s_lock) return;
-    /* In-flight watchdog: NimBLE's event routing can drop NOTIFY_TX
-     * confirmations (seen live: transfer froze at inflight cap after 18
-     * chunks). If the counter sits at the cap with no confirmation for 5 s,
-     * the events are lost — reset and pump; the ATT layer has long since
-     * drained the PDUs. */
-    if (s_notify_inflight >= NOTIFY_INFLIGHT_MAX &&
-        now_s() - s_last_ntx > 5) {
-        ESP_LOGW(TAG, "NOTIFY_TX lost (inflight %d, %lus) - unjamming",
-                 s_notify_inflight, (unsigned long)(now_s() - s_last_ntx));
-        s_notify_inflight = 0;
-        s_last_ntx = now_s();
-    }
-    /* Drain any queued notifies even when no NOTIFY_TX is pending — a
-     * first-send failure would otherwise deadlock the queue (nothing in
-     * flight -> no NOTIFY_TX -> pump never runs). */
-    if (s_conn != BLE_HS_CONN_HANDLE_NONE) txq_pump();
+    /* (Chunk pacing lives in txq_pump_task now — nothing to kick here.) */
     /* Idle-central reaper: a fringe central can hold a healthy LL link yet
      * never complete the ATT handshake (seen live: 23 min of silence). A
      * silent link pins instance 1 (no re-advertising, no fresh dials) —
@@ -862,9 +874,9 @@ void gatt_mesh_tick(void)
 
 void gatt_mesh_print_status(void)
 {
-    printf("gatt: conn=%d subscribed=%d session=%d inflight=%d\n",
+    printf("gatt: conn=%d subscribed=%d session=%d txq=%d\n",
            s_conn == BLE_HS_CONN_HANDLE_NONE ? 0 : 1, s_subscribed ? 1 : 0,
-           s_session_up ? 1 : 0, s_notify_inflight);
+           s_session_up ? 1 : 0, s_txq_n);
     for (int i = 0; i < s_bulk_n; i++) {
         printf("spool: %s %s -> %s %llu B state=%s\n", s_bulk[i].name,
                s_bulk[i].origin, s_bulk[i].target,

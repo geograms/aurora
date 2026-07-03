@@ -110,6 +110,9 @@ class MeshStore {
 
   /// Park a 1:1 frame for custody. [am] may be '' (content-keyed). Returns
   /// true when newly stored (false = dup / already archived / no store).
+  /// A custody MSG frame must fit one ATT write (509B minus 17B header).
+  static const int maxWire = 480;
+
   bool offer({
     required String target,
     required String sender,
@@ -119,7 +122,7 @@ class MeshStore {
     bool inTransit = true,
   }) {
     final db = _db;
-    if (db == null) return false;
+    if (db == null || wire.length > maxWire) return false;
     final key = am.isNotEmpty ? am : contentKey(wire);
     // A frame whose am we've already seen delivered is not worth carrying.
     if (am.isNotEmpty && wasReceived(am)) return false;

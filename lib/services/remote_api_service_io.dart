@@ -143,6 +143,26 @@ class RemoteApiService {
             .add('RemoteApi: media resolve $sha256 -> ${ok ? 'ok' : 'failed'}'));
         return _json(res, {'ok': true, 'started': true, 'sha256': sha256, 'ih': ih});
       }
+      if (req.method == 'POST' && path == '/api/media/put') {
+        // Insert bytes into the local media archive (test/tooling aid):
+        // {"data":"<base64>","ext":"jpg","name":"photo"} → {"token": ...}
+        final data = await _body(req);
+        final archive = _mediaArchive();
+        if (archive == null) {
+          return _json(res, {'ok': false, 'error': 'storage not ready'},
+              status: HttpStatus.serviceUnavailable);
+        }
+        try {
+          final bytes = base64Decode((data['data'] ?? '').toString());
+          final token = archive.putBytes(
+              bytes, (data['ext'] ?? 'bin').toString(),
+              name: data['name']?.toString());
+          return _json(res, {'ok': true, 'token': token, 'size': bytes.length});
+        } catch (e) {
+          return _json(res, {'ok': false, 'error': '$e'},
+              status: HttpStatus.badRequest);
+        }
+      }
       if (req.method == 'POST' && path == '/api/media/publish') {
         final data = await _body(req);
         final token = (data['token'] ?? '').toString();

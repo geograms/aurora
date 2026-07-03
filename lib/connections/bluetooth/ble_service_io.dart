@@ -907,13 +907,14 @@ class BleService {
     // only ~247 B, far under the 450 B spec-side default) — an over-cap frame
     // is rejected by the stack, not truncated, so it must go GATT instead.
     final smallCap = _ble5 ? Ble5Bus.instance.maxPayload : kBleBcastMax;
+    // Mesh custody tap on our own outbound 1:1s: parked in-transit so the
+    // GATT plane also owes delivery. BEFORE the size router — encrypted 1:1s
+    // exceed the advert cap and never reach the broadcast path at all.
+    MeshCustodyDelegate.onAirFrame(payload, outbound: true);
     if (payload.length > smallCap) {
       _gattSend(payload);
       return;
     }
-    // Mesh custody tap on our own outbound 1:1s: parked in-transit so the
-    // GATT plane also owes delivery (the broadcast may never reach the target).
-    MeshCustodyDelegate.onAirFrame(payload, outbound: true);
     // BLE5 path (preferred): a whole APRS message fits ONE extended advert, so
     // register it as a single frame on the shared bus (no chunking, no NACK).
     // Keyed by payload hash so the wapp's periodic re-advertise refreshes it.

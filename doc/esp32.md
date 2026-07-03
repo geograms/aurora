@@ -105,9 +105,21 @@ mesh identity is the iGate callsign from NVS, fallback `TDONGLE`).
 - Legacy T-Dongle firmware (`geogram_ble_hello`) knows nothing of `am:`/`?ACK`/
   `ENC1:`/0x4D — fine as long as it's used for legacy-only deployments.
 - GATT multi-parcel RX is unimplemented in the legacy firmware (single parcel
-  only); rns_ble5 has no GATT server at all (broadcast + scan only), so >254 B
-  payloads cannot reach the dongle.
-- Beacon has no have-digest bloom yet (slot reserved on the wire).
+  only). rns_ble5 HAS a full MSP GATT server since M2 (`src/gatt_mesh.c`):
+  FFE0/FFF1/FFF2, legacy connectable advert on ext-adv instance 1
+  (NIMBLE_ROLE_PERIPHERAL=y, MAX_EXT_ADV_INSTANCES=2, MAX_CONNECTIONS=1),
+  notify TX ring paced by NOTIFY_TX + 5 s in-flight watchdog, idle-central
+  reaper, SD bulk spool at /sdcard/mesh/bulk with a RAM-FIRST index (the FAT
+  VFS readdir deadlocks against concurrent SD writers — never walk the dir
+  outside boot), console `sendfile <to> <path>` / `transfers` / `recv`
+  (base64 file upload over USB) / `advon|advoff` / `scankick` / `wifioff`.
+  TRAPS: CONFIG_BT_CTRL_BLE_SCAN_DUPL must be n (the controller dedups scan
+  reports BY ADDRESS — fixed-address phones are reported once per boot and
+  then never again); NimBLE may fail to route connection GAP events to the
+  adv-instance callback — register a ble_gap_event_listener instead; an ESP
+  reset does NOT power-cycle a wedged SD card (physical replug only).
+- Beacon carries the [pending_msgs][pending_bulk] trailer since M2; the
+  have-digest bloom stays empty on the dongle (a carrier receives no 1:1s).
 - Duplicate-delivery edge: SCF re-air more than ~60 min after the receiver
   already got the message can re-show it (phone content-dedup window) — the
   `?ACK` purge covers the normal case.

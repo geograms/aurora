@@ -167,21 +167,34 @@ class MeshStore {
   }
 
   /// In-transit messages this session should hand to [peer]: frames FOR the
-  /// peer itself, and frames whose route's next hop is the peer.
-  List<MeshPendingMsg> pendingFor(String peer, MeshTable? table, {int max = 32}) {
+  /// peer itself, frames whose route's next hop is the peer, and — mule
+  /// custody — frames WE originated whose target is nowhere in the mesh
+  /// horizon (the peer carries them; custody/TTL/receipts cover a mule
+  /// that never meets the target).
+  List<MeshPendingMsg> pendingFor(String peer, MeshTable? table,
+      {int max = 32, String selfCallsign = ''}) {
     final db = _db;
     if (db == null) return const [];
     final p = peer.toUpperCase();
+    final self = selfCallsign.toUpperCase();
     final rows = db.select(
-        'SELECT am,target,wire,ts FROM mesh_store WHERE state = 0 '
+        'SELECT am,target,sender,wire,ts FROM mesh_store WHERE state = 0 '
         'ORDER BY ts LIMIT 256');
     final out = <MeshPendingMsg>[];
     for (final r in rows) {
       final target = r['target'] as String;
       var give = target == p;
       if (!give && table != null) {
-        final route = table.routes[meshHashHex(meshHash(target))];
-        give = route != null && route.viaCallsign.toUpperCase() == p;
+        final hex = meshHashHex(meshHash(target));
+        final route = table.routes[hex];
+        if (route != null) {
+          give = route.viaCallsign.toUpperCase() == p;
+        } else if (self.isNotEmpty &&
+            (r['sender'] as String) == self &&
+            !table.neighbors.keys
+                .any((n) => n.toUpperCase() == target.toUpperCase())) {
+          give = true; // own mail, unreachable target: mule it
+        }
       }
       if (!give) continue;
       final key = r['am'] as String;
@@ -194,6 +207,16 @@ class MeshStore {
       if (out.length >= max) break;
     }
     return out;
+  }
+
+  /// Distinct targets of in-transit frames WE originated (custodian path).
+  List<String> ownPendingTargets(String selfCallsign) {
+    final db = _db;
+    if (db == null || selfCallsign.isEmpty) return const [];
+    final rows = db.select(
+        'SELECT DISTINCT target FROM mesh_store WHERE state = 0 AND sender = ?',
+        [selfCallsign.toUpperCase()]);
+    return [for (final r in rows) r['target'] as String];
   }
 
   /// Count of frames we still owe delivery for (beacon pending trailer).

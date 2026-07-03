@@ -135,9 +135,29 @@ void main() {
     expect(c.inTransit, greaterThanOrEqualTo(c.archived));
   });
 
+  test('mule custody: own unreachable mail goes to any session peer', () {
+    final table = MeshTable('ME');
+    table.ingest(MeshBeacon(
+      callsign: 'BBB',
+      deviceClass: MeshDeviceClass.phone,
+      cond: const MeshConditions(),
+      dv: [MeshDvEntry(meshHash('ME'), 1)],
+    ));
+    // Our own message to an unknown target...
+    store.offer(target: 'ZZZ', sender: 'ME', wire: _wire('ME', 'ZZZ', 'x'));
+    // ...someone else's message to an unknown target (must NOT be muled).
+    store.offer(target: 'YYY', sender: 'AAA', wire: _wire('AAA', 'YYY', 'y'));
+    final forB =
+        store.pendingFor('BBB', table, selfCallsign: 'ME');
+    expect(forB.length, 1);
+    expect(store.ownPendingTargets('ME'), ['ZZZ']);
+  });
+
   test('bulk handover records', () {
     expect(store.bulkHandedOver('sha1', 'BBB'), false);
     store.recordBulkHandover('sha1', 'BBB', 'CCC');
     expect(store.bulkHandedOver('sha1', 'BBB'), true);
   });
 }
+
+// M3 additions exercised on the same store fixture set.

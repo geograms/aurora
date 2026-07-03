@@ -260,6 +260,16 @@ class FunctionalityRegistry {
       EndpointDef('hal_mesh_devices',
           'Devices in reach as people-widget sections [{title,items:[\u2026]}]', [],
           ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_mesh_scf_status',
+          'Custody store + bulk spool counters JSON', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_mesh_transfers',
+          'Bulk transfers JSON [{sha,name,target,size,have,state,active}]', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_mesh_set_pref',
+          'Set a mesh tunable "key=value" (msgQuotaMb, bulkQuotaMb)', [
+        ParamDef('kv', 'string', 'key=value'),
+      ], ReturnDef('int', '0 ok, -1 unknown key/bad value')),
     ]),
     'hal.relay': FunctionalityDef('hal.relay',
         'NOSTR-relay store-and-forward DM backup (kind-4 over Reticulum)', [

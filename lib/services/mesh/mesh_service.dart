@@ -34,6 +34,9 @@ class MeshService {
   MeshService._();
   static final MeshService instance = MeshService._();
 
+  // Politeness (doc/mesh.md §7): the beacon interval adapts to channel
+  // load — quiet streets get chatty beacons, saturated streets get
+  // presence-only whispers. _beaconInterval is the quiet-street floor.
   static const Duration _beaconInterval = Duration(seconds: 30);
   static const Duration _beaconTtl = Duration(seconds: 70);
   static const Duration _triggerDebounce = Duration(seconds: 4);
@@ -48,7 +51,48 @@ class MeshService {
   Timer? _sweepTimer;
   Timer? _triggerTimer;
   bool _powered = false;
+  int _batteryPct = 100;
   int _beaconsSent = 0, _beaconsHeard = 0;
+
+  // Channel-load meter: BLE5 frames heard in a sliding minute (fed by
+  // BleService for every inbound frame, any subtype). Drives politeness.
+  final List<DateTime> _heardStamps = [];
+
+  /// Called by the transport for every inbound BLE5 frame.
+  void noteChannelActivity() {
+    final now = DateTime.now();
+    _heardStamps.add(now);
+    if (_heardStamps.length > 600) _heardStamps.removeRange(0, 100);
+  }
+
+  /// Frames/second heard over the last minute.
+  double channelLoad() {
+    final cutoff = DateTime.now().subtract(const Duration(seconds: 60));
+    _heardStamps.removeWhere((t) => t.isBefore(cutoff));
+    return _heardStamps.length / 60.0;
+  }
+
+  /// Politeness tier: 0 quiet, 1 busy, 2 saturated (doc/mesh.md §7).
+  /// Powered nodes back off LAST (they are the useful chatter).
+  int politenessTier() {
+    final load = channelLoad();
+    final saturated = _powered ? 5.0 : 3.0;
+    final busy = _powered ? 2.0 : 1.0;
+    if (load >= saturated) return 2;
+    if (load >= busy) return 1;
+    return 0;
+  }
+
+  /// Effective beacon interval for the current tier.
+  Duration beaconIntervalNow() => switch (politenessTier()) {
+        2 => const Duration(minutes: 5),
+        1 => const Duration(seconds: 90),
+        _ => _beaconInterval,
+      };
+
+  /// Battery dial policy: on low battery (and not charging) the node stops
+  /// PULLING work for others; its own outbound mail still moves.
+  bool dialBudgetLow() => !_powered && _batteryPct < 20;
 
   bool get isRunning => _running;
 
@@ -118,7 +162,15 @@ class MeshService {
     } catch (_) {}
 
     _beaconTimer?.cancel();
-    _beaconTimer = Timer.periodic(_beaconInterval, (_) => _sendBeacon());
+    // Adaptive cadence: a fixed 10 s tick decides whether the politeness
+    // interval has elapsed (the interval itself moves with channel load).
+    var lastBeacon = DateTime.fromMillisecondsSinceEpoch(0);
+    _beaconTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (DateTime.now().difference(lastBeacon) >= beaconIntervalNow()) {
+        lastBeacon = DateTime.now();
+        _sendBeacon();
+      }
+    });
     _sweepTimer?.cancel();
     var sweepTick = 0;
     _sweepTimer = Timer.periodic(const Duration(seconds: 60), (_) {
@@ -133,8 +185,12 @@ class MeshService {
     try {
       final st = await _battery.batteryState;
       _powered = st != BatteryState.discharging;
-      _battery.onBatteryStateChanged.listen((st) {
+      _batteryPct = await _battery.batteryLevel;
+      _battery.onBatteryStateChanged.listen((st) async {
         _powered = st != BatteryState.discharging;
+        try {
+          _batteryPct = await _battery.batteryLevel;
+        } catch (_) {}
       });
     } catch (_) {
       _powered = true; // no battery API → assume powered (desktop)
@@ -187,7 +243,8 @@ class MeshService {
     final t = _table;
     if (t == null || !_canAdvertise) return;
     final store = MeshStore.instance;
-    final have = store.buildHaveBloom();
+    final saturated = politenessTier() == 2;
+    final have = saturated ? Uint8List(0) : store.buildHaveBloom();
     final pendingMsgs = store.pendingCount().clamp(0, 255);
     final pendingBulk = MeshBulkSpool.instance.pendingCount().clamp(0, 255);
     final beacon = MeshBeacon(
@@ -200,7 +257,7 @@ class MeshService {
         mobility: MeshMobility.unknown,
         storageBucket: 3,
       ),
-      dv: t.exportDv(),
+      dv: saturated ? const [] : t.exportDv(),
       have: have,
       pendingMsgs: pendingMsgs,
       pendingBulk: pendingBulk,
@@ -327,6 +384,10 @@ class MeshService {
       'routes': t?.routes.length ?? 0,
       'beaconsSent': _beaconsSent,
       'beaconsHeard': _beaconsHeard,
+      'channelLoad': double.parse(channelLoad().toStringAsFixed(2)),
+      'politeness': ['quiet', 'busy', 'saturated'][politenessTier()],
+      'beaconIntervalS': beaconIntervalNow().inSeconds,
+      'battery': _batteryPct,
       'revision': revision,
     });
   }

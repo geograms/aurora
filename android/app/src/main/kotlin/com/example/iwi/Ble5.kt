@@ -701,10 +701,40 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         notifyBusy = false
     }
 
+    // Foreign-central defense: our FFE0 service UUID attracts probes from
+    // unrelated street devices (seen live: one reconnecting every ~15 s,
+    // stealing radio time and spawning ghost sessions). Behavior-based: a
+    // central that writes nothing within 10 s is disconnected and its
+    // address ignored for 10 minutes. No pairing, no whitelist sync — a
+    // real peer's first write always lands well within 10 s.
+    private val strangerBlock = HashMap<String, Long>()
+    private var serverProbeGen = 0
+
+    private fun armServerProbe(device: BluetoothDevice) {
+        val gen = ++serverProbeGen
+        val addr = device.address
+        main.postDelayed({
+            if (serverProbeGen == gen && serverCentral?.address == addr &&
+                !serverSawData) {
+                android.util.Log.w(TAG, "server: silent central $addr — dropping (blocked 10min)")
+                strangerBlock[addr] = System.currentTimeMillis() + 600_000
+                try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
+            }
+        }, 10_000)
+    }
+    private var serverSawData = false
+
     private val gattServerCb = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                val until = strangerBlock[device.address] ?: 0L
+                if (until > System.currentTimeMillis()) {
+                    try { gattServer?.cancelConnection(device) } catch (_: Exception) {}
+                    return
+                }
                 serverCentral = device
+                serverSawData = false
+                armServerProbe(device)
                 emitGatt(mapOf("event" to "server_connected", "address" to device.address))
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 if (serverCentral?.address == device.address) {
@@ -733,6 +763,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         ) {
             if (ch.uuid == FFF1_UUID) {
                 serverCentral = device
+                serverSawData = true
+                strangerBlock.remove(device.address)
                 emitGatt(mapOf("event" to "server_data", "address" to device.address,
                     "data" to value))
             }
@@ -748,6 +780,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
+            serverSawData = true // a CCCD subscribe is a real peer, not a probe
             // CCCD subscription from a central — just acknowledge (plain, no auth).
             if (responseNeeded) {
                 try {

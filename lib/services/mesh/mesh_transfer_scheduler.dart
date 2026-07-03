@@ -19,6 +19,8 @@ import 'dart:async';
 
 import '../log_service.dart';
 import 'mesh_bulk_spool.dart';
+import 'mesh_beacon.dart';
+import 'mesh_custodian.dart';
 import 'mesh_custody.dart';
 import 'mesh_service.dart';
 import 'mesh_store.dart';
@@ -186,10 +188,35 @@ class MeshTransferScheduler {
           return;
         }
       }
+      // 1b) Own-origin mail whose target is nowhere in the mesh horizon:
+      // hand it to the best-scored custodian in reach (contact x stability,
+      // doc/mesh.md §6) rather than holding it forever.
+      if (table != null && havePendingMsgs) {
+        for (final own in store.ownPendingTargets(
+            MeshService.instance.tableCallsign)) {
+          if (table.neighbors.keys
+                  .any((n) => n.toUpperCase() == own.toUpperCase()) ||
+              table.routes.containsKey(meshHashHex(meshHash(own)))) {
+            continue; // reachable: paths 1/2 handle it
+          }
+          final custodian = meshPickCustodian(table, own);
+          if (custodian == null) continue;
+          final peer = custodian.toUpperCase();
+          if (!dialable.containsKey(peer) || blocked(peer)) continue;
+          _dialTo(peer, dial, 'custodian for unreachable $own');
+          return;
+        }
+      }
     }
 
     // 2) Neighbors advertising pending mail (pull — vital for server-only
-    // nodes that cannot dial us).
+    // nodes that cannot dial us). Battery policy: a low, discharging phone
+    // stops volunteering to pull for others; its own mail (path 1) still
+    // moves.
+    if (MeshService.instance.dialBudgetLow()) {
+      _decide('idle: low battery — not pulling for others');
+      return;
+    }
     final advertisers = <String>[];
     if (table != null) {
       for (final n in table.neighbors.values) {

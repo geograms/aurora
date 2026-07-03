@@ -24,7 +24,9 @@ import '../services/blossom_server.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/log_service.dart';
+import '../services/mesh/mesh_bulk_spool.dart';
 import '../services/mesh/mesh_service.dart';
+import '../services/mesh/mesh_store.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -2680,6 +2682,57 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // M2/M3: custody store counters + live transfers + tunables.
+    final halMeshScfStatus = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final c = MeshStore.instance.counts();
+        final bytes = utf8.encode(jsonEncode({
+          'inTransit': c.inTransit,
+          'archived': c.archived,
+          'bytes': c.bytes,
+          'receivedAms': c.receivedAms,
+          'quotaBytes': MeshStore.instance.quotaBytes,
+          'spoolPending': MeshBulkSpool.instance.pendingCount(),
+          'spoolQuotaBytes': MeshBulkSpool.instance.quotaBytes,
+        }));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halMeshTransfers = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes =
+            utf8.encode(jsonEncode(MeshBulkSpool.instance.transfersJson()));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // hal_mesh_set_pref("key=value"): msgQuotaMb / bulkQuotaMb (persisted via
+    // the shared prefs by the caller side later; live-applied immediately).
+    final halMeshSetPref = WasmFunction(
+      (int ptr, int len) {
+        final kv = _readUtf8(ptr, len);
+        final eq = kv.indexOf('=');
+        if (eq <= 0) return -1;
+        final key = kv.substring(0, eq);
+        final v = int.tryParse(kv.substring(eq + 1)) ?? -1;
+        if (v < 0) return -1;
+        switch (key) {
+          case 'msgQuotaMb':
+            MeshStore.instance.quotaBytes = v * 1024 * 1024;
+          case 'bulkQuotaMb':
+            MeshBulkSpool.instance.quotaBytes = v * 1024 * 1024;
+          default:
+            return -1;
+        }
+        return 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
 
     // ── Contacts HAL (reusable people picker source) ────────────────────────
     final halContactsQuery = WasmFunction(
@@ -2884,6 +2937,9 @@ class WappEngine {
       WasmImport('hal', 'rns_status', halRnsStatus),
       WasmImport('hal', 'mesh_status', halMeshStatus),
       WasmImport('hal', 'mesh_devices', halMeshDevices),
+      WasmImport('hal', 'mesh_scf_status', halMeshScfStatus),
+      WasmImport('hal', 'mesh_transfers', halMeshTransfers),
+      WasmImport('hal', 'mesh_set_pref', halMeshSetPref),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),
       // Contacts (reusable people picker source)

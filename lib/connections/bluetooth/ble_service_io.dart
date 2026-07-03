@@ -564,6 +564,7 @@ class BleService {
     final seen = _ble5Seen[key];
     if (seen != null && now.difference(seen) < kBleBcastDedup) return;
     _ble5Seen[key] = now;
+    MeshService.instance.noteChannelActivity(); // politeness load meter
     // Always logged (post-dedup = once per unique frame, low rate): the one
     // line that proves whether a peer's APRS frame reached this phone at all —
     // the exact visibility we lacked when dongle messages vanished en route.

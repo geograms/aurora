@@ -179,7 +179,8 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
 
   @override
   List<MeshPendingMsg> custodyBatchFor(String peer, int max) =>
-      MeshStore.instance.pendingFor(peer, MeshService.instance.table, max: max);
+      MeshStore.instance.pendingFor(peer, MeshService.instance.table,
+          max: max, selfCallsign: MeshService.instance.tableCallsign);
 
   @override
   void custodyTransferred(String peer, MeshPendingMsg m) {

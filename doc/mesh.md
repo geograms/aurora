@@ -304,16 +304,28 @@ Reticulum wapp.
   bidirectional check, contact tracking, and the **Bluetooth wapp devices
   view** (it doubles as M1's verification instrument). 3 phones: each shows
   correct 2-hop routes, conditions, device types. No data plane yet.
-- **M2 — move a message.** GATT custody transfer + sqlite SCF + in-session
-  ack + `?ACK` purge + have-digest; wapp gains actions (send message, ping)
-  + SCF counters. 3 phones in a line (A–B–C, A and C out of range of each
-  other): A→C delivers via B; C offline → parks at B → delivers when C
-  returns; verify no duplicate delivery after return.
-- **M3 — behave in a crowd.** Base-station scoring, custodian selection,
-  politeness backoff, battery scan policy, broadcast fallback; wapp settings
-  (quota/retention/roles/battery/politeness) + mesh view with channel-load
-  meter. Soak test: all available devices + ESP32 scanners measuring channel
-  load.
+- **M2 — move a message. [BUILT + phone-validated 2026-07-03]** The Mesh
+  Session Protocol (MSP v1, `4D 01` magic on FFE0/FFF1/FFF2, mirrored in
+  Dart `mesh_session.dart` and C `blemesh_session.c` with shared fixtures)
+  carries message custody (MSG/ACK = handover), gossip and a BULK FILE
+  lane (FILE_OFFER/ACCEPT with offset resume, CHUNK windows, sha-verified
+  FILE_OK custody). sqlite SCF + have-digest bloom + `[pending]` beacon
+  trailer shipped. Validated: 5 MB image phone→phone through two floors at
+  27 kB/s, sha-verified into the receiver's media archive; custody park +
+  overheard-`?ACK` purge; ESP32 dongle as MSP GATT server with SD spool
+  (RAM-first index) + console `sendfile`. Hard lessons now encoded:
+  controller dup-scan filters must be OFF, session slots must reap on
+  timer-closes, notify bursts need a TX ring, and every gate needs a
+  visible decision (scheduler logs + failsafe).
+- **M3 — behave in a crowd. [IN PROGRESS]** Done: load-adaptive beacon
+  (30 s quiet → 90 s busy → 5 min presence-only saturated; powered nodes
+  back off last), battery dial policy (low+discharging = no pulling for
+  others), custodian scoring (contact × stability, path-claim dominates)
+  with mule handoff of own unreachable mail, foreign-central defense (a
+  silent GATT central is dropped after 10 s and ignored 10 min), Bluetooth
+  wapp Node/Transfers sections + `hal_mesh_scf_status`/`hal_mesh_transfers`
+  /`hal_mesh_set_pref`. Remaining: settings UI, mesh view w/ channel-load
+  meter, broadcast fallback, soak test.
 - **M4 — harden.** Signed beacons, encrypt-or-don't-carry for key-unknown 1:1,
   quota tuning, village-scale field test.
 

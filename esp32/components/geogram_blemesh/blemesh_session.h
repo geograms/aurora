@@ -199,6 +199,10 @@ void blemesh_session_rx(blemesh_session_t *s, const uint8_t *d, int len,
 /* Transport drained a frame (NOTIFY_TX) — resume a paused chunk pump. */
 void blemesh_session_tx_ready(blemesh_session_t *s, uint32_t now);
 
+/* Re-check for bulk work mid-session (routes/spool can appear after the
+ * HELLO-time check — without a poll an idle session never offers). */
+void blemesh_session_poll_bulk(blemesh_session_t *s, uint32_t now);
+
 /* Drive timeouts (hello/stall/politeness). Call every ~1 s. */
 void blemesh_session_tick(blemesh_session_t *s, uint32_t now);
 

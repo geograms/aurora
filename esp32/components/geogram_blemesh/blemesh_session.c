@@ -584,6 +584,11 @@ void blemesh_session_tx_ready(blemesh_session_t *s, uint32_t now)
     if (s->state == 1 && s->tx_active) pump_chunks(s, now);
 }
 
+void blemesh_session_poll_bulk(blemesh_session_t *s, uint32_t now)
+{
+    if (s->state == 1) maybe_start_bulk(s, now);
+}
+
 void blemesh_session_tick(blemesh_session_t *s, uint32_t now)
 {
     if (s->state == 2) return;

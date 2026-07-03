@@ -433,6 +433,25 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private fun emitGatt(map: Map<String, Any?>) { main.post { gattEvents?.success(map) } }
 
+    // Guards the connect-to-ready window: a fringe link can complete the LL
+    // connection yet stall in the ATT handshake (MTU/discovery/CCCD) — the
+    // link then hangs half-open until the idle timer. Tear it down early so
+    // the scheduler can retry; every retry is a fresh chance at the radio dice.
+    private var setupGen = 0
+    private var linkReady = false
+
+    private fun armSetupWatchdog() {
+        val gen = ++setupGen
+        linkReady = false
+        main.postDelayed({
+            if (!linkReady && setupGen == gen && gatt != null) {
+                android.util.Log.w(TAG, "GATT setup stalled 12s — tearing down for retry")
+                gattDisconnect()
+                emitGatt(mapOf("event" to "disconnected"))
+            }
+        }, 12000)
+    }
+
     private fun gattConnect(address: String, auto: Boolean = false) {
         if (gatt != null) return // one link at a time
         val dev: BluetoothDevice = try {
@@ -502,19 +521,26 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun gattDisconnect() {
-        val g = gatt ?: return
-        try { g.disconnect() } catch (_: Exception) {}
-        try { g.close() } catch (_: Exception) {}
+        val g = gatt
         gatt = null
         writeChar = null
         notifyChar = null
         writeQueue.clear()
         writeBusy = false
+        if (g != null) {
+            try { g.disconnect() } catch (_: Exception) {}
+            try { g.close() } catch (_: Exception) {}
+        }
+        // Always tell Dart: its link state can desync from the native handle
+        // (seen live: clientLinkUp true for 23 min with gatt==null, so every
+        // idle-drop call here silently no-opped and the mesh stayed wedged).
+        emitGatt(mapOf("event" to "disconnected"))
     }
 
     private val gattCb = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                armSetupWatchdog()
                 // Bulk-transfer throughput: shortest connection interval the
                 // stack grants, and 2M PHY where both radios support it (the
                 // extended-advert sets stay 1M — this touches only the link).
@@ -574,10 +600,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                         }
                     }
                 } else {
+                    linkReady = true
                     emitGatt(mapOf("event" to "connected")) // no CCCD → ready anyway
                 }
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "CCCD subscribe: ${e.message}")
+                linkReady = true
                 emitGatt(mapOf("event" to "connected"))
             }
         }
@@ -587,6 +615,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         ) {
             if (descriptor.uuid == CCCD_UUID) {
                 android.util.Log.i(TAG, "CCCD write status=$status — link ready")
+                linkReady = true
                 emitGatt(mapOf("event" to "connected"))
             }
         }

@@ -54,6 +54,8 @@ static volatile int s_notify_inflight;
 static bool     s_session_up;
 static blemesh_session_t s_sess;
 static SemaphoreHandle_t s_lock;
+static uint32_t s_conn_since;    /* connect time (for the idle reaper) */
+static uint32_t s_last_msp;      /* last MSP frame from the central */
 
 static uint32_t now_s(void) { return (uint32_t)(esp_timer_get_time() / 1000000ULL); }
 
@@ -263,19 +265,62 @@ int gatt_mesh_sendfile(const char *to, const char *path)
 
 /* ---- session ops ----------------------------------------------------------- */
 
+/* Notify TX ring: a session burst (HELLO+GOSSIP+custody+FILE_OFFER right
+ * after the peer's HELLO) far exceeds the in-flight credit — frames beyond
+ * it must QUEUE, not drop (a dropped FILE_OFFER stalls the whole session:
+ * the phone waits, idles out and disconnects — the exact failure seen in
+ * the first live dongle session). */
+#define TXQ_CAP 16
+static uint8_t s_txq[TXQ_CAP][512];
+static uint16_t s_txq_len[TXQ_CAP];
+static int s_txq_head, s_txq_n;
+
+static int notify_now(const uint8_t *frame, int len)
+{
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, len);
+    if (!om) return BLE_HS_ENOMEM;
+    return ble_gatts_notify_custom(s_conn, s_notify_handle, om);
+}
+
+static void txq_reset(void) { s_txq_head = 0; s_txq_n = 0; }
+
+/* Drain queued frames into the in-flight window (host task context). */
+static void txq_pump(void)
+{
+    while (s_txq_n > 0 && s_notify_inflight < NOTIFY_INFLIGHT_MAX) {
+        int rc = notify_now(s_txq[s_txq_head], s_txq_len[s_txq_head]);
+        if (rc != 0) break;              /* retry on the next NOTIFY_TX */
+        s_txq_head = (s_txq_head + 1) % TXQ_CAP;
+        s_txq_n--;
+        s_notify_inflight++;
+    }
+}
+
 static int op_send(void *ctx, const uint8_t *frame, int len)
 {
     (void)ctx;
-    if (s_conn == BLE_HS_CONN_HANDLE_NONE || !s_subscribed) return -1;
-    if (s_notify_inflight >= NOTIFY_INFLIGHT_MAX) return BLEMESH_SEND_BUSY;
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, len);
-    if (!om) return BLEMESH_SEND_BUSY;
-    int rc = ble_gatts_notify_custom(s_conn, s_notify_handle, om);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "notify rc=%d", rc);
-        return rc == BLE_HS_ENOMEM ? BLEMESH_SEND_BUSY : -1;
+    /* NOT gated on s_subscribed: the SUBSCRIBE gap event can be lost on a
+     * fringe link even though the central called setCharacteristicNotification
+     * locally (Android delivers incoming notify PDUs regardless of the CCCD
+     * round-trip). NimBLE transmits notify_custom without CCCD state. */
+    if (s_conn == BLE_HS_CONN_HANDLE_NONE || len > 512) {
+        return -1;
     }
-    s_notify_inflight++;
+    if (s_txq_n == 0 && s_notify_inflight < NOTIFY_INFLIGHT_MAX) {
+        int rc = notify_now(frame, len);
+        if (rc == 0) {
+            s_notify_inflight++;
+            return BLEMESH_SEND_OK;
+        }
+        ESP_LOGW(TAG, "notify rc=%d (type 0x%02x, %dB) - queueing", rc,
+                 len >= 3 ? frame[2] : 0, len);
+        /* controller busy: fall through to the queue */
+    }
+    if (s_txq_n >= TXQ_CAP) return BLEMESH_SEND_BUSY; /* pump pauses+resumes */
+    int slot = (s_txq_head + s_txq_n) % TXQ_CAP;
+    memcpy(s_txq[slot], frame, len);
+    s_txq_len[slot] = (uint16_t)len;
+    s_txq_n++;
     return BLEMESH_SEND_OK;
 }
 
@@ -517,7 +562,15 @@ static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     if (ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len) != 0) return 0;
     if (!blemesh_msp_is_frame(buf, len)) return 0;   /* not ours: ignore */
     s_conn = conn_handle;
+    s_last_msp = now_s();
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(2000)) == pdTRUE) {
+        /* A HELLO always begins a fresh session: a stale active session from
+         * a dead connection would swallow it (state!=0 ignores HELLO) and the
+         * new peer would never get a reply (seen live). */
+        if (len >= 3 && buf[2] == MSP_HELLO && s_session_up) {
+            blemesh_session_close(&s_sess, false);
+            s_session_up = false;
+        }
         if (!s_session_up) {
             blemesh_session_init(&s_sess, &OPS, s_call,
                                  MSP_CAP_MSG | MSP_CAP_BULK_RX |
@@ -529,6 +582,8 @@ static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
             s_session_up = true;
         }
         blemesh_session_rx(&s_sess, buf, len, now_s());
+        ESP_LOGI(TAG, "msp rx type 0x%02x %dB (peer=%s state=%d)",
+                 buf[2], len, s_sess.peer, s_sess.state);
         xSemaphoreGive(s_lock);
     }
     return 0;
@@ -630,6 +685,8 @@ static int conn_gap_event(struct ble_gap_event *ev, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (ev->connect.status == 0) {
             s_conn = ev->connect.conn_handle;
+            s_conn_since = now_s();
+            s_last_msp = 0;
             s_subscribed = false;
             s_notify_inflight = 0;
             ESP_LOGI(TAG, "central connected (handle %d)", s_conn);
@@ -650,17 +707,20 @@ static int conn_gap_event(struct ble_gap_event *ev, void *arg)
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         s_subscribed = false;
         s_notify_inflight = 0;
+        txq_reset();
         start_conn_advert();            /* back on the air for the next dial */
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (ev->subscribe.attr_handle == s_notify_handle) {
             s_subscribed = ev->subscribe.cur_notify;
-            ESP_LOGI(TAG, "central %ssubscribed FFF2",
-                     s_subscribed ? "" : "un");
+            ESP_LOGI(TAG, "central %ssubscribed FFF2 (conn %d)",
+                     s_subscribed ? "" : "un", ev->subscribe.conn_handle);
+            s_conn = ev->subscribe.conn_handle;
         }
         break;
     case BLE_GAP_EVENT_NOTIFY_TX:
         if (s_notify_inflight > 0) s_notify_inflight--;
+        txq_pump();                      /* queued control/chunk frames first */
         if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(500)) == pdTRUE) {
             if (s_session_up) blemesh_session_tx_ready(&s_sess, now_s());
             xSemaphoreGive(s_lock);
@@ -694,8 +754,25 @@ void gatt_mesh_conn_adv(bool on)
 void gatt_mesh_tick(void)
 {
     if (!s_lock) return;
+    /* Drain any queued notifies even when no NOTIFY_TX is pending — a
+     * first-send failure would otherwise deadlock the queue (nothing in
+     * flight -> no NOTIFY_TX -> pump never runs). */
+    if (s_conn != BLE_HS_CONN_HANDLE_NONE) txq_pump();
+    /* Idle-central reaper: a fringe central can hold a healthy LL link yet
+     * never complete the ATT handshake (seen live: 23 min of silence). A
+     * silent link pins instance 1 (no re-advertising, no fresh dials) —
+     * terminate it so the next attempt starts clean. */
+    if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
+        uint32_t ref = s_last_msp ? s_last_msp : s_conn_since;
+        if (now_s() - ref > 45 && !s_session_up) {
+            ESP_LOGW(TAG, "silent central for %lus - terminating",
+                     (unsigned long)(now_s() - ref));
+            ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
+        }
+    }
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE) {
         if (s_session_up) {
+            blemesh_session_poll_bulk(&s_sess, now_s()); /* routes may be new */
             blemesh_session_tick(&s_sess, now_s());
             if (blemesh_session_closed(&s_sess)) {
                 s_session_up = false;

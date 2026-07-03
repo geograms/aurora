@@ -529,7 +529,12 @@ class MeshPendingMsg {
   final String am; // '' when the frame carries no receipt id
   final Uint8List wire; // raw compact 0x41 frame
   final int ts; // epoch seconds
-  MeshPendingMsg({required this.am, required this.wire, required this.ts});
+  /// Store lookup key (== am, or the content pseudo-key for am-less frames).
+  /// Never goes on the wire.
+  final String key;
+  MeshPendingMsg(
+      {required this.am, required this.wire, required this.ts, String? key})
+      : key = key ?? am;
 }
 
 /// One spooled file ready to move to this peer.
@@ -675,6 +680,9 @@ class MeshSession {
 
   bool get pastCap => DateTime.now().difference(_openedAt) > sessionCap;
   bool get bulkActive => _tx != null || _rx != null;
+
+  /// True when nothing is outstanding — a link drop now is a clean end.
+  bool get idle => _outMsgs.isEmpty && !bulkActive && _custodyDrained;
 
   /// Kick the session off. The dialer speaks first; the served side waits
   /// for the peer's HELLO (its answer goes out from _onHello).
@@ -1053,11 +1061,15 @@ class MeshSession {
     close(clean: true, notifyPeer: false);
   }
 
+  /// How this session ended (valid once state == closed).
+  bool closedClean = false;
+
   /// Tear the session down. [notifyPeer] has no wire effect here (BYE is
   /// explicit via [bye]); the owner drops the GATT link after this returns.
   void close({required bool clean, bool notifyPeer = true}) {
     if (state == MeshSessionState.closed) return;
     state = MeshSessionState.closed;
+    closedClean = clean;
     _helloTimer?.cancel();
     _stallTimer?.cancel();
     _ackTimer?.cancel();

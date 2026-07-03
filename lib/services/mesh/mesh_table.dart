@@ -53,6 +53,11 @@ class MeshNeighbor {
   /// The neighbor's advertised reach: hashHex → cost (its own digest).
   Map<String, int> digest = {};
 
+  /// M2 beacon trailer: mail/bulk the neighbor is carrying. A non-zero count
+  /// invites a GATT session (essential for server-only nodes that can't dial).
+  int pendingMsgs = 0;
+  int pendingBulk = 0;
+
   MeshNeighbor(this.callsign, this.hash, this.deviceClass, this.cond,
       DateTime now, this.lastRssi)
       : firstHeard = now,
@@ -124,6 +129,8 @@ class MeshTable {
     }
     nb.beaconsHeard++;
     nb.touchContact(now);
+    nb.pendingMsgs = b.pendingMsgs;
+    nb.pendingBulk = b.pendingBulk;
     names[meshHashHex(h)] = b.callsign;
 
     // The neighbor's digest: what it says it reaches (hashHex → cost).

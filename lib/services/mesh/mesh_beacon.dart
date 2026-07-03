@@ -132,7 +132,12 @@ class MeshBeacon {
   final MeshDeviceClass deviceClass;
   final MeshConditions cond;
   final List<MeshDvEntry> dv;
-  final Uint8List have; // bloom have-digest; empty in M1
+  final Uint8List have; // bloom have-digest of received am ids (M2)
+  // M2 trailer: how much mail/bulk this node is carrying — lets neighbors
+  // (and dial-capable peers of server-only nodes like the ESP32) decide to
+  // open a GATT session and pull. Old decoders ignore trailing bytes.
+  final int pendingMsgs; // 0..255
+  final int pendingBulk; // 0..255
 
   MeshBeacon({
     required this.callsign,
@@ -140,6 +145,8 @@ class MeshBeacon {
     required this.cond,
     this.dv = const [],
     Uint8List? have,
+    this.pendingMsgs = 0,
+    this.pendingBulk = 0,
   }) : have = have ?? Uint8List(0);
 
   Uint8List encode() {
@@ -158,6 +165,8 @@ class MeshBeacon {
     }
     b.addByte(have.length.clamp(0, 255));
     b.add(have.take(255).toList());
+    b.addByte(pendingMsgs.clamp(0, 255));
+    b.addByte(pendingBulk.clamp(0, 255));
     return b.toBytes();
   }
 
@@ -184,8 +193,21 @@ class MeshBeacon {
       final hl = d[o++];
       if (d.length < o + hl) return null;
       final have = Uint8List.fromList(d.sublist(o, o + hl));
+      o += hl;
+      // Optional M2 pending trailer (absent on M1/dongle beacons).
+      var pm = 0, pb = 0;
+      if (d.length >= o + 2) {
+        pm = d[o];
+        pb = d[o + 1];
+      }
       return MeshBeacon(
-          callsign: cs, deviceClass: cls, cond: cond, dv: dv, have: have);
+          callsign: cs,
+          deviceClass: cls,
+          cond: cond,
+          dv: dv,
+          have: have,
+          pendingMsgs: pm,
+          pendingBulk: pb);
     } catch (_) {
       return null;
     }

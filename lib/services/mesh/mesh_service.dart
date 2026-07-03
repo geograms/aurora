@@ -15,13 +15,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'dart:typed_data';
 
 import 'package:battery_plus/battery_plus.dart';
 
 import '../../connections/bluetooth/ble5_bus.dart';
 import '../../profile/profile_service.dart';
+import '../../profile/storage_paths.dart';
 import '../log_service.dart';
+import '../preferences_service.dart';
 import 'mesh_beacon.dart';
+import 'mesh_store.dart';
 import 'mesh_table.dart';
 
 class MeshService {
@@ -49,6 +53,12 @@ class MeshService {
   /// Bump-on-change revision so UI layers can cheaply poll for updates.
   int revision = 0;
 
+  /// The live table (null before start). M2 custody reads routes/neighbors.
+  MeshTable? get table => _table;
+
+  /// Our mesh identity ('' before the profile loads).
+  String get tableCallsign => _table?.selfCallsign ?? '';
+
   /// Start the mesh node. Idempotent; safe to call again when the profile
   /// (callsign) changes — the table is rebuilt for the new identity.
   Timer? _startRetry;
@@ -73,6 +83,19 @@ class MeshService {
     _canAdvertise = canAdvertise;
     _running = true;
 
+    // The custody store lives beside the other cross-wapp state
+    // (…/data/mesh.sqlite3) and re-opens when the profile changes.
+    final prefs = PreferencesService.instanceSync;
+    if (prefs != null) {
+      try {
+        MeshStore.instance
+            .init(wappsDataStorage(prefs).getAbsolutePath('mesh.sqlite3'));
+        MeshStore.instance.sweep();
+      } catch (e) {
+        LogService.instance.add('Mesh: store init failed: $e');
+      }
+    }
+
     Ble5Bus.instance.onFrame(Ble5Subtype.mesh, _onFrame);
     // Leaves listen too: extended SCANNING is a separate controller capability
     // from extended advertising, so a phone that can't beacon (e.g. C61) may
@@ -84,8 +107,10 @@ class MeshService {
     _beaconTimer?.cancel();
     _beaconTimer = Timer.periodic(_beaconInterval, (_) => _sendBeacon());
     _sweepTimer?.cancel();
+    var sweepTick = 0;
     _sweepTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       if (_table?.sweep() ?? false) revision++;
+      if (++sweepTick % 10 == 0) MeshStore.instance.sweep(); // TTL + quota
     });
 
     // Track power state for the cond byte (desktops report `unknown` = mains).
@@ -116,6 +141,15 @@ class MeshService {
       LogService.instance.add(
           'Mesh: heard ${b.callsign} (${b.deviceClass.label}, ${f.rssi} dBm, reaches ${b.dv.length})');
     }
+    // M2: the beacon's have-bloom says what its owner already received —
+    // purge any mail we're carrying FOR that owner that it claims to have.
+    if (b.have.isNotEmpty) {
+      final purged = MeshStore.instance.applyPeerBloom(b.callsign, b.have);
+      if (purged > 0) {
+        LogService.instance
+            .add('Mesh: ${b.callsign} have-bloom purged $purged parked msg(s)');
+      }
+    }
     revision++;
     if (changed && _canAdvertise) {
       // Triggered update: topology changed — beacon early (debounced) so the
@@ -135,6 +169,9 @@ class MeshService {
   Future<void> _sendBeacon() async {
     final t = _table;
     if (t == null || !_canAdvertise) return;
+    final store = MeshStore.instance;
+    final have = store.buildHaveBloom();
+    final pendingMsgs = store.pendingCount().clamp(0, 255);
     final beacon = MeshBeacon(
       callsign: t.selfCallsign,
       deviceClass: _deviceClass(),
@@ -146,20 +183,32 @@ class MeshService {
         storageBucket: 3,
       ),
       dv: t.exportDv(),
+      have: have,
+      pendingMsgs: pendingMsgs,
+      pendingBulk: 0,
     );
     // Fit THIS controller's advert ceiling (often ~247 B, not the 450 B spec
     // default) — an over-cap frame is rejected outright, so trim the DV digest
-    // (freshest neighbors were exported first) until the beacon fits.
+    // (freshest neighbors were exported first), then the have-bloom, until
+    // the beacon fits.
     var bytes = beacon.encode();
     final cap = Ble5Bus.instance.maxPayload;
     var dv = beacon.dv;
-    while (bytes.length > cap && dv.isNotEmpty) {
-      dv = dv.sublist(0, dv.length - 1);
+    var haveOut = have;
+    while (bytes.length > cap && (dv.isNotEmpty || haveOut.isNotEmpty)) {
+      if (dv.isNotEmpty) {
+        dv = dv.sublist(0, dv.length - 1);
+      } else {
+        haveOut = Uint8List(0); // DV exhausted: the bloom is the next to go
+      }
       bytes = MeshBeacon(
               callsign: beacon.callsign,
               deviceClass: beacon.deviceClass,
               cond: beacon.cond,
-              dv: dv)
+              dv: dv,
+              have: haveOut,
+              pendingMsgs: pendingMsgs,
+              pendingBulk: 0)
           .encode();
     }
     try {

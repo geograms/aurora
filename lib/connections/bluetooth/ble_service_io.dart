@@ -22,7 +22,10 @@ import 'package:flutter/widgets.dart' show WidgetsBinding, WidgetsBindingObserve
 
 import '../../profile/profile_service.dart';
 import '../../services/log_service.dart';
+import '../../services/mesh/mesh_custody.dart';
+import '../../services/mesh/mesh_transfer_scheduler.dart';
 import '../../services/mesh/mesh_service.dart';
+import '../../services/mesh/mesh_session.dart' show mspIsFrame;
 import '../../services/preferences_service.dart';
 import 'ble5_bus.dart';
 import 'ble_gatt_client.dart';
@@ -166,6 +169,11 @@ class BleService {
         Timer.periodic(const Duration(seconds: 2), (_) => _bcastTick());
     _gatt = BleGattClient(_central!, onData: (from, data) {
       _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+      // MSP (mesh session) frames peel off before the legacy parcel queue.
+      if (mspIsFrame(data) &&
+          MeshSessionManager.instance.onFrame(data, serverSide: false)) {
+        return;
+      }
       _queue.onDataReceived(from, data);
     }, onLinkChange: (connected) {
       _gattLinkUp = connected;
@@ -176,8 +184,10 @@ class BleService {
         // (extended scan vs an active connection contend on one radio).
         unawaited(Ble5Bus.instance.stopScan());
         _flushPendingGatt();
+        MeshSessionManager.instance.onLinkUp(serverSide: false);
       } else {
         _dbg('GATT link down (client)');
+        MeshSessionManager.instance.onLinkDown(serverSide: false);
         _resumeBle5Scan(); // transfer done/failed → resume broadcast reception
       }
       _applyScan(); // pause scanning while a GATT link is up (radio contention)
@@ -185,18 +195,25 @@ class BleService {
       ..start();
     _gattServer = BleGattServer(onData: (from, data) {
       _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+      if (mspIsFrame(data) &&
+          MeshSessionManager.instance.onFrame(data, serverSide: true)) {
+        return;
+      }
       _queue.onDataReceived(from, data);
     }, onClientsChanged: () {
       final n = _gattServer?.clientIds.length ?? 0;
       if (n > 0) {
         _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
         unawaited(Ble5Bus.instance.stopScan()); // free the radio for the transfer
+        MeshSessionManager.instance.onLinkUp(serverSide: true);
       } else {
+        MeshSessionManager.instance.onLinkDown(serverSide: true);
         _resumeBle5Scan();
       }
       _dbg('GATT server clients: $n');
       _applyScan(); // pause scanning while we're serving a client (contention)
     });
+    _wireMeshHooks();
     _queue.setSendCallback((deviceId, data) async {
       _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
       // Native GATT path (BLE5): route by which role holds this peer.
@@ -222,6 +239,76 @@ class BleService {
         _inbound.add(BleInboundFrame(m.sourceDeviceId, 0, m.payload));
       }
     });
+  }
+
+  // ── Mesh custody transport hooks (doc/mesh.md M2) ──────────────────────────
+  // The MSP session layer (mesh_custody.dart) is transport-agnostic; these
+  // hooks give it a send path on whichever GATT stack is live, an inbound
+  // delivery tap, and a way to drop the dialed link when a session ends.
+  bool _meshHooksWired = false;
+  void _wireMeshHooks() {
+    if (_meshHooksWired) return;
+    _meshHooksWired = true;
+    final hooks = MeshSessionManager.instance.hooks;
+    hooks.clientSend = (data) async {
+      _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+      if (_ble5) {
+        await Ble5Bus.instance.gattWrite(data);
+      } else {
+        await _gatt?.writeRaw(data);
+      }
+    };
+    hooks.serverSend = (data) async {
+      _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+      if (_ble5) {
+        await Ble5Bus.instance.serverNotify(data);
+      } else {
+        final id = _gattServer?.clientIds.firstOrNull;
+        if (id != null) await _gattServer!.notify(id, data);
+      }
+    };
+    hooks.deliverLocal = (wire) {
+      // Custody-carried frame enters the same stream broadcast frames use, so
+      // the chat wapp (and any other consumer) needs no mesh awareness.
+      if (!_inbound.isClosed) _inbound.add(BleInboundFrame('mesh', 0, wire));
+    };
+    hooks.dropClientLink = () {
+      if (_ble5) {
+        unawaited(Ble5Bus.instance.gattDisconnect());
+      } else {
+        unawaited(_gatt?.disconnect() ?? Future.value());
+      }
+    };
+    hooks.dial = meshDial;
+    hooks.dialable = meshDialable;
+    MeshTransferScheduler.instance.start();
+  }
+
+  // Callsign → (BLE address, last-seen ms) registry from the native discovery
+  // scan, so the mesh scheduler can dial a SPECIFIC peer (the old single
+  // _lastPeerAddr slot only ever remembered the most recent one).
+  final Map<String, ({String addr, int ms})> _meshPeers = {};
+  static const int _meshPeerFreshMs = 150000; // ~2.5 min (a few scan gaps)
+
+  /// Peers the mesh can currently dial: callsign → freshness.
+  Map<String, int> meshDialable() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _meshPeers.removeWhere((_, v) => now - v.ms > _meshPeerFreshMs);
+    return {for (final e in _meshPeers.entries) e.key: now - e.value.ms};
+  }
+
+  /// Dial [callsign] for a mesh custody session. Returns false when the peer
+  /// hasn't been seen recently, the radio is busy, or GATT is unavailable.
+  bool meshDial(String callsign) {
+    if (!_ble5) return false; // scheduler dialing is native-path only for now
+    if (_ngClientUp || _ngServerCentral != null) return false; // radio busy
+    final p = _meshPeers[callsign.toUpperCase()];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (p == null || now - p.ms > _meshPeerFreshMs) return false;
+    _ngClientPeer = p.addr;
+    _dbg('mesh dial: GATT connect to $callsign (${p.addr})');
+    Ble5Bus.instance.gattConnect(p.addr);
+    return true;
   }
 
   /// All peers currently reachable over the parcel transport (server clients +
@@ -386,18 +473,25 @@ class BleService {
     unawaited(Ble5Bus.instance.stopScan()); // quiet the extended scan during xfer
     _applyScan();
     _flushPendingGatt();
+    _wireMeshHooks();
+    MeshSessionManager.instance.onLinkUp(serverSide: false);
   }
 
   void _onNgDisconnected() {
     _dbg('native GATT client link down ($_ngClientPeer)');
     _ngClientUp = false;
     _ngClientPeer = null;
+    MeshSessionManager.instance.onLinkDown(serverSide: false);
     if (_ngServerCentral == null) _resumeBle5Scan();
     _applyScan();
   }
 
   void _onNgClientData(Uint8List data) {
     _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
+    if (mspIsFrame(data) &&
+        MeshSessionManager.instance.onFrame(data, serverSide: false)) {
+      return;
+    }
     _queue.onDataReceived(_ngClientPeer ?? 'gatt', data);
   }
 
@@ -408,6 +502,10 @@ class BleService {
     _lastPeerAddr = address;
     _lastPeerCall = callsign;
     _lastPeerMs = DateTime.now().millisecondsSinceEpoch;
+    if (callsign.isNotEmpty) {
+      _meshPeers[callsign.toUpperCase()] =
+          (addr: address, ms: _lastPeerMs); // mesh scheduler dial registry
+    }
     _maybeAutoPair();
   }
 
@@ -416,6 +514,10 @@ class BleService {
     _ngServerCentral = address;
     _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
     _dbg('native server rx #${++_ngServerRxCount} ${data.length}B from $address');
+    if (mspIsFrame(data) &&
+        MeshSessionManager.instance.onFrame(data, serverSide: true)) {
+      return;
+    }
     _queue.onDataReceived(address, data);
   }
 
@@ -425,11 +527,14 @@ class BleService {
     _dbg('native GATT server: central $address connected');
     unawaited(Ble5Bus.instance.stopScan()); // quiet extended scan during xfer
     _applyScan();
+    _wireMeshHooks();
+    MeshSessionManager.instance.onLinkUp(serverSide: true);
   }
 
   void _onNgServerDisconnected(String address) {
     if (_ngServerCentral == address) _ngServerCentral = null;
     _dbg('native GATT server: central $address disconnected');
+    MeshSessionManager.instance.onLinkDown(serverSide: true);
     if (!_ngClientUp) _resumeBle5Scan();
     _applyScan();
   }
@@ -448,6 +553,9 @@ class BleService {
     // the exact visibility we lacked when dongle messages vanished en route.
     LogService.instance
         .add('BLE5 rx aprs ${f.data.length}B rssi=${f.rssi}');
+    // Mesh custody tap: overheard ?ACKs purge, our 1:1s feed the have-bloom,
+    // others' 1:1s get parked for GATT delivery (doc/mesh.md §6).
+    MeshCustodyDelegate.onAirFrame(f.data, outbound: false);
     _inbound.add(BleInboundFrame(f.addr, f.rssi, f.data));
   }
 
@@ -803,6 +911,9 @@ class BleService {
       _gattSend(payload);
       return;
     }
+    // Mesh custody tap on our own outbound 1:1s: parked in-transit so the
+    // GATT plane also owes delivery (the broadcast may never reach the target).
+    MeshCustodyDelegate.onAirFrame(payload, outbound: true);
     // BLE5 path (preferred): a whole APRS message fits ONE extended advert, so
     // register it as a single frame on the shared bus (no chunking, no NACK).
     // Keyed by payload hash so the wapp's periodic re-advertise refreshes it.

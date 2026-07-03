@@ -1125,6 +1125,8 @@ static void igate_start(void)
  *   beacon                   air the mesh route beacon now
  *   ack <6hex>               simulate an overheard ?ACK (purges parked mail)
  */
+static void console_recv_begin(const char *path);
+
 static void console_handle(char *line)
 {
     if (strcmp(line, "status") == 0) {
@@ -1180,20 +1182,70 @@ static void console_handle(char *line)
         gatt_mesh_print_status();
         return;
     }
+    if (strncmp(line, "recv ", 5) == 0) {
+        /* Preload a file onto the SD over the (fast, native-USB) console:
+         *   recv /sdcard/foo.bin
+         * then base64 lines, then a line "END". */
+        console_recv_begin(line + 5);
+        return;
+    }
     printf("commands: status | msg <to> <text> | beacon | ack <am> | "
            "sendfile <to> <path> | transfers\n");
+}
+
+/* recv mode: base64 lines stream into a file until an "END" line. */
+#include "mbedtls/base64.h"
+static FILE *s_recv_f;
+static uint32_t s_recv_bytes;
+static void console_recv_begin(const char *path)
+{
+    if (s_recv_f) { fclose(s_recv_f); s_recv_f = NULL; }
+    mkdir("/sdcard/mesh", 0775);
+    s_recv_f = fopen(path, "wb");
+    s_recv_bytes = 0;
+    printf(s_recv_f ? "recv: streaming to %s (base64 lines, END to finish)\n"
+                    : "recv: cannot open %s\n", path);
+}
+
+static void console_recv_line(const char *line)
+{
+    if (strcmp(line, "END") == 0) {
+        fclose(s_recv_f);
+        s_recv_f = NULL;
+        printf("recv: done, %lu bytes\n", (unsigned long)s_recv_bytes);
+        return;
+    }
+    unsigned char buf[192];
+    size_t out = 0;
+    if (mbedtls_base64_decode(buf, sizeof(buf), &out,
+                              (const unsigned char *)line, strlen(line)) == 0) {
+        fwrite(buf, 1, out, s_recv_f);
+        s_recv_bytes += out;
+        if ((s_recv_bytes & 0xFFFFF) < out) {  /* ~per-MB progress */
+            printf("recv: %lu bytes\n", (unsigned long)s_recv_bytes);
+        }
+    } else {
+        printf("recv: bad base64 line, aborting\n");
+        fclose(s_recv_f);
+        s_recv_f = NULL;
+    }
 }
 
 static void console_task(void *arg)
 {
     (void)arg;
-    static char line[220];
+    static char line[260];
     int n = 0;
     for (;;) {
         int c = fgetc(stdin);
-        if (c == EOF) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+        if (c == EOF) { vTaskDelay(pdMS_TO_TICKS(s_recv_f ? 2 : 50)); continue; }
         if (c == '\r' || c == '\n') {
-            if (n > 0) { line[n] = 0; console_handle(line); n = 0; }
+            if (n > 0) {
+                line[n] = 0;
+                if (s_recv_f) console_recv_line(line);
+                else console_handle(line);
+                n = 0;
+            }
             continue;
         }
         if (n < (int)sizeof(line) - 1) line[n++] = (char)c;

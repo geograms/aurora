@@ -45,3 +45,8 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=2
+
+# The mesh transport REQUIRES repeated advert reports (beacons re-air
+# on a TTL; the same fixed-address phone must surface every time). The
+# controller dedup filter suppresses a fixed address after ONE report.
+CONFIG_BT_CTRL_BLE_SCAN_DUPL=n

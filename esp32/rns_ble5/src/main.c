@@ -45,6 +45,7 @@
 
 /* APRS-IS iGate: WiFi STA + APRS-IS client (reused generic components). */
 #include "wifi_bsp.h"
+#include "esp_wifi.h"
 #include "aprsis.h"
 
 /* LAN presence: passive listener on the Aurora UDP discovery broadcast. */
@@ -200,12 +201,20 @@ static void handle_rns_packet(const uint8_t *pkt, int len, int rssi)
 static volatile uint32_t s_last_disc;
 static volatile uint32_t s_disc_count;
 
+static volatile int s_rssi_min = 0, s_rssi_max = -127;
+static volatile uint32_t s_rssi_sum, s_rssi_n;
+
 static int gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
     if (event->type != BLE_GAP_EVENT_EXT_DISC) return 0;
     s_last_disc = now_sec();
     s_disc_count++;
+    int r = event->ext_disc.rssi;
+    if (r < s_rssi_min) s_rssi_min = r;
+    if (r > s_rssi_max) s_rssi_max = r;
+    s_rssi_sum += (uint32_t)(-r);
+    s_rssi_n++;
     struct ble_gap_ext_disc_desc *d = &event->ext_disc;
     const uint8_t *p = d->data;
     int n = d->length_data;
@@ -1158,6 +1167,11 @@ static void console_handle(char *line)
                blemesh_scf_count(), (int)sdcard_is_mounted(),
                (unsigned long)s_disc_count,
                (unsigned long)(now_sec() - s_last_disc));
+        if (s_rssi_n) {
+            printf("rx rssi: min=%d max=%d avg=-%lu n=%lu\n", s_rssi_min,
+                   s_rssi_max, (unsigned long)(s_rssi_sum / s_rssi_n),
+                   (unsigned long)s_rssi_n);
+        }
         for (int i = 0; i < blemesh_neighbor_count(); i++) {
             const blemesh_neighbor_t *n = blemesh_neighbor_at(i);
             printf("  neigh %-9s class=%d rssi=%d bidi=%d reach=%d age=%us\n",
@@ -1204,6 +1218,12 @@ static void console_handle(char *line)
     }
     if (strcmp(line, "transfers") == 0 || strcmp(line, "spool") == 0) {
         gatt_mesh_print_status();
+        return;
+    }
+    if (strcmp(line, "wifioff") == 0) {
+        /* Coex experiment: does BLE RX sensitivity recover without WiFi? */
+        esp_wifi_stop();
+        printf("wifi stopped\n");
         return;
     }
     if (strcmp(line, "advoff") == 0) { gatt_mesh_conn_adv(false); printf("conn advert off\n"); return; }

@@ -33,6 +33,17 @@ class UpdateNative {
 
   static Future<void> apply(UpdatePlatform platform, String path) async {}
 
+  static bool get hasDownloadManager => false;
+  static Future<int?> enqueueDownload(
+          String url, String filename, String title) async =>
+      null;
+  static Future<Map<String, dynamic>> pollDownload(int id) async =>
+      const {'status': 'unknown'};
+  static Future<bool> verifyFile(String path,
+          {int expectedSize = 0, String expectedSha = ''}) async =>
+      false;
+  static Future<void> removeDownload(int id) async {}
+
   static void serviceStart(String text) {}
   static void serviceProgress(int percent, String status) {}
   static void serviceStop() {}

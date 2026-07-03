@@ -1,10 +1,13 @@
 package com.geogram.aurora
 
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.database.Cursor
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
 import androidx.core.content.FileProvider
@@ -149,6 +152,31 @@ class MainActivity : FlutterActivity() {
             }
             "getCurrentApkPath" ->
                 result.success(applicationContext.applicationInfo.sourceDir)
+            // System DownloadManager: process-independent background download that
+            // survives the app being closed, auto-resumes an interrupted transfer,
+            // and only reports success once the whole file has landed (so we never
+            // hand a truncated APK to the installer). Used for the geogram.radio
+            // HTTP(S) feed on Android; the Reticulum P2P path stays in Dart.
+            "enqueueDownload" -> {
+                val url = call.argument<String>("url")
+                val name = call.argument<String>("filename")
+                if (url == null || name == null) {
+                    result.error("ARG", "url and filename required", null)
+                } else {
+                    val title = call.argument<String>("title") ?: "Geogram update"
+                    result.success(enqueueDownload(url, name, title))
+                }
+            }
+            "queryDownload" -> {
+                val id = (call.argument<Number>("id"))?.toLong()
+                if (id == null) result.error("ARG", "id required", null)
+                else result.success(queryDownload(id))
+            }
+            "removeDownload" -> {
+                val id = (call.argument<Number>("id"))?.toLong()
+                if (id != null) removeDownload(id)
+                result.success(true)
+            }
             "startDownloadService" -> {
                 val text = call.argument<String>("text") ?: "Downloading update"
                 DownloadForegroundService.start(this, text); result.success(true)
@@ -263,6 +291,89 @@ class MainActivity : FlutterActivity() {
             }
         }
         return false
+    }
+
+    private fun dm(): DownloadManager =
+        getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+
+    /** Enqueue a background download into the app's external files dir (no storage
+     * permission needed, and readable by the FileProvider for install). Returns the
+     * DownloadManager id, or -1 on failure. Cleans any stale file of the same name
+     * first so a fresh enqueue doesn't collide with a partial from a prior run. */
+    private fun enqueueDownload(url: String, filename: String, title: String): Long {
+        return try {
+            val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            File(dir, filename).takeIf { it.exists() }?.delete()
+            val req = DownloadManager.Request(Uri.parse(url))
+                .setTitle(title)
+                .setDescription(filename)
+                .setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED,
+                )
+                .setDestinationInExternalFilesDir(
+                    this, Environment.DIRECTORY_DOWNLOADS, filename,
+                )
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(true)
+                .addRequestHeader("User-Agent", "geogram-aurora-updater")
+            dm().enqueue(req)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "enqueueDownload failed: ${e.message}")
+            -1L
+        }
+    }
+
+    /** Poll a DownloadManager job. Returns a map Dart reads:
+     *   status: "pending"|"running"|"paused"|"success"|"failed"|"unknown"
+     *   downloaded/total: bytes (total is -1 until the server sends Content-Length)
+     *   localPath: absolute file path once successful, else null
+     *   reason: the numeric failure/paused reason (0 when not applicable) */
+    private fun queryDownload(id: Long): Map<String, Any?> {
+        var cursor: Cursor? = null
+        return try {
+            cursor = dm().query(DownloadManager.Query().setFilterById(id))
+            if (cursor == null || !cursor.moveToFirst()) {
+                return mapOf("status" to "unknown")
+            }
+            fun col(name: String) = cursor.getColumnIndex(name)
+            val statusCode = cursor.getInt(col(DownloadManager.COLUMN_STATUS))
+            val downloaded =
+                cursor.getLong(col(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+            val total = cursor.getLong(col(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+            val reason = cursor.getInt(col(DownloadManager.COLUMN_REASON))
+            var localPath: String? = null
+            if (statusCode == DownloadManager.STATUS_SUCCESSFUL) {
+                val localUri =
+                    cursor.getString(col(DownloadManager.COLUMN_LOCAL_URI))
+                if (localUri != null) localPath = Uri.parse(localUri).path
+            }
+            val status = when (statusCode) {
+                DownloadManager.STATUS_PENDING -> "pending"
+                DownloadManager.STATUS_RUNNING -> "running"
+                DownloadManager.STATUS_PAUSED -> "paused"
+                DownloadManager.STATUS_SUCCESSFUL -> "success"
+                DownloadManager.STATUS_FAILED -> "failed"
+                else -> "unknown"
+            }
+            mapOf(
+                "status" to status,
+                "downloaded" to downloaded,
+                "total" to total,
+                "localPath" to localPath,
+                "reason" to reason,
+            )
+        } catch (e: Exception) {
+            mapOf("status" to "unknown")
+        } finally {
+            cursor?.close()
+        }
+    }
+
+    private fun removeDownload(id: Long) {
+        try {
+            dm().remove(id)
+        } catch (_: Exception) {
+        }
     }
 
     private fun installApk(filePath: String): Boolean {

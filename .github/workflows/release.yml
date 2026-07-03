@@ -39,6 +39,25 @@ jobs:
           sed -i "s/^version:.*/version: ${VER}+${CODE}/" pubspec.yaml
           dart run tool/update_version.dart
       - run: flutter pub get
+      # Reconstruct the persistent release keystore from repo secrets so every
+      # tag build signs with the SAME key. Without this, each runner signs with
+      # its own throwaway debug key and Android rejects the upgrade as an invalid
+      # package. Skips (falls back to debug signing) if the secret is unset.
+      - name: Configure release signing
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/geogram-release.jks
+          cat > android/key.properties <<EOF
+          storeFile=geogram-release.jks
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          EOF
       # Universal APK (direct sideload / GitHub-API marketing page) AND per-ABI
       # splits (~40 MB each) — the website (GitHub Pages, 100 MB/file git limit)
       # hosts only the splits; the app downloads the one matching its ABI.

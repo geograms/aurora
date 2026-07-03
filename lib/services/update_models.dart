@@ -19,7 +19,12 @@ class ReleaseAsset {
   final String name;
   final String url; // browser_download_url
   final int size;
-  const ReleaseAsset({required this.name, required this.url, required this.size});
+  final String sha256; // lowercase hex, or '' when the feed didn't advertise one
+  const ReleaseAsset(
+      {required this.name,
+      required this.url,
+      required this.size,
+      this.sha256 = ''});
 }
 
 /// A parsed GitHub release.
@@ -81,8 +86,11 @@ class ReleaseInfo {
   ///     "name": "...", "body": "...notes...",
   ///     "publishedAt": "2026-06-09T12:00:00Z", "prerelease": false,
   ///     "assets": [ {"name": "aurora.apk", "url": "v1.2.3/aurora.apk",
-  ///                  "size": 12345}, ... ]
+  ///                  "size": 12345, "sha256": "abc…"}, ... ]
   ///   }
+  /// `size` and `sha256` are optional but recommended: the downloader verifies
+  /// both before installing, turning a truncated/corrupt transfer into a clean
+  /// "retry" instead of Android's "package appears to be invalid".
   /// Asset `url`s may be relative — they are resolved against [baseUrl] (the
   /// directory the feed JSON was fetched from, e.g.
   /// "https://geogram.radio/updates"). Absolute http(s) urls pass through.
@@ -119,6 +127,7 @@ class ReleaseInfo {
             name: (a['name'] as String?) ?? '',
             url: resolve(url),
             size: (a['size'] as num?)?.toInt() ?? 0,
+            sha256: ((a['sha256'] ?? a['sha'] ?? '') as String).toLowerCase(),
           ));
         }
       }

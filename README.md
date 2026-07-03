@@ -1,19 +1,21 @@
-# Aurora
+# Geogram
 
-**Aurora is an off-grid-first messenger and app launcher.** It speaks several
+*Aurora edition.*
+
+**Geogram is an off-grid-first messenger and app launcher.** It speaks several
 networks at once — the internet, a [Reticulum](docs/reticulum-connections.md) overlay, the
 [APRS](docs/aprs.md) network, and direct [Bluetooth LE](docs/ble.md) — and glues
 them together so a message or a file reaches the other side over whatever path
 is available. When there's no internet, it falls back to radio and Bluetooth;
 when there is, it uses it. No accounts, no central server.
 
-On top of that transport core, Aurora is a **launcher for "wapps"** —
+On top of that transport core, Geogram is a **launcher for "wapps"** —
 sandboxed WebAssembly apps that render through a shared native UI. The flagship
 wapp, **Chat**, is shown throughout this README as an example of what the
 platform does.
 
 <p align="center">
-  <img src="docs/screenshots/01-launcher.png" width="240" alt="Aurora launcher">
+  <img src="docs/screenshots/01-launcher.png" width="240" alt="Geogram launcher">
   <img src="docs/screenshots/02-activity.png" width="240" alt="Chat: Activity feed">
   <img src="docs/screenshots/04-chat.png" width="240" alt="Chat: 1:1 with media">
 </p>
@@ -60,7 +62,7 @@ source — see [Build & run](#build--run).
 
 ## The Chat wapp — a tour
 
-Aurora's main app is **Chat**: a full messaging station that puts an Activity
+Geogram's main app is **Chat**: a full messaging station that puts an Activity
 feed, 1:1 and group messaging, a live map, and a follow roster behind one panel.
 
 ### Launcher
@@ -117,7 +119,7 @@ public Activity into your feed.
 
 ```
             ┌─────────────────────────────────────────────────────────┐
-            │                     Aurora chat (wapps)                  │
+            │                     Geogram chat (wapps)                 │
             │   APRX message conventions  +  file: media references    │
             └───────────────┬───────────────────────┬─────────────────┘
                             │                       │
@@ -150,7 +152,7 @@ code under [`docs/`](docs/README.md):
 
 ## Build & run
 
-Aurora is a Flutter app; the Reticulum stack is a pure-Dart sibling package.
+Geogram is a Flutter app; the Reticulum stack is a pure-Dart sibling package.
 
 ```sh
 flutter pub get

@@ -32,7 +32,12 @@ class _UpdatePageState extends State<UpdatePage> {
   Future<void> _init() async {
     await _svc.load();
     if (mounted) setState(() {});
-    if (_svc.supported) _svc.checkForUpdates();
+    if (_svc.supported) {
+      // Re-attach to a download still running (or finished) in the background
+      // before kicking off a fresh channel check.
+      _svc.resumeActiveDownload();
+      _svc.checkForUpdates();
+    }
   }
 
   /// Prompt for a channel's signed-folder address (npub or hex folderId),
@@ -119,6 +124,51 @@ class _UpdatePageState extends State<UpdatePage> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 16),
+                // ── Releases first: this is what the user came here to act on ──
+                Text('Releases',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: cs.primary, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                // Stable + beta cards.
+                ValueListenableBuilder<ReleaseInfo?>(
+                  valueListenable: _svc.stable,
+                  builder: (context, rel, _) => _ReleaseCard(
+                    channel: 'Stable',
+                    icon: Icons.check_circle_outline,
+                    release: rel,
+                    active: !_svc.betaEnabled,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ValueListenableBuilder<ReleaseInfo?>(
+                  valueListenable: _svc.beta,
+                  builder: (context, rel, _) => _ReleaseCard(
+                    channel: 'Beta',
+                    icon: Icons.science_outlined,
+                    release: rel,
+                    active: _svc.betaEnabled,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // Error line.
+                ValueListenableBuilder<UpdateStatus>(
+                  valueListenable: _svc.status,
+                  builder: (context, st, _) =>
+                      (st == UpdateStatus.error && _svc.error != null)
+                          ? Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Text(_svc.error!,
+                                  style: TextStyle(color: cs.error)),
+                            )
+                          : const SizedBox.shrink(),
+                ),
+                const SizedBox(height: 24),
+                // ── Settings last: source + channel knobs the user rarely touches ──
+                Text('Settings',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                        fontWeight: FontWeight.w600)),
                 const SizedBox(height: 8),
                 // Beta opt-in.
                 Card(
@@ -177,44 +227,6 @@ class _UpdatePageState extends State<UpdatePage> {
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 16),
-                Text('Releases',
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        color: cs.primary, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 8),
-                // Stable + beta cards.
-                ValueListenableBuilder<ReleaseInfo?>(
-                  valueListenable: _svc.stable,
-                  builder: (context, rel, _) => _ReleaseCard(
-                    channel: 'Stable',
-                    icon: Icons.check_circle_outline,
-                    release: rel,
-                    active: !_svc.betaEnabled,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                ValueListenableBuilder<ReleaseInfo?>(
-                  valueListenable: _svc.beta,
-                  builder: (context, rel, _) => _ReleaseCard(
-                    channel: 'Beta',
-                    icon: Icons.science_outlined,
-                    release: rel,
-                    active: _svc.betaEnabled,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                // Error line.
-                ValueListenableBuilder<UpdateStatus>(
-                  valueListenable: _svc.status,
-                  builder: (context, st, _) =>
-                      (st == UpdateStatus.error && _svc.error != null)
-                          ? Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text(_svc.error!,
-                                  style: TextStyle(color: cs.error)),
-                            )
-                          : const SizedBox.shrink(),
                 ),
               ],
             ),

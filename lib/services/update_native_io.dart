@@ -9,6 +9,7 @@
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -65,6 +66,17 @@ class UpdateNative {
       await sink.flush();
       await sink.close();
       sink = null;
+      // Reject a truncated transfer: a partial APK/installer is what surfaces as
+      // "package appears to be invalid". If the server advertised a length and we
+      // got fewer bytes, treat it as a failed download rather than handing a
+      // half-written file to the installer.
+      if (total > 0 && received != total) {
+        debugPrint('UpdateNative.download truncated: $received/$total');
+        try {
+          await file.delete();
+        } catch (_) {}
+        return null;
+      }
       return dest;
     } catch (e) {
       debugPrint('UpdateNative.download failed: $e');
@@ -198,6 +210,91 @@ nohup "\$APPDIR/aurora" >/dev/null 2>&1 &
     );
     await Future<void>.delayed(const Duration(milliseconds: 300));
     exit(0);
+  }
+
+  // ── Android system DownloadManager ──────────────────────────────────
+  // A process-independent background download: it survives the app being
+  // closed, auto-resumes an interrupted transfer, and only reports success once
+  // the whole file is on disk. Used for the geogram.radio HTTP(S) feed so
+  // leaving the Update panel (or the app) doesn't stop or corrupt the download.
+
+  /// True only where the DownloadManager path applies (Android).
+  static bool get hasDownloadManager => Platform.isAndroid;
+
+  /// Enqueue [url] as [filename]; returns the DownloadManager id, or null on
+  /// failure. Poll it with [pollDownload].
+  static Future<int?> enqueueDownload(
+      String url, String filename, String title) async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final id = await _channel.invokeMethod<int>('enqueueDownload', {
+        'url': url,
+        'filename': filename,
+        'title': title,
+      });
+      return (id == null || id < 0) ? null : id;
+    } catch (e) {
+      debugPrint('UpdateNative.enqueueDownload failed: $e');
+      return null;
+    }
+  }
+
+  /// Poll a DownloadManager job. Returns a map with keys:
+  ///   status: 'pending'|'running'|'paused'|'success'|'failed'|'unknown'
+  ///   downloaded/total: int bytes (total -1 until Content-Length known)
+  ///   localPath: String? absolute path once successful
+  ///   reason: int failure/paused reason code
+  static Future<Map<String, dynamic>> pollDownload(int id) async {
+    if (!Platform.isAndroid) return const {'status': 'unknown'};
+    try {
+      final r =
+          await _channel.invokeMethod<Map<dynamic, dynamic>>('queryDownload', {
+        'id': id,
+      });
+      if (r == null) return const {'status': 'unknown'};
+      return r.map((k, v) => MapEntry(k.toString(), v));
+    } catch (e) {
+      debugPrint('UpdateNative.pollDownload failed: $e');
+      return const {'status': 'unknown'};
+    }
+  }
+
+  /// Integrity-check a downloaded artifact before we hand it to the installer.
+  /// Rejects a missing/tiny file, a size mismatch (a truncated APK is what shows
+  /// as "package appears to be invalid"), and a sha256 mismatch when the feed
+  /// advertised one. Passing 0/'' skips that particular check.
+  static Future<bool> verifyFile(String path,
+      {int expectedSize = 0, String expectedSha = ''}) async {
+    try {
+      final f = File(path);
+      if (!await f.exists()) return false;
+      final len = await f.length();
+      if (len < 1000) return false;
+      if (expectedSize > 0 && len != expectedSize) {
+        debugPrint('UpdateNative.verifyFile size $len != $expectedSize');
+        return false;
+      }
+      if (expectedSha.isNotEmpty) {
+        final got =
+            crypto.sha256.convert(await f.readAsBytes()).toString();
+        if (got.toLowerCase() != expectedSha.toLowerCase()) {
+          debugPrint('UpdateNative.verifyFile sha $got != $expectedSha');
+          return false;
+        }
+      }
+      return true;
+    } catch (e) {
+      debugPrint('UpdateNative.verifyFile failed: $e');
+      return false;
+    }
+  }
+
+  /// Cancel/forget a DownloadManager job (removes any partial file).
+  static Future<void> removeDownload(int id) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('removeDownload', {'id': id});
+    } catch (_) {}
   }
 
   // Android download foreground service (keeps the download alive when

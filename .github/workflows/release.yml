@@ -15,6 +15,10 @@ on:
 jobs:
   android:
     runs-on: ubuntu-latest
+    # Hoisted to job level so the signing step's `if` can gate on it — the
+    # `secrets` context is not allowed in a step-level `if`, only `env` is.
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
     steps:
       - uses: actions/checkout@v4
       # pubspec.yaml has a path dependency on ../reticulum-dart (a sibling repo
@@ -44,9 +48,8 @@ jobs:
       # its own throwaway debug key and Android rejects the upgrade as an invalid
       # package. Skips (falls back to debug signing) if the secret is unset.
       - name: Configure release signing
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
         env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}

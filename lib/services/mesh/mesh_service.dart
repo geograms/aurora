@@ -22,9 +22,11 @@ import 'package:battery_plus/battery_plus.dart';
 import '../../connections/bluetooth/ble5_bus.dart';
 import '../../profile/profile_service.dart';
 import '../../profile/storage_paths.dart';
+import '../../util/media_archive.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
 import 'mesh_beacon.dart';
+import 'mesh_bulk_spool.dart';
 import 'mesh_store.dart';
 import 'mesh_table.dart';
 
@@ -91,6 +93,11 @@ class MeshService {
         MeshStore.instance
             .init(wappsDataStorage(prefs).getAbsolutePath('mesh.sqlite3'));
         MeshStore.instance.sweep();
+        MeshBulkSpool.instance.init(
+            wappsDataStorage(prefs).getAbsolutePath('mesh/bulk'),
+            MediaArchive.forDirectory(
+                wappsDataStorage(prefs).getAbsolutePath('')));
+        MeshBulkSpool.instance.sweep();
       } catch (e) {
         LogService.instance.add('Mesh: store init failed: $e');
       }
@@ -110,7 +117,10 @@ class MeshService {
     var sweepTick = 0;
     _sweepTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       if (_table?.sweep() ?? false) revision++;
-      if (++sweepTick % 10 == 0) MeshStore.instance.sweep(); // TTL + quota
+      if (++sweepTick % 10 == 0) {
+        MeshStore.instance.sweep(); // TTL + quota
+        MeshBulkSpool.instance.sweep();
+      }
     });
 
     // Track power state for the cond byte (desktops report `unknown` = mains).
@@ -172,6 +182,7 @@ class MeshService {
     final store = MeshStore.instance;
     final have = store.buildHaveBloom();
     final pendingMsgs = store.pendingCount().clamp(0, 255);
+    final pendingBulk = MeshBulkSpool.instance.pendingCount().clamp(0, 255);
     final beacon = MeshBeacon(
       callsign: t.selfCallsign,
       deviceClass: _deviceClass(),
@@ -185,7 +196,7 @@ class MeshService {
       dv: t.exportDv(),
       have: have,
       pendingMsgs: pendingMsgs,
-      pendingBulk: 0,
+      pendingBulk: pendingBulk,
     );
     // Fit THIS controller's advert ceiling (often ~247 B, not the 450 B spec
     // default) — an over-cap frame is rejected outright, so trim the DV digest
@@ -208,7 +219,7 @@ class MeshService {
               dv: dv,
               have: haveOut,
               pendingMsgs: pendingMsgs,
-              pendingBulk: 0)
+              pendingBulk: pendingBulk)
           .encode();
     }
     try {

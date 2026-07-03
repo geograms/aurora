@@ -509,6 +509,17 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private val gattCb = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                // Bulk-transfer throughput: shortest connection interval the
+                // stack grants, and 2M PHY where both radios support it (the
+                // extended-advert sets stay 1M — this touches only the link).
+                try { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) } catch (_: Exception) {}
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    try {
+                        g.setPreferredPhy(BluetoothDevice.PHY_LE_2M_MASK,
+                            BluetoothDevice.PHY_LE_2M_MASK,
+                            BluetoothDevice.PHY_OPTION_NO_PREFERRED)
+                    } catch (_: Exception) {}
+                }
                 try { g.requestMtu(512) } catch (_: Exception) {}
                 // discoverServices is kicked off after MTU (onMtuChanged); if MTU
                 // request fails to call back, discover here as a fallback.
@@ -651,6 +662,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         gattServer = null
         serverNotifyChar = null
         serverCentral = null
+        notifyQueue.clear()
+        notifyBusy = false
     }
 
     private val gattServerCb = object : BluetoothGattServerCallback() {
@@ -659,13 +672,24 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 serverCentral = device
                 emitGatt(mapOf("event" to "server_connected", "address" to device.address))
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                if (serverCentral?.address == device.address) serverCentral = null
+                if (serverCentral?.address == device.address) {
+                    serverCentral = null
+                    notifyQueue.clear()
+                    notifyBusy = false
+                }
                 emitGatt(mapOf("event" to "server_disconnected", "address" to device.address))
             }
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             android.util.Log.i(TAG, "server MTU=$mtu (${device.address})")
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            // Native pacing for server→central bulk: the next queued notify
+            // goes out only after the stack confirms this one left the buffer
+            // (notifications have no ATT-level flow control of their own).
+            main.post { notifyBusy = false; pumpNotifies() }
         }
 
         override fun onCharacteristicWriteRequest(
@@ -699,15 +723,39 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         }
     }
 
-    /** Notify the connected central on FFF2 (receipts / reverse-direction data). */
+    /** Notify the connected central on FFF2 (receipts / reverse-direction data).
+     *  Queued + paced by onNotificationSent — back-to-back unpaced notifies
+     *  overrun the controller buffer exactly like unpaced writes did. */
+    private val notifyQueue = ArrayDeque<ByteArray>()
+    private var notifyBusy = false
+    private var notifyGen = 0
+
     private fun serverNotify(data: ByteArray): Boolean {
-        val server = gattServer ?: return false
-        val ch = serverNotifyChar ?: return false
-        val dev = serverCentral ?: return false
-        return try {
+        if (gattServer == null || serverCentral == null) return false
+        main.post {
+            if (notifyQueue.size >= 256) {
+                // Deep overload (should not happen under the WIN_ACK window):
+                // drop oldest; the receiver's resync recovers the gap.
+                notifyQueue.removeFirstOrNull()
+                android.util.Log.w(TAG, "serverNotify: queue overflow, dropped oldest")
+            }
+            notifyQueue.add(data)
+            pumpNotifies()
+        }
+        return true
+    }
+
+    private fun pumpNotifies() {
+        if (notifyBusy) return
+        val server = gattServer ?: return
+        val ch = serverNotifyChar ?: return
+        val dev = serverCentral ?: return
+        val data = notifyQueue.removeFirstOrNull() ?: return
+        notifyBusy = true
+        val gen = ++notifyGen
+        val ok = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                server.notifyCharacteristicChanged(dev, ch, false, data)
-                    .let { it == BluetoothStatusOk }
+                server.notifyCharacteristicChanged(dev, ch, false, data) == BluetoothStatusOk
             } else {
                 @Suppress("DEPRECATION") run {
                     ch.value = data
@@ -716,6 +764,16 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             }
         } catch (e: Exception) {
             android.util.Log.e(TAG, "serverNotify: ${e.message}"); false
+        }
+        if (!ok) {
+            notifyBusy = false
+            notifyQueue.addFirst(data)
+            main.postDelayed({ pumpNotifies() }, 60)
+        } else {
+            // Watchdog: some stacks miss onNotificationSent — advance anyway.
+            main.postDelayed({
+                if (notifyBusy && notifyGen == gen) { notifyBusy = false; pumpNotifies() }
+            }, 800)
         }
     }
 

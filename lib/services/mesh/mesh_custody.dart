@@ -16,8 +16,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import '../../util/media_ref.dart';
+
 import '../log_service.dart';
 import 'mesh_beacon.dart';
+import 'mesh_bulk_spool.dart';
 import 'mesh_service.dart';
 import 'mesh_session.dart';
 import 'mesh_store.dart';
@@ -77,7 +80,7 @@ class MeshSessionManager {
       delegate: MeshCustodyDelegate.instance,
       maxFrame: 509,
       pendingMsgs: store.pendingCount().clamp(0, 0xFFFF),
-      pendingBulk: 0,
+      pendingBulk: MeshBulkSpool.instance.pendingCount().clamp(0, 255),
       log: (m) => LogService.instance.add('Mesh: $m'),
     );
     if (serverSide) {
@@ -233,27 +236,43 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     }
   }
 
-  // --- bulk: Stage 2 ---------------------------------------------------------
+  // --- bulk lane: backed by the disk spool -----------------------------------
 
   @override
-  MeshBulkPending? nextBulkFor(String peer) => null;
+  MeshBulkPending? nextBulkFor(String peer) =>
+      MeshBulkSpool.instance.nextFor(peer, MeshService.instance.table);
 
   @override
   MeshBulkDecision bulkOffered(String peer, MspFileOffer offer) =>
-      const MeshBulkDecision.reject(MspFileReject.busy);
+      MeshBulkSpool.instance.offered(peer, offer);
 
   @override
-  Uint8List bulkRead(Uint8List sha256, int offset, int len) => Uint8List(0);
+  Uint8List bulkRead(Uint8List sha256, int offset, int len) =>
+      MeshBulkSpool.instance.readAt(sha256, offset, len);
 
   @override
-  bool bulkWrite(Uint8List sha256, int offset, Uint8List data) => false;
+  bool bulkWrite(Uint8List sha256, int offset, Uint8List data) =>
+      MeshBulkSpool.instance.writeAt(sha256, offset, data);
 
   @override
-  bool bulkVerified(Uint8List sha256) => false;
+  bool bulkVerified(Uint8List sha256) => MeshBulkSpool.instance.verify(sha256);
 
   @override
   void bulkDone(String peer, Uint8List sha256, bool ok,
-      {required bool toPeer}) {}
+      {required bool toPeer}) {
+    final spool = MeshBulkSpool.instance;
+    if (!ok) {
+      spool.transferEnded(sha256); // spool keeps the offset for resume
+      return;
+    }
+    if (toPeer) {
+      spool.handedOver(sha256, peer);
+    } else {
+      spool.completeInbound(sha256,
+          selfCallsign: MeshService.instance.tableCallsign);
+      MeshService.instance.revision++;
+    }
+  }
 
   @override
   void sessionClosed(String peer, {required bool clean}) {
@@ -303,6 +322,16 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     if (store.offer(target: to, sender: from, wire: wire, am: am)) {
       LogService.instance.add(
           'Mesh: parked ${am.isEmpty ? "msg" : am} $from -> $to for custody');
+    }
+    // Chat attachment: our outbound 1:1 references media we host — queue the
+    // payload for the bulk lane (the message travels custody, bytes follow).
+    if (outbound && text.contains('file:')) {
+      for (final ref in MediaRef.findAll(text)) {
+        if (MeshBulkSpool.instance.enqueueFromArchive(ref.token, to, self)) {
+          LogService.instance
+              .add('Mesh: bulk queued ${ref.token} -> $to');
+        }
+      }
     }
   }
 

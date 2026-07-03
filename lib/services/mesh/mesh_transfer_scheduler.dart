@@ -18,6 +18,7 @@
 import 'dart:async';
 
 import '../log_service.dart';
+import 'mesh_bulk_spool.dart';
 import 'mesh_custody.dart';
 import 'mesh_service.dart';
 import 'mesh_store.dart';
@@ -89,12 +90,20 @@ class MeshTransferScheduler {
     final table = MeshService.instance.table;
     final store = MeshStore.instance;
 
-    // 1) Mail we owe: dial the target itself, or its route's next hop.
-    if (store.ready && store.pendingCount() > 0) {
+    // 1) Mail or bulk we owe: dial the target itself, or its route next hop.
+    final spool = MeshBulkSpool.instance;
+    final havePendingMsgs = store.ready && store.pendingCount() > 0;
+    final havePendingBulk = spool.ready && spool.pendingCount() > 0;
+    if (havePendingMsgs || havePendingBulk) {
       for (final peer in dialable.keys) {
         if (blocked(peer)) continue;
-        if (store.pendingFor(peer, table, max: 1).isNotEmpty) {
+        if (havePendingMsgs &&
+            store.pendingFor(peer, table, max: 1).isNotEmpty) {
           _dialTo(peer, dial, 'flush mail');
+          return;
+        }
+        if (havePendingBulk && spool.nextFor(peer, table) != null) {
+          _dialTo(peer, dial, 'move bulk');
           return;
         }
       }

@@ -7,8 +7,10 @@
 # needs an S3/C3-class radio, but that dependency lives in the firmware.)
 #
 # Not to be confused with geogram_mesh (the old, disabled ESP-WIFI-MESH bridge).
+# test_msp_host.c is a HOST-ONLY test harness (gcc, see header comment) and
+# must stay out of SRCS.
 idf_component_register(
-    SRCS "blemesh_beacon.c" "blemesh_table.c" "blemesh_scf.c"
+    SRCS "blemesh_beacon.c" "blemesh_table.c" "blemesh_scf.c" "blemesh_session.c"
     INCLUDE_DIRS "."
     REQUIRES mbedtls log
 )

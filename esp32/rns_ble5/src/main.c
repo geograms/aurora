@@ -116,6 +116,7 @@ static uint32_t now_sec(void);
 static void handle_aprs(const uint8_t *payload, int len, int rssi);
 /* iGate: remember a callsign heard over BLE5 (for the APRS-IS filter). */
 static void igate_heard_add(const char *call);
+static void start_scan(void);
 /* Street mesh: beacon TX + ingest + store-and-forward delivery. */
 static void handle_mesh(const uint8_t *payload, int len, int rssi);
 static void mesh_beacon_air(void);
@@ -194,10 +195,17 @@ static void handle_rns_packet(const uint8_t *pkt, int len, int rssi)
     ESP_LOGI(TAG, "RX announce  dest=%s..  rssi=%d  app=\"%s\"", dh, rssi, text);
 }
 
+/* Scan liveness: vendor controllers can silently stop delivering results
+ * (the phones needed the same watchdog). Stamped on EVERY disc event. */
+static volatile uint32_t s_last_disc;
+static volatile uint32_t s_disc_count;
+
 static int gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
     if (event->type != BLE_GAP_EVENT_EXT_DISC) return 0;
+    s_last_disc = now_sec();
+    s_disc_count++;
     struct ble_gap_ext_disc_desc *d = &event->ext_disc;
     const uint8_t *p = d->data;
     int n = d->length_data;
@@ -691,6 +699,19 @@ static void relay_task(void *arg)
             blemesh_table_sweep(t);
             blemesh_scf_sweep(t);
         }
+        /* Scan watchdog (same lesson as the phones): a controller that has
+         * delivered nothing for 60 s gets its discovery torn down and
+         * re-armed. A healthy desk hears street traffic well within that. */
+        static uint32_t last_scan_kick;
+        if (t - (s_last_disc ? s_last_disc : 0) > 60 &&
+            t - last_scan_kick > 60) {
+            last_scan_kick = t;
+            ESP_LOGW(TAG, "scan silent %lus (disc=%lu) - restarting discovery",
+                     (unsigned long)(t - s_last_disc),
+                     (unsigned long)s_disc_count);
+            ble_gap_disc_cancel();
+            start_scan();
+        }
         /* Triggered update: topology changed -> beacon early (light debounce
          * via the 1.5 s loop period), same as the phones. */
         if (s_mesh_dirty && t - last_beacon >= 4) {
@@ -1130,10 +1151,13 @@ static void console_recv_begin(const char *path);
 static void console_handle(char *line)
 {
     if (strcmp(line, "status") == 0) {
-        printf("callsign=%s mesh=%d neigh=%d routes=%d scf=%d sd=%d\n",
+        printf("callsign=%s mesh=%d neigh=%d routes=%d scf=%d sd=%d "
+               "disc=%lu last_rx=%lus ago\n",
                s_aprs_call[0] ? s_aprs_call : "TDONGLE", (int)s_mesh_up,
                blemesh_neighbor_count(), blemesh_route_count(),
-               blemesh_scf_count(), (int)sdcard_is_mounted());
+               blemesh_scf_count(), (int)sdcard_is_mounted(),
+               (unsigned long)s_disc_count,
+               (unsigned long)(now_sec() - s_last_disc));
         for (int i = 0; i < blemesh_neighbor_count(); i++) {
             const blemesh_neighbor_t *n = blemesh_neighbor_at(i);
             printf("  neigh %-9s class=%d rssi=%d bidi=%d reach=%d age=%us\n",
@@ -1181,6 +1205,11 @@ static void console_handle(char *line)
     if (strcmp(line, "transfers") == 0 || strcmp(line, "spool") == 0) {
         gatt_mesh_print_status();
         return;
+    }
+    if (strcmp(line, "advoff") == 0) { gatt_mesh_conn_adv(false); printf("conn advert off\n"); return; }
+    if (strcmp(line, "advon") == 0) { gatt_mesh_conn_adv(true); printf("conn advert on\n"); return; }
+    if (strcmp(line, "scankick") == 0) {
+        ble_gap_disc_cancel(); start_scan(); printf("scan restarted\n"); return;
     }
     if (strncmp(line, "recv ", 5) == 0) {
         /* Preload a file onto the SD over the (fast, native-USB) console:

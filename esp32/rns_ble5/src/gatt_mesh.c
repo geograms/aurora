@@ -587,8 +587,9 @@ static void start_conn_advert(void)
     p.own_addr_type = s_addr_type;
     p.primary_phy = BLE_HCI_LE_PHY_1M;
     p.secondary_phy = BLE_HCI_LE_PHY_1M;
-    p.itvl_min = 0x140;              /* 200 ms */
-    p.itvl_max = 0x1A0;
+    p.itvl_min = 0xA0;               /* 100 ms — fringe centrals need every
+                                        ADV_IND chance they can get */
+    p.itvl_max = 0xC0;
     p.sid = 1;
 
     int rc = ble_gap_ext_adv_configure(ADV_INSTANCE, &p, NULL,
@@ -679,6 +680,15 @@ void gatt_mesh_start(const char *callsign, uint8_t own_addr_type)
     snprintf(s_call, sizeof(s_call), "%s", callsign);
     s_addr_type = own_addr_type;
     start_conn_advert();
+}
+
+void gatt_mesh_conn_adv(bool on)
+{
+    if (on) {
+        start_conn_advert();
+    } else {
+        ble_gap_ext_adv_stop(ADV_INSTANCE);
+    }
 }
 
 void gatt_mesh_tick(void)

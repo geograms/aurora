@@ -147,6 +147,22 @@ class MeshSessionManager {
     }
   }
 
+  /// Sweep session slots whose FSM already closed. Sessions can end from
+  /// their internal timers (hello timeout, stall, politeness) — paths that
+  /// never pass through onFrame — and a slot that lingers keeps anyActive
+  /// true forever: the scheduler starves and the GATT link never drops.
+  /// Called from the delegate on every sessionClosed and by the scheduler.
+  void reapClosed() {
+    final c = _client;
+    if (c != null && c.state == MeshSessionState.closed) {
+      _reap(c, serverSide: false);
+    }
+    final v = _served;
+    if (v != null && v.state == MeshSessionState.closed) {
+      _reap(v, serverSide: true);
+    }
+  }
+
   /// Politely end the dialed session (scheduler's politeness cycle).
   Future<void> byeClient() async {
     await _client?.bye(MspBye.politeness);
@@ -278,6 +294,8 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
   void sessionClosed(String peer, {required bool clean}) {
     _log('session with ${peer.isEmpty ? "(pre-hello)" : peer} closed '
         '${clean ? "cleanly" : "abruptly"}');
+    // Reap AFTER the close finishes (close() fires this callback mid-teardown).
+    scheduleMicrotask(MeshSessionManager.instance.reapClosed);
   }
 
   /// Tap for every compact 0x41 frame crossing the broadcast plane, both

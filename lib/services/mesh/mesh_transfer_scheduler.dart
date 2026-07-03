@@ -29,7 +29,7 @@ class MeshTransferScheduler {
 
   static const Duration _tick = Duration(seconds: 10);
   static const Duration _cleanQuiet = Duration(seconds: 60);
-  static const Duration _pendingPeerQuiet = Duration(minutes: 5);
+  static const Duration _pendingPeerQuiet = Duration(minutes: 2);
   static const Duration _backoffMin = Duration(seconds: 30);
   static const Duration _backoffMax = Duration(minutes: 5);
 
@@ -63,21 +63,44 @@ class MeshTransferScheduler {
     }
   }
 
+  DateTime? _starvedSince;
+
   void _onTick() {
     final mgr = MeshSessionManager.instance;
     final hooks = mgr.hooks;
     final dial = hooks.dial;
     final dialable = hooks.dialable?.call();
     if (dial == null || dialable == null || dialable.isEmpty) return;
-    if (mgr.anyActive) return; // one session at a time — stay polite
+    mgr.reapClosed(); // belt: sweep timer-closed sessions every tick
+    if (mgr.anyActive) {
+      // Starvation watchdog: a session that has been "active" for far past
+      // the politeness cap is a zombie (stuck link, dead peer) — force the
+      // client link down so the mesh gets its radio back.
+      _starvedSince ??= DateTime.now();
+      if (DateTime.now().difference(_starvedSince!) >
+          const Duration(minutes: 3)) {
+        _starvedSince = null;
+        LogService.instance
+            .add('Mesh: scheduler starved 3 min — forcing link drop');
+        mgr.clientSession?.close(clean: false);
+        mgr.servedSession?.close(clean: false);
+        mgr.reapClosed();
+        hooks.dropClientLink?.call();
+      }
+      return; // one session at a time — stay polite
+    }
+    _starvedSince = null;
 
-    // A dial that never produced a session is a failed attempt.
+    // A dial that never produced a session is a failed attempt. Auto
+    // (background) connects wait at controller level — give them a long
+    // window before aborting; every extra second is more ADV_IND chances.
     final d = _dialing;
     if (d != null) {
       if (DateTime.now().difference(_dialStarted) <
-          const Duration(seconds: 20)) {
+          const Duration(seconds: 110)) {
         return; // connect still in flight
       }
+      hooks.dropClientLink?.call(); // cancel the pending background connect
       dialResult(d, clean: false);
     }
 

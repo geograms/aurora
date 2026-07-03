@@ -154,8 +154,9 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 "maxPayload" -> result.success(maxDataLen() - 8)
                 "gattConnect" -> {
                     val addr = call.argument<String>("address")
+                    val auto = call.argument<Boolean>("auto") ?: false
                     if (addr == null) result.error("ARG", "address required", null)
-                    else { gattConnect(addr); result.success(true) }
+                    else { gattConnect(addr, auto); result.success(true) }
                 }
                 "gattWrite" -> {
                     val data = call.argument<ByteArray>("data")
@@ -432,7 +433,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private fun emitGatt(map: Map<String, Any?>) { main.post { gattEvents?.success(map) } }
 
-    private fun gattConnect(address: String) {
+    private fun gattConnect(address: String, auto: Boolean = false) {
         if (gatt != null) return // one link at a time
         val dev: BluetoothDevice = try {
             adapter?.getRemoteDevice(address) ?: return
@@ -440,7 +441,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             android.util.Log.e(TAG, "getRemoteDevice($address): ${e.message}"); return
         }
         try {
-            gatt = dev.connectGatt(appContext, false, gattCb, BluetoothDevice.TRANSPORT_LE)
+            // auto=true: controller-level background connect — it keeps
+            // listening for the target's ADV_IND indefinitely instead of the
+            // ~12 s direct-connect window. Essential at fringe RSSI where a
+            // single window rarely catches an advert. The caller bounds the
+            // wait and calls gattDisconnect to abort.
+            gatt = dev.connectGatt(appContext, auto, gattCb, BluetoothDevice.TRANSPORT_LE)
         } catch (e: Exception) {
             android.util.Log.e(TAG, "connectGatt: ${e.message}")
             emitGatt(mapOf("event" to "disconnected"))

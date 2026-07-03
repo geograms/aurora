@@ -27,6 +27,9 @@ void gatt_mesh_start(const char *callsign, uint8_t own_addr_type);
 /* Periodic drive (timeouts). Call ~1/s from any task. */
 void gatt_mesh_tick(void);
 
+/* Diagnostics: toggle the connectable presence advert (instance 1). */
+void gatt_mesh_conn_adv(bool on);
+
 /* Files waiting in the bulk spool (beacon pending trailer). */
 int gatt_mesh_bulk_pending(void);
 

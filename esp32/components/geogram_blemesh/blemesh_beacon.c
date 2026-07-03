@@ -46,8 +46,9 @@ int blemesh_beacon_encode(const blemesh_beacon_t *b, uint8_t *out, int cap)
 {
     int cs = (int)strlen(b->callsign);
     if (cs > BLEMESH_CALLSIGN_MAX) cs = BLEMESH_CALLSIGN_MAX;
-    /* Header + callsign + count + bloom-len must fit; dv entries fill the rest. */
-    int fixed = 4 + cs + 1 + 1;
+    /* Header + callsign + count + bloom-len + pending trailer must fit;
+     * dv entries fill the rest. */
+    int fixed = 4 + cs + 1 + 1 + 2;
     if (cap < fixed) return 0;
     int room = (cap - fixed) / 4;
     int k = b->dv_count;
@@ -66,7 +67,9 @@ int blemesh_beacon_encode(const blemesh_beacon_t *b, uint8_t *out, int cap)
         uint8_t c = b->dv[i].cost;
         out[n++] = (c < 1) ? 1 : (c > BLEMESH_MAX_COST ? BLEMESH_MAX_COST : c);
     }
-    out[n++] = 0;                          /* have-digest bloom: none yet */
+    out[n++] = 0;                          /* have-digest bloom: none (carrier) */
+    out[n++] = b->pending_msgs;            /* M2 trailer: parked mail count */
+    out[n++] = b->pending_bulk;            /* M2 trailer: spooled files count */
     return n;
 }
 

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "tweetnacl.c"
+    SRCS "main.c" "tweetnacl.c" "gatt_mesh.c"
     INCLUDE_DIRS "."
     REQUIRES bt nvs_flash log esp_timer mbedtls esp_hw_support
              esp_wifi esp_event esp_netif driver

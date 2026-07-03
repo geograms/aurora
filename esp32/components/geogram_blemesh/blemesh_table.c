@@ -167,3 +167,20 @@ bool blemesh_reachable(const char *callsign)
     blemesh_hash(callsign, h);
     return route_find(h) >= 0;
 }
+
+bool blemesh_route_via(const char *target, char via[BLEMESH_CALLSIGN_MAX + 1])
+{
+    if (neigh_find(target) >= 0) {
+        /* Direct neighbor: the next hop is the target itself. */
+        strncpy(via, target, BLEMESH_CALLSIGN_MAX);
+        via[BLEMESH_CALLSIGN_MAX] = 0;
+        return true;
+    }
+    uint8_t h[3];
+    blemesh_hash(target, h);
+    int r = route_find(h);
+    if (r < 0) return false;
+    strncpy(via, s_route[r].via, BLEMESH_CALLSIGN_MAX);
+    via[BLEMESH_CALLSIGN_MAX] = 0;
+    return true;
+}

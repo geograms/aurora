@@ -281,6 +281,17 @@ class BleService {
     };
     hooks.dial = meshDial;
     hooks.dialable = meshDialable;
+    // Beacon sightings feed the dial registry too (the extended beacon lands
+    // at fringe RSSI where the legacy presence advert is missed).
+    MeshService.instance.onPeerSighting = (callsign, addr) {
+      final cs = callsign.toUpperCase();
+      final my = (ProfileService.instance.activeProfile?.callsign ?? '')
+          .trim()
+          .toUpperCase();
+      if (cs.isEmpty || cs == my) return;
+      _meshPeers[cs] =
+          (addr: addr, ms: DateTime.now().millisecondsSinceEpoch);
+    };
     MeshTransferScheduler.instance.start();
   }
 

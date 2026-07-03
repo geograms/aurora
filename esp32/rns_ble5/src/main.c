@@ -53,6 +53,7 @@
 /* BLE street mesh (aurora doc/mesh.md): route beacon + DV table + SCF. */
 #include <sys/stat.h>
 #include "blemesh.h"
+#include "gatt_mesh.h"
 #include "sdcard.h"
 
 /* Provisioning defaults (WiFi creds + callsign). The real file is gitignored;
@@ -647,6 +648,10 @@ static void mesh_beacon_air(void)
     b.mobility = 1;                       /* stationary */
     b.storage_bucket = sdcard_is_mounted() ? 3 : 0;
     b.dv_count = (uint8_t)blemesh_table_export(b.dv, 48);
+    /* M2 trailer: invite dial-ins while we carry mail/files (we cannot dial). */
+    int pm = blemesh_scf_count(), pb = gatt_mesh_bulk_pending();
+    b.pending_msgs = (uint8_t)(pm > 255 ? 255 : pm);
+    b.pending_bulk = (uint8_t)(pb > 255 ? 255 : pb);
 
     uint8_t payload[200];
     int pn = blemesh_beacon_encode(&b, payload, sizeof(payload));
@@ -678,6 +683,7 @@ static void relay_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1500));
         uint32_t t = now_sec();
+        gatt_mesh_tick();   /* MSP session timeouts (politeness/stall) */
 
         /* Housekeeping: age out dead neighbors/routes + expired parked mail. */
         if (t - last_sweep >= 60) {
@@ -931,6 +937,10 @@ static void on_sync(void)
 {
     ble_hs_id_infer_auto(0, &s_own_addr_type);
     start_scan();
+    /* Mesh M2 data plane: connectable presence advert (instance 1) so phones
+     * can dial a GATT custody session (the identity may still be the NVS
+     * fallback here; the advert re-airs on every disconnect anyway). */
+    gatt_mesh_start(s_aprs_call[0] ? s_aprs_call : "TDONGLE", s_own_addr_type);
     /* relay_task owns ext-adv instance 0 (own announce + relayed packets). It has
      * a generous stack because Ed25519 signing for our own announce is heavy. */
     xTaskCreate(relay_task, "rns_relay", 8192, NULL, 5, NULL);
@@ -1158,7 +1168,20 @@ static void console_handle(char *line)
         printf("purged %d\n", blemesh_scf_ack(line + 4));
         return;
     }
-    printf("commands: status | msg <to> <text> | beacon | ack <am>\n");
+    if (strncmp(line, "sendfile ", 9) == 0) {
+        char *to = line + 9;
+        char *sp = strchr(to, ' ');
+        if (!sp) { printf("usage: sendfile <to> <path>\n"); return; }
+        *sp = 0;
+        gatt_mesh_sendfile(to, sp + 1);
+        return;
+    }
+    if (strcmp(line, "transfers") == 0 || strcmp(line, "spool") == 0) {
+        gatt_mesh_print_status();
+        return;
+    }
+    printf("commands: status | msg <to> <text> | beacon | ack <am> | "
+           "sendfile <to> <path> | transfers\n");
 }
 
 static void console_task(void *arg)
@@ -1219,6 +1242,7 @@ void app_main(void)
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
+    gatt_mesh_svcs_init();   /* GATT service table before the host starts */
     nimble_port_freertos_init(host_task);
 
     ESP_LOGI(TAG, "RNS-BLE5 full node + repeater + UI + APRS-IS iGate up");

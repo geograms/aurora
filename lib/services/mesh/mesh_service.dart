@@ -55,6 +55,12 @@ class MeshService {
   /// Bump-on-change revision so UI layers can cheaply poll for updates.
   int revision = 0;
 
+  /// Set by BleService: every beacon sighting also registers the sender's
+  /// BLE address as dialable. Vital at fringe — the constantly-rotating
+  /// extended beacon lands where a 200 ms legacy presence advert is missed,
+  /// and a GATT connect needs only the address.
+  void Function(String callsign, String addr)? onPeerSighting;
+
   /// The live table (null before start). M2 custody reads routes/neighbors.
   MeshTable? get table => _table;
 
@@ -151,6 +157,7 @@ class MeshService {
       LogService.instance.add(
           'Mesh: heard ${b.callsign} (${b.deviceClass.label}, ${f.rssi} dBm, reaches ${b.dv.length})');
     }
+    if (f.addr.isNotEmpty) onPeerSighting?.call(b.callsign, f.addr);
     // M2: the beacon's have-bloom says what its owner already received —
     // purge any mail we're carrying FOR that owner that it claims to have.
     if (b.have.isNotEmpty) {

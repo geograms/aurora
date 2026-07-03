@@ -55,6 +55,10 @@ typedef struct {
     uint8_t  storage_bucket;  /* 0..3 */
     uint8_t  dv_count;
     blemesh_dv_t dv[48];
+    /* M2 trailer: mail/bulk this node is carrying. Non-zero invites a GATT
+     * custody session — essential for a server-only node that cannot dial. */
+    uint8_t  pending_msgs;
+    uint8_t  pending_bulk;
 } blemesh_beacon_t;
 
 /* Uptime bucket for a duration in seconds (same ladder as the phone). */
@@ -115,6 +119,9 @@ const blemesh_neighbor_t *blemesh_neighbor_at(int i);
 int  blemesh_route_count(void);
 /* Is [callsign] currently reachable (a live neighbor, or routed)? */
 bool blemesh_reachable(const char *callsign);
+/* Next hop toward [target]: fills [via] and returns true when a route exists
+ * (direct neighbors return themselves). */
+bool blemesh_route_via(const char *target, char via[BLEMESH_CALLSIGN_MAX + 1]);
 
 /* ---- store-and-forward --------------------------------------------------- */
 #define BLEMESH_SCF_MAX        24
@@ -149,6 +156,15 @@ int blemesh_scf_pop_for(const char *target, uint32_t now,
 void blemesh_scf_sweep(uint32_t now);
 
 int blemesh_scf_count(void);
+
+/* GATT custody drain (MSP MSG lane): pop the next parked frame whose target
+ * is [peer] itself or is routed via [peer]. Only am-keyed frames are handed
+ * over (am-less frames stay broadcast-only — a custody ack couldn't name
+ * them). A popped entry is rate-limited (not re-popped for 5 min) but stays
+ * parked until blemesh_scf_ack(am) confirms the handover. Returns the frame
+ * length, or 0 when nothing is pending for that peer. */
+int blemesh_scf_pop_custody(const char *peer, uint32_t now, char am[8],
+                            uint8_t *frame, int cap, uint32_t *ts);
 
 #ifdef __cplusplus
 }

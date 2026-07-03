@@ -14,15 +14,17 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 typedef struct {
     char     target[BLEMESH_CALLSIGN_MAX + 1];
     char     am[8];
     uint8_t  frame[BLEMESH_SCF_FRAME_MAX];
     uint16_t len;
-    uint32_t ts;          /* park time (monotonic seconds) */
-    uint32_t last_reair;  /* 0 = never re-aired */
-    uint32_t chash;       /* content dedup when no am id */
+    uint32_t ts;            /* park time (monotonic seconds) */
+    uint32_t last_reair;    /* 0 = never re-aired */
+    uint32_t last_custody;  /* 0 = never handed over MSP (rate limit) */
+    uint32_t chash;         /* content dedup when no am id */
 } scf_t;
 
 static scf_t s_scf[BLEMESH_SCF_MAX];
@@ -170,3 +172,27 @@ void blemesh_scf_sweep(uint32_t now)
 }
 
 int blemesh_scf_count(void) { return s_scf_n; }
+
+int blemesh_scf_pop_custody(const char *peer, uint32_t now, char am[8],
+                            uint8_t *frame, int cap, uint32_t *ts)
+{
+    if (!peer || !peer[0]) return 0;
+    for (int i = 0; i < s_scf_n; i++) {
+        scf_t *e = &s_scf[i];
+        if (!e->am[0] || e->len > cap) continue;   /* am-less: broadcast-only */
+        if (e->last_custody && now - e->last_custody < 300) continue;
+        bool give = strcasecmp(e->target, peer) == 0;
+        if (!give) {
+            char via[BLEMESH_CALLSIGN_MAX + 1];
+            give = blemesh_route_via(e->target, via) &&
+                   strcasecmp(via, peer) == 0;
+        }
+        if (!give) continue;
+        memcpy(am, e->am, 8);
+        memcpy(frame, e->frame, e->len);
+        *ts = e->ts;
+        e->last_custody = now;
+        return e->len;
+    }
+    return 0;
+}

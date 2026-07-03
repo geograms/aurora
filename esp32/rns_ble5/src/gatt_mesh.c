@@ -78,6 +78,13 @@ typedef struct {
     uint64_t size;
 } bulk_meta_t;
 
+/* RAM spool index (defined below; declared here for the meta helpers). */
+#define BULK_CACHE_MAX 8
+static bulk_meta_t s_bulk[BULK_CACHE_MAX];
+static int s_bulk_n;
+static void bulk_cache_upsert(const bulk_meta_t *m);
+static void bulk_cache_remove(const char *sha_hex);
+
 static void meta_path_for(const uint8_t sha[32], char *out, int cap)
 {
     char hx[65];
@@ -123,6 +130,11 @@ static bool meta_read_file(const char *path, bulk_meta_t *m)
 
 static bool meta_read(const uint8_t sha[32], bulk_meta_t *m)
 {
+    char hx[65];
+    sha_hex(sha, hx);
+    for (int i = 0; i < s_bulk_n; i++) {
+        if (strcmp(s_bulk[i].sha, hx) == 0) { *m = s_bulk[i]; return true; }
+    }
     char p[160];
     meta_path_for(sha, p, sizeof(p));
     return meta_read_file(p, m);
@@ -145,6 +157,7 @@ static void meta_write(const bulk_meta_t *m)
             m->sha, (unsigned long long)m->size, m->ext, m->name, m->origin,
             m->target, m->src, m->state, m->path);
     fclose(f);
+    bulk_cache_upsert(m);
 }
 
 static void hex_to_sha(const char *hx, uint8_t out[32])
@@ -178,51 +191,81 @@ static bool sha256_file(const char *path, uint8_t out[32], uint64_t *size)
     return true;
 }
 
-/* Iterate metas; returns true and fills [m] for the first entry matching
- * [state] (and, when non-NULL, deliverable to [peer]). */
-static bool bulk_scan(const char *state, const char *peer, bulk_meta_t *m)
+/* RAM index of spool entries. The FAT VFS directory walk proved unsafe
+ * against concurrent SD writers (console + iGate logs + SCF persist all hit
+ * the card): opendir/readdir wedged the calling task mid-session. The dir is
+ * walked ONCE at start (before the radio traffic ramps) and kept in sync by
+ * every meta mutation; queries never touch readdir again. */
+static void bulk_cache_upsert(const bulk_meta_t *m)
 {
+    for (int i = 0; i < s_bulk_n; i++) {
+        if (strcmp(s_bulk[i].sha, m->sha) == 0) { s_bulk[i] = *m; return; }
+    }
+    if (s_bulk_n < BULK_CACHE_MAX) s_bulk[s_bulk_n++] = *m;
+}
+
+static void bulk_cache_remove(const char *sha_hex)
+{
+    for (int i = 0; i < s_bulk_n; i++) {
+        if (strcmp(s_bulk[i].sha, sha_hex) == 0) {
+            s_bulk[i] = s_bulk[s_bulk_n - 1];
+            s_bulk_n--;
+            return;
+        }
+    }
+}
+
+static void bulk_cache_load(void)
+{
+    s_bulk_n = 0;
     DIR *d = opendir(BULK_DIR);
-    if (!d) return false;
+    if (!d) return;
     struct dirent *e;
-    bool found = false;
-    while (!found && (e = readdir(d)) != NULL) {
+    bulk_meta_t m;
+    while (s_bulk_n < BULK_CACHE_MAX && (e = readdir(d)) != NULL) {
         const char *dot = strrchr(e->d_name, '.');
         if (!dot || strcmp(dot, ".meta") != 0) continue;
         char p[320];
         snprintf(p, sizeof(p), BULK_DIR "/%s", e->d_name);
-        if (!meta_read_file(p, m)) continue;
-        if (strcmp(m->state, state) != 0) continue;
-        if (peer) {
-            bool give = strcasecmp(m->target, peer) == 0;
-            if (!give) {
-                char via[BLEMESH_CALLSIGN_MAX + 1];
-                give = blemesh_route_via(m->target, via) &&
-                       strcasecmp(via, peer) == 0;
-            }
-            if (!give || strcasecmp(m->origin, peer) == 0) continue;
-        }
-        found = true;
+        if (meta_read_file(p, &m)) bulk_cache_upsert(&m);
     }
     closedir(d);
-    return found;
+    ESP_LOGI(TAG, "bulk spool: %d entr%s cached", s_bulk_n,
+             s_bulk_n == 1 ? "y" : "ies");
+}
+
+/* First cached entry matching [state] (and deliverable to [peer]). */
+static bool bulk_scan(const char *state, const char *peer, bulk_meta_t *m)
+{
+    for (int i = 0; i < s_bulk_n; i++) {
+        if (strcmp(s_bulk[i].state, state) != 0) continue;
+        if (peer) {
+            bool give = strcasecmp(s_bulk[i].target, peer) == 0;
+            if (!give) {
+                char via[BLEMESH_CALLSIGN_MAX + 1];
+                if (blemesh_route_via(s_bulk[i].target, via)) {
+                    give = strcasecmp(via, peer) == 0;
+                } else {
+                    /* No route at all: hand custody to whoever is here — the
+                     * data-mule case. Custody, TTL and the e2e receipt purge
+                     * cover a mule that never meets the target. */
+                    give = true;
+                }
+            }
+            if (!give || strcasecmp(s_bulk[i].origin, peer) == 0) continue;
+        }
+        *m = s_bulk[i];
+        return true;
+    }
+    return false;
 }
 
 int gatt_mesh_bulk_pending(void)
 {
-    DIR *d = opendir(BULK_DIR);
-    if (!d) return 0;
-    struct dirent *e;
     int n = 0;
-    bulk_meta_t m;
-    while ((e = readdir(d)) != NULL) {
-        const char *dot = strrchr(e->d_name, '.');
-        if (!dot || strcmp(dot, ".meta") != 0) continue;
-        char p[320];
-        snprintf(p, sizeof(p), BULK_DIR "/%s", e->d_name);
-        if (meta_read_file(p, &m) && strcmp(m.state, "ready") == 0) n++;
+    for (int i = 0; i < s_bulk_n; i++) {
+        if (strcmp(s_bulk[i].state, "ready") == 0) n++;
     }
-    closedir(d);
     return n;
 }
 
@@ -516,6 +559,7 @@ static void op_bulk_done(void *ctx, const char *peer, const uint8_t sha[32],
             meta_path_for(sha, mp, sizeof(mp));
             remove(pp);
             remove(mp);
+            bulk_cache_remove(m.sha);
         }
         ESP_LOGI(TAG, "bulk %s handed to %s", m.name, peer);
     } else {
@@ -739,6 +783,7 @@ void gatt_mesh_start(const char *callsign, uint8_t own_addr_type)
 {
     snprintf(s_call, sizeof(s_call), "%s", callsign);
     s_addr_type = own_addr_type;
+    bulk_cache_load();   /* one dir walk, before radio traffic ramps */
     start_conn_advert();
 }
 
@@ -792,23 +837,10 @@ void gatt_mesh_print_status(void)
     printf("gatt: conn=%d subscribed=%d session=%d inflight=%d\n",
            s_conn == BLE_HS_CONN_HANDLE_NONE ? 0 : 1, s_subscribed ? 1 : 0,
            s_session_up ? 1 : 0, s_notify_inflight);
-    DIR *d = opendir(BULK_DIR);
-    if (!d) { printf("spool: (no dir)\n"); return; }
-    struct dirent *e;
-    bulk_meta_t m;
-    while ((e = readdir(d)) != NULL) {
-        const char *dot = strrchr(e->d_name, '.');
-        if (!dot || strcmp(dot, ".meta") != 0) continue;
-        char p[320];
-        snprintf(p, sizeof(p), BULK_DIR "/%s", e->d_name);
-        if (!meta_read_file(p, &m)) continue;
-        char pp[320];
-        snprintf(pp, sizeof(pp), BULK_DIR "/%.16s.part", e->d_name);
-        struct stat st;
-        long have = (stat(pp, &st) == 0) ? (long)st.st_size
-                    : (strcmp(m.src, "file") == 0 ? (long)m.size : 0);
-        printf("spool: %s %s -> %s %llu B have=%ld state=%s\n", m.name,
-               m.origin, m.target, (unsigned long long)m.size, have, m.state);
+    for (int i = 0; i < s_bulk_n; i++) {
+        printf("spool: %s %s -> %s %llu B state=%s\n", s_bulk[i].name,
+               s_bulk[i].origin, s_bulk[i].target,
+               (unsigned long long)s_bulk[i].size, s_bulk[i].state);
     }
-    closedir(d);
+    if (!s_bulk_n) printf("spool: empty\n");
 }

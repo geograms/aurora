@@ -82,6 +82,13 @@ class MeshStore {
           ts INTEGER NOT NULL,
           PRIMARY KEY (sha, target)
         )''');
+      // v2: drop the pre-park-gate backlog of undeliverable street mail
+      // (it drove nonstop phone-to-phone dial loops).
+      final v = db.select('PRAGMA user_version').first.columnAt(0) as int;
+      if (v < 2) {
+        db.execute('DELETE FROM mesh_store');
+        db.execute('PRAGMA user_version = 2');
+      }
       _db = db;
     } catch (e) {
       _db = null;

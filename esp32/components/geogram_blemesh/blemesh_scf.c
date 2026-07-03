@@ -184,8 +184,11 @@ int blemesh_scf_pop_custody(const char *peer, uint32_t now, char am[8],
         bool give = strcasecmp(e->target, peer) == 0;
         if (!give) {
             char via[BLEMESH_CALLSIGN_MAX + 1];
-            give = blemesh_route_via(e->target, via) &&
-                   strcasecmp(via, peer) == 0;
+            if (blemesh_route_via(e->target, via)) {
+                give = strcasecmp(via, peer) == 0;
+            } else {
+                give = true;   /* unreachable target: mule custody */
+            }
         }
         if (!give) continue;
         memcpy(am, e->am, 8);

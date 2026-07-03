@@ -29,9 +29,9 @@ class MeshTransferScheduler {
 
   static const Duration _tick = Duration(seconds: 10);
   static const Duration _cleanQuiet = Duration(seconds: 60);
-  static const Duration _pendingPeerQuiet = Duration(minutes: 2);
-  static const Duration _backoffMin = Duration(seconds: 30);
-  static const Duration _backoffMax = Duration(minutes: 5);
+  static const Duration _pendingPeerQuiet = Duration(seconds: 45);
+  static const Duration _backoffMin = Duration(seconds: 15);
+  static const Duration _backoffMax = Duration(minutes: 2);
 
   Timer? _timer;
   final Map<String, DateTime> _nextTry = {};

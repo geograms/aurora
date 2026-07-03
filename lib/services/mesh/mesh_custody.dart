@@ -336,8 +336,19 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     if (to.toUpperCase() == self || from.toUpperCase() == self && !outbound) {
       return;
     }
-    // A 1:1 for someone else (or our own outbound): park for custody.
-    if (store.offer(target: to, sender: from, wire: wire, am: am)) {
+    // A 1:1 for someone else (or our own outbound): park for custody — but
+    // ONLY when the target is somewhere in our mesh horizon (a neighbor or a
+    // learned route) or the message is our own. Parking every overheard
+    // street 1:1 filled both phones with hundreds of undeliverable frames,
+    // they advertised huge pending counts and dialed EACH OTHER nonstop —
+    // starving the radio for peers with real work (seen live).
+    final t = MeshService.instance.table;
+    final targetKnown = from.toUpperCase() == self ||
+        (t != null &&
+            (t.neighbors.keys.any((n) => n.toUpperCase() == to.toUpperCase()) ||
+                t.routes.containsKey(meshHashHex(meshHash(to)))));
+    if (targetKnown &&
+        store.offer(target: to, sender: from, wire: wire, am: am)) {
       LogService.instance.add(
           'Mesh: parked ${am.isEmpty ? "msg" : am} $from -> $to for custody');
     }

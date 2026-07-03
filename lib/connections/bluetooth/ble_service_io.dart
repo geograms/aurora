@@ -317,11 +317,13 @@ class BleService {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (p == null || now - p.ms > _meshPeerFreshMs) return false;
     _ngClientPeer = p.addr;
-    _dbg('mesh dial: GATT connect to $callsign (${p.addr})');
-    // Background (auto) connect: at fringe RSSI the 12 s direct window
-    // almost never catches an ADV_IND; auto mode waits at controller level.
-    // The scheduler bounds the wait and disconnects a dial that never lands.
-    Ble5Bus.instance.gattConnect(p.addr, auto: true);
+    // Freshly-seen peer (seconds) = in solid range: use the fast DIRECT
+    // connect. Stale sighting = fringe: background (auto) connect waits at
+    // controller level for an ADV_IND the direct window would miss.
+    final fringe = now - p.ms > 10000;
+    _dbg('mesh dial: GATT connect to $callsign (${p.addr}) '
+        '${fringe ? "auto" : "direct"}');
+    Ble5Bus.instance.gattConnect(p.addr, auto: fringe);
     return true;
   }
 

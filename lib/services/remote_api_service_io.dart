@@ -13,6 +13,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../connections/bluetooth/ble_service.dart';
+import 'mesh/mesh_bulk_spool.dart';
+import 'mesh/mesh_service.dart';
+import 'mesh/mesh_store.dart';
 import '../platform/platform.dart' as platform;
 import '../profile/profile_service.dart';
 import '../profile/storage_paths.dart';
@@ -813,9 +816,32 @@ class RemoteApiService {
   Future<Map<String, dynamic>> _status() async {
     final p = ProfileService.instance.activeProfile;
     final wapps = await _listWapps();
+    // Street-mesh M2 diagnostics: node + custody store + bulk spool state.
+    Map<String, dynamic> mesh;
+    try {
+      final counts = MeshStore.instance.counts();
+      mesh = {
+        ...jsonDecode(MeshService.instance.statusJson())
+            as Map<String, dynamic>,
+        'storeReady': MeshStore.instance.ready,
+        'pendingMsgs': MeshStore.instance.ready
+            ? MeshStore.instance.pendingCount()
+            : null,
+        'archived': counts.archived,
+        'receivedAms': counts.receivedAms,
+        'spoolReady': MeshBulkSpool.instance.ready,
+        'spoolPending': MeshBulkSpool.instance.pendingCount(),
+        'transfers': MeshBulkSpool.instance.transfersJson(),
+        'dialable': BleService.instance.meshDialable(),
+        'gatt': BleService.instance.gattStatus(),
+      };
+    } catch (e) {
+      mesh = {'error': '$e'};
+    }
     return {
       'app': 'aurora',
       'build': kAuroraBuildTag,
+      'mesh': mesh,
       'platform': platform.platformName(),
       'apiPort': _port,
       'profile': p?.nickname,

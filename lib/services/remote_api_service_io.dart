@@ -33,6 +33,7 @@ import 'files/media_file_source.dart';
 import 'i2p/i2p_service.dart';
 import 'log_service.dart';
 import 'reticulum/rns_service.dart';
+import 'folders/folder_event.dart' show FolderShareType;
 import 'preferences_service.dart';
 import 'torrent_service.dart';
 import 'update_service.dart';
@@ -498,16 +499,20 @@ class RemoteApiService {
         return _json(res, {'ok': true, 'indexers': RnsService.instance.relayIndexerCount});
       }
       if (req.method == 'POST' && path == '/api/rns/folder/create') {
-        // {"name":"My folder","desc":"..."} -> creates a mutable folder.
+        // {"name":"My folder","desc":"...","type":"private|readonly|collab"}
+        // type=collab makes a synced, multi-writer folder (every member and
+        // every device of this account can add files).
         final data = await _body(req);
         final name = '${data['name'] ?? ''}'.trim();
         if (name.isEmpty) {
           return _json(res, {'ok': false, 'error': 'name required'},
               status: HttpStatus.badRequest);
         }
-        final id = RnsService.instance
-            .folderCreate(name, desc: '${data['desc'] ?? ''}');
-        return _json(res, {'ok': id != null, 'folderId': id});
+        var type = '${data['type'] ?? 'private'}'.trim();
+        if (!FolderShareType.all.contains(type)) type = FolderShareType.private;
+        final id = RnsService.instance.folderCreate(name,
+            desc: '${data['desc'] ?? ''}', shareType: type);
+        return _json(res, {'ok': id != null, 'folderId': id, 'type': type});
       }
       if (req.method == 'POST' && path == '/api/rns/folder/edit') {
         // {"folderId":"<hex>","op":{"op":"addFile","x":"<sha256hex>",...}}

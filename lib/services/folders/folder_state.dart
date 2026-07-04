@@ -25,6 +25,7 @@ class FolderState {
   String? desc;
   String? tags; // comma/space-separated label string (owner metadata)
   String? owner; // owner's personal npub (for messaging the admin), if stamped
+  String? shareType; // 'private' | 'readonly' | 'collab' (see FolderShareType)
   final Map<String, FileEntry> files = {}; // name (or sha if unnamed) -> entry
   final Map<String, LinkEntry> links = {}; // target folderId -> entry
   List<AdminEntry> admins = const [];
@@ -40,6 +41,7 @@ class FolderState {
         if (desc != null) 'desc': desc,
         if (tags != null) 'tags': tags,
         if (owner != null) 'owner': owner,
+        if (shareType != null) 'shareType': shareType,
         'files': [for (final f in fileList) f.toJson()],
         'links': [for (final l in linkList) l.toJson()],
         'admins': [for (final a in admins) a.toJson()],
@@ -148,6 +150,9 @@ void _apply(FolderState s, Map payload, int createdAt) {
       if (payload.containsKey('desc')) s.desc = payload['desc'] as String?;
       if (payload.containsKey('tags')) s.tags = payload['tags'] as String?;
       if (payload.containsKey('owner')) s.owner = payload['owner'] as String?;
+      if (payload.containsKey('shareType')) {
+        s.shareType = payload['shareType'] as String?;
+      }
       break;
     case 'link':
       final f = payload['f'];

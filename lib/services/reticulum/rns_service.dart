@@ -47,7 +47,8 @@ import '../social/follow_set.dart';
 import '../social/host_retention_policy.dart';
 import '../social/retention_tier.dart';
 import '../folders/disk_folder_manager.dart';
-import '../folders/folder_event.dart' show kKindFolderKeyset, kKindFolderOp;
+import '../folders/folder_event.dart'
+    show kKindFolderKeyset, kKindFolderOp, FolderShareType;
 import '../folders/folder_keystore.dart';
 import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
@@ -1814,7 +1815,7 @@ class RnsService {
           _transport!.addInterface(lan);
           _ifaces.add(lan);
           LogService.instance.add(
-              'RNS: LAN discovery on UDP $_lanDiscoveryPort (announce-only)');
+              'RNS: LAN on UDP $_lanDiscoveryPort (announce bcast + unicast data)');
         } catch (e) {
           LogService.instance.add('RNS: LAN auto-peering unavailable: $e');
         }
@@ -3692,12 +3693,19 @@ class RnsService {
 
   /// Create a folder; returns its folderId (hex; npub is the shareable address).
   /// The master key is stored locally; initial relay state is published async.
-  String? folderCreate(String name, {String desc = ''}) {
+  String? folderCreate(String name,
+      {String desc = '', String shareType = FolderShareType.private}) {
     final f = _folders;
     if (f == null) return null;
     final folderId = f.createKey(name);
     // ignore: discarded_futures
-    f.publishInitial(folderId, name: name, desc: desc);
+    f.publishInitial(folderId, name: name, desc: desc, shareType: shareType);
+    // A collab (synced) folder is one we also consume from our other devices /
+    // co-members, so auto-subscribe it for download + re-seed convergence.
+    if (FolderShareType.isCollab(shareType)) {
+      // ignore: discarded_futures
+      setFolderAutoSync(folderId, true);
+    }
     // Advertise ourselves as a provider so peers find this folder by its key.
     // ignore: discarded_futures
     _folderRelay?.publish(folderId);

@@ -156,8 +156,33 @@ Map<String, dynamic> opRmFile(String shaHex, {String? name}) =>
     {'op': 'rmFile', 'x': shaHex, 'n': ?name};
 
 Map<String, dynamic> opSetMeta(
-        {String? name, String? desc, String? tags, String? owner}) =>
-    {'op': 'setMeta', 'name': ?name, 'desc': ?desc, 'tags': ?tags, 'owner': ?owner};
+        {String? name,
+        String? desc,
+        String? tags,
+        String? owner,
+        String? shareType}) =>
+    {
+      'op': 'setMeta',
+      'name': ?name,
+      'desc': ?desc,
+      'tags': ?tags,
+      'owner': ?owner,
+      // 'private' (default) | 'readonly' | 'collab'. Advisory: it steers the UI
+      // and the auto-subscribe behaviour; the actual write authority is still
+      // enforced by the master-signed keyset in reduceFolder.
+      'shareType': ?shareType,
+    };
+
+/// The share types a folder can advertise. `collab` is the multi-writer /
+/// synced folder: every member (and every device of the owner's own account)
+/// can add files, and members auto-subscribe so their file sets converge.
+class FolderShareType {
+  static const String private = 'private';
+  static const String readonly = 'readonly';
+  static const String collab = 'collab';
+  static const Set<String> all = {private, readonly, collab};
+  static bool isCollab(String? t) => t == collab;
+}
 
 Map<String, dynamic> opLink(String folderId, {String? name}) =>
     {'op': 'link', 'f': folderId, 'name': ?name};

@@ -66,22 +66,58 @@ class FolderService {
     return kp.publicKeyHex;
   }
 
-  /// Publish the initial (empty) key-set + a setMeta op for a folder we own.
+  /// Our personal pubkey (npub's hex form) — the key our other devices sign
+  /// edits with. Null if no identity.
+  String? _ownerPubHex() {
+    final p = adminPrivHex();
+    if (p == null || p.isEmpty) return null;
+    try {
+      return NostrCrypto.derivePublicKey(p);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Publish the initial key-set + a setMeta op for a folder we own. For a
+  /// `collab` (synced) folder the initial keyset already authorizes the owner's
+  /// OWN account key, so every device signed into that account — which all sign
+  /// with the same profile key — can add files immediately, and other members
+  /// are added the same way. A `private`/`readonly` folder starts with an empty
+  /// keyset (owner-only writes).
   Future<void> publishInitial(String folderId,
-      {required String name, String desc = ''}) async {
+      {required String name,
+      String desc = '',
+      String shareType = FolderShareType.private}) async {
     final owner = keystore.get(folderId);
     if (owner == null) return;
-    await publish(buildKeyset(owner.priv, const [], createdAt: _now()));
+    final admins = <AdminEntry>[];
+    if (FolderShareType.isCollab(shareType)) {
+      final self = _ownerPubHex();
+      // Don't self-grant if our account key IS the master (can't happen for a
+      // freshly-generated folder key, but guard anyway).
+      if (self != null && self != folderId) {
+        admins.add(AdminEntry(self, FolderRole.contributor, _now()));
+      }
+    }
+    await publish(buildKeyset(owner.priv, admins, createdAt: _now()));
     await publish(buildOp(owner.priv, folderId,
         opSetMeta(
-            name: name, desc: desc.isEmpty ? null : desc, owner: _ownerNpub()),
+            name: name,
+            desc: desc.isEmpty ? null : desc,
+            owner: _ownerNpub(),
+            shareType: shareType),
         createdAt: _now()));
   }
 
   /// Create a new folder (key + initial relay state); returns its folderId.
-  Future<String> createFolder({required String name, String desc = ''}) async {
+  /// [shareType] is one of [FolderShareType]; `collab` makes it a synced,
+  /// multi-writer folder (see [publishInitial]).
+  Future<String> createFolder(
+      {required String name,
+      String desc = '',
+      String shareType = FolderShareType.private}) async {
     final folderId = createKey(name);
-    await publishInitial(folderId, name: name, desc: desc);
+    await publishInitial(folderId, name: name, desc: desc, shareType: shareType);
     return folderId;
   }
 

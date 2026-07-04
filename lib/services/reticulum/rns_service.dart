@@ -44,6 +44,7 @@ import '../social/relay_role.dart';
 import '../social/spam.dart';
 import '../social/store_forward.dart';
 import '../social/follow_set.dart';
+import '../social/nostr_relay.dart';
 import '../social/host_retention_policy.dart';
 import '../social/retention_tier.dart';
 import '../folders/disk_folder_manager.dart';
@@ -152,6 +153,9 @@ class RnsService {
   final RelayDirectory _relayDir = RelayDirectory();
   RelayRoleManager? _relayRole;
   StoreForward? _storeForward;
+  // NOSTR client hub (wss:// + rns:// + local) + this device's own wss server.
+  NostrRelayHub? _nostrHub;
+  NostrWsServer? _nostrWs;
 
   // Store-and-forward hosting: the set of NOSTR pubkeys (hex) the local user
   // follows, used to classify hosted content into the "followed" retention tier.
@@ -1585,6 +1589,30 @@ class RnsService {
           directory: _relayDir,
           log: (m) => LogService.instance.add('RNS/sf: $m'),
         );
+        // NOSTR client hub: transport-abstract relays (wss:// internet, rns://
+        // Reticulum, local device) all merging into the SAME _relayStore. Plus a
+        // local wss:// server so any stock NOSTR app on the LAN uses THIS device
+        // as a relay, and its subscribers see mesh + internet events live.
+        _nostrWs = NostrWsServer(_relayStore!,
+            log: (m) => LogService.instance.add('NOSTR/wss: $m'));
+        // ignore: discarded_futures
+        _nostrWs!.start();
+        _nostrHub = NostrRelayHub(
+          store: NostrStore.of(_relayStore!),
+          persistPath: relayStorePath == null
+              ? null
+              : relayStorePath!.replaceAll(RegExp(r'[^/]*$'), 'nostr_relays.json'),
+          rnsClientFactory: (uri) {
+            final id = _relayIdentity(uri.replaceFirst('rns://', '').trim());
+            return (id != null && _relay != null)
+                ? NostrRnsClient(_relay!, id, uri: uri)
+                : null;
+          },
+          onStored: (ev) => _nostrWs?.broadcast(ev),
+          log: (m) => LogService.instance.add('NOSTR/hub: $m'),
+        );
+        // ignore: discarded_futures
+        _nostrHub!.init();
       } catch (e) {
         LogService.instance.add('RNS/relay: disabled (store open failed: $e)');
         _relay = null;
@@ -3690,6 +3718,76 @@ class RnsService {
   }
 
   /// The active profile's private key (hex) for signing folder edits as an admin.
+  // ── NOSTR client (transport-abstract relays: wss:// + rns:// + local) ───────
+
+  /// Relay list + live status for the "NOSTR servers" panel.
+  List<Map<String, dynamic>> nostrRelays() =>
+      _nostrHub?.relaysJson() ?? const [];
+
+  /// Add/remove a relay by URI (wss://…, rns://<idhash>, local).
+  bool nostrRelayAdd(String uri) => _nostrHub?.addRelay(uri) ?? false;
+  bool nostrRelayRemove(String uri) => _nostrHub?.removeRelay(uri) ?? false;
+
+  /// Open a subscription from a NIP-01 filter (JSON object or array). Returns a
+  /// subId the caller drains with [nostrDrain].
+  String? nostrSubscribe(String filtersJson) {
+    final hub = _nostrHub;
+    if (hub == null) return null;
+    try {
+      final j = jsonDecode(filtersJson);
+      final filters = <NostrFilter>[];
+      if (j is List) {
+        for (final f in j) {
+          if (f is Map) {
+            filters.add(NostrFilter.fromJson(f.cast<String, dynamic>()));
+          }
+        }
+      } else if (j is Map) {
+        filters.add(NostrFilter.fromJson(j.cast<String, dynamic>()));
+      }
+      if (filters.isEmpty) return null;
+      return hub.subscribe(filters);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Pop buffered events for a subscription (JSON list, oldest first).
+  List<Map<String, dynamic>> nostrDrain(String subId, {int max = 50}) =>
+      _nostrHub?.drainEvents(subId, max: max) ?? const [];
+
+  void nostrUnsubscribe(String subId) => _nostrHub?.unsubscribe(subId);
+
+  /// Build, sign (with the active profile key — nsec never leaves the host) and
+  /// publish an event to the local store + every enabled relay. Returns its id.
+  Future<String?> nostrPost(
+      int kind, String content, List<List<String>> tags) async {
+    final pub = selfPubHex;
+    final priv = _profilePrivHex();
+    final hub = _nostrHub;
+    if (pub == null || priv == null || hub == null) return null;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: kind,
+      tags: tags,
+      content: content,
+    );
+    try {
+      ev.sign(priv);
+    } catch (e) {
+      LogService.instance.add('NOSTR: sign failed: $e');
+      return null;
+    }
+    await hub.publish(ev);
+    return ev.id;
+  }
+
+  /// Followed NOSTR pubkeys (hex) — the feed's author set.
+  List<String> nostrFollows() => _follows.asSet.toList();
+  void nostrFollow(String key) => followPubkey(key);
+  void nostrUnfollow(String key) => unfollowPubkey(key);
+
   String? _profilePrivHex() {
     final nsec = ProfileService.instance.activeProfile?.nsec;
     if (nsec == null || nsec.isEmpty) return null;
@@ -4200,6 +4298,12 @@ class RnsService {
     _relayRole = null;
     _storeForward = null;
     _relayDir.clear();
+    // ignore: discarded_futures
+    _nostrHub?.close();
+    _nostrHub = null;
+    // ignore: discarded_futures
+    _nostrWs?.stop();
+    _nostrWs = null;
     _relayStore?.close();
     _relayStore = null;
     _serveStats?.close();

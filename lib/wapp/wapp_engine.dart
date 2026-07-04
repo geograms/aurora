@@ -2612,6 +2612,116 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // ── hal.nostr — transport-abstract NOSTR client (wss:// + rns:// + local) ──
+    // The wapp manages a relay LIST and subscribes/posts; the host routes each
+    // relay by URI scheme and merges every inbound event into the ONE store.
+    final halNostrRelays = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes =
+            utf8.encode(jsonEncode(RnsService.instance.nostrRelays()));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halNostrRelayAdd = WasmFunction(
+      (int uriPtr, int uriLen) =>
+          RnsService.instance.nostrRelayAdd(_readStr(uriPtr, uriLen)) ? 1 : 0,
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halNostrRelayRemove = WasmFunction(
+      (int uriPtr, int uriLen) =>
+          RnsService.instance.nostrRelayRemove(_readStr(uriPtr, uriLen)) ? 1 : 0,
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Open a subscription from a NIP-01 filter (JSON); writes the subId to out.
+    final halNostrSubscribe = WasmFunction(
+      (int filterPtr, int filterLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final sub = RnsService.instance
+            .nostrSubscribe(_readStr(filterPtr, filterLen));
+        if (sub == null) return 0;
+        final bytes = utf8.encode(sub);
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Pop the next buffered event JSON for a subscription; 0 when drained.
+    final halNostrEventRecv = WasmFunction(
+      (int subPtr, int subLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final evs = RnsService.instance
+            .nostrDrain(_readStr(subPtr, subLen), max: 1);
+        if (evs.isEmpty) return 0;
+        final bytes = utf8.encode(jsonEncode(evs.first));
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halNostrUnsubscribe = WasmFunction(
+      (int subPtr, int subLen) {
+        RnsService.instance.nostrUnsubscribe(_readStr(subPtr, subLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Sign (with the profile key, host-side) + publish an event; writes its id.
+    final halNostrPost = WasmFunction(
+      (int kind, int contentPtr, int contentLen, int tagsPtr, int tagsLen,
+          int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final content = _readStr(contentPtr, contentLen);
+        final tags = <List<String>>[];
+        try {
+          final j = jsonDecode(_readStr(tagsPtr, tagsLen));
+          if (j is List) {
+            for (final t in j) {
+              if (t is List) tags.add(t.map((e) => '$e').toList());
+            }
+          }
+        } catch (_) {}
+        // Fire-and-forget: the host signs + publishes async. The event also
+        // lands in the local store and matching subscriptions' inboxes, so the
+        // feed shows it on the next drain — no id is returned here.
+        // ignore: discarded_futures
+        RnsService.instance.nostrPost(kind, content, tags);
+        return 0;
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32, ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
+    final halNostrFollows = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes =
+            utf8.encode(jsonEncode(RnsService.instance.nostrFollows()));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halNostrFollow = WasmFunction(
+      (int keyPtr, int keyLen) {
+        RnsService.instance.nostrFollow(_readStr(keyPtr, keyLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halNostrUnfollow = WasmFunction(
+      (int keyPtr, int keyLen) {
+        RnsService.instance.nostrUnfollow(_readStr(keyPtr, keyLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     // ── Reticulum visualization/management HAL (read-only) ───────────────────
     // These expose the node's observed network + status + bootstrap hubs as JSON
     // so the "reticulum" wapp can render an interactive graph. Config (add/remove/
@@ -2934,6 +3044,16 @@ class WappEngine {
       WasmImport('hal', 'relay_identity_publish', halRelayIdentityPublish),
       WasmImport('hal', 'relay_resolve', halRelayResolve),
       WasmImport('hal', 'relay_resolve_recv', halRelayResolveRecv),
+      WasmImport('hal', 'nostr_relays', halNostrRelays),
+      WasmImport('hal', 'nostr_relay_add', halNostrRelayAdd),
+      WasmImport('hal', 'nostr_relay_remove', halNostrRelayRemove),
+      WasmImport('hal', 'nostr_subscribe', halNostrSubscribe),
+      WasmImport('hal', 'nostr_event_recv', halNostrEventRecv),
+      WasmImport('hal', 'nostr_unsubscribe', halNostrUnsubscribe),
+      WasmImport('hal', 'nostr_post', halNostrPost),
+      WasmImport('hal', 'nostr_follows', halNostrFollows),
+      WasmImport('hal', 'nostr_follow', halNostrFollow),
+      WasmImport('hal', 'nostr_unfollow', halNostrUnfollow),
       WasmImport('hal', 'rns_status', halRnsStatus),
       WasmImport('hal', 'mesh_status', halMeshStatus),
       WasmImport('hal', 'mesh_devices', halMeshDevices),

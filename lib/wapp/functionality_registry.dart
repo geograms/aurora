@@ -316,6 +316,43 @@ class FunctionalityRegistry {
           'Pop next resolution JSON {callsign,npub,deliv,prop}', [],
           ReturnDef('uint32', 'Bytes written, 0 if none')),
     ]),
+    'hal.nostr': FunctionalityDef('hal.nostr',
+        'Transport-abstract NOSTR client (wss:// internet + rns:// Reticulum + local device)', [
+      EndpointDef('hal_nostr_relays',
+          'Relay list + live status JSON [{uri,scheme,status}]', [],
+          ReturnDef('uint32', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_nostr_relay_add', 'Add a relay by URI (wss://, rns://, local)', [
+        ParamDef('uri', 'string', 'relay URI'),
+      ], ReturnDef('int', '1 added, 0 rejected/duplicate')),
+      EndpointDef('hal_nostr_relay_remove', 'Remove a relay by URI', [
+        ParamDef('uri', 'string', 'relay URI'),
+      ], ReturnDef('int', '1 removed, 0 not found')),
+      EndpointDef('hal_nostr_subscribe',
+          'Open a subscription from a NIP-01 filter (JSON); writes the subId', [
+        ParamDef('filter', 'string', 'NIP-01 filter JSON (object or array)'),
+      ], ReturnDef('uint32', 'subId bytes written, 0 on error')),
+      EndpointDef('hal_nostr_event_recv',
+          'Pop next buffered event JSON for a subscription; 0 when drained', [
+        ParamDef('sub', 'string', 'subId from hal_nostr_subscribe'),
+      ], ReturnDef('uint32', 'Bytes written, 0 if none')),
+      EndpointDef('hal_nostr_unsubscribe', 'Close a subscription', [
+        ParamDef('sub', 'string', 'subId'),
+      ], ReturnDef('int', '1')),
+      EndpointDef('hal_nostr_post',
+          'Sign (with the profile key, host-side) + publish an event', [
+        ParamDef('kind', 'int', 'event kind (1=note)'),
+        ParamDef('content', 'string', 'event content'),
+        ParamDef('tags', 'string', 'JSON array of tag arrays'),
+      ], ReturnDef('int', '0 (event appears on the next feed drain)')),
+      EndpointDef('hal_nostr_follows', 'Followed pubkeys (hex) JSON array', [],
+          ReturnDef('uint32', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_nostr_follow', 'Follow a pubkey (hex or npub)', [
+        ParamDef('key', 'string', 'pubkey hex or npub'),
+      ], ReturnDef('int', '1')),
+      EndpointDef('hal_nostr_unfollow', 'Unfollow a pubkey', [
+        ParamDef('key', 'string', 'pubkey hex or npub'),
+      ], ReturnDef('int', '1')),
+    ]),
     'hal.contacts': FunctionalityDef(
         'hal.contacts', 'Known people (reusable contact picker source)', [
       EndpointDef('hal_contacts_query', 'List known contacts (APRS-seen + follows)', [

@@ -2672,9 +2672,7 @@ class WappEngine {
     );
     // Sign (with the profile key, host-side) + publish an event; writes its id.
     final halNostrPost = WasmFunction(
-      (int kind, int contentPtr, int contentLen, int tagsPtr, int tagsLen,
-          int outPtr, int outCap) {
-        if (outCap <= 0) return 0;
+      (int kind, int contentPtr, int contentLen, int tagsPtr, int tagsLen) {
         final content = _readStr(contentPtr, contentLen);
         final tags = <List<String>>[];
         try {
@@ -2690,11 +2688,10 @@ class WappEngine {
         // feed shows it on the next drain — no id is returned here.
         // ignore: discarded_futures
         RnsService.instance.nostrPost(kind, content, tags);
-        return 0;
+        return 1;
       },
       params: [
-        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
-        ValueTy.i32, ValueTy.i32
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32
       ],
       results: [ValueTy.i32],
     );

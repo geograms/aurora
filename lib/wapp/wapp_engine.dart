@@ -379,7 +379,9 @@ class WappEngine {
 
   String _readStr(int ptr, int len) {
     final mem = _memory!.view;
-    return String.fromCharCodes(mem.buffer.asUint8List(ptr, len));
+    // Wapp strings are UTF-8 (post/DM text carry emoji + non-Latin scripts);
+    // fromCharCodes would read the bytes as Latin-1 and mojibake them.
+    return utf8.decode(mem.buffer.asUint8List(ptr, len), allowMalformed: true);
   }
 
   Uint8List _readBytes(int ptr, int len) {
@@ -2718,6 +2720,36 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // Engagement counts for a post id: JSON {likes, replies, mine}.
+    final halNostrStats = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final s = RnsService.instance.nostrStats(_readStr(idPtr, idLen));
+        final bytes = utf8.encode(jsonEncode(
+            {'likes': s.likes, 'replies': s.replies, 'mine': s.mine}));
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Track post ids (JSON array) so the host counts reactions/replies for them.
+    final halNostrTrack = WasmFunction(
+      (int idsPtr, int idsLen) {
+        RnsService.instance.nostrTrackStats(jsonStrList(_readStr(idsPtr, idsLen)));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Like a post: publish a kind-7 '+' reaction (host signs).
+    final halNostrReact = WasmFunction(
+      (int idPtr, int idLen) {
+        // ignore: discarded_futures
+        RnsService.instance.nostrReact(_readStr(idPtr, idLen), '');
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     // Web-of-trust author set (follows + followers + follows-of-follows) — the
     // feed subscribes kind-1 from THIS, not the global firehose.
     final halNostrWot = WasmFunction(
@@ -3116,6 +3148,9 @@ class WappEngine {
       WasmImport('hal', 'nostr_follows', halNostrFollows),
       WasmImport('hal', 'nostr_wot', halNostrWot),
       WasmImport('hal', 'nostr_discovery', halNostrDiscovery),
+      WasmImport('hal', 'nostr_stats', halNostrStats),
+      WasmImport('hal', 'nostr_track', halNostrTrack),
+      WasmImport('hal', 'nostr_react', halNostrReact),
       WasmImport('hal', 'nostr_follow', halNostrFollow),
       WasmImport('hal', 'nostr_unfollow', halNostrUnfollow),
       WasmImport('hal', 'nostr_self', halNostrSelf),

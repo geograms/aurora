@@ -3768,6 +3768,45 @@ class RnsService {
   /// posts which have gathered >2 reactions (spam gets none). Drain like any sub.
   String? nostrDiscovery() => _nostrHub?.subscribeDiscovery(minLikes: 3);
 
+  /// Track engagement (likes/replies) for the given post ids (event ids on
+  /// screen). The feed calls this as posts scroll into view.
+  void nostrTrackStats(List<String> ids) => _nostrHub?.trackStats(ids);
+
+  /// (likes, replies, likedByMe) for a post id — 0/0/false until stats arrive.
+  ({int likes, int replies, bool mine}) nostrStats(String id) {
+    final s = _nostrHub?.statsOf(id, selfPubHex);
+    if (s == null) return (likes: 0, replies: 0, mine: false);
+    return (likes: s.$1, replies: s.$2, mine: s.$3);
+  }
+
+  /// Like a post: publish a kind-7 '+' reaction referencing [eventId] by
+  /// [authorHex]. Signed with the profile key.
+  Future<String?> nostrReact(String eventId, String authorHex) async {
+    final pub = selfPubHex;
+    final priv = _profilePrivHex();
+    final hub = _nostrHub;
+    if (pub == null || priv == null || hub == null) return null;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: NostrEventKind.reaction,
+      tags: [
+        ['e', eventId],
+        if (authorHex.isNotEmpty) ['p', authorHex],
+      ],
+      content: '+',
+    );
+    try {
+      ev.sign(priv);
+    } catch (_) {
+      return null;
+    }
+    // Reflect our own like immediately in the local tally.
+    hub.recordReaction(eventId, pub);
+    await hub.publish(ev);
+    return ev.id;
+  }
+
   void nostrUnsubscribe(String subId) => _nostrHub?.unsubscribe(subId);
 
   /// Build, sign (with the active profile key — nsec never leaves the host) and

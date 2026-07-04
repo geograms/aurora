@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart' show mediaSizeHint;
@@ -701,6 +702,14 @@ class ActivityPostCard extends StatelessWidget {
                         ],
                       ),
                     ),
+                  // Plain http(s) image/video links in the text (NOSTR posts,
+                  // etc.) are fetched + shown inline (≤10 MB) or offered as a
+                  // tap-to-download card.
+                  for (final url in activityMediaUrls(body))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: _RemoteMedia(url, key: ValueKey('rm-$url')),
+                    ),
                   if (mid.isNotEmpty) _actionRow(cs, mid),
                 ],
               ),
@@ -1078,5 +1087,143 @@ class _ExpandableTextState extends State<_ExpandableText> {
           ),
       ],
     );
+  }
+}
+
+// ── Inline remote media (plain http image/video links in post text) ──────────
+
+final _activityMediaRe = RegExp(
+    r'https?://[^\s]+?\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|mov|webm|m4v)(?:\?[^\s]*)?',
+    caseSensitive: false);
+
+/// Up to 4 distinct http(s) image/video URLs mentioned in a post body.
+List<String> activityMediaUrls(String body) {
+  final out = <String>[];
+  for (final m in _activityMediaRe.allMatches(body)) {
+    final u = m.group(0)!;
+    if (!out.contains(u)) out.add(u);
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
+bool _isVideoUrl(String u) {
+  final l = u.toLowerCase().split('?').first;
+  return l.endsWith('.mp4') ||
+      l.endsWith('.mov') ||
+      l.endsWith('.webm') ||
+      l.endsWith('.m4v');
+}
+
+enum _RmState { checking, show, tooBig, error }
+
+/// Fetches + renders a media URL inline. Auto-loads when ≤10 MB (or unknown);
+/// larger files show a tap-to-download card so a big image can't auto-pull on
+/// cellular. Videos are always a tap-to-open card (no inline player).
+class _RemoteMedia extends StatefulWidget {
+  final String url;
+  const _RemoteMedia(this.url, {super.key});
+  @override
+  State<_RemoteMedia> createState() => _RemoteMediaState();
+}
+
+class _RemoteMediaState extends State<_RemoteMedia> {
+  static const int _cap = 10 * 1024 * 1024;
+  _RmState _s = _RmState.checking;
+  int _bytes = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _check();
+  }
+
+  Future<void> _check() async {
+    if (_isVideoUrl(widget.url)) {
+      if (mounted) setState(() => _s = _RmState.tooBig); // videos: tap to open
+      return;
+    }
+    try {
+      final r = await http
+          .head(Uri.parse(widget.url))
+          .timeout(const Duration(seconds: 8));
+      _bytes = int.tryParse(r.headers['content-length'] ?? '') ?? 0;
+      if (!mounted) return;
+      setState(() => _s = (_bytes > _cap) ? _RmState.tooBig : _RmState.show);
+    } catch (_) {
+      // HEAD unsupported/blocked — show anyway; the image loader caps memory.
+      if (mounted) setState(() => _s = _RmState.show);
+    }
+  }
+
+  String get _sizeLabel =>
+      _bytes > 0 ? '${(_bytes / (1024 * 1024)).toStringAsFixed(1)} MB' : '';
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    switch (_s) {
+      case _RmState.checking:
+        return const SizedBox.shrink();
+      case _RmState.tooBig:
+        final video = _isVideoUrl(widget.url);
+        return InkWell(
+          borderRadius: BorderRadius.circular(10),
+          // Images: tap to download now. Videos: no inline player, info only.
+          onTap: video ? null : () => setState(() => _s = _RmState.show),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest.withAlpha(60),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: cs.outlineVariant.withAlpha(70)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(video ? Icons.play_circle_outline : Icons.download,
+                    size: 20, color: cs.primary),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    video
+                        ? 'Video attachment'
+                        : 'Image ${_sizeLabel.isEmpty ? '' : '($_sizeLabel) '}— tap to load',
+                    style: TextStyle(color: cs.onSurface, fontSize: 13),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      case _RmState.error:
+        return const SizedBox.shrink();
+      case _RmState.show:
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 340),
+            child: Image.network(
+              widget.url,
+              fit: BoxFit.cover,
+              width: double.infinity,
+              cacheHeight: 900,
+              loadingBuilder: (c, child, prog) => prog == null
+                  ? child
+                  : Container(
+                      height: 160,
+                      alignment: Alignment.center,
+                      color: cs.surfaceContainerHighest.withAlpha(40),
+                      child: const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(strokeWidth: 2)),
+                    ),
+              errorBuilder: (c, e, s) => const SizedBox.shrink(),
+            ),
+          ),
+        );
+    }
   }
 }

@@ -380,6 +380,11 @@ class _WappPageState extends State<WappPage>
   /// page rebuilds with newly-arrived replies/likes.
   final ValueNotifier<int> _activityRev = ValueNotifier<int>(0);
 
+  /// Absolute like/reply counts a wapp pushes for its posts via
+  /// `ui.activity.stats` (keyed by post mid). Generic: any wapp can report
+  /// engagement it tracks itself (e.g. NOSTR relay reactions).
+  final Map<String, ({int likes, int replies, bool mine})> _wappPostStats = {};
+
   /// Periodic FEED backfill over Reticulum (complements APRS-IS, which loses
   /// messages): asks peers for FEED notes since the last sweep.
   Timer? _feedBackfillTimer;
@@ -1522,6 +1527,21 @@ class _WappPageState extends State<WappPage>
             _activityArchive?.setReaction(
                 mid, from, data['like'] == true, data['mine'] == true);
             _activityRev.value++; // refresh any open thread page
+            changed = true;
+          }
+        } else if (type == 'ui.activity.stats') {
+          // A wapp reports absolute like/reply counts for a post (mid) it tracks
+          // itself. Generic — the host just stores + renders them.
+          final mid = (data['mid'] ?? '').toString();
+          if (mid.isNotEmpty) {
+            _wappPostStats[mid] = (
+              likes: (data['likes'] as num?)?.toInt() ?? 0,
+              replies: (data['replies'] as num?)?.toInt() ?? 0,
+              mine: data['mine'] == true,
+            );
+            if (_wappPostStats.length > 1000) {
+              _wappPostStats.remove(_wappPostStats.keys.first);
+            }
             changed = true;
           }
         } else if (type == 'ui.activity.filter') {
@@ -3898,6 +3918,8 @@ class _WappPageState extends State<WappPage>
       final posts = _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
       return ActivityFeed(
         posts: posts,
+        replyCount: (mid) =>
+            _wappPostStats[mid]?.replies ?? (_activityArchive?.replyCount(mid) ?? 0),
         onAttach: _attachImageOrVideoToChat,
         onItemTap: _openConvoFromFeed,
         onSenderTap: _openProfile,
@@ -3914,15 +3936,20 @@ class _WappPageState extends State<WappPage>
           _fieldValues['activity_call'] = from;
           _sendCommand('activity_mute');
         },
-        likeInfo: (mid) =>
-            _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false),
+        likeInfo: (mid) {
+          // A wapp can push absolute counts via ui.activity.stats (e.g. a NOSTR
+          // wapp reporting relay reactions); otherwise fall back to the archive's
+          // own like tally.
+          final s = _wappPostStats[mid];
+          if (s != null) return (count: s.likes, mine: s.mine);
+          return _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false);
+        },
         isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
         savedPosts: () =>
             _activityArchive?.savedPosts() ?? const <Map<String, dynamic>>[],
         onLike: (mid, like) {
-          // Reuse the group like-vote wire: the wapp sends "<mid>:like/unlike"
-          // to the FEED group and echoes a ui.activity.react (mine=true), which
-          // the outbox loop tallies + repaints.
+          // Generic: hand the like to the wapp (it decides what a "like" means —
+          // APRS group vote, NOSTR kind-7 reaction, …).
           _fieldValues['activity_mid'] = mid;
           _fieldValues['activity_unlike'] = !like;
           _sendCommand('activity_like');
@@ -3937,7 +3964,6 @@ class _WappPageState extends State<WappPage>
         },
         selfAvatar: _loadSelfProfile().avatar,
         profileFor: _streamProfileFor,
-        replyCount: (mid) => _activityArchive?.replyCount(mid) ?? 0,
         onOpenThread: _openActivityThread,
         onSend: (text) {
           _fieldValues['${name}_input'] = text;

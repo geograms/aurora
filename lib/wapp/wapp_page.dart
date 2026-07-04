@@ -1359,6 +1359,13 @@ class _WappPageState extends State<WappPage>
               existing.clear();
               changed = true;
             }
+            // The Activity feed is backed by a persisted archive — wipe it too,
+            // else cleared posts reappear on the next rebuild/restart.
+            if (fieldName == 'activity') {
+              _activityArchive?.clearAll();
+              _activityRev.value++;
+              changed = true;
+            }
           }
         } else if (type == 'ui.convo.upsert') {
           final field = data['field'] as String? ?? 'conversations';
@@ -3242,9 +3249,11 @@ class _WappPageState extends State<WappPage>
     final tc = _tabController;
     if (tc == null || _tabScreens.isEmpty) return const [];
     final s = _tabScreens[tc.index];
-    final isPeople =
-        s.children.any((c) => c.keyword == 'field' && c.type == 'people');
-    if (!isPeople) return const [];
+    // Screens whose body is a full-bleed field (people list or chat feed) can't
+    // show inline action buttons, so their actions surface in the options menu.
+    final fullBleed = s.children.any((c) =>
+        c.keyword == 'field' && (c.type == 'people' || c.type == 'chat'));
+    if (!fullBleed) return const [];
     return s.children.where((c) => c.keyword == 'action').toList();
   }
 

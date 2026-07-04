@@ -3788,6 +3788,56 @@ class RnsService {
   void nostrFollow(String key) => followPubkey(key);
   void nostrUnfollow(String key) => unfollowPubkey(key);
 
+  /// Our own x-only pubkey (hex) — the Messages tab filters kind-4 by `#p`=this.
+  String? nostrSelfHex() => selfPubHex;
+
+  /// Encrypt (NIP-04, to [recipientHex]) + sign (profile key) + publish a kind-4
+  /// DM across every enabled relay. Returns the event id.
+  Future<String?> nostrDmSend(String recipientHex, String text) async {
+    final pub = selfPubHex;
+    final priv = _profilePrivHex();
+    final hub = _nostrHub;
+    if (pub == null || priv == null || hub == null || text.isEmpty) return null;
+    final rpub = _hexToBytes(recipientHex);
+    if (rpub == null || rpub.length != 32) return null;
+    final content = AprxSign.nip04Encrypt(
+        _scalarFromHex(priv), rpub, utf8.encode(text));
+    if (content == null) return null;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: NostrEventKind.encryptedDirectMessage,
+      tags: [
+        ['p', recipientHex.toLowerCase()]
+      ],
+      content: content,
+    );
+    try {
+      ev.sign(priv);
+    } catch (e) {
+      LogService.instance.add('NOSTR: DM sign failed: $e');
+      return null;
+    }
+    await hub.publish(ev);
+    return ev.id;
+  }
+
+  /// Decrypt a kind-4 [content] sent by [senderHex] with the profile key
+  /// (NIP-04). Returns plaintext, or null if it isn't ours / can't decrypt.
+  String? nostrDmDecrypt(String senderHex, String content) {
+    final priv = _profilePrivHex();
+    if (priv == null) return null;
+    final authorX = _hexToBytes(senderHex);
+    if (authorX == null || authorX.length != 32) return null;
+    final pt = AprxSign.nip04Decrypt(_scalarFromHex(priv), authorX, content);
+    if (pt == null) return null;
+    try {
+      return utf8.decode(pt);
+    } catch (_) {
+      return null;
+    }
+  }
+
   String? _profilePrivHex() {
     final nsec = ProfileService.instance.activeProfile?.nsec;
     if (nsec == null || nsec.isEmpty) return null;

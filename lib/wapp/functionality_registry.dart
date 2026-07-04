@@ -352,6 +352,18 @@ class FunctionalityRegistry {
       EndpointDef('hal_nostr_unfollow', 'Unfollow a pubkey', [
         ParamDef('key', 'string', 'pubkey hex or npub'),
       ], ReturnDef('int', '1')),
+      EndpointDef('hal_nostr_self', 'Our own x-only pubkey (hex)', [],
+          ReturnDef('uint32', 'Bytes written, 0 if none')),
+      EndpointDef('hal_nostr_dm_send',
+          'Encrypt (NIP-04) + sign + publish a kind-4 DM', [
+        ParamDef('recipient', 'string', 'recipient pubkey (hex)'),
+        ParamDef('text', 'string', 'plaintext'),
+      ], ReturnDef('int', '1 queued, -1 error')),
+      EndpointDef('hal_nostr_dm_decrypt',
+          'Decrypt a kind-4 content from a sender (profile key)', [
+        ParamDef('sender', 'string', 'sender pubkey (hex)'),
+        ParamDef('content', 'string', 'encrypted content'),
+      ], ReturnDef('uint32', 'plaintext bytes written, 0 if not ours')),
     ]),
     'hal.contacts': FunctionalityDef(
         'hal.contacts', 'Known people (reusable contact picker source)', [

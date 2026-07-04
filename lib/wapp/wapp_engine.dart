@@ -2722,6 +2722,47 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // Our own x-only pubkey (hex) — for the Messages tab's kind-4 #p filter.
+    final halNostrSelf = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final hex = RnsService.instance.nostrSelfHex() ?? '';
+        final bytes = utf8.encode(hex);
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Encrypt (NIP-04) + sign + publish a kind-4 DM to [recipient] (hex).
+    final halNostrDmSend = WasmFunction(
+      (int recPtr, int recLen, int textPtr, int textLen) {
+        final rec = _readStr(recPtr, recLen);
+        final text = _readStr(textPtr, textLen);
+        if (rec.isEmpty || text.isEmpty) return -1;
+        // ignore: discarded_futures
+        RnsService.instance.nostrDmSend(rec, text);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Decrypt a kind-4 [content] from [sender] (hex) with the profile key.
+    final halNostrDmDecrypt = WasmFunction(
+      (int sndPtr, int sndLen, int cPtr, int cLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final pt = RnsService.instance
+            .nostrDmDecrypt(_readStr(sndPtr, sndLen), _readStr(cPtr, cLen));
+        if (pt == null) return 0;
+        final bytes = utf8.encode(pt);
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [
+        ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32
+      ],
+      results: [ValueTy.i32],
+    );
     // ── Reticulum visualization/management HAL (read-only) ───────────────────
     // These expose the node's observed network + status + bootstrap hubs as JSON
     // so the "reticulum" wapp can render an interactive graph. Config (add/remove/
@@ -3054,6 +3095,9 @@ class WappEngine {
       WasmImport('hal', 'nostr_follows', halNostrFollows),
       WasmImport('hal', 'nostr_follow', halNostrFollow),
       WasmImport('hal', 'nostr_unfollow', halNostrUnfollow),
+      WasmImport('hal', 'nostr_self', halNostrSelf),
+      WasmImport('hal', 'nostr_dm_send', halNostrDmSend),
+      WasmImport('hal', 'nostr_dm_decrypt', halNostrDmDecrypt),
       WasmImport('hal', 'rns_status', halRnsStatus),
       WasmImport('hal', 'mesh_status', halMeshStatus),
       WasmImport('hal', 'mesh_devices', halMeshDevices),

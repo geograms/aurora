@@ -3764,6 +3764,10 @@ class RnsService {
   List<Map<String, dynamic>> nostrDrain(String subId, {int max = 50}) =>
       _nostrHub?.drainEvents(subId, max: max) ?? const [];
 
+  /// Discovery feed for users who follow nobody: a subId that only yields kind-1
+  /// posts which have gathered >2 reactions (spam gets none). Drain like any sub.
+  String? nostrDiscovery() => _nostrHub?.subscribeDiscovery(minLikes: 3);
+
   void nostrUnsubscribe(String subId) => _nostrHub?.unsubscribe(subId);
 
   /// Build, sign (with the active profile key — nsec never leaves the host) and

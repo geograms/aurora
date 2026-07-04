@@ -2705,6 +2705,19 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // Discovery feed (no follows yet): a subId that only yields posts with >2
+    // reactions, so a new user sees quality instead of the raw spam firehose.
+    final halNostrDiscovery = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final sub = RnsService.instance.nostrDiscovery();
+        if (sub == null) return 0;
+        final bytes = utf8.encode(sub);
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     // Web-of-trust author set (follows + followers + follows-of-follows) — the
     // feed subscribes kind-1 from THIS, not the global firehose.
     final halNostrWot = WasmFunction(
@@ -3102,6 +3115,7 @@ class WappEngine {
       WasmImport('hal', 'nostr_post', halNostrPost),
       WasmImport('hal', 'nostr_follows', halNostrFollows),
       WasmImport('hal', 'nostr_wot', halNostrWot),
+      WasmImport('hal', 'nostr_discovery', halNostrDiscovery),
       WasmImport('hal', 'nostr_follow', halNostrFollow),
       WasmImport('hal', 'nostr_unfollow', halNostrUnfollow),
       WasmImport('hal', 'nostr_self', halNostrSelf),

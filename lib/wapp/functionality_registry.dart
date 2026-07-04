@@ -349,6 +349,9 @@ class FunctionalityRegistry {
       EndpointDef('hal_nostr_wot',
           'Web-of-trust author set (follows + followers + follows-of-follows) JSON array',
           [], ReturnDef('uint32', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_nostr_discovery',
+          'Start/return the discovery feed subId (only posts with >2 reactions; for users with no follows)',
+          [], ReturnDef('uint32', 'subId bytes written, 0 if unavailable')),
       EndpointDef('hal_nostr_follow', 'Follow a pubkey (hex or npub)', [
         ParamDef('key', 'string', 'pubkey hex or npub'),
       ], ReturnDef('int', '1')),

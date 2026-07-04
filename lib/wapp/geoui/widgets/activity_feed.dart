@@ -677,9 +677,10 @@ class ActivityPostCard extends StatelessWidget {
                   if (body.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 3),
-                      child: Text(body,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 14, height: 1.3)),
+                      // Long notes (some are thousands of chars) are clamped with
+                      // a "More" toggle so one post can't blow up the row.
+                      child: _ExpandableText(body,
+                          key: ValueKey('body-${mid.isNotEmpty ? mid : '$from$body'.hashCode}')),
                     ),
                   if (refs.isNotEmpty)
                     Padding(
@@ -1032,6 +1033,50 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// A post body that clamps very long notes (some relays carry thousands of
+/// characters) to a preview with a "More" toggle, so one post can't dominate
+/// the feed. State is keyed by the post id so it survives list rebuilds.
+class _ExpandableText extends StatefulWidget {
+  final String text;
+  const _ExpandableText(this.text, {super.key});
+  @override
+  State<_ExpandableText> createState() => _ExpandableTextState();
+}
+
+class _ExpandableTextState extends State<_ExpandableText> {
+  bool _expanded = false;
+  static const int _limit = 560;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = widget.text;
+    final long = t.length > _limit;
+    final shown =
+        (_expanded || !long) ? t : '${t.substring(0, _limit).trimRight()}…';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(shown,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 14, height: 1.3)),
+        if (long)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(_expanded ? 'Less' : 'More',
+                  style: const TextStyle(
+                      color: ChatPalette.accent,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600)),
+            ),
+          ),
+      ],
     );
   }
 }

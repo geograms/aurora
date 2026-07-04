@@ -516,15 +516,25 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
 
   Future<void> _addProfileFlow() async {
     // Push the welcome page as a modal to generate / import another
-    // profile. On completion, saveAndActivate fires the notifier and
-    // this widget rebuilds with the fresh display name. canCancel
-    // adds a back arrow and leaves the user inside the current
-    // profile if they bail out.
-    await Navigator.of(context).push(
+    // profile. canCancel adds a back arrow and leaves the user inside the
+    // current profile if they bail out.
+    //
+    // Capture the Navigator BEFORE the await: on completion the WelcomePage
+    // calls saveAndActivate, which flips activeProfileNotifier and rebuilds
+    // the launcher's home subtree under a NEW profile-id key — deactivating
+    // THIS page's context. Popping via `Navigator.of(context)` inside the
+    // onComplete callback would then look up a deactivated widget and throw
+    // (the "something was null" error the user saw, even though the profile
+    // had already been saved). The Navigator state itself survives the
+    // rebuild, so hold a direct reference and pop through that.
+    final navigator = Navigator.of(context);
+    await navigator.push(
       MaterialPageRoute(
         builder: (_) => WelcomePage(
           canCancel: true,
-          onComplete: () => Navigator.of(context).pop(),
+          onComplete: () {
+            if (navigator.canPop()) navigator.pop();
+          },
         ),
         fullscreenDialog: true,
       ),

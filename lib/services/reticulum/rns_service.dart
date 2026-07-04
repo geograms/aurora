@@ -1410,6 +1410,17 @@ class RnsService {
         // links are routable — the fix that makes device-to-device folder
         // discovery work on busy/asymmetric public hubs.
         requestPath: (h) => _transport?.requestPath(h),
+        // Pin an outbound file link to its dest's path interface (the LAN) up
+        // front, so our GET_FILE/resource traffic can't be flipped onto a slow
+        // hub by a proof copy arriving there.
+        onLinkOpened: (linkId, destHash) {
+          final via = _transport?.pathFor(destHash)?.via;
+          if (via != null) _transport?.noteLinkIface(linkId, via);
+        },
+        // (LAN link-failure demotion intentionally NOT wired: the LAN lane is
+        // reliable unicast now, so demoting it on a transient miss only flapped
+        // co-located transfers onto a slower/again-failing hub. noteLinkFailure
+        // stays available for a future, less trigger-happy policy.)
         // Count a download whenever we serve a file's manifest to another node.
         // Both the media-archive metric (for archived files) and the serve-stats
         // store (works for disk-folder files too — they're never in the archive).

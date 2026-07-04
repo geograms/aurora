@@ -910,6 +910,11 @@ class _WappPageState extends State<WappPage>
     _wappData = wappData;
     _geoArchive = GeoChatArchive.forStorage(wappData);
     _activityArchive = ActivityArchive.forStorage(wappData);
+    // NOSTR web of trust: never firehose-evict posts from people the user
+    // follows or who follow them. Harmless for other wapps (their callsign
+    // authors never intersect the hex-pubkey trust set).
+    _activityArchive!.protectedAuthors =
+        () => RnsService.instance.nostrProtectedAuthors().toSet();
     // Coin wallet bridge: backs the "wallet" wapp's coin.* messages. Lazy — the
     // holdings DB is only opened when a coin operation actually runs.
     _coinBridge = CoinHostBridge(wappData);

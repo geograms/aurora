@@ -156,6 +156,11 @@ class RnsService {
   // NOSTR client hub (wss:// + rns:// + local) + this device's own wss server.
   NostrRelayHub? _nostrHub;
   NostrWsServer? _nostrWs;
+  // Web of trust: people who follow us (kind-3 that #p us) and the people our
+  // follows follow (degree-2). The feed reads from this set, not the firehose.
+  final Set<String> _nostrFollowers = {};
+  final Set<String> _nostrDeg2 = {};
+  String? _nostrWotSub;
 
   // Store-and-forward hosting: the set of NOSTR pubkeys (hex) the local user
   // follows, used to classify hosted content into the "followed" retention tier.
@@ -1608,11 +1613,14 @@ class RnsService {
                 ? NostrRnsClient(_relay!, id, uri: uri)
                 : null;
           },
-          onStored: (ev) => _nostrWs?.broadcast(ev),
+          onStored: (ev) {
+            _nostrWs?.broadcast(ev);
+            _absorbNostrWot(ev);
+          },
           log: (m) => LogService.instance.add('NOSTR/hub: $m'),
         );
         // ignore: discarded_futures
-        _nostrHub!.init();
+        _nostrHub!.init().then((_) => _refreshNostrWot());
       } catch (e) {
         LogService.instance.add('RNS/relay: disabled (store open failed: $e)');
         _relay = null;
@@ -3785,8 +3793,15 @@ class RnsService {
 
   /// Followed NOSTR pubkeys (hex) — the feed's author set.
   List<String> nostrFollows() => _follows.asSet.toList();
-  void nostrFollow(String key) => followPubkey(key);
-  void nostrUnfollow(String key) => unfollowPubkey(key);
+  void nostrFollow(String key) {
+    followPubkey(key);
+    _refreshNostrWot();
+  }
+
+  void nostrUnfollow(String key) {
+    unfollowPubkey(key);
+    _refreshNostrWot();
+  }
 
   /// Our own x-only pubkey (hex) — the Messages tab filters kind-4 by `#p`=this.
   String? nostrSelfHex() => selfPubHex;
@@ -3837,6 +3852,68 @@ class RnsService {
       return null;
     }
   }
+
+  // ── NOSTR web of trust (kills the global-firehose spam) ─────────────────────
+
+  /// Learn the graph from kind-3 contact lists: our follows' follows become
+  /// degree-2 trust; anyone whose list #p's us is a follower.
+  void _absorbNostrWot(NostrEvent ev) {
+    if (ev.kind != NostrEventKind.contacts) return;
+    final self = selfPubHex?.toLowerCase();
+    var followsUs = false;
+    final ps = <String>[];
+    for (final t in ev.tags) {
+      if (t.length >= 2 && t[0] == 'p') {
+        final p = t[1].toLowerCase();
+        ps.add(p);
+        if (self != null && p == self) followsUs = true;
+      }
+    }
+    if (followsUs) _nostrFollowers.add(ev.pubkey.toLowerCase());
+    if (_follows.asSet.contains(ev.pubkey) && _nostrDeg2.length < 4000) {
+      _nostrDeg2.addAll(ps);
+    }
+  }
+
+  /// (Re)subscribe kind-3 for our follows (→ degree-2) and for lists that #p us
+  /// (→ followers). Events land via [_absorbNostrWot] on merge.
+  void _refreshNostrWot() {
+    final hub = _nostrHub;
+    if (hub == null) return;
+    final self = selfPubHex;
+    final follows = _follows.asSet.toList();
+    if (_nostrWotSub != null) hub.unsubscribe(_nostrWotSub!);
+    final filters = <NostrFilter>[];
+    if (follows.isNotEmpty) {
+      filters.add(NostrFilter(kinds: const [3], authors: follows));
+    }
+    if (self != null) {
+      filters.add(NostrFilter(kinds: const [3], tags: {'p': [self]}));
+    }
+    if (filters.isEmpty) {
+      _nostrWotSub = null;
+      return;
+    }
+    _nostrWotSub = hub.subscribe(filters);
+  }
+
+  /// Feed author set = follows ∪ followers ∪ follows-of-follows (capped). The
+  /// wapp subscribes kind-1 from THIS instead of the global firehose.
+  List<String> nostrWot() {
+    final s = <String>{}
+      ..addAll(_follows.asSet)
+      ..addAll(_nostrFollowers)
+      ..addAll(_nostrDeg2);
+    // Cap to a relay-friendly REQ size (huge author lists get rejected).
+    return s.length > 500 ? s.take(500).toList() : s.toList();
+  }
+
+  /// Authors whose posts are exempt from firehose eviction (direct trust:
+  /// people we follow or who follow us). The activity archive keeps these.
+  List<String> nostrProtectedAuthors() => (<String>{}
+        ..addAll(_follows.asSet)
+        ..addAll(_nostrFollowers))
+      .toList();
 
   String? _profilePrivHex() {
     final nsec = ProfileService.instance.activeProfile?.nsec;

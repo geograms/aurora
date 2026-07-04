@@ -2705,6 +2705,17 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // Web-of-trust author set (follows + followers + follows-of-follows) — the
+    // feed subscribes kind-1 from THIS, not the global firehose.
+    final halNostrWot = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(jsonEncode(RnsService.instance.nostrWot()));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     final halNostrFollow = WasmFunction(
       (int keyPtr, int keyLen) {
         RnsService.instance.nostrFollow(_readStr(keyPtr, keyLen));
@@ -3090,6 +3101,7 @@ class WappEngine {
       WasmImport('hal', 'nostr_unsubscribe', halNostrUnsubscribe),
       WasmImport('hal', 'nostr_post', halNostrPost),
       WasmImport('hal', 'nostr_follows', halNostrFollows),
+      WasmImport('hal', 'nostr_wot', halNostrWot),
       WasmImport('hal', 'nostr_follow', halNostrFollow),
       WasmImport('hal', 'nostr_unfollow', halNostrUnfollow),
       WasmImport('hal', 'nostr_self', halNostrSelf),

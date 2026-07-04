@@ -346,6 +346,9 @@ class FunctionalityRegistry {
       ], ReturnDef('int', '0 (event appears on the next feed drain)')),
       EndpointDef('hal_nostr_follows', 'Followed pubkeys (hex) JSON array', [],
           ReturnDef('uint32', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_nostr_wot',
+          'Web-of-trust author set (follows + followers + follows-of-follows) JSON array',
+          [], ReturnDef('uint32', 'Bytes written, negated required size if too small')),
       EndpointDef('hal_nostr_follow', 'Follow a pubkey (hex or npub)', [
         ParamDef('key', 'string', 'pubkey hex or npub'),
       ], ReturnDef('int', '1')),

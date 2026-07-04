@@ -3808,11 +3808,20 @@ class RnsService {
 
   /// Encrypt (NIP-04, to [recipientHex]) + sign (profile key) + publish a kind-4
   /// DM across every enabled relay. Returns the event id.
-  Future<String?> nostrDmSend(String recipientHex, String text) async {
+  Future<String?> nostrDmSend(String recipient, String text) async {
     final pub = selfPubHex;
     final priv = _profilePrivHex();
     final hub = _nostrHub;
     if (pub == null || priv == null || hub == null || text.isEmpty) return null;
+    // Accept an npub or a raw hex pubkey.
+    var recipientHex = recipient.trim();
+    if (recipientHex.startsWith('npub1')) {
+      try {
+        recipientHex = NostrCrypto.decodeNpub(recipientHex);
+      } catch (_) {
+        return null;
+      }
+    }
     final rpub = _hexToBytes(recipientHex);
     if (rpub == null || rpub.length != 32) return null;
     final content = AprxSign.nip04Encrypt(

@@ -105,10 +105,20 @@ bootstrapped and how a personal folder syncs across one account's devices.
 ## 6. Live validation status
 
 The folder model + op-log + reducer are unit-tested and the read/host/write
-capability boundaries are enforced in `reduceFolder`. Device-to-device transfer
-between two co-located phones rides the RNS link + resource layer; on the same
-LAN, path selection now prefers the LAN medium (see the LAN interface and
-`speedRank`), so a folder's files transfer directly at LAN speed rather than via
-an internet hub. Cross-network (two phones on different carriers behind
-symmetric CGNAT) direct P2P remains hard; the file layer falls back to the
-public content tier there.
+capability boundaries are enforced in `reduceFolder`. Path selection now prefers
+the LAN medium for co-located peers (see the LAN interface and `speedRank`), and
+over that LAN path **general RNS links work both directions** — validated live
+with LXMF delivery between two phones on the same Wi-Fi.
+
+**Known gap (device-to-device file/folder transfer).** Fetching a folder's file
+bytes opens a link to the provider's *files* destination and pulls an RNS
+Resource. Between two phones this link's handshake does not yet complete
+reliably: the initiator's link request reaches the provider (which accepts it),
+but the provider's proof does not consistently complete the initiator's link —
+`files: handshake attempt N failed, retrying`. Because a plain LXMF link to the
+same peer completes over the same LAN path, the fault is specific to the
+files-service link/Resource path, not the transport or path selection. Until
+that is fixed, folder *listing* (the signed op-log) can propagate but *byte*
+transfer between two phones is unreliable; the file layer's public content tier
+is the fallback. This was never validated device-to-device historically (only
+aurora↔reference on one host) and is the next focused item.

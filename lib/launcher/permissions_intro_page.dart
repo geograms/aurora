@@ -1,9 +1,10 @@
 part of 'launcher.dart';
 
-/// First-run Android intro that explains the permissions Aurora needs and
-/// requests them on Continue. Modelled on geogram's onboarding page. Shown
-/// once (gated by PreferencesService.onboardingComplete); skipped on
-/// non-Android platforms.
+/// First-run Android intro: explains and REQUESTS every permission Aurora
+/// needs, showing each one's live granted/missing state. The user cannot
+/// continue to profile creation until all required permissions are granted —
+/// so nothing surfaces a late prompt after a profile exists. Skipped on
+/// non-Android platforms (no runtime permissions).
 class PermissionsIntroPage extends StatefulWidget {
   final Future<void> Function() onComplete;
   const PermissionsIntroPage({super.key, required this.onComplete});
@@ -12,15 +13,64 @@ class PermissionsIntroPage extends StatefulWidget {
   State<PermissionsIntroPage> createState() => _PermissionsIntroPageState();
 }
 
-class _PermissionsIntroPageState extends State<PermissionsIntroPage> {
+class _PermissionsIntroPageState extends State<PermissionsIntroPage>
+    with WidgetsBindingObserver {
+  final Map<String, bool> _granted = {};
   bool _busy = false;
+  bool _allGranted = false;
 
-  Future<void> _continue() async {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The All-files (special-access) grant leaves the app for system settings;
+    // re-check when we come back so the row flips to granted without a manual
+    // refresh, and Continue enables automatically.
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final svc = AndroidPermissionsService.instance;
+    for (final item in AndroidPermissionsService.items) {
+      _granted[item.key] = await svc.isGranted(item);
+    }
+    final all = await svc.allGranted();
+    if (mounted) setState(() => _allGranted = all);
+  }
+
+  Future<void> _grant(AppPermission item) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await AndroidPermissionsService.instance.requestItem(item);
+    } catch (_) {}
+    await _refresh();
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _grantAll() async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
       await AndroidPermissionsService.instance.requestAll();
     } catch (_) {}
+    await _refresh();
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _continue() async {
+    if (!_allGranted) return;
     await widget.onComplete();
   }
 
@@ -70,13 +120,30 @@ class _PermissionsIntroPageState extends State<PermissionsIntroPage> {
                   ],
                 ),
                 const SizedBox(height: 28),
-                Text('Permissions',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.bold)),
+                Row(
+                  children: [
+                    Text('Permissions',
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    Text(
+                      _allGranted ? 'All granted' : 'Tap to grant',
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: _allGranted ? Colors.green : cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Grant these before continuing. Nothing works without them, '
+                  'and asking now means no surprise prompts later.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: cs.onSurfaceVariant),
+                ),
                 const SizedBox(height: 16),
                 for (final item in AndroidPermissionsService.items)
-                  _permissionItem(
-                      theme, _iconFor(item.title), item.title, item.desc),
+                  _permissionItem(theme, item),
                 const SizedBox(height: 8),
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -102,17 +169,31 @@ class _PermissionsIntroPageState extends State<PermissionsIntroPage> {
                   ),
                 ),
                 const SizedBox(height: 24),
+                if (!_allGranted)
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _busy ? null : _grantAll,
+                      icon: const Icon(Icons.done_all, size: 18),
+                      label: const Text('Grant all'),
+                    ),
+                  ),
+                const SizedBox(height: 8),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(
-                    onPressed: _busy ? null : _continue,
+                    // Disabled until every required permission is granted — the
+                    // gate that stops a late prompt after profile creation.
+                    onPressed: (_allGranted && !_busy) ? _continue : null,
                     child: _busy
                         ? const SizedBox(
                             width: 20,
                             height: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('Continue'),
+                        : Text(_allGranted
+                            ? 'Continue'
+                            : 'Grant permissions to continue'),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -124,20 +205,24 @@ class _PermissionsIntroPageState extends State<PermissionsIntroPage> {
     );
   }
 
-  IconData _iconFor(String title) {
-    switch (title) {
-      case 'Bluetooth':
+  IconData _iconFor(String name) {
+    switch (name) {
+      case 'bluetooth':
         return Icons.bluetooth;
-      case 'Internet':
+      case 'notifications':
+        return Icons.notifications_outlined;
+      case 'folder':
+        return Icons.folder_outlined;
+      case 'wifi':
         return Icons.wifi;
       default:
         return Icons.check_circle_outline;
     }
   }
 
-  Widget _permissionItem(
-      ThemeData theme, IconData icon, String title, String desc) {
+  Widget _permissionItem(ThemeData theme, AppPermission item) {
     final cs = theme.colorScheme;
+    final granted = _granted[item.key] ?? item.info;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Row(
@@ -149,22 +234,38 @@ class _PermissionsIntroPageState extends State<PermissionsIntroPage> {
               color: cs.surfaceContainerHighest,
               borderRadius: BorderRadius.circular(8),
             ),
-            child: Icon(icon, size: 20, color: cs.primary),
+            child: Icon(_iconFor(item.icon), size: 20, color: cs.primary),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
+                Text(item.title,
                     style: theme.textTheme.titleSmall
                         ?.copyWith(fontWeight: FontWeight.w600)),
-                Text(desc,
+                Text(item.desc,
                     style: theme.textTheme.bodySmall
                         ?.copyWith(color: cs.onSurfaceVariant)),
               ],
             ),
           ),
+          const SizedBox(width: 8),
+          // Trailing state: informational rows are auto-satisfied; required
+          // rows show a green check when granted or a Grant button when not.
+          if (item.info || granted)
+            Icon(Icons.check_circle,
+                size: 22, color: item.info ? cs.onSurfaceVariant : Colors.green)
+          else
+            TextButton(
+              onPressed: _busy ? null : () => _grant(item),
+              style: TextButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                minimumSize: Size.zero,
+              ),
+              child: const Text('Grant'),
+            ),
         ],
       ),
     );

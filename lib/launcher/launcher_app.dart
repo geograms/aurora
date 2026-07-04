@@ -92,18 +92,19 @@ class _IwiAppState extends State<IwiApp> {
     if (!_gateReady || prefs == null) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    // First-run Android permissions intro: ONLY when the BLE permissions are
-    // not yet granted AND we haven't completed onboarding. If the perms are
-    // already granted (e.g. re-install, or granted out-of-band) there is
-    // nothing to request, so skip the intro entirely — this is why it must
-    // gate on the live permission status, not just a stored flag.
-    final needIntro = platform.platformName() == 'android' &&
-        !prefs.onboardingComplete &&
-        !_permsGranted;
+    // First-run Android permissions intro: shown whenever the required
+    // permissions are NOT all granted. It gates PURELY on live status (not a
+    // stored flag), so a user who denied cannot slip past to profile creation
+    // — the intro's Continue button is disabled until everything is granted,
+    // which is what keeps any prompt from surfacing later. Already-granted
+    // (e.g. reinstall) skips it entirely.
+    final needIntro =
+        platform.platformName() == 'android' && !_permsGranted;
     if (needIntro) {
       return PermissionsIntroPage(onComplete: () async {
-        // Persist the flag (awaited so it survives an immediate restart) and
-        // re-read the live permission status after the request.
+        // Reached only once everything is granted (button was disabled
+        // otherwise). Persist the flag and flip the gate so profile
+        // creation becomes reachable.
         await prefs.setOnboardingComplete(true);
         final granted = await AndroidPermissionsService.instance.allGranted();
         if (mounted) setState(() => _permsGranted = granted);

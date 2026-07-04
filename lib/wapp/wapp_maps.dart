@@ -1700,6 +1700,26 @@ extension _WappMaps on _WappPageState {
         );
       }
       final total = box.maxHeight;
+      // While the user is typing (keyboard up), the old fixed ~150 px chat box
+      // under the Expanded map left the composer cramped and half-hidden — easy
+      // to mis-tap send, hard to actually write. So when the keyboard is open,
+      // flip to CHAT-DOMINANT: the map shrinks to a thin peek and the chat
+      // panel takes the rest, putting a full-size composer right above the
+      // keyboard. Back to the normal drag-split once the keyboard closes.
+      // Raw platform keyboard inset (View, not MediaQuery): the Scaffold's
+      // resizeToAvoidBottomInset consumes MediaQuery.viewInsets for its
+      // descendants, so that would always read 0 here.
+      final view = View.of(context);
+      final keyboardUp = view.viewInsets.bottom > 0;
+      if (keyboardUp) {
+        return Column(
+          children: [
+            SizedBox(height: (total * 0.25).clamp(80.0, 180.0), child: map),
+            _geoSplitHandle(total),
+            Expanded(child: _buildGeoChatScreen(showStatus: false)),
+          ],
+        );
+      }
       // Chat height from the user-set fraction, but never starve either side:
       // chat keeps at least its header+composer, map keeps room to pan.
       final chatH = (total * _geoSplit).clamp(150.0, total - 200.0);

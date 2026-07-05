@@ -23,10 +23,22 @@ class ProfileRoute extends StatefulWidget {
   final List<Map<String, dynamic>> posts;
   final bool following;
   final bool blocked;
+  final bool muted;
   final void Function(Map<String, dynamic> post)? onPostTap;
   final VoidCallback? onMessage;
   final void Function(bool follow)? onSetFollow;
   final void Function(bool block)? onSetBlock;
+  final void Function(bool mute)? onSetMute;
+
+  /// Profile metadata supplied DIRECTLY (e.g. a NOSTR kind-0 already cached by
+  /// the wapp): {name, about, pic, banner, nip05, website, lud16}. When present
+  /// it's applied synchronously and [fetchMetadata] is not called.
+  final Map<String, String>? metadata;
+
+  /// Name + avatar already resolved by the caller (exactly what the feed shows),
+  /// used to seed the header so it's NEVER blank while richer data loads.
+  final String? presetName;
+  final ImageProvider? presetAvatar;
 
   /// Read our own profile (name/about/avatar). Called on open and after editing.
   final SelfData Function()? loadSelf;
@@ -57,10 +69,15 @@ class ProfileRoute extends StatefulWidget {
     this.posts = const [],
     this.following = false,
     this.blocked = false,
+    this.muted = false,
     this.onPostTap,
     this.onMessage,
     this.onSetFollow,
     this.onSetBlock,
+    this.onSetMute,
+    this.metadata,
+    this.presetName,
+    this.presetAvatar,
     this.loadSelf,
     this.onEdit,
     this.fetchMetadata,
@@ -76,17 +93,45 @@ class _ProfileRouteState extends State<ProfileRoute> {
   String? _name;
   String? _about;
   ImageProvider? _avatar;
+  ImageProvider? _banner;
+  String? _nip05;
+  String? _website;
+  String? _lud16;
   List<Map<String, dynamic>>? _devices; // null = still loading / not requested
 
   @override
   void initState() {
     super.initState();
+    // Seed with the feed's already-resolved name/avatar so the header is never
+    // blank, then layer richer metadata (banner, links) on top.
+    _name = widget.presetName;
+    _avatar = widget.presetAvatar;
     if (widget.isSelf) {
       _applySelf();
     } else {
+      if (widget.metadata != null) _applyMetadata(widget.metadata!);
+      // Always try a fresh fetch too — fills banner/links/name if the preset or
+      // cached metadata was sparse.
       _fetchRemote();
     }
     _loadDevices();
+  }
+
+  void _applyMetadata(Map<String, String> m) {
+    ImageProvider? img(String? url) =>
+        (url != null && url.startsWith('http')) ? NetworkImage(url) : null;
+    setState(() {
+      final n = (m['name'] ?? '').trim();
+      if (n.isNotEmpty) _name = n;
+      if ((m['about'] ?? '').isNotEmpty) _about = m['about'];
+      final a = img(m['pic']);
+      if (a != null) _avatar = a; // never blank a seeded avatar
+      final b = img(m['banner']);
+      if (b != null) _banner = b;
+      if ((m['nip05'] ?? '').isNotEmpty) _nip05 = m['nip05'];
+      if ((m['website'] ?? '').isNotEmpty) _website = m['website'];
+      if ((m['lud16'] ?? '').isNotEmpty) _lud16 = m['lud16'];
+    });
   }
 
   Future<void> _loadDevices() async {
@@ -113,12 +158,26 @@ class _ProfileRouteState extends State<ProfileRoute> {
     final meta = await fetch();
     if (!mounted || meta == null) return;
     final picture = (meta['picture'] ?? '').toString();
+    final banner = (meta['banner'] ?? '').toString();
     setState(() {
-      _name = (meta['name'] ?? meta['display_name'] ?? '').toString();
-      _about = (meta['about'] ?? '').toString();
-      if (picture.isNotEmpty) {
-        _avatar = widget.resolveAvatar?.call(picture);
+      final n = (meta['name'] ?? meta['display_name'] ?? '').toString().trim();
+      if (n.isNotEmpty) _name = n; // don't blank a seeded name
+      if ((meta['about'] ?? '').toString().isNotEmpty) {
+        _about = meta['about'].toString();
       }
+      if (picture.isNotEmpty) {
+        final a = widget.resolveAvatar?.call(picture);
+        if (a != null) _avatar = a;
+      }
+      if (banner.startsWith('http')) _banner = NetworkImage(banner);
+      if ((meta['nip05'] ?? '').toString().isNotEmpty) {
+        _nip05 = meta['nip05'].toString();
+      }
+      if ((meta['website'] ?? '').toString().isNotEmpty) {
+        _website = meta['website'].toString();
+      }
+      final lud = (meta['lud16'] ?? meta['lud06'] ?? '').toString();
+      if (lud.isNotEmpty) _lud16 = lud;
     });
   }
 
@@ -141,9 +200,15 @@ class _ProfileRouteState extends State<ProfileRoute> {
       blocked: widget.blocked,
       onSetFollow: widget.onSetFollow,
       onSetBlock: widget.onSetBlock,
+      onSetMute: widget.onSetMute,
+      muted: widget.muted,
       displayName: _name,
       about: _about,
       avatarImage: _avatar,
+      bannerImage: _banner,
+      nip05: _nip05,
+      website: _website,
+      lud16: _lud16,
       isSelf: widget.isSelf,
       onEdit: widget.isSelf && widget.onEdit != null ? _edit : null,
       devices: _devices,

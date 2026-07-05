@@ -3968,15 +3968,83 @@ class _WappPageState extends State<WappPage>
     return _streamProfileFor(from);
   }
 
-  /// Tapping an author: show the wapp-pushed profile sheet if we have one, else
-  /// the built-in profile view.
-  void _feedSenderTap(String from) {
-    final p = _wappProfiles[from];
-    if (p != null && (p['name'] != null || p['about'] != null || p['npub'] != null)) {
-      _showWappProfileSheet(from, p);
-      return;
-    }
-    _openProfile(from);
+  /// Tapping an author: open the full-screen profile page (banner, bio, links,
+  /// their posts + Message/Follow/Mute/Block), seeded from exactly what the feed
+  /// already shows so the header is never blank.
+  void _feedSenderTap(String from) => _openNostrProfile(from);
+
+  /// Full-screen Twitter-style profile for a NOSTR author: banner + avatar +
+  /// name + bio + nip05/website/lightning + their posts, with Message, Follow,
+  /// Mute and Block actions.
+  void _openNostrProfile(String from) {
+    final arch = _activityArchive;
+    final uc = from.toUpperCase();
+    final p = _wappProfiles[from] ?? const <String, String>{};
+    // Seed name + avatar from the SAME resolver the feed uses — guarantees the
+    // profile header matches the feed even when the wapp hasn't pushed a full
+    // profile yet.
+    final feedProf = _feedProfileFor(from);
+    final npub = (p['npub']?.isNotEmpty == true)
+        ? p['npub']
+        : RnsService.instance.npubForCallsign(from);
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ProfileRoute(
+        callsign: from,
+        npub: npub,
+        metadata: p.isEmpty ? null : p,
+        presetName: feedProf.name,
+        presetAvatar: feedProf.avatar,
+        // Pull the fresh kind-0 (banner, website, lightning, name, pic) when we
+        // can resolve an npub — non-destructive, only fills what's missing.
+        fetchMetadata: npub == null
+            ? null
+            : () => RnsService.instance.fetchProfileMetadata(npub),
+        firstSeenMs: arch?.firstSeenMs(from),
+        postCount: arch?.postCount(from) ?? 0,
+        posts: arch?.byAuthor(from) ?? const [],
+        onPostTap: (post) {
+          Navigator.of(context).pop();
+          _openActivityThread(post);
+        },
+        following: _followedCalls.contains(uc),
+        blocked: _activityHidden.contains(uc),
+        muted: _activityHidden.contains(uc),
+        onMessage: () {
+          final hex = npub == null
+              ? null
+              : RnsService.instance.nostrHexFromNpub(npub);
+          Navigator.of(context).pop();
+          if (hex != null) _openConvoById(hex);
+        },
+        onSetFollow: (follow) {
+          if (follow) {
+            _followedCalls.add(uc);
+            if (npub != null) {
+              _fieldValues['follow_input'] = npub;
+              _sendCommand('follow_add');
+            }
+          } else {
+            _followedCalls.remove(uc);
+            if (npub != null) {
+              _fieldValues['follows_list_id'] = npub;
+              _sendCommand('follows_list_tap');
+            }
+          }
+          setState(() {});
+        },
+        onSetBlock: (block) {
+          _fieldValues['activity_call'] = from;
+          _sendCommand('activity_block');
+          setState(() {});
+        },
+        onSetMute: (mute) {
+          _fieldValues['activity_call'] = from;
+          _sendCommand('activity_mute');
+          setState(() {});
+        },
+        resolveAvatar: _imageForPicture,
+      ),
+    ));
   }
 
   void _showWappProfileSheet(String from, Map<String, String> p) {

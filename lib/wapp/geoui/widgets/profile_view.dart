@@ -34,6 +34,18 @@ class ProfileView extends StatefulWidget {
   final String? about; // kind-0 "about" / description
   final ImageProvider? avatarImage; // kind-0 "picture" resolved to an image
 
+  /// Extra kind-0 fields (all optional): a header banner image, a NIP-05
+  /// verified address, a website URL and a lightning address (lud16).
+  final ImageProvider? bannerImage;
+  final String? nip05;
+  final String? website;
+  final String? lud16;
+
+  /// Mute relationship + toggle (hides their posts without a full block). When
+  /// [onSetMute] is null the control is hidden.
+  final bool muted;
+  final void Function(bool mute)? onSetMute;
+
   /// This is OUR own profile: show an Edit button instead of Follow/Block.
   final bool isSelf;
   final VoidCallback? onEdit;
@@ -61,6 +73,12 @@ class ProfileView extends StatefulWidget {
     this.displayName,
     this.about,
     this.avatarImage,
+    this.bannerImage,
+    this.nip05,
+    this.website,
+    this.lud16,
+    this.muted = false,
+    this.onSetMute,
     this.isSelf = false,
     this.onEdit,
     this.devices,
@@ -74,6 +92,7 @@ class ProfileView extends StatefulWidget {
 class _ProfileViewState extends State<ProfileView> {
   late bool _following = widget.following;
   late bool _blocked = widget.blocked;
+  late bool _muted = widget.muted;
 
   String get callsign => widget.callsign;
   String? get npub => widget.npub;
@@ -97,6 +116,11 @@ class _ProfileViewState extends State<ProfileView> {
     widget.onSetBlock?.call(_blocked);
   }
 
+  void _toggleMute() {
+    setState(() => _muted = !_muted);
+    widget.onSetMute?.call(_muted);
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -107,24 +131,43 @@ class _ProfileViewState extends State<ProfileView> {
             ? widget.displayName!.trim()
             : callsign),
         actions: [
-          if (widget.onSetBlock != null)
+          if (!widget.isSelf &&
+              (widget.onSetBlock != null || widget.onSetMute != null))
             PopupMenuButton<String>(
-              onSelected: (_) => _toggleBlock(),
+              onSelected: (v) {
+                if (v == 'block') _toggleBlock();
+                if (v == 'mute') _toggleMute();
+              },
               itemBuilder: (_) => [
-                PopupMenuItem(
-                  value: 'block',
-                  child: Row(
-                    children: [
-                      Icon(_blocked ? Icons.check_circle_outline : Icons.block,
-                          size: 18,
-                          color: _blocked ? null : Colors.red),
-                      const SizedBox(width: 8),
-                      Text(_blocked ? 'Unblock $callsign' : 'Block $callsign',
-                          style:
-                              TextStyle(color: _blocked ? null : Colors.red)),
-                    ],
+                if (widget.onSetMute != null)
+                  PopupMenuItem(
+                    value: 'mute',
+                    child: Row(
+                      children: [
+                        Icon(
+                            _muted
+                                ? Icons.notifications_active_outlined
+                                : Icons.notifications_off_outlined,
+                            size: 18),
+                        const SizedBox(width: 8),
+                        Text(_muted ? 'Unmute $callsign' : 'Mute $callsign'),
+                      ],
+                    ),
                   ),
-                ),
+                if (widget.onSetBlock != null)
+                  PopupMenuItem(
+                    value: 'block',
+                    child: Row(
+                      children: [
+                        Icon(_blocked ? Icons.check_circle_outline : Icons.block,
+                            size: 18, color: _blocked ? null : Colors.red),
+                        const SizedBox(width: 8),
+                        Text(_blocked ? 'Unblock $callsign' : 'Block $callsign',
+                            style:
+                                TextStyle(color: _blocked ? null : Colors.red)),
+                      ],
+                    ),
+                  ),
               ],
             ),
         ],
@@ -135,6 +178,13 @@ class _ProfileViewState extends State<ProfileView> {
           child: ListView(
             padding: EdgeInsets.zero,
             children: [
+              if (widget.bannerImage != null)
+                Image(
+                    image: widget.bannerImage!,
+                    height: 150,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink()),
               _header(context, cs),
               Divider(height: 1, color: cs.outlineVariant.withAlpha(60)),
               if (widget.showDevices) ...[
@@ -369,6 +419,14 @@ class _ProfileViewState extends State<ProfileView> {
                 style: const TextStyle(
                     color: Colors.white, fontSize: 14, height: 1.35)),
           ],
+          if (widget.nip05?.trim().isNotEmpty == true)
+            _metaRow(cs, Icons.verified_outlined, widget.nip05!.trim()),
+          if (widget.website?.trim().isNotEmpty == true)
+            _metaRow(cs, Icons.link, widget.website!.trim(),
+                link: true, color: cs.primary),
+          if (widget.lud16?.trim().isNotEmpty == true)
+            _metaRow(cs, Icons.bolt, widget.lud16!.trim(),
+                color: const Color(0xFFF7931A)),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -396,6 +454,37 @@ class _ProfileViewState extends State<ProfileView> {
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  Widget _metaRow(ColorScheme cs, IconData icon, String text,
+      {bool link = false, Color? color}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: InkWell(
+        onTap: () {
+          Clipboard.setData(ClipboardData(text: text));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)),
+          );
+        },
+        child: Row(
+          children: [
+            Icon(icon, size: 15, color: color ?? cs.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: color ?? Colors.white.withAlpha(200),
+                      fontSize: 13,
+                      decoration:
+                          link ? TextDecoration.underline : TextDecoration.none)),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -507,8 +596,13 @@ class _ProfileViewState extends State<ProfileView> {
   }
 
   static final _fileRe = RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}');
+  static final _httpMediaRe = RegExp(
+      r'https?://[^\s]+?\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|mov|webm|m4v)(?:\?[^\s]*)?',
+      caseSensitive: false);
   static String _stripTokens(String s) => s
       .replaceAll(_fileRe, '')
+      // A NOSTR post's inline image/video URL (shown as media, not raw text).
+      .replaceAll(_httpMediaRe, '')
       // Inline thumbnail preview: tn:<base64url> (may carry '=' padding).
       .replaceAll(RegExp(r'\btn:[A-Za-z0-9_-]+=*'), '')
       .replaceAll(RegExp(r'\bih:[0-9a-fA-F]{40}\b'), '')

@@ -1,8 +1,8 @@
 # APRX — APRS eXtended messaging protocol
 
-> Part of the Aurora protocol docs — see [README](README.md) for the full set
-> ([Reticulum](reticulum.md), [DHT](dht.md), [APRS transport](aprs.md),
-> [BLE transport](ble.md), [file sharing](file-sharing.md)).
+> Part of the Geogram protocol docs — see [README](README.md) for the full set
+> ([Reticulum](../../reticulum-dart/doc/reticulum.md), [DHT](../../reticulum-dart/doc/dht.md), [APRS transport](aprs.md),
+> [BLE transport](ble.md), [file sharing](../../reticulum-dart/doc/file-sharing.md)).
 
 APRX is a thin set of **conventions layered on top of standard APRS**. Every
 APRX frame is a 100% valid APRS frame: a vanilla APRS client shows it as
@@ -203,7 +203,7 @@ chooses to pull the group:
   group's bulletins only from senders inside your radius. (APRS‑IS positions the
   sender; BLE is inherently in‑range.)
 - **Global** — additionally ask APRS‑IS for the group worldwide with a bulletin
-  filter term. Aurora adds a single catch‑all **`g/BLN*`** when any global group
+  filter term. Geogram adds a single catch‑all **`g/BLN*`** when any global group
   is subscribed, then files only the groups the user actually joined.
 
 > **APRS‑IS `g/` gotcha (verified live against aprsc):** `g/` has **no
@@ -302,9 +302,9 @@ Mapping for a receiver:
 - `pubkey`  = `base64url_decode(body)` → 32 raw bytes (use directly for NIP‑04 /
   NIP‑44 encryption, or re‑encode to `npub` for display).
 
-Recommended cadence: low (the key rarely changes) — Aurora sends one **every
+Recommended cadence: low (the key rarely changes) — Geogram sends one **every
 hour**, on whichever transports are up (APRS‑IS and/or BLE). A receiver should
-treat repeats as refreshes of the same record. Aurora only **persists** the keys
+treat repeats as refreshes of the same record. Geogram only **persists** the keys
 of callsigns it actually interacts with (chats with or follows): a NOSTR beacon
 from a stranger is parked in memory and promoted to the stored map the moment you
 interact with that callsign. These beacons are intercepted before the chat layer,
@@ -505,6 +505,20 @@ Status: **implemented** (APRS wapp ≥ 0.2.28). A direct message to a callsign
 whose public key is in the keys database (§10) is end‑to‑end encrypted so only
 that station can read it. Group messages are never encrypted.
 
+> **⚠ Legal restriction — no encryption over licensed RF.** Amateur‑radio
+> regulations (ITU Radio Regulation 25.2A and national rules such as FCC
+> Part 97.113(a)(4)) forbid transmissions that obscure their meaning on
+> licensed amateur frequencies. An `ENC1:` message must therefore **never be
+> transmitted — or be forwardable — over licensed RF**: it may travel only on
+> transports where encryption is lawful (e.g. Bluetooth LE,
+> Reticulum). Any path that could put the frame on the air — an RF TNC, a
+> digipeater, or an iGate gating traffic IS→RF — is off‑limits for encrypted
+> bodies on frequencies requiring a license; implementations must suppress
+> encryption (or refuse to send) when such a path cannot be ruled out, and
+> gateways must drop `ENC1:` frames rather than forward them onto RF.
+> Operators remain responsible for compliance with the regulations of their
+> own jurisdiction.
+
 ### 15.1 Scheme
 
 ECDH over secp256k1 + AES‑256‑CBC (NIP‑04‑style), using the same key pair behind
@@ -553,6 +567,9 @@ decrypting (the signature is computed over the space‑free `ENC1:<base64>`).
   chats); only the wire is encrypted.
 - A station learns peers' keys passively from their §10 `NOSTR` beacons, so
   encryption “just works” once two APRX stations have heard each other's key.
+- Encryption is a **transport‑gated** feature: it applies only on encryption‑
+  legal transports (APRS‑IS, BLE, Reticulum). See the legal restriction at the
+  top of this section — `ENC1:` bodies must never reach licensed RF.
 
 ---
 
@@ -663,11 +680,11 @@ also exactly what a non‑APRX client sees: retro‑compatible by construction.
 
 ---
 
-*This spec documents the Aurora APRS wapp implementation (`wapps/aprs`). The
+*This spec documents the Geogram APRS wapp implementation (`wapps/aprs`). The
 APRS-IS framing helpers live in `aprs.c`/`aprs.h`; the BLE compact form in
-`BLE_PROTOCOL.md`; the host-side crypto in `aurora/lib/util/aprx_sign.dart`
+`BLE_PROTOCOL.md`; the host-side crypto in `geogram/lib/util/aprx_sign.dart`
 (exposed via `hal_identity_sign`/`hal_verify`/`hal_encrypt`/`hal_decrypt`);
-the media token parser in `aurora/lib/util/media_ref.dart` and the media
-archive in `aurora/lib/util/media_archive.dart`. Signed messages (§14) ship
+the media token parser in `geogram/lib/util/media_ref.dart` and the media
+archive in `geogram/lib/util/media_archive.dart`. Signed messages (§14) ship
 in wapp 0.2.18; encrypted 1:1 (§15) in 0.2.28; media references (§16) are
 specified as of 0.2.35.*

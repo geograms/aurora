@@ -7,7 +7,7 @@ ways depending on payload size, and a **size router** picks between them:
 - **small payloads (chat, positions, control)** → **connectionless broadcast**:
   one advertisement per message, heard by everyone in range, no pairing;
 - **large payloads (files)** → a **GATT Reticulum link**: a point‑to‑point
-  connection that carries an encrypted [Reticulum](reticulum.md) Resource.
+  connection that carries an encrypted [Reticulum](../../reticulum-dart/doc/reticulum.md) Resource.
 
 This split is deliberate: APRS‑style chat wants cheap one‑to‑many broadcast that
 also reaches an ESP32 node, while a file needs a reliable byte pipe. The two
@@ -84,9 +84,9 @@ their map.
 For files (and any RNS packet over the broadcast cap), the GATT path carries a
 normal **Reticulum link**: the BLE interface is just another `RnsInterface`, so
 the link handshake, encryption and Resource transfer described in
-[reticulum.md](reticulum.md) §6–7 run unchanged over Bluetooth. This is how two
+[reticulum.md](../../reticulum-dart/doc/reticulum.md) §6–7 run unchanged over Bluetooth. This is how two
 phones, or a phone and the ESP32 dongle, move a file off‑grid: discovery by hash
-([dht.md](dht.md)) if reachable, otherwise a direct link to a known holder.
+([dht.md](../../reticulum-dart/doc/dht.md)) if reachable, otherwise a direct link to a known holder.
 
 ## 6. The ESP32 node
 
@@ -101,4 +101,4 @@ microSD message store queryable over HTTP/BLE.
 
 See also: [aprs.md](aprs.md) (the internet transport and the iGate that bridges
 to it), [aprx.md](aprx.md) (the message conventions carried over BLE), and
-[reticulum.md](reticulum.md) (the link/resource layer used for files).
+[reticulum.md](../../reticulum-dart/doc/reticulum.md) (the link/resource layer used for files).

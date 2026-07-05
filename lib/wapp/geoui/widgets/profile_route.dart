@@ -30,6 +30,15 @@ class ProfileRoute extends StatefulWidget {
   final void Function(bool block)? onSetBlock;
   final void Function(bool mute)? onSetMute;
 
+  /// Per-post social actions (Like / Reply / Retweet), forwarded to ProfileView.
+  final ({int count, bool mine}) Function(String mid)? likeInfo;
+  final void Function(String mid, bool like)? onLike;
+  final int Function(String mid)? replyCount;
+  final void Function(Map<String, dynamic> post)? onReplyPost;
+  final bool Function(String mid)? isReposted;
+  final void Function(Map<String, dynamic> post)? onRepost;
+  final String? Function(String npub)? mentionResolver;
+
   /// Profile metadata supplied DIRECTLY (e.g. a NOSTR kind-0 already cached by
   /// the wapp): {name, about, pic, banner, nip05, website, lud16}. When present
   /// it's applied synchronously and [fetchMetadata] is not called.
@@ -75,6 +84,13 @@ class ProfileRoute extends StatefulWidget {
     this.onSetFollow,
     this.onSetBlock,
     this.onSetMute,
+    this.likeInfo,
+    this.onLike,
+    this.replyCount,
+    this.onReplyPost,
+    this.isReposted,
+    this.onRepost,
+    this.mentionResolver,
     this.metadata,
     this.presetName,
     this.presetAvatar,
@@ -202,6 +218,13 @@ class _ProfileRouteState extends State<ProfileRoute> {
       onSetBlock: widget.onSetBlock,
       onSetMute: widget.onSetMute,
       muted: widget.muted,
+      likeInfo: widget.likeInfo,
+      onLike: widget.onLike,
+      replyCount: widget.replyCount,
+      onReplyPost: widget.onReplyPost,
+      isReposted: widget.isReposted,
+      onRepost: widget.onRepost,
+      mentionResolver: widget.mentionResolver,
       displayName: _name,
       about: _about,
       avatarImage: _avatar,

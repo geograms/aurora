@@ -2762,6 +2762,16 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // Repost a post (kind-6 "retweet"), host signs + publishes.
+    final halNostrRepost = WasmFunction(
+      (int idPtr, int idLen, int aPtr, int aLen) {
+        RnsService.instance
+            .nostrRepost(_readStr(idPtr, idLen), _readStr(aPtr, aLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // Reply to a post: publish a kind-1 note tagged e=parent (host signs).
     final halNostrReply = WasmFunction(
       (int pPtr, int pLen, int tPtr, int tLen) {
@@ -3189,6 +3199,7 @@ class WappEngine {
       WasmImport('hal', 'nostr_profile', halNostrProfile),
       WasmImport('hal', 'nostr_track', halNostrTrack),
       WasmImport('hal', 'nostr_react', halNostrReact),
+      WasmImport('hal', 'nostr_repost', halNostrRepost),
       WasmImport('hal', 'nostr_reply', halNostrReply),
       WasmImport('hal', 'nostr_replies', halNostrReplies),
       WasmImport('hal', 'nostr_follow', halNostrFollow),

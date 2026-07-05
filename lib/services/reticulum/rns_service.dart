@@ -58,6 +58,7 @@ import '../folders/folder_subscriptions.dart';
 import '../../profile/profile_service.dart';
 import '../preferences_service.dart';
 import '../../util/nostr_crypto.dart';
+import '../../util/nostr_nip19.dart';
 import '../../util/nostr_event.dart';
 import '../../util/aprx_sign.dart';
 import 'lxmf/lxmf.dart'
@@ -3786,18 +3787,17 @@ class RnsService {
     }
   }
 
-  /// Resolve a `npub1…` mention to its display name (fetching the profile if
-  /// unknown). Returns null until the name is known.
-  String? nostrMentionName(String npub) {
-    if (!npub.startsWith('npub1')) return null;
-    String hex;
-    try {
-      hex = NostrCrypto.decodeNpub(npub);
-    } catch (_) {
-      return null;
-    }
+  /// Resolve a `npub1…` / `nprofile1…` mention to its display name (fetching the
+  /// referenced profile if unknown). Returns null until the name is known.
+  String? nostrMentionName(String token) {
+    final hex = NostrNip19.decode(token.trim())?.pubkeyHex;
+    if (hex == null || hex.length != 64) return null;
+    // profile() also tracks it, so an unknown mentioned account is fetched.
     final name = _nostrHub?.profile(hex)['name'];
-    return (name != null && name.isNotEmpty) ? name : null;
+    if (name != null && name.isNotEmpty) return name;
+    // Fall back to the persistent-store index (author seen before).
+    final byIdx = _nostrHub?.profileByShort12(hex.substring(0, 12))['name'];
+    return (byIdx != null && byIdx.isNotEmpty) ? byIdx : null;
   }
 
   /// (likes, replies, likedByMe) for a post id — 0/0/false until stats arrive.
@@ -3859,6 +3859,33 @@ class RnsService {
     hub.publish(ev); // fire-and-forget to the engine
   }
 
+  /// Repost a note (NIP-18 kind-6 "retweet"): publish a signed kind-6 that
+  /// e-tags [eventId] (and p-tags [authorHex] when it's a full pubkey), so the
+  /// repost is visible on any NOSTR client.
+  void nostrRepost(String eventId, String authorHex) {
+    final pub = selfPubHex;
+    final priv = _profilePrivHex();
+    final hub = _nostrHub;
+    if (pub == null || priv == null || hub == null) return;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: 6,
+      tags: [
+        ['e', eventId],
+        if (authorHex.length == 64) ['p', authorHex],
+      ],
+      content: '',
+    );
+    try {
+      ev.sign(priv);
+    } catch (_) {
+      return;
+    }
+    // ignore: discarded_futures
+    hub.publish(ev);
+  }
+
   void nostrUnsubscribe(String subId) => _nostrHub?.unsubscribe(subId);
 
   /// Build, sign (with the active profile key — nsec never leaves the host) and
@@ -3887,9 +3914,39 @@ class RnsService {
   }
 
   /// Followed NOSTR pubkeys (hex) — the feed's author set.
-  List<String> nostrFollows() => _follows.asSet.toList();
+  List<String> nostrFollows() {
+    _mergeMyFollows();
+    return _follows.asSet.toList();
+  }
+
   void nostrFollow(String key) => followPubkey(key);
   void nostrUnfollow(String key) => unfollowPubkey(key);
+
+  /// Fold my kind-3 contact list (fetched from the relays by the engine) into
+  /// the local follow set, so follows made on OTHER NOSTR clients count too.
+  void _mergeMyFollows() {
+    final mine = _nostrHub?.myFollows();
+    if (mine == null || mine.isEmpty) return;
+    var added = false;
+    for (final h in mine) {
+      final hx = h.toLowerCase();
+      if (hx.length == 64 && !_follows.contains(hx)) {
+        _follows.add(hx);
+        added = true;
+      }
+    }
+    if (added) refreshFollowedProfiles();
+  }
+
+  /// My follows as the UI's post-key form: `short12(pubkey).toUpperCase()`, so
+  /// the feed's "Following" filter (which matches a post's `from`) resolves.
+  Set<String> nostrFollowShort12() {
+    _mergeMyFollows();
+    return {
+      for (final h in _follows.asSet)
+        if (h.length >= 12) h.substring(0, 12).toUpperCase()
+    };
+  }
 
   /// Our own x-only pubkey (hex) — the Messages tab filters kind-4 by `#p`=this.
   String? nostrSelfHex() => selfPubHex;

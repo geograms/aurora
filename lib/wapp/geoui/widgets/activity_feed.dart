@@ -37,6 +37,8 @@ class ActivityFeed extends StatefulWidget {
   final bool Function(String mid)? isSaved;
   final void Function(String mid, bool like)? onLike;
   final void Function(Map<String, dynamic> post)? onSave;
+  final bool Function(String mid)? isReposted;
+  final void Function(Map<String, dynamic> post)? onRepost;
   /// Bookmarked posts, newest-first, for the Favorites tab.
   final List<Map<String, dynamic>> Function()? savedPosts;
 
@@ -88,6 +90,8 @@ class ActivityFeed extends StatefulWidget {
     this.isSaved,
     this.onLike,
     this.onSave,
+    this.isReposted,
+    this.onRepost,
     this.savedPosts,
     this.onSelfTap,
     this.selfAvatar,
@@ -241,6 +245,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
                           onLike: widget.onLike,
                           isSaved: widget.isSaved,
                           onSave: widget.onSave,
+                          isReposted: widget.isReposted,
+                          onRepost: widget.onRepost,
                           replyCount: widget.replyCount,
                           onBlock: widget.onBlock,
                           onMute: widget.onMute,
@@ -593,6 +599,10 @@ class ActivityPostCard extends StatelessWidget {
   final void Function(Map<String, dynamic> post)? onSave;
   final int Function(String mid)? replyCount;
 
+  /// Repost (kind-6 "retweet"): whether we've reposted, and the toggle action.
+  final bool Function(String mid)? isReposted;
+  final void Function(Map<String, dynamic> post)? onRepost;
+
   /// Tapping the card body (open the thread). Null = not tappable.
   final VoidCallback? onTap;
 
@@ -621,6 +631,8 @@ class ActivityPostCard extends StatelessWidget {
     this.isSaved,
     this.onSave,
     this.replyCount,
+    this.isReposted,
+    this.onRepost,
     this.onBlock,
     this.onMute,
     this.onTap,
@@ -854,6 +866,15 @@ class ActivityPostCard extends StatelessWidget {
               muted, onReply),
           const SizedBox(width: 18),
           action(
+            Icons.repeat,
+            null,
+            (isReposted?.call(mid) ?? false)
+                ? const Color(0xFF00BA7C)
+                : muted,
+            onRepost == null ? null : () => onRepost!(post),
+          ),
+          const SizedBox(width: 18),
+          action(
             saved ? Icons.bookmark : Icons.bookmark_border,
             null,
             saved ? ChatPalette.accent : muted,
@@ -882,6 +903,8 @@ class ActivityThreadPage extends StatefulWidget {
   final void Function(String mid, bool like)? onLike;
   final bool Function(String mid)? isSaved;
   final void Function(Map<String, dynamic> post)? onSave;
+  final bool Function(String mid)? isReposted;
+  final void Function(Map<String, dynamic> post)? onRepost;
 
   /// Post a reply [text] under message [parentMid].
   final void Function(String parentMid, String text) onReply;
@@ -910,6 +933,8 @@ class ActivityThreadPage extends StatefulWidget {
     this.onLike,
     this.isSaved,
     this.onSave,
+    this.isReposted,
+    this.onRepost,
     this.onSenderTap,
     this.profileFor,
     this.npubFor,
@@ -1036,6 +1061,8 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                       onLike: widget.onLike,
                       isSaved: widget.isSaved,
                       onSave: widget.onSave,
+                      isReposted: widget.isReposted,
+                      onRepost: widget.onRepost,
                       replyCount: widget.replyCount,
                       indent: depth * 16.0,
                       connector: depth > 0,
@@ -1216,20 +1243,24 @@ List<String> activityMediaUrls(String body) {
 }
 
 final _activityMentionRe = RegExp(
-    r'nostr:(npub1[023456789acdefghjklmnpqrstuvwxyz]{20,}|nprofile1[023456789acdefghjklmnpqrstuvwxyz]{20,})',
+    r'nostr:((?:npub1|nprofile1|nevent1|note1|naddr1)[023456789acdefghjklmnpqrstuvwxyz]{20,})',
     caseSensitive: false);
 
-/// Replace `nostr:npub1…` / `nostr:nprofile1…` mentions with `@Name` (via
-/// [resolve]) or a short `@npub1abcd…` when the name isn't known yet.
+/// Turn NIP-19 `nostr:` references into readable text:
+///   • `npub1…` / `nprofile1…`  → `@Name` (via [resolve]) or a short `@npub1…`,
+///   • `nevent1…` / `note1…` / `naddr1…` → a compact `↗ note` (a quoted note),
+/// instead of dumping the raw 60-char bech32 string into the post.
 String activityFormatMentions(String body, String? Function(String npub)? resolve) {
   if (!body.contains('nostr:')) return body;
   return body.replaceAllMapped(_activityMentionRe, (m) {
     final token = m.group(1)!;
-    if (token.toLowerCase().startsWith('npub1')) {
+    final lower = token.toLowerCase();
+    if (lower.startsWith('npub1') || lower.startsWith('nprofile1')) {
       final name = resolve?.call(token);
       if (name != null && name.isNotEmpty) return '@$name';
+      return '@${token.substring(0, 10)}…';
     }
-    return '@${token.substring(0, 10)}…';
+    return '↗ note'; // nevent / note / naddr — a reference to another note
   });
 }
 

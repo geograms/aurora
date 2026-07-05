@@ -398,6 +398,21 @@ class _WappPageState extends State<WappPage>
   File? _wappProfilesFile;
   Timer? _wappProfilesSaveTimer;
 
+  /// Posts we've reposted (kind-6 "retweet"), by mid — for the optimistic
+  /// green Retweet state in the feed / thread / profile.
+  final Set<String> _wappReposted = {};
+
+  /// Repost a publication (kind-6): tell the wapp + reflect it immediately.
+  void _repostPost(Map<String, dynamic> post) {
+    final mid = (post['mid'] ?? '').toString();
+    if (mid.isEmpty || _wappReposted.contains(mid)) return;
+    _wappReposted.add(mid);
+    _fieldValues['activity_mid'] = mid;
+    _fieldValues['activity_author'] = (post['from'] ?? '').toString();
+    _sendCommand('activity_repost');
+    setState(() {});
+  }
+
   /// Periodic FEED backfill over Reticulum (complements APRS-IS, which loses
   /// messages): asks peers for FEED notes since the last sweep.
   Timer? _feedBackfillTimer;
@@ -4073,6 +4088,27 @@ class _WappPageState extends State<WappPage>
           Navigator.of(context).pop();
           _openActivityThread(post);
         },
+        // Per-post Like / Reply / Retweet, same wiring as the feed.
+        mentionResolver: RnsService.instance.nostrMentionName,
+        likeInfo: (m) {
+          final s = _wappPostStats[m];
+          if (s != null) return (count: s.likes, mine: s.mine);
+          return _activityArchive?.likeInfo(m) ?? (count: 0, mine: false);
+        },
+        onLike: (m, like) {
+          _fieldValues['activity_mid'] = m;
+          _fieldValues['activity_unlike'] = !like;
+          _sendCommand('activity_like');
+          setState(() {});
+        },
+        replyCount: (m) =>
+            _wappPostStats[m]?.replies ?? (_activityArchive?.replyCount(m) ?? 0),
+        onReplyPost: (post) {
+          Navigator.of(context).pop();
+          _openActivityThread(post);
+        },
+        isReposted: (m) => _wappReposted.contains(m),
+        onRepost: _repostPost,
         following: _followedCalls.contains(uc),
         blocked: _activityHidden.contains(uc),
         muted: _activityHidden.contains(uc),
@@ -4236,7 +4272,12 @@ class _WappPageState extends State<WappPage>
         onSenderTap: _feedSenderTap,
         npubFor: (c) =>
             _wappProfiles[c]?['npub'] ?? RnsService.instance.npubForCallsign(c),
-        followedCalls: _followedCalls,
+        // Follow set for the "Following" filter: the host's own follows PLUS my
+        // NOSTR contact list (kind-3), keyed to match a post's `from`.
+        followedCalls: {
+          ..._followedCalls,
+          ...RnsService.instance.nostrFollowShort12(),
+        },
         hiddenCalls: _activityHidden,
         onBlock: (from) {
           if (from.isEmpty) return;
@@ -4271,6 +4312,8 @@ class _WappPageState extends State<WappPage>
           _keepPostMedia(post); // pinned/saved — keep its media
           setState(() {});
         },
+        isReposted: (mid) => _wappReposted.contains(mid),
+        onRepost: _repostPost,
         onSelfTap: () {
           final self = ProfileService.instance.activeProfile;
           if (self != null) _openProfile(self.callsign);
@@ -4590,6 +4633,11 @@ class _WappPageState extends State<WappPage>
         isSaved: (m) => _activityArchive?.isSaved(m) ?? false,
         onSave: (p) {
           _activityArchive?.toggleSaved(p);
+          _activityRev.value++;
+        },
+        isReposted: (m) => _wappReposted.contains(m),
+        onRepost: (p) {
+          _repostPost(p);
           _activityRev.value++;
         },
         onReply: (parentMid, text) {

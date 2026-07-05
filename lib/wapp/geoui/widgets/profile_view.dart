@@ -8,6 +8,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart' show mediaSizeHint;
+import 'activity_feed.dart' show activityFormatMentions;
 import 'chat_view_field.dart' show viaTagColor;
 import 'generated_avatar.dart';
 import 'media_view.dart';
@@ -20,6 +21,17 @@ class ProfileView extends StatefulWidget {
   final List<Map<String, dynamic>> posts; // oldest→newest
   final void Function(Map<String, dynamic> post)? onPostTap;
   final VoidCallback? onMessage;
+
+  /// Per-post social actions (Like / Reply / Retweet), mirroring the feed. When
+  /// a callback is null the corresponding control is hidden. Keyed by the post's
+  /// `mid`.
+  final ({int count, bool mine}) Function(String mid)? likeInfo;
+  final void Function(String mid, bool like)? onLike;
+  final int Function(String mid)? replyCount;
+  final void Function(Map<String, dynamic> post)? onReplyPost;
+  final bool Function(String mid)? isReposted;
+  final void Function(Map<String, dynamic> post)? onRepost;
+  final String? Function(String npub)? mentionResolver;
 
   /// Current relationship + actions (wired to the APRS wapp). When the callbacks
   /// are null the corresponding control is hidden.
@@ -66,6 +78,13 @@ class ProfileView extends StatefulWidget {
     this.posts = const [],
     this.onPostTap,
     this.onMessage,
+    this.likeInfo,
+    this.onLike,
+    this.replyCount,
+    this.onReplyPost,
+    this.isReposted,
+    this.onRepost,
+    this.mentionResolver,
     this.following = false,
     this.blocked = false,
     this.onSetFollow,
@@ -415,7 +434,7 @@ class _ProfileViewState extends State<ProfileView> {
           ),
           if (_about.isNotEmpty) ...[
             const SizedBox(height: 10),
-            Text(_about,
+            Text(activityFormatMentions(_about, widget.mentionResolver),
                 style: const TextStyle(
                     color: Colors.white, fontSize: 14, height: 1.35)),
           ],
@@ -522,9 +541,10 @@ class _ProfileViewState extends State<ProfileView> {
     final time = (p['time'] ?? '').toString();
     final via = (p['via'] ?? '').toString();
     final convo = (p['convo'] ?? '').toString();
-    final body = _stripTokens(raw);
+    final mid = (p['mid'] ?? '').toString();
+    final body = activityFormatMentions(_stripTokens(raw), widget.mentionResolver);
     final refs = MediaRef.findAll(raw);
-    final tappable = widget.onPostTap != null && convo.isNotEmpty;
+    final tappable = widget.onPostTap != null && (convo.isNotEmpty || mid.isNotEmpty);
     return InkWell(
       onTap: tappable ? () => widget.onPostTap!(p) : null,
       child: Padding(
@@ -565,9 +585,53 @@ class _ProfileViewState extends State<ProfileView> {
                   ],
                 ),
               ),
+            if (mid.isNotEmpty) _postActions(cs, mid, p),
           ],
         ),
       ),
+    );
+  }
+
+  /// Like / Reply / Retweet under each publication (mirrors the feed).
+  Widget _postActions(ColorScheme cs, String mid, Map<String, dynamic> p) {
+    final like = widget.likeInfo?.call(mid) ?? (count: 0, mine: false);
+    final replies = widget.replyCount?.call(mid) ?? 0;
+    final reposted = widget.isReposted?.call(mid) ?? false;
+    const muted = Color(0xFF8899A6);
+
+    Widget act(IconData icon, String? label, Color color, VoidCallback? onTap) =>
+        InkWell(
+          borderRadius: BorderRadius.circular(4),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(icon, size: 17, color: color),
+              if (label != null && label.isNotEmpty) ...[
+                const SizedBox(width: 4),
+                Text(label, style: TextStyle(color: color, fontSize: 12)),
+              ],
+            ]),
+          ),
+        );
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(children: [
+        act(Icons.chat_bubble_outline, replies > 0 ? '$replies' : null, muted,
+            widget.onReplyPost == null ? null : () => widget.onReplyPost!(p)),
+        const SizedBox(width: 18),
+        act(Icons.repeat, null,
+            reposted ? const Color(0xFF00BA7C) : muted,
+            widget.onRepost == null ? null : () => widget.onRepost!(p)),
+        const SizedBox(width: 18),
+        act(
+          like.mine ? Icons.favorite : Icons.favorite_border,
+          like.count > 0 ? '${like.count}' : null,
+          like.mine ? Colors.pink : muted,
+          widget.onLike == null ? null : () => widget.onLike!(mid, !like.mine),
+        ),
+      ]),
     );
   }
 

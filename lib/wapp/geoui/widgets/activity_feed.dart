@@ -588,6 +588,10 @@ class ActivityPostCard extends StatelessWidget {
     final time = activityTimeLabel(p);
     final via = (p['via'] ?? '').toString();
     final body = activityStrip(raw);
+    // Media links shown inline below are stripped from the visible text (no
+    // point repeating a long blossom.band/… URL under its own image).
+    final mediaUrls = activityMediaUrls(body);
+    final textBody = mediaUrls.isEmpty ? body : _stripMediaUrls(body, mediaUrls);
     final refs = MediaRef.findAll(raw);
     final fullNpub = from.isEmpty ? null : npubFor?.call(from);
     final npub = fullNpub == null
@@ -675,12 +679,12 @@ class ActivityPostCard extends StatelessWidget {
                       ],
                     ],
                   ),
-                  if (body.isNotEmpty)
+                  if (textBody.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 3),
                       // Long notes (some are thousands of chars) are clamped with
                       // a "More" toggle so one post can't blow up the row.
-                      child: _ExpandableText(body,
+                      child: _ExpandableText(textBody,
                           key: ValueKey('body-${mid.isNotEmpty ? mid : '$from$body'.hashCode}')),
                     ),
                   if (refs.isNotEmpty)
@@ -705,7 +709,7 @@ class ActivityPostCard extends StatelessWidget {
                   // Plain http(s) image/video links in the text (NOSTR posts,
                   // etc.) are fetched + shown inline (≤10 MB) or offered as a
                   // tap-to-download card.
-                  for (final url in activityMediaUrls(body))
+                  for (final url in mediaUrls)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: _RemoteMedia(url, key: ValueKey('rm-$url')),
@@ -1105,6 +1109,16 @@ List<String> activityMediaUrls(String body) {
     if (out.length >= 4) break;
   }
   return out;
+}
+
+/// Remove the media URLs (shown inline below) from the visible post text.
+String _stripMediaUrls(String body, List<String> urls) {
+  var s = body;
+  for (final u in urls) {
+    s = s.replaceAll(u, '');
+  }
+  // Tidy up doubled spaces / trailing whitespace left behind.
+  return s.replaceAll(RegExp(r'[ \t]{2,}'), ' ').trim();
 }
 
 bool _isVideoUrl(String u) {

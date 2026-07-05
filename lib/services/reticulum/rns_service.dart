@@ -3772,11 +3772,68 @@ class RnsService {
   /// screen). The feed calls this as posts scroll into view.
   void nostrTrackStats(List<String> ids) => _nostrHub?.trackStats(ids);
 
+  /// Profile (kind-0 metadata) for an author pubkey (hex): {name, pic, about,
+  /// npub}. Empty name until the kind-0 arrives — the call also subscribes to it.
+  Map<String, String> nostrProfile(String pubHex) {
+    final hub = _nostrHub;
+    if (hub == null) return const {};
+    hub.trackProfile(pubHex); // ensure we fetch it
+    final ev = hub.profileOf(pubHex);
+    final out = <String, String>{'npub': _npubOf(pubHex)};
+    if (ev == null) return out;
+    try {
+      final j = jsonDecode(ev.content);
+      if (j is Map) {
+        final name = (j['display_name'] ?? j['displayName'] ?? j['name'] ?? '')
+            .toString()
+            .trim();
+        if (name.isNotEmpty) out['name'] = name;
+        final pic = (j['picture'] ?? '').toString().trim();
+        if (pic.startsWith('http')) out['pic'] = pic;
+        final about = (j['about'] ?? '').toString().trim();
+        if (about.isNotEmpty) out['about'] = about;
+        final nip05 = (j['nip05'] ?? '').toString().trim();
+        if (nip05.isNotEmpty) out['nip05'] = nip05;
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  String _npubOf(String pubHex) {
+    try {
+      return NostrCrypto.encodeNpub(pubHex);
+    } catch (_) {
+      return '';
+    }
+  }
+
   /// (likes, replies, likedByMe) for a post id — 0/0/false until stats arrive.
   ({int likes, int replies, bool mine}) nostrStats(String id) {
     final s = _nostrHub?.statsOf(id, selfPubHex);
     if (s == null) return (likes: 0, replies: 0, mine: false);
     return (likes: s.$1, replies: s.$2, mine: s.$3);
+  }
+
+  /// Stored replies to [postId]: [{id, pubkey, content, ts}] oldest-first.
+  List<Map<String, dynamic>> nostrReplies(String postId) {
+    final hub = _nostrHub;
+    if (hub == null) return const [];
+    return [
+      for (final e in hub.repliesTo(postId))
+        {
+          'id': e.id ?? '',
+          'pubkey': e.pubkey,
+          'content': e.content,
+          'ts': e.createdAt,
+        }
+    ];
+  }
+
+  /// Reply to [parentId]: publish a kind-1 note tagged `e` = parent. Returns id.
+  Future<String?> nostrReply(String parentId, String text) async {
+    return nostrPost(1, text, [
+      ['e', parentId, '', 'reply']
+    ]);
   }
 
   /// Like a post: publish a kind-7 '+' reaction referencing [eventId] by

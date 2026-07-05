@@ -355,6 +355,10 @@ class FunctionalityRegistry {
       EndpointDef('hal_nostr_stats', 'Engagement JSON {likes,replies,mine} for a post id', [
         ParamDef('id', 'string', 'event id (hex)'),
       ], ReturnDef('uint32', 'Bytes written, 0 if none')),
+      EndpointDef('hal_nostr_profile',
+          'Author profile JSON {name,pic,about,nip05,npub} (kind-0); triggers a fetch if unknown', [
+        ParamDef('pubkey', 'string', 'author pubkey (hex)'),
+      ], ReturnDef('uint32', 'Bytes written, 0 if none')),
       EndpointDef('hal_nostr_track',
           'Track post ids (JSON array) so the host counts their reactions/replies', [
         ParamDef('ids', 'string', 'JSON array of event ids'),
@@ -362,6 +366,13 @@ class FunctionalityRegistry {
       EndpointDef('hal_nostr_react', 'Like a post (publish a kind-7 + reaction)', [
         ParamDef('id', 'string', 'event id to react to'),
       ], ReturnDef('int', '1')),
+      EndpointDef('hal_nostr_reply', 'Reply to a post (publish a kind-1 tagged e=parent)', [
+        ParamDef('parent', 'string', 'parent event id'),
+        ParamDef('text', 'string', 'reply text'),
+      ], ReturnDef('int', '1 queued, -1 error')),
+      EndpointDef('hal_nostr_replies', 'Stored replies to a post: JSON [{id,pubkey,content,ts}]', [
+        ParamDef('id', 'string', 'parent event id'),
+      ], ReturnDef('uint32', 'Bytes written, negated required size if too small')),
       EndpointDef('hal_nostr_follow', 'Follow a pubkey (hex or npub)', [
         ParamDef('key', 'string', 'pubkey hex or npub'),
       ], ReturnDef('int', '1')),

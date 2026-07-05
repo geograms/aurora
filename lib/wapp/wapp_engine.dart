@@ -2733,6 +2733,18 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Author profile (kind-0): JSON {name, pic, about, nip05, npub}.
+    final halNostrProfile = WasmFunction(
+      (int pubPtr, int pubLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final m = RnsService.instance.nostrProfile(_readStr(pubPtr, pubLen));
+        final bytes = utf8.encode(jsonEncode(m));
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // Track post ids (JSON array) so the host counts reactions/replies for them.
     final halNostrTrack = WasmFunction(
       (int idsPtr, int idsLen) {
@@ -2749,6 +2761,31 @@ class WappEngine {
         return 1;
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Reply to a post: publish a kind-1 note tagged e=parent (host signs).
+    final halNostrReply = WasmFunction(
+      (int pPtr, int pLen, int tPtr, int tLen) {
+        final parent = _readStr(pPtr, pLen);
+        final text = _readStr(tPtr, tLen);
+        if (parent.isEmpty || text.isEmpty) return -1;
+        // ignore: discarded_futures
+        RnsService.instance.nostrReply(parent, text);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Stored replies to a post: JSON [{id,pubkey,content,ts}].
+    final halNostrReplies = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(
+            jsonEncode(RnsService.instance.nostrReplies(_readStr(idPtr, idLen))));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
     );
     // Web-of-trust author set (follows + followers + follows-of-follows) — the
     // feed subscribes kind-1 from THIS, not the global firehose.
@@ -3149,8 +3186,11 @@ class WappEngine {
       WasmImport('hal', 'nostr_wot', halNostrWot),
       WasmImport('hal', 'nostr_discovery', halNostrDiscovery),
       WasmImport('hal', 'nostr_stats', halNostrStats),
+      WasmImport('hal', 'nostr_profile', halNostrProfile),
       WasmImport('hal', 'nostr_track', halNostrTrack),
       WasmImport('hal', 'nostr_react', halNostrReact),
+      WasmImport('hal', 'nostr_reply', halNostrReply),
+      WasmImport('hal', 'nostr_replies', halNostrReplies),
       WasmImport('hal', 'nostr_follow', halNostrFollow),
       WasmImport('hal', 'nostr_unfollow', halNostrUnfollow),
       WasmImport('hal', 'nostr_self', halNostrSelf),

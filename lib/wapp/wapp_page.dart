@@ -385,6 +385,11 @@ class _WappPageState extends State<WappPage>
   /// engagement it tracks itself (e.g. NOSTR relay reactions).
   final Map<String, ({int likes, int replies, bool mine})> _wappPostStats = {};
 
+  /// Author profiles a wapp pushes via `ui.profile.set` (keyed by the post's
+  /// `from`). {name, pic, about, nip05, npub}. Generic — lets a wapp resolve
+  /// its own identities (e.g. NOSTR kind-0) to a display name + avatar.
+  final Map<String, Map<String, String>> _wappProfiles = {};
+
   /// Periodic FEED backfill over Reticulum (complements APRS-IS, which loses
   /// messages): asks peers for FEED notes since the last sweep.
   Timer? _feedBackfillTimer;
@@ -1541,6 +1546,21 @@ class _WappPageState extends State<WappPage>
             );
             if (_wappPostStats.length > 1000) {
               _wappPostStats.remove(_wappPostStats.keys.first);
+            }
+            changed = true;
+          }
+        } else if (type == 'ui.profile.set') {
+          // A wapp resolves one of its post authors (by the post's `from`) to a
+          // display name + avatar + bio. Generic — the host just stores it.
+          final key = (data['key'] ?? '').toString();
+          if (key.isNotEmpty) {
+            _wappProfiles[key] = {
+              for (final f in const ['name', 'pic', 'about', 'nip05', 'npub'])
+                if ((data[f] ?? '').toString().isNotEmpty)
+                  f: data[f].toString(),
+            };
+            if (_wappProfiles.length > 2000) {
+              _wappProfiles.remove(_wappProfiles.keys.first);
             }
             changed = true;
           }
@@ -3906,6 +3926,95 @@ class _WappPageState extends State<WappPage>
     );
   }
 
+  /// Resolve a post author to name+avatar: prefer a wapp-pushed profile
+  /// (ui.profile.set), else the built-in stream profile lookup.
+  ({String? name, ImageProvider? avatar}) _feedProfileFor(String from) {
+    final p = _wappProfiles[from];
+    if (p != null) {
+      final pic = p['pic'];
+      return (
+        name: p['name'],
+        avatar: (pic != null && pic.isNotEmpty) ? NetworkImage(pic) : null
+      );
+    }
+    return _streamProfileFor(from);
+  }
+
+  /// Tapping an author: show the wapp-pushed profile sheet if we have one, else
+  /// the built-in profile view.
+  void _feedSenderTap(String from) {
+    final p = _wappProfiles[from];
+    if (p != null && (p['name'] != null || p['about'] != null || p['npub'] != null)) {
+      _showWappProfileSheet(from, p);
+      return;
+    }
+    _openProfile(from);
+  }
+
+  void _showWappProfileSheet(String from, Map<String, String> p) {
+    final pic = p['pic'];
+    final name = p['name'] ?? from;
+    final about = p['about'];
+    final npub = p['npub'];
+    final nip05 = p['nip05'];
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+            20, 4, 20, 20 + MediaQuery.of(ctx).viewInsets.bottom),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 28,
+                  backgroundImage: (pic != null && pic.isNotEmpty)
+                      ? NetworkImage(pic)
+                      : null,
+                  child: (pic == null || pic.isEmpty)
+                      ? Text(name.isNotEmpty ? name[0].toUpperCase() : '?')
+                      : null,
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(name,
+                          style: const TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.bold)),
+                      if (nip05 != null)
+                        Text(nip05,
+                            style: TextStyle(
+                                fontSize: 13,
+                                color: Theme.of(ctx).colorScheme.primary)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (about != null) ...[
+              const SizedBox(height: 14),
+              Text(about, style: const TextStyle(fontSize: 14, height: 1.35)),
+            ],
+            if (npub != null) ...[
+              const SizedBox(height: 14),
+              SelectableText(npub,
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontFeatures: const [],
+                      color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   /// A full-height chat feed (the chat field fills the tab; the composer sits
   /// at the bottom). Used for screens that are just a `$type:"chat"` field.
   Widget _buildChatFeedScreen(GeoUiBlock chat) {
@@ -3922,8 +4031,9 @@ class _WappPageState extends State<WappPage>
             _wappPostStats[mid]?.replies ?? (_activityArchive?.replyCount(mid) ?? 0),
         onAttach: _attachImageOrVideoToChat,
         onItemTap: _openConvoFromFeed,
-        onSenderTap: _openProfile,
-        npubFor: (c) => RnsService.instance.npubForCallsign(c),
+        onSenderTap: _feedSenderTap,
+        npubFor: (c) =>
+            _wappProfiles[c]?['npub'] ?? RnsService.instance.npubForCallsign(c),
         followedCalls: _followedCalls,
         hiddenCalls: _activityHidden,
         onBlock: (from) {
@@ -3963,7 +4073,7 @@ class _WappPageState extends State<WappPage>
           if (self != null) _openProfile(self.callsign);
         },
         selfAvatar: _loadSelfProfile().avatar,
-        profileFor: _streamProfileFor,
+        profileFor: _feedProfileFor,
         onOpenThread: _openActivityThread,
         onSend: (text) {
           _fieldValues['${name}_input'] = text;

@@ -3954,6 +3954,17 @@ class _WappPageState extends State<WappPage>
         avatar: (pic != null && pic.isNotEmpty) ? NetworkImage(pic) : null
       );
     }
+    // My own posts/replies: use my local profile so my name + avatar always
+    // show (my kind-0 isn't fetched from relays — I am the author).
+    final selfHex = RnsService.instance.nostrSelfHex();
+    if (selfHex != null &&
+        selfHex.length >= 12 &&
+        from == selfHex.substring(0, 12)) {
+      final self = _loadSelfProfile();
+      if ((self.name != null && self.name!.isNotEmpty) || self.avatar != null) {
+        return (name: self.name, avatar: self.avatar);
+      }
+    }
     return _streamProfileFor(from);
   }
 

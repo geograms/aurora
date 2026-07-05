@@ -351,8 +351,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
                       style: TextStyle(
                           color: Colors.white.withAlpha(110), fontSize: 15)),
                 ),
-                Icon(Icons.edit_outlined,
-                    size: 18, color: ChatPalette.accent.withAlpha(200)),
+                Icon(Icons.send,
+                    size: 18, color: ChatPalette.accent),
               ],
             ),
           ),

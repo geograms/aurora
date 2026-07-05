@@ -1,8 +1,8 @@
 # APRX — APRS eXtended messaging protocol
 
 > Part of the Geogram protocol docs — see [README](README.md) for the full set
-> ([Reticulum](reticulum.md), [DHT](dht.md), [APRS transport](aprs.md),
-> [BLE transport](ble.md), [file sharing](file-sharing.md)).
+> ([Reticulum](../../reticulum-dart/doc/reticulum.md), [DHT](../../reticulum-dart/doc/dht.md), [APRS transport](aprs.md),
+> [BLE transport](ble.md), [file sharing](../../reticulum-dart/doc/file-sharing.md)).
 
 APRX is a thin set of **conventions layered on top of standard APRS**. Every
 APRX frame is a 100% valid APRS frame: a vanilla APRS client shows it as

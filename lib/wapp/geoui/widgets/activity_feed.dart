@@ -9,6 +9,8 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+
+import '../../../services/media_disk_cache.dart';
 import 'package:http/http.dart' as http;
 
 import '../../../util/media_ref.dart';
@@ -106,13 +108,28 @@ enum _ActivityFilter { all, following, favorites }
 
 class _ActivityFeedState extends State<ActivityFeed> {
   final _input = TextEditingController();
+  final _composeFocus = FocusNode();
   final _pending = <({String token, MediaRef ref})>[];
   _ActivityFilter _filter = _ActivityFilter.all;
+  bool _composing = false; // collapsed single-line composer until tapped
 
   @override
   void dispose() {
     _input.dispose();
+    _composeFocus.dispose();
     super.dispose();
+  }
+
+  void _expandComposer() {
+    setState(() => _composing = true);
+    _composeFocus.requestFocus();
+  }
+
+  void _collapseComposer() {
+    if (_input.text.trim().isEmpty && _pending.isEmpty) {
+      _composeFocus.unfocus();
+      setState(() => _composing = false);
+    }
   }
 
   void _post() {
@@ -125,7 +142,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
     widget.onSend(text);
     _input.clear();
     _pending.clear();
-    setState(() {});
+    _composeFocus.unfocus();
+    setState(() => _composing = false);
   }
 
   Future<void> _attach() async {
@@ -284,6 +302,40 @@ class _ActivityFeedState extends State<ActivityFeed> {
   // A distinct, slightly-tinted card so it's clearly a place to write a status,
   // set apart from the stream of others' posts below.
   Widget _composer(ColorScheme cs) {
+    // Collapsed: a single-line tappable pill so the feed isn't pushed down.
+    if (!_composing) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: _expandComposer,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: ChatPalette.inBubble,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: ChatPalette.accent.withAlpha(45)),
+            ),
+            child: Row(
+              children: [
+                GestureDetector(
+                    onTap: widget.onSelfTap, child: _avatar('', cs, me: true)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(widget.hint,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          color: Colors.white.withAlpha(110), fontSize: 15)),
+                ),
+                Icon(Icons.edit_outlined,
+                    size: 18, color: ChatPalette.accent.withAlpha(200)),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 10, 10, 10),
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
@@ -306,6 +358,9 @@ class _ActivityFeedState extends State<ActivityFeed> {
               Expanded(
                 child: TextField(
                   controller: _input,
+                  focusNode: _composeFocus,
+                  autofocus: true,
+                  onTapOutside: (_) => _collapseComposer(),
                   style: const TextStyle(color: Colors.white, fontSize: 16),
                   minLines: 1,
                   maxLines: 5,
@@ -436,27 +491,33 @@ const _activityMonths = [
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
 ];
 
-/// Human label for a post's time. The wapp sends a same-day clock string
-/// (`time`, HH:MM[:SS]); for posts from earlier days that alone is ambiguous, so
-/// when an absolute epoch (`t`, ms) is present we prefix a date ("yesterday HH:MM",
-/// "Jun 26 HH:MM", or "Jun 26 2024 HH:MM" for other years). Today's posts keep the
-/// plain clock string. Falls back to `time` if no epoch is available.
+/// Human label for a post's time. Within 2 days it's a RELATIVE age ("just now",
+/// "14 minutes ago", "3 hours ago", "yesterday"); older than that it's an
+/// absolute date ("Jun 26" / "Jun 26 2024"). Falls back to the wapp's `time`
+/// clock string when no epoch (`t`, ms) is present.
 String activityTimeLabel(Map<String, dynamic> p) {
   final time = (p['time'] ?? '').toString();
   final t = (p['t'] as num?)?.toInt() ?? 0;
   if (t <= 0) return time; // no absolute time — keep the wapp's clock string
   final dt = DateTime.fromMillisecondsSinceEpoch(t);
   final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-  final day = DateTime(dt.year, dt.month, dt.day);
-  if (!day.isBefore(today)) return time; // today (or future-skew) — clock only
-  String two(int v) => v.toString().padLeft(2, '0');
-  final hm = '${two(dt.hour)}:${two(dt.minute)}';
-  if (day == today.subtract(const Duration(days: 1))) return 'yesterday $hm';
+  final diff = now.difference(dt);
+  final secs = diff.inSeconds;
+  if (secs < -60) {
+    // Future-skew (bad clock) — just show the clock string.
+    return time.isNotEmpty ? time : 'now';
+  }
+  if (secs < 45) return 'just now';
+  final mins = diff.inMinutes;
+  if (mins < 60) return '$mins minute${mins == 1 ? '' : 's'} ago';
+  final hours = diff.inHours;
+  if (hours < 24) return '$hours hour${hours == 1 ? '' : 's'} ago';
+  final days = diff.inDays;
+  if (days < 2) return 'yesterday';
   final mon = _activityMonths[dt.month - 1];
   return dt.year == now.year
-      ? '$mon ${dt.day} $hm'
-      : '$mon ${dt.day} ${dt.year} $hm';
+      ? '$mon ${dt.day}'
+      : '$mon ${dt.day} ${dt.year}';
 }
 
 final _activityFileRe = RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}');
@@ -1188,47 +1249,68 @@ class _RemoteMedia extends StatefulWidget {
 class _RemoteMediaState extends State<_RemoteMedia> {
   static const int _cap = 10 * 1024 * 1024;
   _RmState _s = _RmState.checking;
-  int _bytes = 0;
+  Uint8List? _img;
 
   @override
   void initState() {
     super.initState();
-    _check();
+    _load(_cap);
   }
 
-  Future<void> _check() async {
+  /// Fetch through the persistent disk cache (no re-download across sessions).
+  Future<void> _load(int maxBytes) async {
     if (_isVideoUrl(widget.url)) {
       if (mounted) setState(() => _s = _RmState.tooBig); // videos: tap to open
       return;
     }
-    try {
-      final r = await http
-          .head(Uri.parse(widget.url))
-          .timeout(const Duration(seconds: 8));
-      _bytes = int.tryParse(r.headers['content-length'] ?? '') ?? 0;
-      if (!mounted) return;
-      setState(() => _s = (_bytes > _cap) ? _RmState.tooBig : _RmState.show);
-    } catch (_) {
-      // HEAD unsupported/blocked — show anyway; the image loader caps memory.
-      if (mounted) setState(() => _s = _RmState.show);
-    }
+    final bytes =
+        await MediaDiskCache.instance.fetch(widget.url, maxBytes: maxBytes);
+    if (!mounted) return;
+    setState(() {
+      if (bytes != null) {
+        _img = bytes;
+        _s = _RmState.show;
+      } else {
+        // Too big (or blocked) — offer a manual download.
+        _s = _s == _RmState.checking ? _RmState.tooBig : _RmState.error;
+      }
+    });
   }
 
-  String get _sizeLabel =>
-      _bytes > 0 ? '${(_bytes / (1024 * 1024)).toStringAsFixed(1)} MB' : '';
+  String get _sizeLabel => '';
+
+  // A fixed media height so the row NEVER changes size as the image loads —
+  // checking, loading and loaded all occupy exactly this box (no scroll jump).
+  static const double _mediaHeight = 260;
+
+  Widget _box(ColorScheme cs, Widget child) => ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          height: _mediaHeight,
+          width: double.infinity,
+          color: cs.surfaceContainerHighest.withAlpha(35),
+          child: child,
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     switch (_s) {
       case _RmState.checking:
-        return const SizedBox.shrink();
+        // Reserve the box up-front so it doesn't pop in and shove the feed.
+        return _box(cs, const SizedBox.shrink());
       case _RmState.tooBig:
         final video = _isVideoUrl(widget.url);
         return InkWell(
           borderRadius: BorderRadius.circular(10),
-          // Images: tap to download now. Videos: no inline player, info only.
-          onTap: video ? null : () => setState(() => _s = _RmState.show),
+          // Images: tap to download now (up to 200 MB). Videos: info only.
+          onTap: video
+              ? null
+              : () {
+                  setState(() => _s = _RmState.checking);
+                  _load(200 * 1024 * 1024);
+                },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
@@ -1256,30 +1338,26 @@ class _RemoteMediaState extends State<_RemoteMedia> {
           ),
         );
       case _RmState.error:
-        return const SizedBox.shrink();
+        return _box(
+            cs,
+            Center(
+                child: Icon(Icons.broken_image_outlined,
+                    color: cs.onSurfaceVariant.withAlpha(120), size: 30)));
       case _RmState.show:
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(10),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 340),
-            child: Image.network(
-              widget.url,
-              fit: BoxFit.cover,
-              width: double.infinity,
-              cacheHeight: 900,
-              loadingBuilder: (c, child, prog) => prog == null
-                  ? child
-                  : Container(
-                      height: 160,
-                      alignment: Alignment.center,
-                      color: cs.surfaceContainerHighest.withAlpha(40),
-                      child: const SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: CircularProgressIndicator(strokeWidth: 2)),
-                    ),
-              errorBuilder: (c, e, s) => const SizedBox.shrink(),
-            ),
+        final img = _img;
+        if (img == null) return _box(cs, const SizedBox.shrink());
+        return _box(
+          cs,
+          Image.memory(
+            img,
+            fit: BoxFit.cover,
+            width: double.infinity,
+            height: _mediaHeight,
+            gaplessPlayback: true,
+            cacheHeight: 720,
+            errorBuilder: (c, e, s) => Center(
+                child: Icon(Icons.broken_image_outlined,
+                    color: cs.onSurfaceVariant.withAlpha(120), size: 30)),
           ),
         );
     }

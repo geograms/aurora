@@ -52,6 +52,7 @@ import 'background_wapp_manager.dart';
 import 'android_foreground_service.dart';
 import '../profile/iwi_profile.dart';
 import '../models/monitored_task.dart';
+import '../services/media_disk_cache.dart';
 import '../services/event_bus.dart';
 import '../services/log_service.dart';
 import '../services/notification_service.dart';
@@ -3931,6 +3932,17 @@ class _WappPageState extends State<WappPage>
     );
   }
 
+  /// Keep a post's remote media in the disk cache (exempt from LRU eviction)
+  /// because the logged-in user interacted with it (saved / opened its thread).
+  void _keepPostMedia(Map<String, dynamic> post) {
+    final urls = activityMediaUrls(
+        activityStrip((post['text'] ?? '').toString()));
+    if (urls.isNotEmpty) {
+      // ignore: discarded_futures
+      MediaDiskCache.instance.keepAll(urls);
+    }
+  }
+
   /// Resolve a post author to name+avatar: prefer a wapp-pushed profile
   /// (ui.profile.set), else the built-in stream profile lookup.
   ({String? name, ImageProvider? avatar}) _feedProfileFor(String from) {
@@ -4106,6 +4118,7 @@ class _WappPageState extends State<WappPage>
         },
         onSave: (post) {
           _activityArchive?.toggleSaved(post);
+          _keepPostMedia(post); // pinned/saved — keep its media
           setState(() {});
         },
         onSelfTap: () {
@@ -4400,6 +4413,7 @@ class _WappPageState extends State<WappPage>
   void _openActivityThread(Map<String, dynamic> post) {
     final mid = (post['mid'] ?? '').toString();
     if (mid.isEmpty) return;
+    _keepPostMedia(post); // opening a thread = an interaction — keep its media
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => ActivityThreadPage(
         root: post,

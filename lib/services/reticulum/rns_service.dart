@@ -153,14 +153,10 @@ class RnsService {
   final RelayDirectory _relayDir = RelayDirectory();
   RelayRoleManager? _relayRole;
   StoreForward? _storeForward;
-  // NOSTR client hub (wss:// + rns:// + local) + this device's own wss server.
-  NostrRelayHub? _nostrHub;
+  // NOSTR relay pipeline — runs entirely on a background isolate (NostrEngine);
+  // this proxy just sends commands + reads caches. Plus the LAN wss server.
+  NostrClient? _nostrHub;
   NostrWsServer? _nostrWs;
-  // Web of trust: people who follow us (kind-3 that #p us) and the people our
-  // follows follow (degree-2). The feed reads from this set, not the firehose.
-  final Set<String> _nostrFollowers = {};
-  final Set<String> _nostrDeg2 = {};
-  String? _nostrWotSub;
 
   // Store-and-forward hosting: the set of NOSTR pubkeys (hex) the local user
   // follows, used to classify hosted content into the "followed" retention tier.
@@ -1602,25 +1598,22 @@ class RnsService {
             log: (m) => LogService.instance.add('NOSTR/wss: $m'));
         // ignore: discarded_futures
         _nostrWs!.start();
-        _nostrHub = NostrRelayHub(
-          store: NostrStore.of(_relayStore!),
-          persistPath: relayStorePath == null
-              ? null
-              : relayStorePath!.replaceAll(RegExp(r'[^/]*$'), 'nostr_relays.json'),
-          rnsClientFactory: (uri) {
-            final id = _relayIdentity(uri.replaceFirst('rns://', '').trim());
-            return (id != null && _relay != null)
-                ? NostrRnsClient(_relay!, id, uri: uri)
-                : null;
-          },
-          onStored: (ev) {
-            _nostrWs?.broadcast(ev);
-            _absorbNostrWot(ev);
-          },
-          log: (m) => LogService.instance.add('NOSTR/hub: $m'),
-        );
-        // ignore: discarded_futures
-        _nostrHub!.init().then((_) => _refreshNostrWot());
+        // The NOSTR relay pipeline (WebSocket receive, decode, verify, SQLite,
+        // like/reply/profile tallies) all runs on a DEDICATED background isolate
+        // via NostrEngine — the UI isolate only sends commands + reads caches, so
+        // a public firehose can never make the app unresponsive. Its store is a
+        // separate SQLite file opened INSIDE that isolate.
+        final base = relayStorePath == null
+            ? null
+            : relayStorePath!.replaceAll(RegExp(r'[^/]*$'), '');
+        if (base != null) {
+          // ignore: discarded_futures
+          NostrClient.spawn(
+            storePath: '${base}nostr_feed.sqlite3',
+            persistPath: '${base}nostr_relays.json',
+            selfPubHex: selfPubHex,
+          ).then((c) => _nostrHub = c);
+        }
       } catch (e) {
         LogService.instance.add('RNS/relay: disabled (store open failed: $e)');
         _relay = null;
@@ -3772,46 +3765,11 @@ class RnsService {
   /// screen). The feed calls this as posts scroll into view.
   void nostrTrackStats(List<String> ids) => _nostrHub?.trackStats(ids);
 
-  /// Profile (kind-0 metadata) for an author pubkey (hex): {name, pic, about,
-  /// npub}. Empty name until the kind-0 arrives — the call also subscribes to it.
-  Map<String, String> nostrProfile(String pubHex) {
-    final hub = _nostrHub;
-    if (hub == null) return const {};
-    hub.trackProfile(pubHex); // ensure we fetch it
-    final ev = hub.profileOf(pubHex);
-    final out = <String, String>{'npub': _npubOf(pubHex)};
-    if (ev == null) return out;
-    try {
-      final j = jsonDecode(ev.content);
-      if (j is Map) {
-        final name = (j['display_name'] ?? j['displayName'] ?? j['name'] ?? '')
-            .toString()
-            .trim();
-        if (name.isNotEmpty) out['name'] = name;
-        final pic = (j['picture'] ?? '').toString().trim();
-        if (pic.startsWith('http')) out['pic'] = pic;
-        final about = (j['about'] ?? '').toString().trim();
-        if (about.isNotEmpty) out['about'] = about;
-        final nip05 = (j['nip05'] ?? '').toString().trim();
-        if (nip05.isNotEmpty) out['nip05'] = nip05;
-        final website = (j['website'] ?? '').toString().trim();
-        if (website.isNotEmpty) out['website'] = website;
-        final lud16 = (j['lud16'] ?? j['lud06'] ?? '').toString().trim();
-        if (lud16.isNotEmpty) out['lud16'] = lud16;
-        final banner = (j['banner'] ?? '').toString().trim();
-        if (banner.startsWith('http')) out['banner'] = banner;
-      }
-    } catch (_) {}
-    return out;
-  }
-
-  String _npubOf(String pubHex) {
-    try {
-      return NostrCrypto.encodeNpub(pubHex);
-    } catch (_) {
-      return '';
-    }
-  }
+  /// Profile (kind-0 metadata) for an author pubkey: {name, pic, about, nip05,
+  /// website, lud16, banner, npub}. Parsed by the engine; empty until it arrives
+  /// (this call also triggers the fetch).
+  Map<String, String> nostrProfile(String pubHex) =>
+      _nostrHub?.profile(pubHex) ?? const {};
 
   /// (likes, replies, likedByMe) for a post id — 0/0/false until stats arrive.
   ({int likes, int replies, bool mine}) nostrStats(String id) {
@@ -3820,17 +3778,18 @@ class RnsService {
     return (likes: s.$1, replies: s.$2, mine: s.$3);
   }
 
-  /// Stored replies to [postId]: [{id, pubkey, content, ts}] oldest-first.
+  /// Replies to [postId]: [{id, pubkey, content, ts}] — from the engine cache
+  /// (the call also refreshes it).
   List<Map<String, dynamic>> nostrReplies(String postId) {
     final hub = _nostrHub;
     if (hub == null) return const [];
     return [
-      for (final e in hub.repliesTo(postId))
+      for (final e in hub.replies(postId))
         {
-          'id': e.id ?? '',
-          'pubkey': e.pubkey,
-          'content': e.content,
-          'ts': e.createdAt,
+          'id': e['id'] ?? '',
+          'pubkey': e['pubkey'] ?? '',
+          'content': e['content'] ?? '',
+          'ts': e['ts'] ?? 0,
         }
     ];
   }
@@ -3899,15 +3858,8 @@ class RnsService {
 
   /// Followed NOSTR pubkeys (hex) — the feed's author set.
   List<String> nostrFollows() => _follows.asSet.toList();
-  void nostrFollow(String key) {
-    followPubkey(key);
-    _refreshNostrWot();
-  }
-
-  void nostrUnfollow(String key) {
-    unfollowPubkey(key);
-    _refreshNostrWot();
-  }
+  void nostrFollow(String key) => followPubkey(key);
+  void nostrUnfollow(String key) => unfollowPubkey(key);
 
   /// Our own x-only pubkey (hex) — the Messages tab filters kind-4 by `#p`=this.
   String? nostrSelfHex() => selfPubHex;
@@ -3968,67 +3920,15 @@ class RnsService {
     }
   }
 
-  // ── NOSTR web of trust (kills the global-firehose spam) ─────────────────────
-
-  /// Learn the graph from kind-3 contact lists: our follows' follows become
-  /// degree-2 trust; anyone whose list #p's us is a follower.
-  void _absorbNostrWot(NostrEvent ev) {
-    if (ev.kind != NostrEventKind.contacts) return;
-    final self = selfPubHex?.toLowerCase();
-    var followsUs = false;
-    final ps = <String>[];
-    for (final t in ev.tags) {
-      if (t.length >= 2 && t[0] == 'p') {
-        final p = t[1].toLowerCase();
-        ps.add(p);
-        if (self != null && p == self) followsUs = true;
-      }
-    }
-    if (followsUs) _nostrFollowers.add(ev.pubkey.toLowerCase());
-    if (_follows.asSet.contains(ev.pubkey) && _nostrDeg2.length < 4000) {
-      _nostrDeg2.addAll(ps);
-    }
-  }
-
-  /// (Re)subscribe kind-3 for our follows (→ degree-2) and for lists that #p us
-  /// (→ followers). Events land via [_absorbNostrWot] on merge.
-  void _refreshNostrWot() {
-    final hub = _nostrHub;
-    if (hub == null) return;
-    final self = selfPubHex;
-    final follows = _follows.asSet.toList();
-    if (_nostrWotSub != null) hub.unsubscribe(_nostrWotSub!);
-    final filters = <NostrFilter>[];
-    if (follows.isNotEmpty) {
-      filters.add(NostrFilter(kinds: const [3], authors: follows));
-    }
-    if (self != null) {
-      filters.add(NostrFilter(kinds: const [3], tags: {'p': [self]}));
-    }
-    if (filters.isEmpty) {
-      _nostrWotSub = null;
-      return;
-    }
-    _nostrWotSub = hub.subscribe(filters);
-  }
-
-  /// Feed author set = follows ∪ followers ∪ follows-of-follows (capped). The
-  /// wapp subscribes kind-1 from THIS instead of the global firehose.
+  /// Feed author set — the people we follow. The wapp subscribes kind-1 from
+  /// THIS (empty → the wapp falls back to the reaction-gated discovery feed).
   List<String> nostrWot() {
-    final s = <String>{}
-      ..addAll(_follows.asSet)
-      ..addAll(_nostrFollowers)
-      ..addAll(_nostrDeg2);
-    // Cap to a relay-friendly REQ size (huge author lists get rejected).
-    return s.length > 500 ? s.take(500).toList() : s.toList();
+    final s = _follows.asSet.toList();
+    return s.length > 500 ? s.take(500).toList() : s;
   }
 
-  /// Authors whose posts are exempt from firehose eviction (direct trust:
-  /// people we follow or who follow us). The activity archive keeps these.
-  List<String> nostrProtectedAuthors() => (<String>{}
-        ..addAll(_follows.asSet)
-        ..addAll(_nostrFollowers))
-      .toList();
+  /// Authors whose posts are exempt from firehose eviction (people we follow).
+  List<String> nostrProtectedAuthors() => _follows.asSet.toList();
 
   String? _profilePrivHex() {
     final nsec = ProfileService.instance.activeProfile?.nsec;

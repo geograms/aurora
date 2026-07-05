@@ -8,7 +8,7 @@
  *
  * Wire: every frame is [0x4D][0x01][type][body], little-endian, one frame
  * per ATT write/notify. Callsign-style strings are [len u8][ASCII].
- * See doc/mesh.md §3 Plane 2 for the frame table.
+ * See docs/mesh.md §3 Plane 2 for the frame table.
  *
  * Pure logic — no radio, storage or OS deps. The firmware supplies transport
  * and spool through blemesh_session_ops_t; time comes in as monotonic seconds

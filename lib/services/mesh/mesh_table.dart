@@ -1,6 +1,6 @@
 /*
  * mesh_table — neighbor registry + distance-vector routing table
- * (doc/mesh.md §4).
+ * (docs/mesh.md §4).
  *
  * Fed exclusively by received route beacons. Android hears adverts in batched
  * bursts with gaps of tens of seconds, so nothing here reacts to a single
@@ -42,7 +42,7 @@ class MeshNeighbor {
   int beaconsHeard = 0;
 
   /// EWMA of "was this neighbor heard in a given minute" — the contact ratio
-  /// used for custodian scoring (doc/mesh.md §6). Updated lazily on sightings.
+  /// used for custodian scoring (docs/mesh.md §6). Updated lazily on sightings.
   double contactRatio = 0;
   DateTime _contactStamp;
 
@@ -107,7 +107,7 @@ class MeshTable {
   MeshTable(this.selfCallsign);
 
   /// Ingest one received beacon. Returns true when topology changed (used to
-  /// trigger an early beacon of our own, doc/mesh.md §4 "triggered updates").
+  /// trigger an early beacon of our own, docs/mesh.md §4 "triggered updates").
   bool ingest(MeshBeacon b, {int rssi = 0, DateTime? at}) {
     final now = at ?? DateTime.now();
     if (b.callsign.isEmpty || b.callsign == selfCallsign) return false;

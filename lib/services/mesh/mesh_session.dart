@@ -1,5 +1,5 @@
 /*
- * mesh_session — the Mesh Session Protocol v1 (MSP), doc/mesh.md §3 Plane 2.
+ * mesh_session — the Mesh Session Protocol v1 (MSP), docs/mesh.md §3 Plane 2.
  *
  * MSP is the mesh's GATT data plane: once two nodes hold a GATT link
  * (FFE0/FFF1/FFF2 — the same channel the legacy parcel transport uses), MSP
@@ -25,7 +25,7 @@
  *     BYE    ------------------------>                 (politeness or done)
  *
  * Custody semantics: a MSG_ACK is the handover — the sender demotes its copy
- * to archive the moment the ack lands (doc/mesh.md §6). Bulk custody is the
+ * to archive the moment the ack lands (docs/mesh.md §6). Bulk custody is the
  * FILE_OK after a full-file SHA-256 verify on the receiver's spool.
  *
  * Flow control: chunk data is paced by the transport (write-with-response on

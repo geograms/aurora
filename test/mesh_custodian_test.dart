@@ -1,5 +1,5 @@
 /*
- * Custodian scoring tests (doc/mesh.md §6, M3).
+ * Custodian scoring tests (docs/mesh.md §6, M3).
  */
 import 'package:aurora/services/mesh/mesh_beacon.dart';
 import 'package:aurora/services/mesh/mesh_custodian.dart';

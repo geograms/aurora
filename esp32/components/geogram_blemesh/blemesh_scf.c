@@ -1,4 +1,4 @@
-/* Store-and-forward custody queue (doc/mesh.md §6, dongle-sized).
+/* Store-and-forward custody queue (docs/mesh.md §6, dongle-sized).
  *
  * Parks heard 1:1 frames (raw 0x41 payloads) keyed by their am: receipt id,
  * purges them when an "?ACK <am>" receipt is overheard, and hands them back

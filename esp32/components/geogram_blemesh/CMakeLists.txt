@@ -1,4 +1,4 @@
-# BLE street-mesh core (aurora doc/mesh.md) — wire-compatible with the phones.
+# BLE street-mesh core (aurora docs/mesh.md) — wire-compatible with the phones.
 #
 # Pure protocol logic: route-beacon codec (subtype 0x4D), neighbor + DV table,
 # and the store-and-forward pending queue. NO radio, storage or UI code — the

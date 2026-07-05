@@ -241,7 +241,7 @@ class BleService {
     });
   }
 
-  // ── Mesh custody transport hooks (doc/mesh.md M2) ──────────────────────────
+  // ── Mesh custody transport hooks (docs/mesh.md M2) ──────────────────────────
   // The MSP session layer (mesh_custody.dart) is transport-agnostic; these
   // hooks give it a send path on whichever GATT stack is live, an inbound
   // delivery tap, and a way to drop the dialed link when a session ends.
@@ -475,7 +475,7 @@ class BleService {
         ..startGattEvents();
       _dbg('BLE5 broadcast + native GATT enabled');
     }
-    // Street-mesh node (doc/mesh.md): rides the same BLE5 bus on its own
+    // Street-mesh node (docs/mesh.md): rides the same BLE5 bus on its own
     // subtype. Non-BLE5 devices still start it as a scan-only leaf so the
     // Bluetooth wapp has a live (if empty) registry + self status.
     unawaited(MeshService.instance.start(canAdvertise: _ble5));
@@ -571,7 +571,7 @@ class BleService {
     LogService.instance
         .add('BLE5 rx aprs ${f.data.length}B rssi=${f.rssi}');
     // Mesh custody tap: overheard ?ACKs purge, our 1:1s feed the have-bloom,
-    // others' 1:1s get parked for GATT delivery (doc/mesh.md §6).
+    // others' 1:1s get parked for GATT delivery (docs/mesh.md §6).
     MeshCustodyDelegate.onAirFrame(f.data, outbound: false);
     _inbound.add(BleInboundFrame(f.addr, f.rssi, f.data));
   }

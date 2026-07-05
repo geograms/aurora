@@ -1,5 +1,5 @@
 /*
- * blemesh — BLE street-mesh core (aurora doc/mesh.md), phone-wire-compatible.
+ * blemesh — BLE street-mesh core (aurora docs/mesh.md), phone-wire-compatible.
  *
  * Three pieces, all pure logic (no radio/storage/UI — the firmware wires those):
  *
@@ -126,7 +126,7 @@ bool blemesh_route_via(const char *target, char via[BLEMESH_CALLSIGN_MAX + 1]);
 /* ---- store-and-forward --------------------------------------------------- */
 #define BLEMESH_SCF_MAX        24
 #define BLEMESH_SCF_FRAME_MAX  252   /* one extended-advert AD payload */
-#define BLEMESH_SCF_TTL_SEC    (7 * 24 * 3600)  /* 7 days (doc/mesh.md §6) */
+#define BLEMESH_SCF_TTL_SEC    (7 * 24 * 3600)  /* 7 days (docs/mesh.md §6) */
 
 /* Initialize; [persist_path] (e.g. "/sdcard/mesh/pending.bin") may be NULL for
  * RAM-only. Loads any persisted entries. */

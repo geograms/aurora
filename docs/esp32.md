@@ -42,7 +42,7 @@ see `geogram_msgstore/CMakeLists.txt`).
 |---|---|---|
 | `0x55` | Reticulum packet (announces relayed blind, HEADER_2 hops+1) | rns_ble5 |
 | `0x41` | APRS broadcast parcel, compact `from\x1F to\x1F text` | both projects + phones |
-| `0x4D` | **street-mesh route beacon** (doc/mesh.md §3) | rns_ble5 (`geogram_blemesh`) + phones |
+| `0x4D` | **street-mesh route beacon** (docs/mesh.md §3) | rns_ble5 (`geogram_blemesh`) + phones |
 | `0x47` | phone GATT presence beacon | phones only (not implemented on ESP32) |
 | `0x50/0x51/0x52` | legacy broadcast-parcel chunks + NACK (13-17 B payloads) | legacy firmware + legacy-phone path |
 | `0x42` | legacy SCAN_RSP continuation | legacy firmware |

@@ -2914,7 +2914,7 @@ class WappEngine {
       results: [ValueTy.i32],
     );
 
-    // ── Mesh HAL (BLE street mesh, doc/mesh.md) ─────────────────────────────
+    // ── Mesh HAL (BLE street mesh, docs/mesh.md) ─────────────────────────────
     final halMeshStatus = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;

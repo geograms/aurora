@@ -16,6 +16,11 @@ file/line pointers into the code), not an idealised spec.
 | [aprs.md](aprs.md) | The APRS transport: APRS‑IS (TNC2) framing, the wapp's connection/iGate behaviour, and how Aurora gates traffic between Bluetooth and APRS‑IS. |
 | [ble.md](ble.md) | The Bluetooth transport: the size‑routed split between connectionless APRS broadcast and GATT Reticulum links, the compact frame format, the digipeater, and the store‑and‑forward iGate. |
 | [aprx.md](aprx.md) | APRX — the message‑level conventions layered on plain APRS (groups, threads, reactions, signed/encrypted messages, public‑key beacons, embedded media references). |
+| [mesh.md](mesh.md) | The BLE street mesh: gossip route beacons, distance‑vector routing, GATT custody transfer, store‑and‑forward, politeness backoff. |
+| [folders.md](folders.md) | Mutable shared folders over Reticulum: key‑addressed directories backed by a signed, append‑only op‑log. |
+| [sync.md](sync.md) | Collab (multi‑writer) folders and cross‑device sync built on top of mutable folders. |
+| [nostr.md](nostr.md) | The NOSTR client wapp and its transport‑abstract relay hub (wss + Reticulum + local store). |
+| [esp32.md](esp32.md) | The ESP32 dongle firmware map: project layout, which firmware is which, BLE protocol state, and the traps. |
 
 ## The big picture
 

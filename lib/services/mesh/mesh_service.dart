@@ -1,5 +1,5 @@
 /*
- * mesh_service — the BLE street-mesh node (doc/mesh.md, milestone M1).
+ * mesh_service — the BLE street-mesh node (docs/mesh.md, milestone M1).
  *
  * Owns the mesh control plane: builds and airs this node's route beacon on
  * the shared BLE5 extended-advert bus (subtype 0x4D) and ingests neighbors'
@@ -34,7 +34,7 @@ class MeshService {
   MeshService._();
   static final MeshService instance = MeshService._();
 
-  // Politeness (doc/mesh.md §7): the beacon interval adapts to channel
+  // Politeness (docs/mesh.md §7): the beacon interval adapts to channel
   // load — quiet streets get chatty beacons, saturated streets get
   // presence-only whispers. _beaconInterval is the quiet-street floor.
   static const Duration _beaconInterval = Duration(seconds: 30);
@@ -72,7 +72,7 @@ class MeshService {
     return _heardStamps.length / 60.0;
   }
 
-  /// Politeness tier: 0 quiet, 1 busy, 2 saturated (doc/mesh.md §7).
+  /// Politeness tier: 0 quiet, 1 busy, 2 saturated (docs/mesh.md §7).
   /// Powered nodes back off LAST (they are the useful chatter).
   int politenessTier() {
     final load = channelLoad();

@@ -1,5 +1,5 @@
 /*
- * mesh_bloom — the beacon have-digest (doc/mesh.md §3, M2).
+ * mesh_bloom — the beacon have-digest (docs/mesh.md §3, M2).
  *
  * A fixed 128-byte Bloom filter over the `am:` correlation ids this node has
  * RECEIVED recently (~24 h window). Carried in the route beacon's reserved

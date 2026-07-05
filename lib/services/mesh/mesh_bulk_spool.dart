@@ -1,5 +1,5 @@
 /*
- * mesh_bulk_spool — disk spool for the MSP bulk file lane (doc/mesh.md §6b).
+ * mesh_bulk_spool — disk spool for the MSP bulk file lane (docs/mesh.md §6b).
  *
  * Two kinds of entry, both content-addressed by SHA-256:
  *

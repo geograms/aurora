@@ -1,5 +1,5 @@
 /*
- * mesh_transfer_scheduler — decides when to dial whom (doc/mesh.md §6).
+ * mesh_transfer_scheduler — decides when to dial whom (docs/mesh.md §6).
  *
  * A 10 s tick walks the work list and opens at most one GATT custody session
  * at a time:
@@ -190,7 +190,7 @@ class MeshTransferScheduler {
       }
       // 1b) Own-origin mail whose target is nowhere in the mesh horizon:
       // hand it to the best-scored custodian in reach (contact x stability,
-      // doc/mesh.md §6) rather than holding it forever.
+      // docs/mesh.md §6) rather than holding it forever.
       if (table != null && havePendingMsgs) {
         for (final own in store.ownPendingTargets(
             MeshService.instance.tableCallsign)) {

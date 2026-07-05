@@ -1,5 +1,5 @@
 /*
- * mesh_beacon — wire codec for the BLE street-mesh route beacon (doc/mesh.md §3).
+ * mesh_beacon — wire codec for the BLE street-mesh route beacon (docs/mesh.md §3).
  *
  * The beacon is the mesh's whole control plane: presence + node conditions +
  * a distance-vector digest of every destination this node can reach. It rides
@@ -35,7 +35,7 @@ const int kMeshBeaconVersion = 1;
 const int kMeshMaxCost = 6;
 const int kMeshMaxCallsign = 9;
 
-/// Self-declared device type carried in the beacon class byte (doc/mesh.md §3).
+/// Self-declared device type carried in the beacon class byte (docs/mesh.md §3).
 enum MeshDeviceClass {
   other(0),
   phone(1),

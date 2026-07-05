@@ -51,7 +51,7 @@
 /* LAN presence: passive listener on the Aurora UDP discovery broadcast. */
 #include "lanwatch.h"
 
-/* BLE street mesh (aurora doc/mesh.md): route beacon + DV table + SCF. */
+/* BLE street mesh (aurora docs/mesh.md): route beacon + DV table + SCF. */
 #include <sys/stat.h>
 #include "blemesh.h"
 #include "gatt_mesh.h"
@@ -589,7 +589,7 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
             aprsis_uplink(from, to, text);
     }
 
-    /* Store-and-forward custody (doc/mesh.md §6): park heard 1:1 messages so a
+    /* Store-and-forward custody (docs/mesh.md §6): park heard 1:1 messages so a
      * receiver that is out of range / asleep gets them when it reappears. The
      * sender was just heard transmitting — deliver anything parked for IT too. */
     if (aurora && s_mesh_up) {
@@ -612,7 +612,7 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
     }
 }
 
-/* ---- street mesh (aurora doc/mesh.md): beacon + DV + SCF ----------------- */
+/* ---- street mesh (aurora docs/mesh.md): beacon + DV + SCF ----------------- */
 
 /* Re-air every parked frame for [target] (it was just seen). Each goes back on
  * the normal relay rotation as a plain 0x41 broadcast; the receiver dedups. */

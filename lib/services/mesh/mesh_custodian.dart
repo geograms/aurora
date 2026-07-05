@@ -1,6 +1,6 @@
 /*
  * mesh_custodian — who should carry mail we can't deliver ourselves?
- * (doc/mesh.md §6 custodian selection, M3.)
+ * (docs/mesh.md §6 custodian selection, M3.)
  *
  * Score = contactRatio × stability. contactRatio is the neighbor's sighting
  * EWMA (how reliably we meet it); stability rewards powered, long-uptime,

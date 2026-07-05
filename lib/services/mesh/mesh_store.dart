@@ -1,5 +1,5 @@
 /*
- * mesh_store — the street-mesh store-and-forward archive (doc/mesh.md §6).
+ * mesh_store — the street-mesh store-and-forward archive (docs/mesh.md §6).
  *
  * Every custody node archives the 1:1 messages it carries. SQLite (WAL) for
  * the same reason as media_archive.dart: atomic writes, a crash can't shred

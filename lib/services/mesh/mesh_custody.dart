@@ -300,7 +300,7 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
   }
 
   /// Tap for every compact 0x41 frame crossing the broadcast plane, both
-  /// directions (doc/mesh.md §6): overheard `?ACK`s purge parked copies,
+  /// directions (docs/mesh.md §6): overheard `?ACK`s purge parked copies,
   /// frames addressed to us feed the have-bloom, and 1:1 frames for OTHERS
   /// (plus our own outbound) are parked for GATT custody delivery.
   static void onAirFrame(Uint8List wire, {required bool outbound}) {

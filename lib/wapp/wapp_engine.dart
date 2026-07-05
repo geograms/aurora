@@ -2753,10 +2753,10 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
-    // Like a post: publish a kind-7 '+' reaction (host signs).
+    // Like a post: publish a kind-7 '+' reaction (host signs). Synchronous so
+    // the optimistic count is recorded before the wapp's next stats push.
     final halNostrReact = WasmFunction(
       (int idPtr, int idLen) {
-        // ignore: discarded_futures
         RnsService.instance.nostrReact(_readStr(idPtr, idLen), '');
         return 1;
       },

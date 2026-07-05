@@ -3816,12 +3816,14 @@ class RnsService {
   }
 
   /// Like a post: publish a kind-7 '+' reaction referencing [eventId] by
-  /// [authorHex]. Signed with the profile key.
-  Future<String?> nostrReact(String eventId, String authorHex) async {
+  /// [authorHex], signed with the profile key. SYNCHRONOUS so the optimistic
+  /// like is recorded before the wapp's immediate stats-refresh reads it (an
+  /// async body would run after and the like would appear to do nothing).
+  void nostrReact(String eventId, String authorHex) {
     final pub = selfPubHex;
     final priv = _profilePrivHex();
     final hub = _nostrHub;
-    if (pub == null || priv == null || hub == null) return null;
+    if (pub == null || priv == null || hub == null) return;
     final ev = NostrEvent(
       pubkey: pub,
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -3835,12 +3837,11 @@ class RnsService {
     try {
       ev.sign(priv);
     } catch (_) {
-      return null;
+      return;
     }
-    // Reflect our own like immediately in the local tally.
-    hub.recordReaction(eventId, pub);
-    await hub.publish(ev);
-    return ev.id;
+    hub.recordReaction(eventId, pub); // optimistic, synchronous
+    // ignore: discarded_futures
+    hub.publish(ev); // fire-and-forget to the engine
   }
 
   void nostrUnsubscribe(String subId) => _nostrHub?.unsubscribe(subId);

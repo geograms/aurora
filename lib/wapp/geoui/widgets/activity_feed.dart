@@ -70,6 +70,10 @@ class ActivityFeed extends StatefulWidget {
   /// Resolve a `npub1…` mention in a post body to a display name.
   final String? Function(String npub)? mentionResolver;
 
+  /// Pull-to-refresh: re-query the relays for the latest posts. Awaited so the
+  /// spinner shows until new events have had a moment to arrive.
+  final Future<void> Function()? onRefresh;
+
   final String hint;
 
   const ActivityFeed({
@@ -95,6 +99,7 @@ class ActivityFeed extends StatefulWidget {
     this.onBlock,
     this.onMute,
     this.mentionResolver,
+    this.onRefresh,
     this.hint = "What's happening?",
   });
 
@@ -209,30 +214,42 @@ class _ActivityFeedState extends State<ActivityFeed> {
             Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
             _composer(cs),
             Expanded(
-              child: posts.isEmpty
-                  ? _empty(cs)
-                  : ListView.separated(
-                      padding: EdgeInsets.zero,
-                      itemCount: posts.length,
-                      separatorBuilder: (_, __) => Divider(
-                          height: 1, color: cs.outlineVariant.withAlpha(45)),
-                      itemBuilder: (_, i) => ActivityPostCard(
-                        post: posts[i],
-                        profileFor: widget.profileFor,
-                        npubFor: widget.npubFor,
-                        onSenderTap: widget.onSenderTap,
-                        likeInfo: widget.likeInfo,
-                        onLike: widget.onLike,
-                        isSaved: widget.isSaved,
-                        onSave: widget.onSave,
-                        replyCount: widget.replyCount,
-                        onBlock: widget.onBlock,
-                        onMute: widget.onMute,
-                        onTap: () => widget.onOpenThread?.call(posts[i]),
-                        onReply: () => widget.onOpenThread?.call(posts[i]),
-                        mentionResolver: widget.mentionResolver,
+              child: RefreshIndicator(
+                onRefresh: () async {
+                  await widget.onRefresh?.call();
+                  // Give freshly-requested events a beat to land before the
+                  // spinner retracts, so the user sees the stream update.
+                  await Future<void>.delayed(const Duration(milliseconds: 900));
+                },
+                child: posts.isEmpty
+                    ? ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: [const SizedBox(height: 120), _empty(cs)],
+                      )
+                    : ListView.separated(
+                        padding: EdgeInsets.zero,
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        itemCount: posts.length,
+                        separatorBuilder: (_, __) => Divider(
+                            height: 1, color: cs.outlineVariant.withAlpha(45)),
+                        itemBuilder: (_, i) => ActivityPostCard(
+                          post: posts[i],
+                          profileFor: widget.profileFor,
+                          npubFor: widget.npubFor,
+                          onSenderTap: widget.onSenderTap,
+                          likeInfo: widget.likeInfo,
+                          onLike: widget.onLike,
+                          isSaved: widget.isSaved,
+                          onSave: widget.onSave,
+                          replyCount: widget.replyCount,
+                          onBlock: widget.onBlock,
+                          onMute: widget.onMute,
+                          onTap: () => widget.onOpenThread?.call(posts[i]),
+                          onReply: () => widget.onOpenThread?.call(posts[i]),
+                          mentionResolver: widget.mentionResolver,
+                        ),
                       ),
-                    ),
+              ),
             ),
           ],
         ),

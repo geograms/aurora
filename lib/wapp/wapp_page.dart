@@ -4111,7 +4111,11 @@ class _WappPageState extends State<WappPage>
         },
         resolveAvatar: _imageForPicture,
       ),
-    ));
+    )).then((_) {
+      if (!mounted) return;
+      _sendCommand('activity_refresh');
+      setState(() {});
+    });
   }
 
   void _showWappProfileSheet(String from, Map<String, String> p) {
@@ -4275,6 +4279,10 @@ class _WappPageState extends State<WappPage>
         profileFor: _feedProfileFor,
         mentionResolver: RnsService.instance.nostrMentionName,
         onOpenThread: _openActivityThread,
+        onRefresh: () async {
+          // Re-query the relays for the newest posts (pull-to-refresh).
+          _sendCommand('${name}_refresh');
+        },
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');
@@ -4597,7 +4605,13 @@ class _WappPageState extends State<WappPage>
             _wappProfiles[c]?['npub'] ?? RnsService.instance.npubForCallsign(c),
         onAttach: _attachImageOrVideoToChat,
       ),
-    ));
+    )).then((_) {
+      // Back on the stream: pull the latest + repaint so posts that arrived
+      // while reading the thread appear ("updates falling in").
+      if (!mounted) return;
+      _sendCommand('activity_refresh');
+      setState(() {});
+    });
   }
 
   void _openConvoById(String convo) {

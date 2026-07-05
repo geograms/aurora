@@ -9,6 +9,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show kIsWeb, ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart'
     show
         Clipboard,
@@ -389,7 +390,13 @@ class _WappPageState extends State<WappPage>
   /// Author profiles a wapp pushes via `ui.profile.set` (keyed by the post's
   /// `from`). {name, pic, about, nip05, npub}. Generic — lets a wapp resolve
   /// its own identities (e.g. NOSTR kind-0) to a display name + avatar.
+  ///
+  /// PERSISTED to disk: once an author is resolved it stays resolved in every
+  /// view (Saved, threads, profile page) and across restarts — it does not
+  /// depend on that author still being in the live feed.
   final Map<String, Map<String, String>> _wappProfiles = {};
+  File? _wappProfilesFile;
+  Timer? _wappProfilesSaveTimer;
 
   /// Periodic FEED backfill over Reticulum (complements APRS-IS, which loses
   /// messages): asks peers for FEED notes since the last sweep.
@@ -768,7 +775,44 @@ class _WappPageState extends State<WappPage>
     // If this wapp is running as a background service, hand it over to this
     // page so only one engine (and one BLE scan) is live while it's open.
     BackgroundWappManager.instance.suspend(_wappName);
+    unawaited(_loadWappProfilesCache());
     _loadWapp();
+  }
+
+  /// Load the persisted author-profile cache so names/avatars resolve in every
+  /// view (including Saved + old threads) from the first frame.
+  Future<void> _loadWappProfilesCache() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final f = File('${dir.path}/wapp_profiles.json');
+      _wappProfilesFile = f;
+      if (!f.existsSync()) return;
+      final j = jsonDecode(await f.readAsString());
+      if (j is! Map) return;
+      j.forEach((k, v) {
+        if (v is Map && !_wappProfiles.containsKey('$k')) {
+          _wappProfiles['$k'] = {
+            for (final e in v.entries) '${e.key}': '${e.value}'
+          };
+        }
+      });
+      if (mounted) {
+        setState(() {});
+        _activityRev.value++;
+      }
+    } catch (_) {}
+  }
+
+  /// Persist the profile cache a few seconds after the last update (debounced).
+  void _saveWappProfilesCacheSoon() {
+    _wappProfilesSaveTimer?.cancel();
+    _wappProfilesSaveTimer = Timer(const Duration(seconds: 3), () async {
+      final f = _wappProfilesFile;
+      if (f == null) return;
+      try {
+        await f.writeAsString(jsonEncode(_wappProfiles));
+      } catch (_) {}
+    });
   }
 
   void _onProfilesChanged() {
@@ -1556,17 +1600,22 @@ class _WappPageState extends State<WappPage>
           // display name + avatar + bio. Generic — the host just stores it.
           final key = (data['key'] ?? '').toString();
           if (key.isNotEmpty) {
-            _wappProfiles[key] = {
-              for (final f in const [
-                'name', 'pic', 'about', 'nip05', 'npub',
-                'website', 'lud16', 'banner'
-              ])
-                if ((data[f] ?? '').toString().isNotEmpty)
-                  f: data[f].toString(),
-            };
-            if (_wappProfiles.length > 2000) {
+            // MERGE into any existing entry so a later sparse push (e.g. just an
+            // npub) never clobbers an already-resolved name/avatar.
+            final merged =
+                Map<String, String>.from(_wappProfiles[key] ?? const {});
+            for (final f in const [
+              'name', 'pic', 'about', 'nip05', 'npub',
+              'website', 'lud16', 'banner'
+            ]) {
+              final v = (data[f] ?? '').toString();
+              if (v.isNotEmpty) merged[f] = v;
+            }
+            _wappProfiles[key] = merged;
+            if (_wappProfiles.length > 4000) {
               _wappProfiles.remove(_wappProfiles.keys.first);
             }
+            _saveWappProfilesCacheSoon(); // keep it resolved across views/restarts
             _activityRev.value++; // refresh open thread's author names/avatars
             changed = true;
           }
@@ -3947,10 +3996,23 @@ class _WappPageState extends State<WappPage>
   /// (ui.profile.set), else the built-in stream profile lookup.
   ({String? name, ImageProvider? avatar}) _feedProfileFor(String from) {
     final p = _wappProfiles[from];
-    if (p != null) {
+    if (p != null && (p['name'] != null || p['pic'] != null)) {
       final pic = p['pic'];
       return (
         name: p['name'],
+        avatar: (pic != null && pic.isNotEmpty) ? NetworkImage(pic) : null
+      );
+    }
+    // Persistent engine store (any author whose kind-0 we've EVER fetched),
+    // keyed by the 12-char prefix — resolves Saved/old-thread authors that
+    // aren't in the current live feed.
+    final eng = RnsService.instance.nostrProfileByShort12(from);
+    final eName = eng['name'];
+    if ((eName != null && eName.isNotEmpty) ||
+        (eng['pic']?.isNotEmpty == true)) {
+      final pic = eng['pic'];
+      return (
+        name: eName,
         avatar: (pic != null && pic.isNotEmpty) ? NetworkImage(pic) : null
       );
     }
@@ -3979,7 +4041,12 @@ class _WappPageState extends State<WappPage>
   void _openNostrProfile(String from) {
     final arch = _activityArchive;
     final uc = from.toUpperCase();
-    final p = _wappProfiles[from] ?? const <String, String>{};
+    // Merge the persistent engine profile (banner/website/npub/…) under any
+    // wapp-pushed one so Saved/old-thread authors get the full rich page too.
+    final p = <String, String>{
+      ...RnsService.instance.nostrProfileByShort12(from),
+      ...?_wappProfiles[from],
+    };
     // Seed name + avatar from the SAME resolver the feed uses — guarantees the
     // profile header matches the feed even when the wapp hasn't pushed a full
     // profile yet.

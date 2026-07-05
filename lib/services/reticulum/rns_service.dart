@@ -3771,6 +3771,21 @@ class RnsService {
   Map<String, String> nostrProfile(String pubHex) =>
       _nostrHub?.profile(pubHex) ?? const {};
 
+  /// Resolve a profile by the 12-char pubkey prefix (a post's `from`), from the
+  /// engine's PERSISTENT store — so authors resolve even when they're not in the
+  /// live feed (Saved tab, old threads). {} if unknown.
+  Map<String, String> nostrProfileByShort12(String short12) =>
+      _nostrHub?.profileByShort12(short12) ?? const {};
+
+  /// Decode an `npub1…` to its 64-char hex pubkey (null on failure).
+  String? nostrHexFromNpub(String npub) {
+    try {
+      return NostrCrypto.decodeNpub(npub.trim());
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Resolve a `npub1…` mention to its display name (fetching the profile if
   /// unknown). Returns null until the name is known.
   String? nostrMentionName(String npub) {

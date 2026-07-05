@@ -76,6 +76,11 @@ class ActivityFeed extends StatefulWidget {
   /// spinner shows until new events have had a moment to arrive.
   final Future<void> Function()? onRefresh;
 
+  /// Persisted tab choice to open on: 'all' | 'following' | 'favorites'.
+  /// Null/unknown → 'all'. Changes are reported via [onFilterChanged].
+  final String? initialFilter;
+  final ValueChanged<String>? onFilterChanged;
+
   final String hint;
 
   const ActivityFeed({
@@ -104,6 +109,8 @@ class ActivityFeed extends StatefulWidget {
     this.onMute,
     this.mentionResolver,
     this.onRefresh,
+    this.initialFilter,
+    this.onFilterChanged,
     this.hint = "What's happening?",
   });
 
@@ -119,8 +126,27 @@ class _ActivityFeedState extends State<ActivityFeed> {
   final _input = TextEditingController();
   final _composeFocus = FocusNode();
   final _pending = <({String token, MediaRef ref})>[];
-  _ActivityFilter _filter = _ActivityFilter.all;
+  late _ActivityFilter _filter;
   bool _composing = false; // collapsed single-line composer until tapped
+
+  static _ActivityFilter _filterFromString(String? s) => switch (s) {
+        'following' => _ActivityFilter.following,
+        'favorites' => _ActivityFilter.favorites,
+        _ => _ActivityFilter.all,
+      };
+  static String _filterToString(_ActivityFilter f) => switch (f) {
+        _ActivityFilter.following => 'following',
+        _ActivityFilter.favorites => 'favorites',
+        _ActivityFilter.all => 'all',
+      };
+
+  @override
+  void initState() {
+    super.initState();
+    // Seed ONCE from the persisted choice; never in didUpdateWidget (the widget
+    // rebuilds on every archive update — that would stomp the in-session tab).
+    _filter = _filterFromString(widget.initialFilter);
+  }
 
   @override
   void dispose() {
@@ -186,8 +212,11 @@ class _ActivityFeedState extends State<ActivityFeed> {
         posts = widget.savedPosts?.call() ?? const [];
         break;
       case _ActivityFilter.following:
+        // Everything the people I follow do — their posts AND their replies to
+        // others (their interactions), so NOT gated to roots. Scoped strictly
+        // to accounts I follow (+ my own posts).
         posts = widget.posts.reversed.where((p) {
-          if (!_isStreamPost(p) || !_isRoot(p)) return false;
+          if (!_isStreamPost(p)) return false;
           final from = (p['from'] ?? '').toString().toUpperCase();
           final out = (p['dir'] ?? '') == 'out';
           return out || widget.followedCalls.contains(from);
@@ -269,7 +298,10 @@ class _ActivityFeedState extends State<ActivityFeed> {
       final selected = _filter == value;
       final color = selected ? ChatPalette.accent : ChatPalette.secondary;
       return InkWell(
-        onTap: () => setState(() => _filter = value),
+        onTap: () {
+          setState(() => _filter = value);
+          widget.onFilterChanged?.call(_filterToString(value));
+        },
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(

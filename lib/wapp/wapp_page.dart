@@ -4326,6 +4326,11 @@ class _WappPageState extends State<WappPage>
           // Re-query the relays for the newest posts (pull-to-refresh).
           _sendCommand('${name}_refresh');
         },
+        // Remember the All/Following/Saved tab across restarts, per wapp.
+        initialFilter: PreferencesService.instanceSync
+            ?.getWappUiPref(_wappName, 'feedFilter'),
+        onFilterChanged: (f) => PreferencesService.instanceSync
+            ?.setWappUiPref(_wappName, 'feedFilter', f),
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');

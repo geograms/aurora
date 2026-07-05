@@ -210,6 +210,13 @@ class PreferencesService {
   void setWappFields(String wappId, String json) =>
       _prefs.setString('wapp.fields.$wappId', json);
 
+  // Small per-wapp UI preferences (e.g. the Activity feed's All/Following/Saved
+  // tab choice), keyed by wapp id so each wapp remembers its own.
+  String? getWappUiPref(String wappId, String key) =>
+      _prefs.getString('wapp.ui.$wappId.$key');
+  void setWappUiPref(String wappId, String key, String value) =>
+      _prefs.setString('wapp.ui.$wappId.$key', value);
+
   // First-run Android onboarding (permissions intro panel) shown + handled.
   bool get onboardingComplete => _prefs.getBool('onboarding.complete') ?? false;
   // Awaited so the flag is flushed before the app may be killed/restarted.

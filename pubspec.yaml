@@ -59,6 +59,7 @@ dependencies:
   # backend is added as an optional feature rather than shipped in the base app.
   flutter_pcm_sound: ^3.3.3            # raw PCM speaker sink (Android/iOS/macOS) for wasm-decoded audio
   path_provider: ^2.1.4                   # Writable app data dir on Android/iOS (no $HOME there)
+  url_launcher: ^6.3.0                     # Open http(s) links from posts in the system browser
   permission_handler: ^11.3.1             # Runtime permission requests (Android BLE/location/notify)
   geolocator: ^12.0.0                      # Device GPS for the hal_sensor_gps_* HAL (real phone position)
   ble_peripheral: ^2.4.0                  # Reliable BLE advertising on Android/iOS (geogram's choice)

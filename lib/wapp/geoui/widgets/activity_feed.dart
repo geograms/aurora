@@ -8,7 +8,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../services/media_disk_cache.dart';
 import 'package:http/http.dart' as http;
@@ -725,10 +727,6 @@ class ActivityPostCard extends StatelessWidget {
     final mediaUrls = activityMediaUrls(body);
     final textBody = mediaUrls.isEmpty ? body : _stripMediaUrls(body, mediaUrls);
     final refs = MediaRef.findAll(raw);
-    final fullNpub = from.isEmpty ? null : npubFor?.call(from);
-    final npub = fullNpub == null
-        ? null
-        : (fullNpub.length > 14 ? '${fullNpub.substring(0, 12)}…' : fullNpub);
     final prof = from.isEmpty ? null : profileFor?.call(from);
     final hasNick = (prof?.name?.trim().isNotEmpty) ?? false;
     final displayName =
@@ -772,25 +770,8 @@ class ActivityPostCard extends StatelessWidget {
                                   fontSize: 14)),
                         ),
                       ),
-                      if (hasNick && from.isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        Flexible(
-                          child: Text(from,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                  color: Colors.white.withAlpha(120),
-                                  fontSize: 12)),
-                        ),
-                      ] else if (npub != null) ...[
-                        const SizedBox(width: 6),
-                        Flexible(
-                          child: Text(npub,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                  color: Colors.white.withAlpha(120),
-                                  fontSize: 12)),
-                        ),
-                      ],
+                      // (No npub/pubkey beside the name — it only crowds out the
+                      // one thing people can actually read: the name.)
                       if (time.isNotEmpty) ...[
                         const SizedBox(width: 6),
                         Text('· $time',
@@ -1226,6 +1207,56 @@ class _ExpandableText extends StatefulWidget {
 class _ExpandableTextState extends State<_ExpandableText> {
   bool _expanded = false;
   static const int _limit = 560;
+  final List<TapGestureRecognizer> _recognizers = [];
+
+  static final _urlRe = RegExp(r'https?://[^\s]+', caseSensitive: false);
+
+  @override
+  void dispose() {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _openUrl(String url) async {
+    try {
+      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    } catch (_) {}
+  }
+
+  /// Split [text] into plain runs + tappable http(s) link spans (opened in the
+  /// system browser). Trailing punctuation stays out of the link.
+  List<InlineSpan> _linkified(String text) {
+    for (final r in _recognizers) {
+      r.dispose();
+    }
+    _recognizers.clear();
+    final spans = <InlineSpan>[];
+    var i = 0;
+    for (final m in _urlRe.allMatches(text)) {
+      if (m.start > i) spans.add(TextSpan(text: text.substring(i, m.start)));
+      var url = m.group(0)!;
+      String tail = '';
+      final tm = RegExp(r'[.,;:!?)\]}>"' r"']+$").firstMatch(url);
+      if (tm != null) {
+        tail = url.substring(tm.start);
+        url = url.substring(0, tm.start);
+      }
+      final rec = TapGestureRecognizer()..onTap = () => _openUrl(url);
+      _recognizers.add(rec);
+      spans.add(TextSpan(
+        text: url,
+        recognizer: rec,
+        style: TextStyle(
+            color: ChatPalette.accent, decoration: TextDecoration.underline),
+      ));
+      if (tail.isNotEmpty) spans.add(TextSpan(text: tail));
+      i = m.end;
+    }
+    if (i < text.length) spans.add(TextSpan(text: text.substring(i)));
+    return spans;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1236,7 +1267,8 @@ class _ExpandableTextState extends State<_ExpandableText> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(shown,
+        Text.rich(
+            TextSpan(children: _linkified(shown)),
             style: const TextStyle(
                 color: Colors.white, fontSize: 14, height: 1.3)),
         if (long)

@@ -832,6 +832,7 @@ class ActivityThreadPage extends StatefulWidget {
 
 class _ActivityThreadPageState extends State<ActivityThreadPage> {
   final _input = TextEditingController();
+  final _inputFocus = FocusNode();
   final _pending = <({String token, MediaRef ref})>[];
   Map<String, dynamic>? _replyTarget; // null = reply to the publication
 
@@ -847,7 +848,14 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
   void dispose() {
     widget.revision?.removeListener(_onRev);
     _input.dispose();
+    _inputFocus.dispose();
     super.dispose();
+  }
+
+  /// Aim the composer at [post] (null = the root) and pop the keyboard open.
+  void _replyTo(Map<String, dynamic>? post) {
+    setState(() => _replyTarget = post);
+    _inputFocus.requestFocus();
   }
 
   void _onRev() {
@@ -939,7 +947,9 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                       replyCount: widget.replyCount,
                       indent: depth * 16.0,
                       connector: depth > 0,
-                      onReply: () => setState(() => _replyTarget = it.post),
+                      // Reply to the root itself targets the publication (null).
+                      onReply: () =>
+                          _replyTo(i == 0 ? null : it.post),
                     );
                   },
                 ),
@@ -1017,6 +1027,7 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
               Expanded(
                 child: TextField(
                   controller: _input,
+                  focusNode: _inputFocus,
                   style: const TextStyle(color: Colors.white),
                   minLines: 1,
                   maxLines: 5,

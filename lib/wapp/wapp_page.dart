@@ -1547,6 +1547,7 @@ class _WappPageState extends State<WappPage>
             if (_wappPostStats.length > 1000) {
               _wappPostStats.remove(_wappPostStats.keys.first);
             }
+            _activityRev.value++; // refresh an open thread's like/reply counts
             changed = true;
           }
         } else if (type == 'ui.profile.set') {
@@ -1565,6 +1566,7 @@ class _WappPageState extends State<WappPage>
             if (_wappProfiles.length > 2000) {
               _wappProfiles.remove(_wappProfiles.keys.first);
             }
+            _activityRev.value++; // refresh open thread's author names/avatars
             changed = true;
           }
         } else if (type == 'ui.activity.filter') {
@@ -4404,9 +4406,13 @@ class _WappPageState extends State<WappPage>
         loadThread: (rootMid) =>
             _activityArchive?.threadReplies(rootMid) ??
             const <Map<String, dynamic>>[],
-        replyCount: (m) => _activityArchive?.replyCount(m) ?? 0,
-        likeInfo: (m) =>
-            _activityArchive?.likeInfo(m) ?? (count: 0, mine: false),
+        replyCount: (m) =>
+            _wappPostStats[m]?.replies ?? (_activityArchive?.replyCount(m) ?? 0),
+        likeInfo: (m) {
+          final s = _wappPostStats[m];
+          if (s != null) return (count: s.likes, mine: s.mine);
+          return _activityArchive?.likeInfo(m) ?? (count: 0, mine: false);
+        },
         onLike: (m, like) {
           _fieldValues['activity_mid'] = m;
           _fieldValues['activity_unlike'] = !like;

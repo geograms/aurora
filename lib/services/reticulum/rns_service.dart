@@ -3794,6 +3794,12 @@ class RnsService {
         if (about.isNotEmpty) out['about'] = about;
         final nip05 = (j['nip05'] ?? '').toString().trim();
         if (nip05.isNotEmpty) out['nip05'] = nip05;
+        final website = (j['website'] ?? '').toString().trim();
+        if (website.isNotEmpty) out['website'] = website;
+        final lud16 = (j['lud16'] ?? j['lud06'] ?? '').toString().trim();
+        if (lud16.isNotEmpty) out['lud16'] = lud16;
+        final banner = (j['banner'] ?? '').toString().trim();
+        if (banner.startsWith('http')) out['banner'] = banner;
       }
     } catch (_) {}
     return out;

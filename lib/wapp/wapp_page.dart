@@ -1555,7 +1555,10 @@ class _WappPageState extends State<WappPage>
           final key = (data['key'] ?? '').toString();
           if (key.isNotEmpty) {
             _wappProfiles[key] = {
-              for (final f in const ['name', 'pic', 'about', 'nip05', 'npub'])
+              for (final f in const [
+                'name', 'pic', 'about', 'nip05', 'npub',
+                'website', 'lud16', 'banner'
+              ])
                 if ((data[f] ?? '').toString().isNotEmpty)
                   f: data[f].toString(),
             };
@@ -3953,65 +3956,100 @@ class _WappPageState extends State<WappPage>
 
   void _showWappProfileSheet(String from, Map<String, String> p) {
     final pic = p['pic'];
+    final banner = p['banner'];
     final name = p['name'] ?? from;
     final about = p['about'];
     final npub = p['npub'];
     final nip05 = p['nip05'];
+    final website = p['website'];
+    final lud16 = p['lud16'];
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 4, 20, 20 + MediaQuery.of(ctx).viewInsets.bottom),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                CircleAvatar(
-                  radius: 28,
-                  backgroundImage: (pic != null && pic.isNotEmpty)
-                      ? NetworkImage(pic)
-                      : null,
-                  child: (pic == null || pic.isEmpty)
-                      ? Text(name.isNotEmpty ? name[0].toUpperCase() : '?')
-                      : null,
-                ),
-                const SizedBox(width: 14),
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        Widget kv(IconData icon, String text, {Color? color}) => Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Icon(icon, size: 17, color: color ?? cs.onSurfaceVariant),
+                const SizedBox(width: 8),
                 Expanded(
+                  child: SelectableText(text,
+                      style: TextStyle(fontSize: 13, color: color ?? cs.onSurface)),
+                ),
+              ]),
+            );
+        return SingleChildScrollView(
+          child: Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (banner != null && banner.isNotEmpty)
+                  ClipRRect(
+                    borderRadius:
+                        const BorderRadius.vertical(top: Radius.circular(16)),
+                    child: Image.network(banner,
+                        height: 120,
+                        width: double.infinity,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
                   child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(name,
-                          style: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold)),
-                      if (nip05 != null)
-                        Text(nip05,
-                            style: TextStyle(
-                                fontSize: 13,
-                                color: Theme.of(ctx).colorScheme.primary)),
+                      Row(children: [
+                        CircleAvatar(
+                          radius: 30,
+                          backgroundImage: (pic != null && pic.isNotEmpty)
+                              ? NetworkImage(pic)
+                              : null,
+                          child: (pic == null || pic.isEmpty)
+                              ? Text(name.isNotEmpty ? name[0].toUpperCase() : '?')
+                              : null,
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(name,
+                                  style: const TextStyle(
+                                      fontSize: 19, fontWeight: FontWeight.bold)),
+                              if (nip05 != null)
+                                Text(nip05,
+                                    style: TextStyle(
+                                        fontSize: 13, color: cs.primary)),
+                            ],
+                          ),
+                        ),
+                      ]),
+                      if (about != null) ...[
+                        const SizedBox(height: 14),
+                        SelectableText(about,
+                            style:
+                                const TextStyle(fontSize: 14, height: 1.35)),
+                      ],
+                      if (website != null && website.isNotEmpty)
+                        kv(Icons.link, website, color: cs.primary),
+                      if (lud16 != null && lud16.isNotEmpty)
+                        kv(Icons.bolt, lud16,
+                            color: const Color(0xFFF7931A)),
+                      if (npub != null)
+                        kv(Icons.key, npub),
                     ],
                   ),
                 ),
               ],
             ),
-            if (about != null) ...[
-              const SizedBox(height: 14),
-              Text(about, style: const TextStyle(fontSize: 14, height: 1.35)),
-            ],
-            if (npub != null) ...[
-              const SizedBox(height: 14),
-              SelectableText(npub,
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontFeatures: const [],
-                      color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
-            ],
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -4385,9 +4423,10 @@ class _WappPageState extends State<WappPage>
           _fieldValues['activity_input'] = text.trim();
           _sendCommand('activity_reply');
         },
-        onSenderTap: _openProfile,
-        profileFor: _streamProfileFor,
-        npubFor: (c) => RnsService.instance.npubForCallsign(c),
+        onSenderTap: _feedSenderTap,
+        profileFor: _feedProfileFor,
+        npubFor: (c) =>
+            _wappProfiles[c]?['npub'] ?? RnsService.instance.npubForCallsign(c),
         onAttach: _attachImageOrVideoToChat,
       ),
     ));

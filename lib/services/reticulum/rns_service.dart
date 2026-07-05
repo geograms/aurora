@@ -3771,6 +3771,20 @@ class RnsService {
   Map<String, String> nostrProfile(String pubHex) =>
       _nostrHub?.profile(pubHex) ?? const {};
 
+  /// Resolve a `npub1…` mention to its display name (fetching the profile if
+  /// unknown). Returns null until the name is known.
+  String? nostrMentionName(String npub) {
+    if (!npub.startsWith('npub1')) return null;
+    String hex;
+    try {
+      hex = NostrCrypto.decodeNpub(npub);
+    } catch (_) {
+      return null;
+    }
+    final name = _nostrHub?.profile(hex)['name'];
+    return (name != null && name.isNotEmpty) ? name : null;
+  }
+
   /// (likes, replies, likedByMe) for a post id — 0/0/false until stats arrive.
   ({int likes, int replies, bool mine}) nostrStats(String id) {
     final s = _nostrHub?.statsOf(id, selfPubHex);

@@ -4114,6 +4114,7 @@ class _WappPageState extends State<WappPage>
         },
         selfAvatar: _loadSelfProfile().avatar,
         profileFor: _feedProfileFor,
+        mentionResolver: RnsService.instance.nostrMentionName,
         onOpenThread: _openActivityThread,
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
@@ -4431,6 +4432,7 @@ class _WappPageState extends State<WappPage>
         },
         onSenderTap: _feedSenderTap,
         profileFor: _feedProfileFor,
+        mentionResolver: RnsService.instance.nostrMentionName,
         npubFor: (c) =>
             _wappProfiles[c]?['npub'] ?? RnsService.instance.npubForCallsign(c),
         onAttach: _attachImageOrVideoToChat,

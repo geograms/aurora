@@ -65,6 +65,9 @@ class ActivityFeed extends StatefulWidget {
   final void Function(String from)? onBlock;
   final void Function(String from)? onMute;
 
+  /// Resolve a `npub1…` mention in a post body to a display name.
+  final String? Function(String npub)? mentionResolver;
+
   final String hint;
 
   const ActivityFeed({
@@ -89,6 +92,7 @@ class ActivityFeed extends StatefulWidget {
     this.hiddenCalls = const {},
     this.onBlock,
     this.onMute,
+    this.mentionResolver,
     this.hint = "What's happening?",
   });
 
@@ -208,6 +212,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
                         onMute: widget.onMute,
                         onTap: () => widget.onOpenThread?.call(posts[i]),
                         onReply: () => widget.onOpenThread?.call(posts[i]),
+                        mentionResolver: widget.mentionResolver,
                       ),
                     ),
             ),
@@ -524,6 +529,9 @@ class ActivityPostCard extends StatelessWidget {
   final double indent;
   final bool connector;
 
+  /// Resolve a `npub1…` mention in the body to a display name.
+  final String? Function(String npub)? mentionResolver;
+
   const ActivityPostCard({
     super.key,
     required this.post,
@@ -541,6 +549,7 @@ class ActivityPostCard extends StatelessWidget {
     this.onReply,
     this.indent = 0,
     this.connector = false,
+    this.mentionResolver,
   });
 
   /// Per-post "…" menu: mute or block the author (only for others' posts).
@@ -587,7 +596,8 @@ class ActivityPostCard extends StatelessWidget {
     }
     final time = activityTimeLabel(p);
     final via = (p['via'] ?? '').toString();
-    final body = activityStrip(raw);
+    final body =
+        activityFormatMentions(activityStrip(raw), mentionResolver);
     // Media links shown inline below are stripped from the visible text (no
     // point repeating a long blossom.band/… URL under its own image).
     final mediaUrls = activityMediaUrls(body);
@@ -809,6 +819,9 @@ class ActivityThreadPage extends StatefulWidget {
   /// Rebuild when the activity archive changes (new replies arrive live).
   final Listenable? revision;
 
+  /// Resolve a `npub1…` mention in a post body to a display name.
+  final String? Function(String npub)? mentionResolver;
+
   const ActivityThreadPage({
     super.key,
     required this.root,
@@ -824,6 +837,7 @@ class ActivityThreadPage extends StatefulWidget {
     this.npubFor,
     this.onAttach,
     this.revision,
+    this.mentionResolver,
   });
 
   @override
@@ -947,6 +961,7 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                       replyCount: widget.replyCount,
                       indent: depth * 16.0,
                       connector: depth > 0,
+                      mentionResolver: widget.mentionResolver,
                       // Reply to the root itself targets the publication (null).
                       onReply: () =>
                           _replyTo(i == 0 ? null : it.post),
@@ -1120,6 +1135,24 @@ List<String> activityMediaUrls(String body) {
     if (out.length >= 4) break;
   }
   return out;
+}
+
+final _activityMentionRe = RegExp(
+    r'nostr:(npub1[023456789acdefghjklmnpqrstuvwxyz]{20,}|nprofile1[023456789acdefghjklmnpqrstuvwxyz]{20,})',
+    caseSensitive: false);
+
+/// Replace `nostr:npub1…` / `nostr:nprofile1…` mentions with `@Name` (via
+/// [resolve]) or a short `@npub1abcd…` when the name isn't known yet.
+String activityFormatMentions(String body, String? Function(String npub)? resolve) {
+  if (!body.contains('nostr:')) return body;
+  return body.replaceAllMapped(_activityMentionRe, (m) {
+    final token = m.group(1)!;
+    if (token.toLowerCase().startsWith('npub1')) {
+      final name = resolve?.call(token);
+      if (name != null && name.isNotEmpty) return '@$name';
+    }
+    return '@${token.substring(0, 10)}…';
+  });
 }
 
 /// Remove the media URLs (shown inline below) from the visible post text.

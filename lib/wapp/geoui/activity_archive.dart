@@ -92,6 +92,11 @@ class ActivityArchive {
       if (!cols.contains('parent')) {
         db.execute('ALTER TABLE activity ADD COLUMN parent TEXT;');
       }
+      // 1 = a "popular" post surfaced by the discovery feed (>=2 likes) — shown
+      // in the All tab even after the transient like count is lost on restart.
+      if (!cols.contains('pop')) {
+        db.execute('ALTER TABLE activity ADD COLUMN pop INTEGER DEFAULT 0;');
+      }
       db.execute('CREATE INDEX IF NOT EXISTS idx_activity_mid ON activity(mid);');
       db.execute(
           'CREATE INDEX IF NOT EXISTS idx_activity_parent ON activity(parent);');
@@ -163,8 +168,8 @@ class ActivityArchive {
     }
     try {
       db.execute(
-        'INSERT OR IGNORE INTO activity(t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent) '
-        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'INSERT OR IGNORE INTO activity(t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [
           // Backfilled notes carry their real time so they sort correctly;
           // live posts default to now.
@@ -181,6 +186,7 @@ class ActivityArchive {
           (raw['time'] ?? '').toString(),
           (raw['mid'] ?? '').toString(),
           (raw['parent'] ?? '').toString(),
+          (raw['pop'] == 1 || raw['pop'] == '1' || raw['pop'] == true) ? 1 : 0,
         ],
       );
     } catch (e) {
@@ -197,7 +203,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent '
+        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
         'FROM activity ORDER BY t DESC LIMIT ?',
         [limit],
       );
@@ -216,6 +222,7 @@ class ActivityArchive {
         'mid': (r['mid'] ?? '').toString(),
         'parent': (r['parent'] ?? '').toString(),
         'time': (r['time'] ?? '').toString(),
+        'pop': (r['pop'] as int?) ?? 0,
       };
       for (final f in const ['convo', 'via', 'meta']) {
         final v = (r[f] ?? '').toString();
@@ -237,7 +244,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent '
+        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
         'FROM activity WHERE parent = ? ORDER BY t ASC LIMIT ?',
         [mid, limit],
       );
@@ -256,6 +263,7 @@ class ActivityArchive {
         'mid': (r['mid'] ?? '').toString(),
         'parent': (r['parent'] ?? '').toString(),
         'time': (r['time'] ?? '').toString(),
+        'pop': (r['pop'] as int?) ?? 0,
       };
       for (final f in const ['convo', 'via', 'meta']) {
         final v = (r[f] ?? '').toString();
@@ -345,7 +353,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent '
+        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
         'FROM activity WHERE from_call = ? ORDER BY t DESC LIMIT ?',
         [callsign, limit],
       );
@@ -364,6 +372,7 @@ class ActivityArchive {
         'mid': (r['mid'] ?? '').toString(),
         'parent': (r['parent'] ?? '').toString(),
         'time': (r['time'] ?? '').toString(),
+        'pop': (r['pop'] as int?) ?? 0,
       };
       for (final f in const ['convo', 'via', 'meta']) {
         final v = (r[f] ?? '').toString();

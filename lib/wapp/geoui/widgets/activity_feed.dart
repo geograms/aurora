@@ -225,9 +225,18 @@ class _ActivityFeedState extends State<ActivityFeed> {
         }).toList();
         break;
       case _ActivityFilter.all:
-        posts = widget.posts.reversed
-            .where((p) => _isStreamPost(p) && _isRoot(p))
-            .toList();
+        // A firehose of PUBLICATIONS worth reading: my own posts + any root post
+        // that has gathered at least 2 likes. Zero-like noise never shows here
+        // (unpopular posts from follows live under the Following tab instead).
+        posts = widget.posts.reversed.where((p) {
+          if (!_isStreamPost(p) || !_isRoot(p)) return false;
+          if ((p['dir'] ?? '') == 'out') return true; // my own posts always
+          // Popular = surfaced by the discovery feed (>=2 likes; the flag is
+          // stored so it survives restarts) OR its live like count is >=2.
+          if (p['pop'] == 1 || p['pop'] == '1') return true;
+          final mid = (p['mid'] ?? '').toString();
+          return (widget.likeInfo?.call(mid).count ?? 0) >= 2;
+        }).toList();
         break;
     }
     // Hide posts from blocked/muted callsigns (the wapp pushes the set).
@@ -577,6 +586,24 @@ String activityTimeLabel(Map<String, dynamic> p) {
       : '$mon ${dt.day} ${dt.year}';
 }
 
+/// Compact time for the crowded post header ("now", "18m", "2h", "3d", "Jun 26")
+/// so the author name gets the room it needs.
+String activityTimeShort(Map<String, dynamic> p) {
+  final t = (p['t'] as num?)?.toInt() ?? 0;
+  if (t <= 0) return (p['time'] ?? '').toString();
+  final dt = DateTime.fromMillisecondsSinceEpoch(t);
+  final now = DateTime.now();
+  final secs = now.difference(dt).inSeconds;
+  if (secs < -60) return 'now';
+  if (secs < 60) return 'now';
+  if (secs < 3600) return '${secs ~/ 60}m';
+  if (secs < 86400) return '${secs ~/ 3600}h';
+  final days = secs ~/ 86400;
+  if (days < 7) return '${days}d';
+  final mon = _activityMonths[dt.month - 1];
+  return dt.year == now.year ? '$mon ${dt.day}' : '$mon ${dt.day} ${dt.year}';
+}
+
 final _activityFileRe = RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}');
 // An embedded preview thumbnail: `tn:<base64url-png>` (carries padding `=`).
 final _activityTnRe = RegExp(r'\btn:([A-Za-z0-9_-]+=*)');
@@ -718,7 +745,7 @@ class ActivityPostCard extends StatelessWidget {
       mid = activityMid(from, raw);
       p['mid'] = mid;
     }
-    final time = activityTimeLabel(p);
+    final time = activityTimeShort(p);
     final via = (p['via'] ?? '').toString();
     final body =
         activityFormatMentions(activityStrip(raw), mentionResolver);
@@ -757,39 +784,45 @@ class ActivityPostCard extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Flexible(
-                        child: GestureDetector(
-                          onTap: (onSenderTap != null && from.isNotEmpty)
-                              ? () => onSenderTap!(from)
-                              : null,
-                          child: Text(displayName,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 14)),
+                      // Name gets ALL the room left after the (compact) time +
+                      // via chip; the "…" menu sits at the far right without
+                      // competing for the name's width. No npub beside the name —
+                      // the name is the only thing people can read.
+                      Expanded(
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: GestureDetector(
+                                onTap: (onSenderTap != null && from.isNotEmpty)
+                                    ? () => onSenderTap!(from)
+                                    : null,
+                                child: Text(displayName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14)),
+                              ),
+                            ),
+                            if (time.isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              Text('· $time',
+                                  style: TextStyle(
+                                      color: Colors.white.withAlpha(120),
+                                      fontSize: 12)),
+                            ],
+                            if (via.isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              _activityViaChip(via),
+                            ],
+                          ],
                         ),
                       ),
-                      // (No npub/pubkey beside the name — it only crowds out the
-                      // one thing people can actually read: the name.)
-                      if (time.isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        Text('· $time',
-                            style: TextStyle(
-                                color: Colors.white.withAlpha(120),
-                                fontSize: 12)),
-                      ],
-                      if (via.isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        _activityViaChip(via),
-                      ],
                       if (from.isNotEmpty &&
                           (p['dir'] ?? '') != 'out' &&
-                          (onBlock != null || onMute != null)) ...[
-                        const Spacer(),
-                        SizedBox(
-                            height: 22, width: 28, child: _menu(from)),
-                      ],
+                          (onBlock != null || onMute != null))
+                        SizedBox(height: 22, width: 28, child: _menu(from)),
                     ],
                   ),
                   if (textBody.isNotEmpty)

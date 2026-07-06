@@ -904,35 +904,47 @@ class _GraphViewState extends State<_GraphView>
       case _Panel.none:
         return const SizedBox.shrink();
     }
-    return Positioned(
-      top: 0,
-      right: 0,
-      bottom: 0,
-      width: 320,
+    // A chat thread's back arrow returns to the conversation list; every other
+    // panel's back arrow returns to the graph.
+    final back = _panel == _Panel.chat
+        ? () => setState(() => _panel = _Panel.chats)
+        : () => setState(() => _panel = _Panel.none);
+    // Full-screen panel (no side-strip popup): covers the whole graph area.
+    return Positioned.fill(
       child: Material(
-        color: _gPanel,
+        color: _gBg,
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Container(
-            height: 46,
-            padding: const EdgeInsets.only(left: 14, right: 6),
+            height: 52,
+            padding: const EdgeInsets.only(left: 4, right: 8),
             decoration: const BoxDecoration(
-                border: Border(bottom: BorderSide(color: _gBorder))),
+              color: _gPanel,
+              border: Border(bottom: BorderSide(color: _gBorder)),
+            ),
             child: Row(children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back, size: 22, color: _gFg),
+                tooltip: 'Back',
+                onPressed: back,
+              ),
               Expanded(
                 child: Text(title,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         color: Color(0xFFE6EDF3),
-                        fontSize: 15,
+                        fontSize: 17,
                         fontWeight: FontWeight.w600)),
-              ),
-              IconButton(
-                icon: const Icon(Icons.close, size: 20, color: _gMuted),
-                onPressed: () => setState(() => _panel = _Panel.none),
               ),
             ]),
           ),
-          Expanded(child: content),
+          Expanded(
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 680),
+                child: content,
+              ),
+            ),
+          ),
         ]),
       ),
     );
@@ -973,37 +985,92 @@ class _GraphViewState extends State<_GraphView>
         : n.kind == 'hub'
             ? 'Hub / transport node'
             : 'Peer';
-    return ListView(padding: const EdgeInsets.all(14), children: [
-      Text(kindName + (n.geogram ? ' · geogram' : ''),
-          style: const TextStyle(color: _gMuted, fontSize: 12)),
-      // Prominent "Last seen" right at the top — the first thing you want when
-      // opening a device (don't make the user scroll past services/caps for it).
-      if (n.kind != 'self' && m['lastSeen'] != null)
-        Padding(
-          padding: const EdgeInsets.only(top: 6),
-          child: Row(children: [
-            const Icon(Icons.schedule, size: 14, color: _gMuted),
-            const SizedBox(width: 6),
-            Text('Last seen ${_ago(m['lastSeen'])}',
-                style: const TextStyle(color: _gFg, fontSize: 13)),
+    final pubkey = (m['pubkey'] ?? '').toString();
+    final canMessage = n.kind != 'self' && n.dm.isNotEmpty && pubkey.isNotEmpty;
+    final color = n.kind == 'self'
+        ? _gSelf
+        : n.kind == 'hub'
+            ? _gHub
+            : (n.geogram ? _gGeo : _gGeneric);
+    final initial = n.label.isNotEmpty ? n.label.substring(0, 1).toUpperCase() : '?';
+    final dmText = switch (n.dm) {
+      'lxmf' => 'LXMF · direct',
+      'sf' => 'LXMF · store-and-forward',
+      'chat' => 'Geogram chat',
+      _ => 'No 1:1 messaging heard',
+    };
+    return ListView(padding: const EdgeInsets.all(18), children: [
+      // Header: avatar + name + kind + last seen.
+      Row(children: [
+        Container(
+          width: 58,
+          height: 58,
+          decoration: BoxDecoration(
+              color: color.withAlpha(38),
+              shape: BoxShape.circle,
+              border: Border.all(color: color, width: 2)),
+          child: Center(
+              child: Text(initial,
+                  style: TextStyle(
+                      color: color, fontSize: 25, fontWeight: FontWeight.w700))),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(n.label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: _gFg, fontSize: 20, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 2),
+            Text(kindName + (n.geogram ? ' · geogram' : ''),
+                style: const TextStyle(color: _gMuted, fontSize: 13)),
+            if (n.kind != 'self' && m['lastSeen'] != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text('Last seen ${_ago(m['lastSeen'])}',
+                    style: const TextStyle(color: _gMuted, fontSize: 12)),
+              ),
           ]),
         ),
-      const SizedBox(height: 12),
+      ]),
+      const SizedBox(height: 18),
+      // Prominent Message button (or a reachability note when unreachable).
+      if (canMessage)
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            icon: const Icon(Icons.send, size: 18),
+            label: const Text('Message'),
+            style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 13)),
+            onPressed: () => _messagePeer(n, pubkey),
+          ),
+        )
+      else if (n.kind != 'self')
+        Row(children: [
+          const Icon(Icons.do_not_disturb_on, size: 15, color: _gMuted),
+          const SizedBox(width: 6),
+          Text(dmText, style: const TextStyle(color: _gMuted, fontSize: 13)),
+        ]),
+      const SizedBox(height: 16),
       if (n.kind == 'hub' && n.childCount > 0)
         Padding(
           padding: const EdgeInsets.only(bottom: 10),
-          child: OutlinedButton.icon(
-            icon: const Icon(Icons.list, size: 16),
-            label: Text('List ${n.childCount} devices'),
-            onPressed: () => setState(() {
-              _panelHubId = n.id;
-              _expanded.add(n.id);
-              _panel = _Panel.hubDevices;
-              _rebuildVisible();
-            }),
+          child: SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.list, size: 16),
+              label: Text('List ${n.childCount} devices'),
+              onPressed: () => setState(() {
+                _panelHubId = n.id;
+                _expanded.add(n.id);
+                _panel = _Panel.hubDevices;
+                _rebuildVisible();
+              }),
+            ),
           ),
         ),
-      if (n.kind != 'self') _dmSection(n),
       if (n.services.isNotEmpty) _chips(n.services),
       if ((m['nickname'] ?? '').toString().isNotEmpty &&
           (m['nickname'] ?? '').toString().toUpperCase() !=
@@ -1023,46 +1090,6 @@ class _GraphViewState extends State<_GraphView>
       if (n.npub.isNotEmpty) _kv('npub', n.npub),
       if (n.id.isNotEmpty) _kv('Identity', n.id),
     ]);
-  }
-
-  // 1:1 messaging reachability + a Message action. The 'dm' hint comes from the
-  // host (graphSnapshot): 'lxmf' = LXMF delivery (direct), 'sf' = LXMF
-  // propagation only (store-and-forward), 'chat' = geogram chat, '' = none heard.
-  // The Message button derives the LXMF delivery dest from meta.pubkey, so it
-  // needs a key; synthetic hubs we never heard announce have none.
-  Widget _dmSection(_GNode n) {
-    final pubkey = (n.meta['pubkey'] ?? '').toString();
-    final (String text, Color color) = switch (n.dm) {
-      'lxmf' => ('LXMF · direct', _gGeo),
-      'sf' => ('LXMF · store-and-forward', _gHub),
-      'chat' => ('Geogram chat', _gSelf),
-      _ => ('No 1:1 messaging heard', _gMuted),
-    };
-    final canMessage = n.dm.isNotEmpty && pubkey.isNotEmpty;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('DIRECT MESSAGE',
-            style: TextStyle(color: _gMuted, fontSize: 10, letterSpacing: 0.4)),
-        const SizedBox(height: 3),
-        Row(children: [
-          Icon(canMessage ? Icons.check_circle : Icons.do_not_disturb_on,
-              size: 14, color: color),
-          const SizedBox(width: 6),
-          Expanded(
-              child: Text(text, style: TextStyle(color: color, fontSize: 13))),
-        ]),
-        if (canMessage)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: FilledButton.icon(
-              icon: const Icon(Icons.send, size: 16),
-              label: const Text('Message'),
-              onPressed: () => _messagePeer(n, pubkey),
-            ),
-          ),
-      ]),
-    );
   }
 
   // Open (or start) an LXMF conversation with a graph node. The conversation is
@@ -1508,25 +1535,20 @@ class _GraphViewState extends State<_GraphView>
     if (peer == null) return const SizedBox.shrink();
     final msgs = RnsService.instance.lxmfConversation(peer);
     return Column(children: [
-      // Address bar: back to the list + the full address (copyable) so a group
-      // address can be shared/verified.
+      // Address bar: the full LXMF address (copyable) so a group address can be
+      // shared/verified. (Back is the panel header's arrow.)
       Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        color: _gBg,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        color: _gPanel,
         child: Row(children: [
-          InkWell(
-            onTap: () => setState(() => _panel = _Panel.chats),
-            child: const Icon(Icons.arrow_back, size: 16, color: _gMuted),
-          ),
-          const SizedBox(width: 8),
           const Icon(Icons.alternate_email, size: 13, color: _gMuted),
-          const SizedBox(width: 4),
+          const SizedBox(width: 6),
           Expanded(
             child: SelectableText(peer,
                 maxLines: 1,
                 style: const TextStyle(
-                    color: _gMuted, fontSize: 11, fontFamily: 'monospace')),
+                    color: _gMuted, fontSize: 11.5, fontFamily: 'monospace')),
           ),
         ]),
       ),

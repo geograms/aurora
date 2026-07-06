@@ -4882,6 +4882,73 @@ class _WappPageState extends State<WappPage>
     ));
   }
 
+  /// Open the shared full profile page for a geogram device tapped in the
+  /// Reticulum graph — the same page NOSTR/Chat show (Follow / Message / Mute),
+  /// plus the reticulum facts: observed first-seen + the hubs it's reachable via.
+  void _openReticulumProfile({
+    required String callsign,
+    String? npub,
+    int? firstSeenMs,
+    List<String> reachableVia = const [],
+  }) {
+    final c = callsign.trim();
+    if (c.isEmpty) return;
+    final arch = _activityArchive;
+    final resolvedNpub = (npub != null && npub.isNotEmpty)
+        ? npub
+        : RnsService.instance.npubForCallsign(c);
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ProfileRoute(
+        callsign: c,
+        npub: resolvedNpub,
+        firstSeenMs: firstSeenMs ?? arch?.firstSeenMs(c),
+        reachableVia: reachableVia,
+        postCount: arch?.postCount(c) ?? 0,
+        posts: arch?.byAuthor(c) ?? const [],
+        onPostTap: (post) {
+          Navigator.of(context).pop();
+          _openConvoFromFeed(post);
+        },
+        onMessage: () {
+          Navigator.of(context).pop();
+          _openConvoById(c);
+        },
+        following: _followedCalls.contains(c.toUpperCase()),
+        blocked: _blockedCalls.contains(c.toUpperCase()),
+        muted: RnsService.instance.isMutedCallsign(c),
+        onSetFollow: (follow) {
+          final uc = c.toUpperCase();
+          if (follow) {
+            _followedCalls.add(uc);
+          } else {
+            _followedCalls.remove(uc);
+          }
+          _fieldValues['profile_target'] = c;
+          _sendCommand(follow ? 'profile_follow' : 'profile_unfollow');
+        },
+        onSetBlock: (block) {
+          final uc = c.toUpperCase();
+          if (block) {
+            _blockedCalls.add(uc);
+          } else {
+            _blockedCalls.remove(uc);
+          }
+          _fieldValues['profile_target'] = c;
+          _sendCommand(block ? 'profile_block' : 'profile_unblock');
+        },
+        onSetMute: (mute) {
+          RnsService.instance.setMutedCallsign(c, mute);
+          if (mounted) setState(() {}); // re-filter the graph lists
+        },
+        fetchMetadata: resolvedNpub == null
+            ? null
+            : () => RnsService.instance.fetchProfileMetadata(resolvedNpub),
+        fetchDevices: () async => RnsService.instance.devicesForCallsign(c),
+        resolveAvatar: _imageForPicture,
+      ),
+    ));
+  }
+
   /// Resolve a stream post author's callsign to its display name + avatar. Our
   /// own callsign uses the local identity; others use the auto-fetched NOSTR
   /// profile cache (populated only for people we follow).

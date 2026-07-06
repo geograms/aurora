@@ -68,6 +68,10 @@ class ProfileRoute extends StatefulWidget {
   /// section in the panel; null hides the section.
   final Future<List<Map<String, dynamic>>> Function()? fetchDevices;
 
+  /// Hubs this station is reachable through now (reticulum graph). See
+  /// [ProfileView.reachableVia].
+  final List<String>? reachableVia;
+
   const ProfileRoute({
     super.key,
     required this.callsign,
@@ -99,6 +103,7 @@ class ProfileRoute extends StatefulWidget {
     this.fetchMetadata,
     this.resolveAvatar,
     this.fetchDevices,
+    this.reachableVia,
   });
 
   @override
@@ -234,6 +239,7 @@ class _ProfileRouteState extends State<ProfileRoute> {
       lud16: _lud16,
       isSelf: widget.isSelf,
       onEdit: widget.isSelf && widget.onEdit != null ? _edit : null,
+      reachableVia: widget.reachableVia,
       devices: _devices,
       showDevices: widget.fetchDevices != null,
     );

@@ -3252,6 +3252,21 @@ class RnsService {
     }
   }
 
+  // Muted callsigns (in-memory) — the Reticulum wapp hides these from its device
+  // lists; toggled from a peer's profile "Mute" action.
+  final Set<String> _mutedCalls = {};
+  bool isMutedCallsign(String cs) =>
+      _mutedCalls.contains(cs.trim().toUpperCase());
+  void setMutedCallsign(String cs, bool muted) {
+    final k = cs.trim().toUpperCase();
+    if (k.isEmpty) return;
+    if (muted) {
+      _mutedCalls.add(k);
+    } else {
+      _mutedCalls.remove(k);
+    }
+  }
+
   /// Resolved profile metadata for [callsign] ({name, about, picture}) or null.
   Map<String, dynamic>? profileMetaFor(String callsign) =>
       _profileMeta[callsign.trim()];

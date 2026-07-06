@@ -62,6 +62,11 @@ class ProfileView extends StatefulWidget {
   final bool isSelf;
   final VoidCallback? onEdit;
 
+  /// Hubs / transport nodes this station is reachable through right now (e.g.
+  /// ["hub 07d20e92", "hub 9b31cacc"]). Rendered as a compact line under
+  /// "First seen"; empty/null hides it.
+  final List<String>? reachableVia;
+
   /// Reticulum devices this user has been seen announcing from, each
   /// {dest, hops, ageSec, online, services, via}. When [showDevices] is true a
   /// "Reticulum devices" section renders: null = still loading, empty = none
@@ -100,6 +105,7 @@ class ProfileView extends StatefulWidget {
     this.onSetMute,
     this.isSelf = false,
     this.onEdit,
+    this.reachableVia,
     this.devices,
     this.showDevices = false,
   });
@@ -460,6 +466,22 @@ class _ProfileViewState extends State<ProfileView> {
                       color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12.5)),
             ],
           ),
+          if ((widget.reachableVia ?? const []).isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.lan_outlined, size: 14, color: cs.onSurfaceVariant),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text('Reachable via ${widget.reachableVia!.join(', ')}',
+                        style: TextStyle(
+                            color: cs.onSurfaceVariant, fontSize: 12.5)),
+                  ),
+                ],
+              ),
+            ),
           if (_blocked)
             Padding(
               padding: const EdgeInsets.only(top: 8),

@@ -836,6 +836,8 @@ class RnsService {
     ('lxmf', kLxmfApp, kLxmfDeliveryAspects),
     ('lxmf-prop', kLxmfApp, kLxmfPropagationAspects),
     ('rv', 'circles', ['rv']),
+    // NomadNet node (serves pages/files; often also an LXMF propagation node).
+    ('node', 'nomadnetwork', ['node']),
   ];
 
   /// Which service destination this announce is, or null if it's none we know.
@@ -982,10 +984,12 @@ class RnsService {
     for (final e in _relayDir.entries()) {
       relayByHex[e.idHex] = e;
     }
-    // A geogram device carries a service beyond bare LXMF (chat/relay/wapp/…) —
-    // our own network. Defined up here because reachability trusts it.
+    // A geogram device carries a geogram service (chat/relay/wapp/files/dht) —
+    // our own network. LXMF and NomadNet ('node') services are NOT geogram.
+    // Defined up here because reachability trusts it.
+    const nonGeoSvc = {'lxmf', 'lxmf-prop', 'node'};
     bool isGeogram(_ObservedNode n) =>
-        n.services.any((s) => s != 'lxmf' && s != 'lxmf-prop');
+        n.services.any((s) => !nonGeoSvc.contains(s));
 
     // Which observed nodes to show. A recent lastSeen alone isn't enough: linking
     // a hub floods its cached announce table at us, so every long-dead node it
@@ -1510,6 +1514,13 @@ class RnsService {
             'hash': _hex(m.hash),
             'ts': m.timestamp,
           });
+          // Surface it as a conversation (keyed by the sender's delivery dest —
+          // the address we reply to). LXMF ts is epoch seconds → ms.
+          _recordLxmf(_hex(m.sourceHash),
+              incoming: true,
+              text: m.contentString,
+              title: m.titleString,
+              tsMs: (m.timestamp * 1000).round());
           LogService.instance
               .add('LXMF: from ${_hex(m.sourceHash)}: "${m.contentString}"');
         },
@@ -2533,6 +2544,12 @@ class RnsService {
     if (!_up || r == null || _id == null) return false;
     final dh = _bytesFromHex(destHex);
     if (dh == null) return false;
+    // Record the outgoing chat optimistically NOW (before the path-heal wait
+    // below, which can take seconds) so it shows in the thread immediately. Skip
+    // wapp-datagram sends (0xB0), which aren't user chat.
+    if (fields == null || !fields.containsKey(_kWappLxmfField)) {
+      _recordLxmf(destHex, incoming: false, text: content, title: title);
+    }
     // Self-heal: if we have no path to the recipient yet, pull one (path
     // request) and wait briefly. This lets delivery reach a peer whose announce
     // never passively flooded to us over busy/asymmetric public hubs.
@@ -3138,6 +3155,100 @@ class RnsService {
       try {
         c();
       } catch (_) {}
+    }
+  }
+
+  // ── LXMF conversations (NomadNet / Sideband / group nodes) ──────────────────
+  // Every conversation is keyed by the PEER's LXMF delivery-dest hash (hex) —
+  // the same address we send replies to. Peers can be geogram devices, NomadNet
+  // or Sideband users, or LXMF distribution-group nodes (group chat): they all
+  // speak the same LXMF protocol, so one conversation model serves all of them.
+  final Map<String, List<Map<String, dynamic>>> _lxmfConvos = {};
+  final Map<String, String> _lxmfNames = {}; // destHex -> friendly label
+  final Set<String> _lxmfUnread = {}; // destHex with unseen incoming
+  final List<void Function()> _lxmfListeners = [];
+  void addLxmfListener(void Function() cb) => _lxmfListeners.add(cb);
+  void removeLxmfListener(void Function() cb) => _lxmfListeners.remove(cb);
+  void _notifyLxmf() {
+    for (final c in List.of(_lxmfListeners)) {
+      try {
+        c();
+      } catch (_) {}
+    }
+  }
+
+  static String _shortId(String h) => h.length > 12 ? '${h.substring(0, 12)}…' : h;
+
+  /// Message history with [peerHex] (oldest→newest). Each: {in, text, title, ts}.
+  List<Map<String, dynamic>> lxmfConversation(String peerHex) =>
+      List.unmodifiable(_lxmfConvos[peerHex.toLowerCase()] ?? const []);
+
+  /// All conversations, newest-activity first: {id, name, last, ts, unread}.
+  List<Map<String, dynamic>> lxmfConversations() {
+    final out = <Map<String, dynamic>>[];
+    _lxmfConvos.forEach((id, msgs) {
+      final last = msgs.isNotEmpty ? msgs.last : null;
+      out.add({
+        'id': id,
+        'name': _lxmfNames[id] ?? _shortId(id),
+        'last': (last?['text'] ?? '').toString(),
+        'ts': (last?['ts'] as int?) ?? 0,
+        'unread': _lxmfUnread.contains(id),
+      });
+    });
+    out.sort((a, b) => (b['ts'] as int).compareTo(a['ts'] as int));
+    return out;
+  }
+
+  int get lxmfUnreadCount => _lxmfUnread.length;
+
+  void lxmfMarkRead(String peerHex) {
+    if (_lxmfUnread.remove(peerHex.toLowerCase())) _notifyLxmf();
+  }
+
+  /// Attach a friendly label to a peer address (e.g. the graph node's name).
+  void lxmfSetName(String peerHex, String name) {
+    final k = peerHex.toLowerCase();
+    if (name.trim().isNotEmpty && _lxmfNames[k] != name.trim()) {
+      _lxmfNames[k] = name.trim();
+      _notifyLxmf();
+    }
+  }
+
+  /// Ensure a conversation exists (so a freshly-opened/pasted address shows up
+  /// in the list even before the first message).
+  void lxmfEnsureConversation(String peerHex, {String name = ''}) {
+    final k = peerHex.toLowerCase();
+    _lxmfConvos.putIfAbsent(k, () => []);
+    if (name.isNotEmpty) lxmfSetName(k, name);
+    _notifyLxmf();
+  }
+
+  void _recordLxmf(String peerHex,
+      {required bool incoming, required String text, String title = '', int? tsMs}) {
+    final k = peerHex.toLowerCase();
+    final list = _lxmfConvos.putIfAbsent(k, () => []);
+    list.add({
+      'in': incoming,
+      'text': text,
+      'title': title,
+      'ts': tsMs ?? DateTime.now().millisecondsSinceEpoch,
+    });
+    if (list.length > 500) list.removeRange(0, list.length - 500);
+    if (incoming) _lxmfUnread.add(k);
+    _notifyLxmf();
+  }
+
+  /// The LXMF delivery-dest hash (hex) a peer's 64-byte public key maps to — the
+  /// stable conversation key for a graph node. Null on a malformed key.
+  String? lxmfDestForPubkey(String pubkeyHex) {
+    final pub = _bytesFromHex(pubkeyHex);
+    if (pub == null || pub.length != 64) return null;
+    try {
+      final id = RnsIdentity.fromPublicKey(pub);
+      return _hex(RnsDestination.hash(id, kLxmfApp, kLxmfDeliveryAspects));
+    } catch (_) {
+      return null;
     }
   }
 

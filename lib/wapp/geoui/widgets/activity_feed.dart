@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../services/media_disk_cache.dart';
+import '../../native/wasm_video_player.dart';
 import 'package:http/http.dart' as http;
 
 import '../../../util/media_ref.dart';
@@ -83,6 +84,10 @@ class ActivityFeed extends StatefulWidget {
   final String? initialFilter;
   final ValueChanged<String>? onFilterChanged;
 
+  /// Read-only mode (search results): no composer, no All/Following bar, no
+  /// "new posts" pill — just the tappable post/result cards, shown as-is.
+  final bool readOnly;
+
   final String hint;
 
   const ActivityFeed({
@@ -113,6 +118,7 @@ class ActivityFeed extends StatefulWidget {
     this.onRefresh,
     this.initialFilter,
     this.onFilterChanged,
+    this.readOnly = false,
     this.hint = "What's happening?",
   });
 
@@ -131,6 +137,32 @@ class _ActivityFeedState extends State<ActivityFeed> {
   late _ActivityFilter _filter;
   bool _composing = false; // collapsed single-line composer until tapped
 
+  final _scroll = ScrollController();
+  // The FROZEN post snapshot the list renders. While the user is scrolled down,
+  // new posts are held out of this list (so the screen doesn't shift under them)
+  // and surfaced via the "N new posts" pill.
+  List<Map<String, dynamic>> _shown = const [];
+  int _newCount = 0;
+
+  bool get _atTop => !_scroll.hasClients || _scroll.offset <= 12;
+
+  void _onScroll() {
+    // Reaching the top adopts whatever arrived while reading below.
+    if (_atTop && _newCount > 0) _pullNew(scroll: false);
+  }
+
+  /// Show the freshest posts: adopt the latest list + jump to the top.
+  void _pullNew({bool scroll = true}) {
+    setState(() {
+      _shown = widget.posts;
+      _newCount = 0;
+    });
+    if (scroll && _scroll.hasClients) {
+      _scroll.animateTo(0,
+          duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+    }
+  }
+
   static _ActivityFilter _filterFromString(String? s) => switch (s) {
         'following' => _ActivityFilter.following,
         'favorites' => _ActivityFilter.favorites,
@@ -148,12 +180,37 @@ class _ActivityFeedState extends State<ActivityFeed> {
     // Seed ONCE from the persisted choice; never in didUpdateWidget (the widget
     // rebuilds on every archive update — that would stomp the in-session tab).
     _filter = _filterFromString(widget.initialFilter);
+    _shown = widget.posts; // show cached posts immediately
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
+  void didUpdateWidget(ActivityFeed old) {
+    super.didUpdateWidget(old);
+    if (identical(old.posts, widget.posts)) return;
+    if (_atTop) {
+      // At the top → keep it live (new posts just appear, no jump).
+      _shown = widget.posts;
+      _newCount = 0;
+      return;
+    }
+    // Scrolled down → hold the new posts back; count how many (of the ones that
+    // pass the current filter) are waiting, to label the pill.
+    final shownMids = {
+      for (final p in _filtered(_shown)) (p['mid'] ?? '').toString()
+    };
+    var n = 0;
+    for (final p in _filtered(widget.posts)) {
+      if (!shownMids.contains((p['mid'] ?? '').toString())) n++;
+    }
+    _newCount = n;
   }
 
   @override
   void dispose() {
     _input.dispose();
     _composeFocus.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -203,10 +260,10 @@ class _ActivityFeedState extends State<ActivityFeed> {
   bool _isRoot(Map<String, dynamic> p) =>
       (p['parent'] ?? '').toString().trim().isEmpty;
 
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    // Newest first (Twitter order), filtered by the All/Following/Favorites tab.
+  /// Apply the current All/Following/Saved filter to a raw post list, newest
+  /// first. Kept separate so the "N new posts" count can be measured against the
+  /// same filtered view the user actually sees.
+  List<Map<String, dynamic>> _filtered(List<Map<String, dynamic>> src) {
     List<Map<String, dynamic>> posts;
     switch (_filter) {
       case _ActivityFilter.favorites:
@@ -217,7 +274,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
         // Everything the people I follow do — their posts AND their replies to
         // others (their interactions), so NOT gated to roots. Scoped strictly
         // to accounts I follow (+ my own posts).
-        posts = widget.posts.reversed.where((p) {
+        posts = src.reversed.where((p) {
           if (!_isStreamPost(p)) return false;
           final from = (p['from'] ?? '').toString().toUpperCase();
           final out = (p['dir'] ?? '') == 'out';
@@ -228,7 +285,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
         // A firehose of PUBLICATIONS worth reading: my own posts + any root post
         // that has gathered at least 2 likes. Zero-like noise never shows here
         // (unpopular posts from follows live under the Following tab instead).
-        posts = widget.posts.reversed.where((p) {
+        posts = src.reversed.where((p) {
           if (!_isStreamPost(p) || !_isRoot(p)) return false;
           if ((p['dir'] ?? '') == 'out') return true; // my own posts always
           // Popular = surfaced by the discovery feed (>=2 likes; the flag is
@@ -246,6 +303,21 @@ class _ActivityFeedState extends State<ActivityFeed> {
               !widget.hiddenCalls.contains((p['from'] ?? '').toString().toUpperCase()))
           .toList();
     }
+    return posts;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    // Read-only (search results): show all posts as-is; no live snapshot games.
+    // Otherwise render the FROZEN snapshot (so new posts don't shove the screen
+    // while the user reads); the "N new posts" pill pulls the fresh ones in.
+    final posts = widget.readOnly
+        ? widget.posts.reversed
+            .where((p) => !widget.hiddenCalls
+                .contains((p['from'] ?? '').toString().toUpperCase()))
+            .toList()
+        : _filtered(_shown);
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 640),
@@ -254,9 +326,12 @@ class _ActivityFeedState extends State<ActivityFeed> {
             // Filter sits right below the nav tabs (Activity/Messages/…), with
             // the composer card underneath it (its own tinted box + margins set
             // it apart from the stream — no extra dividers needed).
-            _filterBar(cs),
-            Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
-            _composer(cs),
+            if (!widget.readOnly) ...[
+              _filterBar(cs),
+              Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
+              _composer(cs),
+              if (_newCount > 0) _newPostsPill(cs),
+            ],
             Expanded(
               child: RefreshIndicator(
                 onRefresh: () async {
@@ -267,10 +342,21 @@ class _ActivityFeedState extends State<ActivityFeed> {
                 },
                 child: posts.isEmpty
                     ? ListView(
+                        controller: _scroll,
                         physics: const AlwaysScrollableScrollPhysics(),
-                        children: [const SizedBox(height: 120), _empty(cs)],
+                        children: [
+                          const SizedBox(height: 120),
+                          widget.readOnly
+                              ? Center(
+                                  child: Text('No results.',
+                                      style: TextStyle(
+                                          color: cs.onSurfaceVariant
+                                              .withAlpha(150))))
+                              : _empty(cs),
+                        ],
                       )
                     : ListView.separated(
+                        controller: _scroll,
                         padding: EdgeInsets.zero,
                         physics: const AlwaysScrollableScrollPhysics(),
                         itemCount: posts.length,
@@ -302,6 +388,37 @@ class _ActivityFeedState extends State<ActivityFeed> {
       ),
     );
   }
+
+  /// A tappable "N new posts" pill under the composer. Tapping pulls the fresh
+  /// posts in and scrolls to the top — new posts never move the screen on their
+  /// own while the user is reading below.
+  Widget _newPostsPill(ColorScheme cs) => Padding(
+        padding: const EdgeInsets.only(top: 4, bottom: 2),
+        child: Center(
+          child: Material(
+            color: ChatPalette.accent,
+            borderRadius: BorderRadius.circular(20),
+            elevation: 2,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: () => _pullNew(),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.arrow_upward, size: 15, color: Colors.white),
+                  const SizedBox(width: 6),
+                  Text('$_newCount new post${_newCount == 1 ? '' : 's'}',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600)),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      );
 
   /// Filter the noise: everything, only people you follow, or your bookmarks.
   Widget _filterBar(ColorScheme cs) {
@@ -1393,33 +1510,71 @@ class _RemoteMedia extends StatefulWidget {
 
 class _RemoteMediaState extends State<_RemoteMedia> {
   static const int _cap = 10 * 1024 * 1024;
+  static const int _vidCap = 120 * 1024 * 1024;
+  late final bool _isVid = _isVideoUrl(widget.url);
   _RmState _s = _RmState.checking;
-  Uint8List? _img;
+  Uint8List? _bytes; // decoded image OR fetched video bytes
+  bool _playing = false; // video: user tapped play
 
   @override
   void initState() {
     super.initState();
-    _load(_cap);
+    if (_isVid) {
+      _s = _RmState.show; // show a play card; fetch the (big) video on tap only
+    } else {
+      _load(_cap);
+    }
+  }
+
+  String _extOf(String url) {
+    final l = url.toLowerCase().split('?').first;
+    final dot = l.lastIndexOf('.');
+    return dot >= 0 ? l.substring(dot + 1) : 'mp4';
   }
 
   /// Fetch through the persistent disk cache (no re-download across sessions).
   Future<void> _load(int maxBytes) async {
-    if (_isVideoUrl(widget.url)) {
-      if (mounted) setState(() => _s = _RmState.tooBig); // videos: tap to open
-      return;
-    }
     final bytes =
         await MediaDiskCache.instance.fetch(widget.url, maxBytes: maxBytes);
     if (!mounted) return;
     setState(() {
       if (bytes != null) {
-        _img = bytes;
+        _bytes = bytes;
         _s = _RmState.show;
       } else {
         // Too big (or blocked) — offer a manual download.
         _s = _s == _RmState.checking ? _RmState.tooBig : _RmState.error;
       }
     });
+  }
+
+  /// Tap-to-play a video: fetch its bytes (bigger cap) then hand them to the
+  /// shared WasmVideoPlayer (same player the Chat wapp uses).
+  Future<void> _playVideo() async {
+    setState(() {
+      _playing = true;
+      _s = _RmState.checking;
+    });
+    final bytes =
+        await MediaDiskCache.instance.fetch(widget.url, maxBytes: _vidCap);
+    if (!mounted) return;
+    setState(() {
+      if (bytes != null) {
+        _bytes = bytes;
+        _s = _RmState.show;
+      } else {
+        _s = _RmState.error;
+      }
+    });
+  }
+
+  /// Open the image full-screen with pinch-zoom (reuses the same viewer body as
+  /// the Chat media viewer).
+  void _openFullImage() {
+    final img = _bytes;
+    if (img == null) return;
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => _FullscreenImage(img), fullscreenDialog: true));
   }
 
   String get _sizeLabel => '';
@@ -1443,19 +1598,24 @@ class _RemoteMediaState extends State<_RemoteMedia> {
     final cs = Theme.of(context).colorScheme;
     switch (_s) {
       case _RmState.checking:
-        // Reserve the box up-front so it doesn't pop in and shove the feed.
-        return _box(cs, const SizedBox.shrink());
+        // Reserve the box; show a spinner while a video's bytes download.
+        return _box(
+            cs,
+            _playing
+                ? const Center(
+                    child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2)))
+                : const SizedBox.shrink());
       case _RmState.tooBig:
-        final video = _isVideoUrl(widget.url);
+        // Large image: tap to download now (up to 200 MB).
         return InkWell(
           borderRadius: BorderRadius.circular(10),
-          // Images: tap to download now (up to 200 MB). Videos: info only.
-          onTap: video
-              ? null
-              : () {
-                  setState(() => _s = _RmState.checking);
-                  _load(200 * 1024 * 1024);
-                },
+          onTap: () {
+            setState(() => _s = _RmState.checking);
+            _load(200 * 1024 * 1024);
+          },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
@@ -1466,17 +1626,12 @@ class _RemoteMediaState extends State<_RemoteMedia> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(video ? Icons.play_circle_outline : Icons.download,
-                    size: 20, color: cs.primary),
+                Icon(Icons.download, size: 20, color: cs.primary),
                 const SizedBox(width: 8),
                 Flexible(
-                  child: Text(
-                    video
-                        ? 'Video attachment'
-                        : 'Image ${_sizeLabel.isEmpty ? '' : '($_sizeLabel) '}— tap to load',
-                    style: TextStyle(color: cs.onSurface, fontSize: 13),
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  child: Text('Image — tap to load',
+                      style: TextStyle(color: cs.onSurface, fontSize: 13),
+                      overflow: TextOverflow.ellipsis),
                 ),
               ],
             ),
@@ -1489,22 +1644,71 @@ class _RemoteMediaState extends State<_RemoteMedia> {
                 child: Icon(Icons.broken_image_outlined,
                     color: cs.onSurfaceVariant.withAlpha(120), size: 30)));
       case _RmState.show:
-        final img = _img;
+        // Video: a play card until tapped, then the shared WasmVideoPlayer.
+        if (_isVid) {
+          if (!_playing) {
+            return InkWell(
+              onTap: _playVideo,
+              child: _box(
+                cs,
+                Container(
+                  color: Colors.black,
+                  child: const Center(
+                      child: Icon(Icons.play_circle_fill,
+                          size: 64, color: Colors.white70)),
+                ),
+              ),
+            );
+          }
+          final v = _bytes;
+          if (v == null) return _box(cs, const SizedBox.shrink());
+          return ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: WasmVideoPlayer(mediaBytes: v, ext: _extOf(widget.url)),
+          );
+        }
+        // Image: tap to open full-screen (pinch-zoom).
+        final img = _bytes;
         if (img == null) return _box(cs, const SizedBox.shrink());
-        return _box(
-          cs,
-          Image.memory(
-            img,
-            fit: BoxFit.cover,
-            width: double.infinity,
-            height: _mediaHeight,
-            gaplessPlayback: true,
-            cacheHeight: 720,
-            errorBuilder: (c, e, s) => Center(
-                child: Icon(Icons.broken_image_outlined,
-                    color: cs.onSurfaceVariant.withAlpha(120), size: 30)),
+        return GestureDetector(
+          onTap: _openFullImage,
+          child: _box(
+            cs,
+            Image.memory(
+              img,
+              fit: BoxFit.cover,
+              width: double.infinity,
+              height: _mediaHeight,
+              gaplessPlayback: true,
+              cacheHeight: 720,
+              errorBuilder: (c, e, s) => Center(
+                  child: Icon(Icons.broken_image_outlined,
+                      color: cs.onSurfaceVariant.withAlpha(120), size: 30)),
+            ),
           ),
         );
     }
   }
+}
+
+/// Full-screen pinch-zoom image viewer (same body as the Chat media viewer).
+class _FullscreenImage extends StatelessWidget {
+  final Uint8List bytes;
+  const _FullscreenImage(this.bytes);
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+          elevation: 0,
+        ),
+        body: Center(
+          child: InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 6,
+            child: Image.memory(bytes, fit: BoxFit.contain),
+          ),
+        ),
+      );
 }

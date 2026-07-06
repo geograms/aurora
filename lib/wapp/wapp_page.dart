@@ -205,6 +205,7 @@ class _WappPageState extends State<WappPage>
   String _panelName = '';
   String? _panelTitle; // dynamic AppBar title for the open panel (e.g. folder name)
   TabController? _tabController;
+  final _nostrSearchCtl = TextEditingController(); // Search panel query box
 
   /// True when this wapp is the App Creator. Drives a navigation split
   /// where the initial view is just the Projects panel (no tabs) and
@@ -1036,6 +1037,15 @@ class _WappPageState extends State<WappPage>
           }
         }
       }
+    }
+
+    // Paint the tab bar + fields NOW — the archive/conversation caches are
+    // already loaded, so cached posts show instantly. Otherwise the screen sits
+    // on "Loading…" for up to a minute while the wasm engine compiles + connects
+    // + subscribes, which reads as "something is broken".
+    if (mounted) {
+      _status = 'Running';
+      setState(() {});
     }
 
     // Load the WASM binary from the package.
@@ -3008,6 +3018,7 @@ class _WappPageState extends State<WappPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     RnsService.instance.removeProfileListener(_onProfilesChanged);
+    _nostrSearchCtl.dispose();
     _feedBackfillTimer?.cancel();
     _fastBackfillTimer?.cancel();
     _tickTimer?.cancel();
@@ -3660,6 +3671,16 @@ class _WappPageState extends State<WappPage>
         .firstOrNull;
     if (peopleField != null) return _buildPeopleScreen(screen, peopleField);
 
+    // Search panel — a query box on top of a read-only results feed. Detected
+    // by a `search_results` chat field (any wapp can opt in with that name).
+    final searchField = screen.children
+        .where((c) =>
+            c.keyword == 'field' &&
+            c.type == 'chat' &&
+            c.name == 'search_results')
+        .firstOrNull;
+    if (searchField != null) return _buildSearchScreen(searchField);
+
     // Feed screen — a screen whose only content is a single `$type:"chat"`
     // field (e.g. the Activity tab) renders as a full-height feed + composer
     // (Twitter-style), not a fixed-height box inside a scroll form.
@@ -3678,6 +3699,48 @@ class _WappPageState extends State<WappPage>
 
     // Settings-like screen — use GeoUI renderer
     return _buildSettingsScreen(screen);
+  }
+
+  /// Search panel: a query box that hands the text to the wapp's `search_go`
+  /// command (which fans out to the local index + connected relays), over a
+  /// read-only results feed reusing the post cards + tap→thread/profile wiring.
+  Widget _buildSearchScreen(GeoUiBlock chatField) {
+    void run() {
+      _fieldValues['search_input'] = _nostrSearchCtl.text.trim();
+      _sendCommand('search_go');
+      FocusScope.of(context).unfocus();
+    }
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _nostrSearchCtl,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: (_) => run(),
+                  decoration: InputDecoration(
+                    hintText: 'Search posts and people',
+                    prefixIcon: const Icon(Icons.search),
+                    isDense: true,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24)),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(onPressed: run, child: const Text('Search')),
+            ],
+          ),
+        ),
+        Expanded(child: _buildChatFeedScreen(chatField)),
+      ],
+    );
   }
 
   /// Show a station's profile: forwarded to the wapp as the generic
@@ -4334,6 +4397,33 @@ class _WappPageState extends State<WappPage>
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');
+        },
+      );
+    }
+    // Search results: a read-only Twitter-style stream reusing the post cards
+    // and their tap→thread / tap-author→profile wiring, fed from _fieldValues
+    // (NOT the persisted archive), so it never pollutes the main feed.
+    if (name == 'search_results') {
+      final raw = _fieldValues[name];
+      final results = raw is List
+          ? raw.whereType<Map>().map((m) => m.cast<String, dynamic>()).toList()
+          : const <Map<String, dynamic>>[];
+      return ActivityFeed(
+        posts: results,
+        readOnly: true,
+        onSend: (_) {},
+        npubFor: (c) =>
+            _wappProfiles[c]?['npub'] ?? RnsService.instance.npubForCallsign(c),
+        profileFor: _feedProfileFor,
+        mentionResolver: RnsService.instance.nostrMentionName,
+        onSenderTap: _feedSenderTap,
+        onOpenThread: _openActivityThread,
+        replyCount: (mid) =>
+            _wappPostStats[mid]?.replies ?? (_activityArchive?.replyCount(mid) ?? 0),
+        likeInfo: (mid) {
+          final s = _wappPostStats[mid];
+          if (s != null) return (count: s.likes, mine: s.mine);
+          return _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false);
         },
       );
     }

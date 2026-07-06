@@ -207,6 +207,11 @@ class _WappPageState extends State<WappPage>
   TabController? _tabController;
   final _nostrSearchCtl = TextEditingController(); // Search panel query box
 
+  // The reticulum wapp's native graph reports its open full-screen panel here so
+  // the app bar shows that panel's title + a single back arrow (no second one).
+  String? _graphPanelTitle;
+  VoidCallback? _graphPanelBack;
+
   /// True when this wapp is the App Creator. Drives a navigation split
   /// where the initial view is just the Projects panel (no tabs) and
   /// the Code / UI / Settings tabs are only revealed after the user
@@ -3193,12 +3198,15 @@ class _WappPageState extends State<WappPage>
     final navBack = thread == null && _wappNavBack;
 
     return PopScope(
-      // Intercept system-back to close an open conversation thread, or to drill
-      // up one in-wapp level. Otherwise back leaves for the launcher.
-      canPop: thread == null && !navBack,
+      // Intercept system-back to close an open reticulum-graph panel, a
+      // conversation thread, or to drill up one in-wapp level. Otherwise back
+      // leaves for the launcher.
+      canPop: _graphPanelBack == null && thread == null && !navBack,
       onPopInvoked: (didPop) {
         if (didPop) return;
-        if (thread != null) {
+        if (_graphPanelBack != null) {
+          _graphPanelBack!();
+        } else if (thread != null) {
           setState(() => _convOpenId = null);
         } else if (navBack) {
           _sendCommand('nav_back');
@@ -3209,20 +3217,30 @@ class _WappPageState extends State<WappPage>
         appBar: AppBar(
           backgroundColor: ChatPalette.windowBg,
           foregroundColor: ChatPalette.text,
-          leading: thread != null
+          leading: _graphPanelBack != null
+              // A reticulum-graph full-screen panel is open: the single back
+              // arrow closes it (no second in-panel arrow).
               ? IconButton(
                   icon: const Icon(Icons.arrow_back),
                   tooltip: 'Back',
-                  onPressed: () => setState(() => _convOpenId = null),
+                  onPressed: _graphPanelBack,
                 )
-              : navBack
+              : thread != null
                   ? IconButton(
                       icon: const Icon(Icons.arrow_back),
-                      tooltip: 'Up',
-                      onPressed: () => _sendCommand('nav_back'),
+                      tooltip: 'Back',
+                      onPressed: () => setState(() => _convOpenId = null),
                     )
-                  : null, // default "←" pops back to the launcher
-          title: thread != null
+                  : navBack
+                      ? IconButton(
+                          icon: const Icon(Icons.arrow_back),
+                          tooltip: 'Up',
+                          onPressed: () => _sendCommand('nav_back'),
+                        )
+                      : null, // default "←" pops back to the launcher
+          title: _graphPanelTitle != null
+              ? Text(_graphPanelTitle!)
+              : thread != null
               ? Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
@@ -3240,8 +3258,8 @@ class _WappPageState extends State<WappPage>
                 )
               : Text(navBack ? _wappNavTitle! : widget.title),
           // The horizontal tab bar lives under the title. Hidden while a
-          // conversation thread is taking over the screen in portrait.
-          bottom: (showTabs && thread == null)
+          // conversation thread or a graph panel takes over the screen.
+          bottom: (showTabs && thread == null && _graphPanelTitle == null)
               ? TabBar(
                   controller: _tabController,
                   labelColor: ChatPalette.accent,
@@ -3270,7 +3288,9 @@ class _WappPageState extends State<WappPage>
                   ],
                 )
               : null,
-          actions: [
+          actions: _graphPanelTitle != null
+              ? const [] // a graph panel owns the screen — no wapp options menu
+              : [
             ..._channelIndicators(),
             // A single top-right options menu (☰). When a conversation thread is
             // open its room actions (e.g. Recurring bulletin, Private) are folded

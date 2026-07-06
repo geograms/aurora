@@ -982,18 +982,33 @@ class RnsService {
     for (final e in _relayDir.entries()) {
       relayByHex[e.idHex] = e;
     }
-    // The graph shows only nodes REACHABLE NOW. "Reachable" needs more than a
-    // recent lastSeen: when we link a hub it floods its cached announce table at
-    // us, so every long-dead node it ever heard gets stamped "now" once. A truly
-    // reachable peer instead RE-announces on its cadence — so we require ≥2
-    // announces spread over [_reannounceMinSpanMs] within the online window.
-    // This drops the connect-flood ghosts the user saw. One definition, used for
-    // the canvas, the hub child counts, and the headline badges alike.
+    // A geogram device carries a service beyond bare LXMF (chat/relay/wapp/…) —
+    // our own network. Defined up here because reachability trusts it.
+    bool isGeogram(_ObservedNode n) =>
+        n.services.any((s) => s != 'lxmf' && s != 'lxmf-prop');
+
+    // Which observed nodes to show. A recent lastSeen alone isn't enough: linking
+    // a hub floods its cached announce table at us, so every long-dead node it
+    // ever heard gets stamped "now" ONCE. Those connect-flood ghosts (generic,
+    // remote, heard once and then silent) must stay hidden.
+    //
+    // BUT the strict "re-announced ≥2× spread over 25s" test also hid the user's
+    // OWN devices: a LAN peer's announce often arrives twice within a few ms (two
+    // interfaces), so its heardCount is 2 but the spread is ~0 — and a geogram
+    // node we just heard shouldn't need a full re-announce cycle to appear. So we
+    // trust the two categories that are never flood ghosts — LAN peers and
+    // geogram devices — as soon as they're heard, and keep the strict spread gate
+    // only for generic remote nodes (to filter the flood).
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    bool isFresh(_ObservedNode n) =>
-        n.heardCount >= 2 &&
-        nowMs - n.lastSeenMs <= _onlineWindowMs &&
-        n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
+    bool isFresh(_ObservedNode n) {
+      if (nowMs - n.lastSeenMs > _onlineWindowMs) return false; // gone quiet
+      if (n.via == 'lan') return true; // our LAN — real, show immediately
+      if (isGeogram(n)) return true; // a geogram device — our network
+      // Generic remote node: require a genuine re-announce to prove it's not a
+      // one-shot connect-flood ghost.
+      return n.heardCount >= 2 &&
+          n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
+    }
 
     // Hub set = every identity that is a relayer for some node reachable now.
     final hubIds = <String>{};
@@ -1003,8 +1018,6 @@ class RnsService {
       if (r != null && r.isNotEmpty) hubIds.add(r);
     }
 
-    bool isGeogram(_ObservedNode n) =>
-        n.services.any((s) => s != 'lxmf' && s != 'lxmf-prop');
     bool matchesFilters(_ObservedNode n) {
       if (geogramOnly && !isGeogram(n)) return false;
       if (service != null &&

@@ -212,6 +212,7 @@ class _GraphViewState extends State<_GraphView>
   final ScrollController _chatScroll = ScrollController();
   String? _chatPeer; // open thread's peer LXMF delivery-dest hex
   String _chatName = '';
+  bool _peopleTab = false; // Messages panel: false = Chats, true = People
 
   @override
   void initState() {
@@ -948,14 +949,6 @@ class _GraphViewState extends State<_GraphView>
         ]),
       );
 
-  // Short stable identifier for a device row: its npub (preferred — the geogram
-  // cross-transport identity) abbreviated, else its RNS identity hex. Lets two
-  // devices that announce the same nickname be told apart.
-  String _idLabel(_GNode n) {
-    if (n.npub.isNotEmpty) return _shorten(n.npub, head: 10, tail: 6);
-    return 'id ${_shorten(n.id, head: 8, tail: 0)}';
-  }
-
   String _shorten(String s, {int head = 10, int tail = 6}) {
     if (s.length <= head + tail + 1) return s;
     return tail > 0
@@ -1105,7 +1098,13 @@ class _GraphViewState extends State<_GraphView>
   // Devices on a hub: tap a device → select + centre it on the graph.
   Widget _hubDevicesBody(String hubId) {
     final peers = _allNodes.where((n) => n.relayer == hubId).toList()
-      ..sort((a, b) => a.label.compareTo(b.label));
+      ..sort((a, b) {
+        // Messageable people first, then by name — so the useful rows are on top.
+        if (a.geogram != b.geogram) return a.geogram ? -1 : 1;
+        final am = a.dm.isNotEmpty, bm = b.dm.isNotEmpty;
+        if (am != bm) return am ? -1 : 1;
+        return a.label.toLowerCase().compareTo(b.label.toLowerCase());
+      });
     if (peers.isEmpty) {
       return const Center(
         child: Padding(
@@ -1118,57 +1117,14 @@ class _GraphViewState extends State<_GraphView>
       );
     }
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       itemCount: peers.length,
-      itemBuilder: (_, i) {
-        final p = peers[i];
-        final sel = p.id == _selectedId;
-        return InkWell(
-          onTap: () {
-            setState(() => _selectedId = p.id);
-            _centerOn(p.id);
-          },
-          child: Container(
-            color: sel ? const Color(0x2258A6FF) : null,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-            child: Row(children: [
-              Container(
-                width: 10,
-                height: 10,
-                decoration: BoxDecoration(
-                  color: p.geogram ? _gGeo : _gGeneric,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(p.label,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              color: sel ? _gSelf : _gFg, fontSize: 13)),
-                      if (p.services.isNotEmpty)
-                        Text(p.services.join(' · '),
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: _gMuted, fontSize: 11)),
-                    ]),
-              ),
-              if (p.geogram)
-                const Text('geogram',
-                    style: TextStyle(color: _gGeo, fontSize: 10)),
-            ]),
-          ),
-        );
-      },
+      itemBuilder: (_, i) => _peerRow(peers[i]),
     );
   }
 
-  // All reachable-now geogram devices (hubs + leaves), with a one-tap 1:1
-  // message for any that announced a way to receive it. Opened from the badge's
-  // "geogram" line. Tapping a row opens that node's detail panel.
+  // Reachable geogram devices, compact + one-tap to message. Opened from the
+  // badge's "geogram" line.
   Widget _geogramDevicesBody() {
     final peers = _allNodes
         .where((n) => n.kind != 'self' && n.geogram)
@@ -1185,73 +1141,10 @@ class _GraphViewState extends State<_GraphView>
       );
     }
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       itemCount: peers.length,
-      itemBuilder: (_, i) {
-        final p = peers[i];
-        final pubkey = (p.meta['pubkey'] ?? '').toString();
-        final canMessage = p.dm.isNotEmpty && pubkey.isNotEmpty;
-        return InkWell(
-          onTap: () => _openDeviceDetail(p),
-          child: Container(
-            padding: const EdgeInsets.only(left: 14, right: 4, top: 9, bottom: 9),
-            child: Row(children: [
-              Container(
-                width: 10,
-                height: 10,
-                decoration: const BoxDecoration(
-                    color: _gGeo, shape: BoxShape.circle),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(p.label,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: _gFg, fontSize: 13)),
-                      Text(_idLabel(p),
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: _gSelf,
-                              fontSize: 11,
-                              fontFamily: 'monospace')),
-                      if (p.services.isNotEmpty)
-                        Text(p.services.join(' · '),
-                            overflow: TextOverflow.ellipsis,
-                            style:
-                                const TextStyle(color: _gMuted, fontSize: 11)),
-                      if (p.meta['lastSeen'] != null)
-                        Text('seen ${_ago(p.meta['lastSeen'])}',
-                            style: const TextStyle(
-                                color: _gMuted, fontSize: 10)),
-                    ]),
-              ),
-              if (canMessage)
-                IconButton(
-                  icon: const Icon(Icons.send, size: 17),
-                  color: _gSelf,
-                  tooltip: 'Message',
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () => _messagePeer(p, pubkey),
-                ),
-            ]),
-          ),
-        );
-      },
+      itemBuilder: (_, i) => _peerRow(peers[i]),
     );
-  }
-
-  // Open a node's detail panel from a list. Expand its hub first so the node is
-  // part of the visible set the detail panel reads from.
-  void _openDeviceDetail(_GNode p) {
-    setState(() {
-      _selectedId = p.id;
-      if (p.relayer.isNotEmpty) _expanded.add(p.relayer);
-      _panel = _Panel.detail;
-    });
-    _rebuildVisible();
-    _centerOn(p.id);
   }
 
   // Bootstrap-hub manager.
@@ -1358,71 +1251,20 @@ class _GraphViewState extends State<_GraphView>
   // by pasting an LXMF address. Peers can be geogram devices, NomadNet/Sideband
   // users, or LXMF distribution-group nodes — all interoperate over LXMF.
   Widget _chatsBody() {
-    final convos = RnsService.instance.lxmfConversations();
     return Column(children: [
-      Expanded(
-        child: convos.isEmpty
-            ? const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(22),
-                  child: Text(
-                      'No conversations yet.\n\nTap a device on the graph and press Message, or use "New chat / join group" below with an LXMF address.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: _gMuted, fontSize: 13)),
-                ),
-              )
-            : ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                itemCount: convos.length,
-                itemBuilder: (_, i) {
-                  final c = convos[i];
-                  final id = (c['id'] ?? '').toString();
-                  final unread = c['unread'] == true;
-                  return InkWell(
-                    onTap: () =>
-                        _openChat(id, name: (c['name'] ?? '').toString()),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 10),
-                      child: Row(children: [
-                        Icon(Icons.chat_bubble_outline,
-                            size: 18, color: unread ? _gSelf : _gMuted),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text((c['name'] ?? '').toString(),
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        color: _gFg,
-                                        fontSize: 14,
-                                        fontWeight: unread
-                                            ? FontWeight.w700
-                                            : FontWeight.w500)),
-                                if ((c['last'] ?? '').toString().isNotEmpty)
-                                  Text((c['last'] ?? '').toString(),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                          color: _gMuted, fontSize: 12)),
-                              ]),
-                        ),
-                        if (unread)
-                          Container(
-                              width: 8,
-                              height: 8,
-                              decoration: const BoxDecoration(
-                                  color: _gSelf, shape: BoxShape.circle)),
-                      ]),
-                    ),
-                  );
-                },
-              ),
+      // Chats | People segmented control.
+      Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+        child: Row(children: [
+          _seg('Chats', !_peopleTab, () => setState(() => _peopleTab = false)),
+          const SizedBox(width: 6),
+          _seg('People', _peopleTab, () => setState(() => _peopleTab = true)),
+        ]),
       ),
+      Expanded(child: _peopleTab ? _peopleList() : _conversationsList()),
       const Divider(height: 1, color: _gBorder),
       Padding(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(8),
         child: SizedBox(
           width: double.infinity,
           child: OutlinedButton.icon(
@@ -1433,6 +1275,172 @@ class _GraphViewState extends State<_GraphView>
         ),
       ),
     ]);
+  }
+
+  Widget _seg(String label, bool active, VoidCallback onTap) => Expanded(
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 7),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active ? const Color(0x3358A6FF) : _gBg,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: active ? _gSelf : _gBorder),
+            ),
+            child: Text(label,
+                style: TextStyle(
+                    color: active ? _gSelf : _gMuted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600)),
+          ),
+        ),
+      );
+
+  Widget _conversationsList() {
+    final convos = RnsService.instance.lxmfConversations();
+    if (convos.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(22),
+          child: Text(
+              'No conversations yet.\n\nOpen the People tab to message a reachable device, or "New chat / join group" for an LXMF address.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: _gMuted, fontSize: 13)),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      itemCount: convos.length,
+      itemBuilder: (_, i) {
+        final c = convos[i];
+        final id = (c['id'] ?? '').toString();
+        final unread = c['unread'] == true;
+        return InkWell(
+          onTap: () => _openChat(id, name: (c['name'] ?? '').toString()),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(children: [
+              Icon(Icons.chat_bubble,
+                  size: 15, color: unread ? _gSelf : _gMuted),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text((c['name'] ?? '').toString(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: _gFg,
+                              fontSize: 13.5,
+                              fontWeight:
+                                  unread ? FontWeight.w700 : FontWeight.w500)),
+                      if ((c['last'] ?? '').toString().isNotEmpty)
+                        Text((c['last'] ?? '').toString(),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style:
+                                const TextStyle(color: _gMuted, fontSize: 11.5)),
+                    ]),
+              ),
+              if (unread)
+                Container(
+                    width: 7,
+                    height: 7,
+                    decoration: const BoxDecoration(
+                        color: _gSelf, shape: BoxShape.circle)),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
+  // Reachable, messageable peers (geogram / NomadNet / Sideband), newest network
+  // heard. Tap a row → start messaging. Compact single-line rows.
+  Widget _peopleList() {
+    final peers = _allNodes.where((n) {
+      if (n.kind == 'self') return false;
+      final pubkey = (n.meta['pubkey'] ?? '').toString();
+      return n.dm.isNotEmpty && pubkey.isNotEmpty; // can receive a 1:1 message
+    }).toList()
+      ..sort((a, b) {
+        if (a.geogram != b.geogram) return a.geogram ? -1 : 1; // our devices top
+        return a.label.toLowerCase().compareTo(b.label.toLowerCase());
+      });
+    if (peers.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(22),
+          child: Text(
+              'No reachable people right now.\n\nDevices that announce LXMF — geogram, NomadNet or Sideband — appear here as they are heard.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: _gMuted, fontSize: 13)),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      itemCount: peers.length,
+      itemBuilder: (_, i) => _peerRow(peers[i]),
+    );
+  }
+
+  // One compact, tappable peer row. Messageable peers (LXMF/chat) open a chat on
+  // tap + show a send icon; the rest (bare nodes/relays) open the detail panel.
+  Widget _peerRow(_GNode p) {
+    final pubkey = (p.meta['pubkey'] ?? '').toString();
+    final canMsg = p.dm.isNotEmpty && pubkey.isNotEmpty;
+    final color = p.geogram
+        ? _gGeo
+        : (p.dm.isNotEmpty ? _gSelf : _gGeneric);
+    // A short tag telling the peer's network apart at a glance.
+    final tag = p.geogram
+        ? ''
+        : p.services.contains('node')
+            ? 'nomadnet'
+            : p.dm.isNotEmpty
+                ? 'lxmf'
+                : (p.services.isNotEmpty ? p.services.first : '');
+    return InkWell(
+      onTap: canMsg
+          ? () => _messagePeer(p, pubkey)
+          : () {
+              setState(() {
+                _selectedId = p.id;
+                _panel = _Panel.detail;
+              });
+              _centerOn(p.id);
+            },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(children: [
+          Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(p.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: _gFg, fontSize: 13.5)),
+          ),
+          if (tag.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 8, right: 6),
+              child: Text(tag,
+                  style: const TextStyle(color: _gMuted, fontSize: 10.5)),
+            ),
+          Icon(canMsg ? Icons.send : Icons.chevron_right,
+              size: canMsg ? 17 : 16, color: canMsg ? _gSelf : _gMuted),
+        ]),
+      ),
+    );
   }
 
   Future<void> _newChatDialog() async {

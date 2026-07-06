@@ -111,6 +111,85 @@ class MediaDiskCache {
     }
   }
 
+  /// Probe a media URL's size (Content-Length) without downloading it. 0 if the
+  /// server doesn't report it. Used to show "▶ 12.3 MB" before a video download.
+  Future<int> probeSize(String url) async {
+    try {
+      final head = await http
+          .head(Uri.parse(url))
+          .timeout(const Duration(seconds: 8));
+      return int.tryParse(head.headers['content-length'] ?? '') ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Streaming download with progress — for big media (videos) where the caller
+  /// wants a live "X MB / Y MB" bar. Uses the same on-disk cache as [fetch], but
+  /// times out PER CHUNK (not on the whole body), so a large-but-progressing
+  /// download isn't killed at 20s. [onProgress] is (received, total) bytes;
+  /// total is 0 when the server didn't send Content-Length.
+  Future<Uint8List?> fetchStreamed(
+    String url, {
+    int maxBytes = 200 * 1024 * 1024,
+    void Function(int received, int total)? onProgress,
+  }) async {
+    await _ensure();
+    final h = _hash(url);
+    final hot = _mem[h];
+    if (hot != null) {
+      onProgress?.call(hot.length, hot.length);
+      return hot;
+    }
+    final dir = _dir;
+    if (dir != null) {
+      final f = File('${dir.path}/$h');
+      if (f.existsSync()) {
+        try {
+          final bytes = await f.readAsBytes();
+          unawaited(f.setLastModified(DateTime.now()).catchError((_) {}));
+          _remember(h, bytes);
+          onProgress?.call(bytes.length, bytes.length);
+          return bytes;
+        } catch (_) {}
+      }
+    }
+    final client = http.Client();
+    try {
+      final resp = await client
+          .send(http.Request('GET', Uri.parse(url)))
+          .timeout(const Duration(seconds: 20));
+      if (resp.statusCode != 200) return null;
+      final total = resp.contentLength ?? 0;
+      if (total > 0 && total > maxBytes) return null;
+      onProgress?.call(0, total);
+      final builder = BytesBuilder(copy: false);
+      var received = 0;
+      // Per-chunk timeout: a stalled connection aborts, a slow one keeps going.
+      await for (final chunk
+          in resp.stream.timeout(const Duration(seconds: 30))) {
+        builder.add(chunk);
+        received += chunk.length;
+        if (received > maxBytes) return null; // over cap mid-stream
+        onProgress?.call(received, total);
+      }
+      final bytes = builder.toBytes();
+      final dir2 = _dir;
+      if (dir2 != null) {
+        try {
+          await File('${dir2.path}/$h').writeAsBytes(bytes, flush: false);
+          unawaited(_evictIfNeeded());
+        } catch (_) {}
+      }
+      _remember(h, bytes);
+      return bytes;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close();
+    }
+  }
+
   void _remember(String h, Uint8List bytes) {
     if (bytes.length > 2 * 1024 * 1024) return; // don't hold big files in RAM
     _mem[h] = bytes;

@@ -1386,7 +1386,19 @@ class _WappPageState extends State<WappPage>
                 buf = <Map<String, dynamic>>[];
                 _fieldValues[fieldName] = buf;
               }
-              buf.add(msg.map((k, v) => MapEntry(k.toString(), v)));
+              final row = msg.map((k, v) => MapEntry(k.toString(), v));
+              // Search results arrive from many relays → dedupe: same post id
+              // (mid), or same author (from) for profile cards which have no mid.
+              var dup = false;
+              if (fieldName == 'search_results') {
+                final mid = (row['mid'] ?? '').toString();
+                final from = (row['from'] ?? '').toString();
+                dup = buf.any((e) => mid.isNotEmpty
+                    ? (e['mid'] ?? '').toString() == mid
+                    : (e['mid'] ?? '').toString().isEmpty &&
+                        (e['from'] ?? '').toString() == from);
+              }
+              if (!dup) buf.add(row);
               // Persist the Activity feed so background-received posts survive
               // into the foreground (and across restarts).
               if (fieldName == 'activity') {

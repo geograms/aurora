@@ -1498,6 +1498,14 @@ bool _isVideoUrl(String u) {
 
 enum _RmState { checking, show, tooBig, error }
 
+/// Human byte size: "12.3 MB", "1.4 GB", "840 KB".
+String _fmtBytes(int b) {
+  if (b >= 1 << 30) return '${(b / (1 << 30)).toStringAsFixed(1)} GB';
+  if (b >= 1 << 20) return '${(b / (1 << 20)).toStringAsFixed(1)} MB';
+  if (b >= 1 << 10) return '${(b / (1 << 10)).toStringAsFixed(0)} KB';
+  return '$b B';
+}
+
 /// Fetches + renders a media URL inline. Auto-loads when ≤10 MB (or unknown);
 /// larger files show a tap-to-download card so a big image can't auto-pull on
 /// cellular. Videos are always a tap-to-open card (no inline player).
@@ -1510,17 +1518,23 @@ class _RemoteMedia extends StatefulWidget {
 
 class _RemoteMediaState extends State<_RemoteMedia> {
   static const int _cap = 10 * 1024 * 1024;
-  static const int _vidCap = 120 * 1024 * 1024;
+  static const int _vidCap = 500 * 1024 * 1024;
   late final bool _isVid = _isVideoUrl(widget.url);
   _RmState _s = _RmState.checking;
   Uint8List? _bytes; // decoded image OR fetched video bytes
   bool _playing = false; // video: user tapped play
+  int _dlTotal = 0; // video size in bytes (0 = unknown)
+  int _dlReceived = 0; // bytes downloaded so far
 
   @override
   void initState() {
     super.initState();
     if (_isVid) {
       _s = _RmState.show; // show a play card; fetch the (big) video on tap only
+      // Probe the size so the card can show "▶ 12.3 MB" before downloading.
+      MediaDiskCache.instance.probeSize(widget.url).then((s) {
+        if (mounted && s > 0) setState(() => _dlTotal = s);
+      });
     } else {
       _load(_cap);
     }
@@ -1548,15 +1562,25 @@ class _RemoteMediaState extends State<_RemoteMedia> {
     });
   }
 
-  /// Tap-to-play a video: fetch its bytes (bigger cap) then hand them to the
-  /// shared WasmVideoPlayer (same player the Chat wapp uses).
+  /// Tap-to-play a video: stream its bytes with a live progress bar, then hand
+  /// them to the shared WasmVideoPlayer (same player the Chat wapp uses).
   Future<void> _playVideo() async {
     setState(() {
       _playing = true;
+      _dlReceived = 0;
       _s = _RmState.checking;
     });
-    final bytes =
-        await MediaDiskCache.instance.fetch(widget.url, maxBytes: _vidCap);
+    final bytes = await MediaDiskCache.instance.fetchStreamed(
+      widget.url,
+      maxBytes: _vidCap,
+      onProgress: (received, total) {
+        if (!mounted) return;
+        setState(() {
+          _dlReceived = received;
+          if (total > 0) _dlTotal = total;
+        });
+      },
+    );
     if (!mounted) return;
     setState(() {
       if (bytes != null) {
@@ -1583,6 +1607,39 @@ class _RemoteMediaState extends State<_RemoteMedia> {
   // checking, loading and loaded all occupy exactly this box (no scroll jump).
   static const double _mediaHeight = 260;
 
+  /// Live download bar for a video: "6.2 MB / 12.3 MB · 50%" with a progress
+  /// bar (indeterminate when the server didn't report a total).
+  Widget _downloadProgress(ColorScheme cs) {
+    final known = _dlTotal > 0;
+    final frac = known ? (_dlReceived / _dlTotal).clamp(0.0, 1.0) : null;
+    final label = known
+        ? '${_fmtBytes(_dlReceived)} / ${_fmtBytes(_dlTotal)} · ${((frac ?? 0) * 100).round()}%'
+        : 'Downloading ${_fmtBytes(_dlReceived)}…';
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.downloading, color: Colors.white70, size: 30),
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: frac,
+                minHeight: 5,
+                backgroundColor: Colors.white24,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(label,
+                style: const TextStyle(color: Colors.white, fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _box(ColorScheme cs, Widget child) => ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: Container(
@@ -1599,15 +1656,7 @@ class _RemoteMediaState extends State<_RemoteMedia> {
     switch (_s) {
       case _RmState.checking:
         // Reserve the box; show a spinner while a video's bytes download.
-        return _box(
-            cs,
-            _playing
-                ? const Center(
-                    child: SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2)))
-                : const SizedBox.shrink());
+        return _box(cs, _playing ? _downloadProgress(cs) : const SizedBox.shrink());
       case _RmState.tooBig:
         // Large image: tap to download now (up to 200 MB).
         return InkWell(
@@ -1653,9 +1702,30 @@ class _RemoteMediaState extends State<_RemoteMedia> {
                 cs,
                 Container(
                   color: Colors.black,
-                  child: const Center(
-                      child: Icon(Icons.play_circle_fill,
-                          size: 64, color: Colors.white70)),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      const Icon(Icons.play_circle_fill,
+                          size: 64, color: Colors.white70),
+                      // Video size ("▶ 12.3 MB"), once probed.
+                      if (_dlTotal > 0)
+                        Positioned(
+                          bottom: 8,
+                          right: 10,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.black54,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text('${_fmtBytes(_dlTotal)} video',
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 11)),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             );

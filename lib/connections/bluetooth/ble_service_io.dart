@@ -25,6 +25,8 @@ import '../../services/log_service.dart';
 import '../../services/mesh/mesh_custody.dart';
 import '../../services/mesh/mesh_transfer_scheduler.dart';
 import '../../services/mesh/mesh_service.dart';
+import '../../services/reticulum/rns_service.dart';
+import '../../services/wifi_direct/wifi_direct_coordinator.dart';
 import '../../services/mesh/mesh_session.dart' show mspIsFrame;
 import '../../services/preferences_service.dart';
 import 'ble5_bus.dart';
@@ -479,6 +481,12 @@ class BleService {
     // subtype. Non-BLE5 devices still start it as a scan-only leaf so the
     // Bluetooth wapp has a live (if empty) registry + self status.
     unawaited(MeshService.instance.start(canAdvertise: _ble5));
+    // WiFi-Direct coordinator: negotiates a fast P2P data plane over this same
+    // BLE bus (subtype 0x57) when a bulk transfer wants a BLE-adjacent peer.
+    // Android-only + self-gating (no-op where WiFi Direct is unsupported).
+    unawaited(WifiDirectCoordinator.instance.start());
+    RnsService.instance.onWantFastPath =
+        (dest) => WifiDirectCoordinator.instance.ensureFastPath(dest);
   }
 
   // ── Native GATT event handlers (BLE5) ─────────────────────────────────────

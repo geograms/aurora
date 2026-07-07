@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 
 import '../connections/bluetooth/ble_service.dart';
 import '../connections/wifi_direct/wifi_direct_service.dart';
+import 'wifi_direct/wifi_direct_coordinator.dart';
 import 'mesh/mesh_bulk_spool.dart';
 import 'mesh/mesh_service.dart';
 import 'mesh/mesh_store.dart';
@@ -304,6 +305,12 @@ class RemoteApiService {
         return _json(res, {
           'supported': await wfd.supported(),
           'group': await wfd.groupInfo(),
+          'coordinator': {
+            'groupUp': WifiDirectCoordinator.instance.groupUp,
+            'powered': WifiDirectCoordinator.instance.powered,
+            'enabled': WifiDirectCoordinator.instance.enabled,
+          },
+          'wfdIfaces': RnsService.instance.wfdIfaceLabels(),
         });
       }
       if (req.method == 'POST' && path == '/api/wfd/group') {
@@ -332,6 +339,23 @@ class RemoteApiService {
         await RnsService.instance.detachWfd();
         return _json(res, {'ok': await WifiDirectService.instance.removeGroup()});
       }
+      if (req.method == 'POST' && path == '/api/wfd/connect') {
+        // {"dest": destHex} → drive the FULL zero-touch coordinator path
+        // (BLE negotiation → group → RNS attach) to that peer.
+        final data = await _body(req);
+        final dest = (data['dest'] ?? '').toString();
+        if (dest.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'dest required'},
+              status: HttpStatus.badRequest);
+        }
+        final ok = await WifiDirectCoordinator.instance
+            .ensureFastPath(dest, force: data['force'] == true);
+        return _json(res, {
+          'ok': ok,
+          'via': RnsService.instance.pathViaFor(dest),
+          'groupUp': WifiDirectCoordinator.instance.groupUp,
+        });
+      }
       if (req.method == 'POST' && path == '/api/wfd/fetch') {
         // {"sha256": hex, "dest": destHex} → fetch the file from that peer and
         // report WHICH interface the path used (must be wfd…, not lan) + speed.
@@ -346,9 +370,12 @@ class RemoteApiService {
         final viaBefore = RnsService.instance.pathViaFor(dest);
         final t0 = DateTime.now();
         final bytes = await RnsService.instance
-            .fetchFileFrom(shaBytes, dest, timeout: const Duration(minutes: 5));
+            .fetchFileFrom(shaBytes, dest, timeout: const Duration(seconds: 60));
         final ms = DateTime.now().difference(t0).inMilliseconds;
-        final via = RnsService.instance.pathViaFor(dest);
+        // Store the received bytes so a subsequent /api/media/has confirms it.
+        if (bytes != null) {
+          _mediaArchive()?.putBytes(bytes, 'bin');
+        }
         return _json(res, {
           'ok': bytes != null,
           'bytes': bytes?.length ?? 0,
@@ -357,7 +384,7 @@ class RemoteApiService {
               ? ((bytes.length / 1024) / (ms / 1000)).round()
               : 0,
           'viaBefore': viaBefore,
-          'via': via,
+          'via': RnsService.instance.pathViaFor(dest),
           'wfdIfaces': RnsService.instance.wfdIfaceLabels(),
         });
       }

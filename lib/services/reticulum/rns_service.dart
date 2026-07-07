@@ -127,6 +127,11 @@ class RnsService {
   // paths repoint onto the P2P pipe even when both devices share a WiFi LAN.
   RnsTcpServerInterface? _wfdServer;
   final List<RnsTcpInterface> _wfdClients = [];
+  // Set by the WiFi-Direct coordinator: given a peer dest hash, try to bring up
+  // a rank-4 P2P path to it (returns true if one is now available). Called
+  // before a bulk fetch when the peer's best path is BLE. Null = no coordinator
+  // (rns_service keeps zero wifi_direct imports).
+  Future<bool> Function(String destHex)? onWantFastPath;
   // Fixed UDP port every Aurora node broadcasts/listens on for LAN auto-peering.
   static const int _lanDiscoveryPort = 42671;
 
@@ -792,6 +797,45 @@ class RnsService {
     final dh = _bytesFromHex(destHex);
     if (dh == null) return null;
     return _transport?.pathFor(dh)?.via;
+  }
+
+  // ── WiFi-Direct coordinator support ──
+  // Our node's 16-byte identity hash (the WFD negotiation addresses by it).
+  Uint8List? get identityHash16 => _id?.hash;
+
+  /// A heard geogram peer's identity by its 16-byte hash, or null.
+  RnsIdentity? identityByHash16(Uint8List h16) {
+    final want = _hex(h16);
+    for (final id in _callIdentity.values) {
+      if (_hex(id.hash) == want) return id;
+    }
+    return null;
+  }
+
+  /// Encrypt [data] to the peer whose 16-byte identity hash is [destHash16]
+  /// (ECDH to its heard public key). Null if that peer is unknown — the caller
+  /// then skips the WFD negotiation and the transfer stays on its current path.
+  Future<Uint8List>? encryptToIdentityHash(Uint8List destHash16, Uint8List data) =>
+      identityByHash16(destHash16)?.encrypt(data);
+
+  /// Decrypt a token encrypted TO US (our identity's private key).
+  Future<Uint8List>? decryptForSelf(Uint8List token) => _id?.decrypt(token);
+
+  /// Is the best current path to [destHex] a BLE-only (rank ≤ 1) interface —
+  /// i.e. a WiFi-Direct upgrade would meaningfully speed a bulk transfer to it.
+  bool isBlePath(String destHex) {
+    final via = pathViaFor(destHex);
+    if (via == null) return false;
+    return (_transport?.speedRankOf(via) ?? 2) <= 1;
+  }
+
+  /// The 16-byte identity hash of the peer that owns [destHex] (from its path
+  /// entry), or null if we have no path — the WFD coordinator addresses the
+  /// peer by it.
+  Uint8List? identityHash16ForDest(String destHex) {
+    final dh = _bytesFromHex(destHex);
+    if (dh == null) return null;
+    return _transport?.pathFor(dh)?.identity.hash;
   }
 
   /// Seconds this node's Reticulum stack has been up this run (0 when down).
@@ -2526,6 +2570,15 @@ class RnsService {
   }) async {
     final f = _files;
     if (!_up || f == null) return null;
+    // Bulk transfer: if the peer's best path is BLE, try to bring up a
+    // WiFi-Direct fast path first (self-organized, hands-free). Non-fatal — the
+    // fetch proceeds over whatever path exists either way.
+    final hook = onWantFastPath;
+    if (hook != null && isBlePath(peerDestHex)) {
+      try {
+        await hook(peerDestHex);
+      } catch (_) {}
+    }
     final dh = _bytesFromHex(peerDestHex);
     if (dh == null) return null;
     final entry = _transport?.pathFor(dh);

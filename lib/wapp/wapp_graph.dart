@@ -195,6 +195,7 @@ enum _Panel {
   settings,
   chats, // list of LXMF conversations
   chat, // one open conversation thread
+  page, // a NomadNet node page (browser)
 }
 
 class _GraphViewState extends State<_GraphView>
@@ -252,6 +253,8 @@ class _GraphViewState extends State<_GraphView>
         return 'Messages';
       case _Panel.chat:
         return _chatName.isNotEmpty ? _chatName : _shorten(_chatPeer ?? '');
+      case _Panel.page:
+        return _pageLabel.isNotEmpty ? _pageLabel : 'Page';
     }
   }
 
@@ -292,6 +295,14 @@ class _GraphViewState extends State<_GraphView>
   String? _chatPeer; // open thread's peer LXMF delivery-dest hex
   String _chatName = '';
   bool _peopleTab = false; // Messages panel: false = Chats, true = People
+
+  // NomadNet page browser state.
+  String _pagePub = ''; // the node's identity pubkey hex
+  String _pageLabel = ''; // node label for the title
+  String _pagePath = '/page/index.mu';
+  String? _pageText; // fetched page bytes as text (null = loading)
+  String? _pageErr;
+  int _pageSeq = 0; // guards against a stale fetch overwriting a newer one
 
   @override
   void initState() {
@@ -999,6 +1010,9 @@ class _GraphViewState extends State<_GraphView>
       case _Panel.chat:
         content = _chatThreadBody();
         break;
+      case _Panel.page:
+        content = _pageBody();
+        break;
       case _Panel.none:
         return const SizedBox.shrink();
     }
@@ -1597,7 +1611,10 @@ class _GraphViewState extends State<_GraphView>
     final avatar =
         (p.geogram && p.npub.isNotEmpty) ? widget.avatarFor?.call(p.npub) : null;
     void onRowTap() {
-      if (p.geogram) {
+      if (p.services.contains('node')) {
+        // A NomadNet node → browse its pages.
+        _openNodePage((p.meta['pubkey'] ?? '').toString(), p.label);
+      } else if (p.geogram) {
         _openPeerProfile(p);
       } else if (canMsg) {
         _messagePeer(p, pubkey);
@@ -1759,6 +1776,87 @@ class _GraphViewState extends State<_GraphView>
       messenger?.showSnackBar(const SnackBar(
           content: Text('Not a valid LXMF address (need 32 hex characters)')));
     }
+  }
+
+  // ── NomadNet page browser ──
+  // Open a NomadNet node's page (default its index) and fetch it over Reticulum.
+  void _openNodePage(String pubHex, String label,
+      {String path = '/page/index.mu'}) {
+    final seq = ++_pageSeq;
+    setState(() {
+      _pagePub = pubHex;
+      _pageLabel = label;
+      _pagePath = path;
+      _pageText = null;
+      _pageErr = null;
+      _panel = _Panel.page;
+    });
+    if (pubHex.isEmpty) {
+      setState(() => _pageErr = 'No identity key for this node yet.');
+      return;
+    }
+    RnsService.instance.fetchNomadPage(pubHex, path).then((bytes) {
+      if (!mounted || seq != _pageSeq) return;
+      setState(() {
+        if (bytes == null) {
+          _pageErr =
+              'No response — the node may be offline or not serving $path.';
+        } else {
+          try {
+            _pageText = utf8.decode(bytes, allowMalformed: true);
+          } catch (_) {
+            _pageText = String.fromCharCodes(bytes);
+          }
+        }
+      });
+    });
+  }
+
+  Widget _pageBody() {
+    if (_pageErr != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.cloud_off, size: 34, color: _gMuted),
+            const SizedBox(height: 12),
+            Text(_pageErr!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: _gMuted, fontSize: 13)),
+            const SizedBox(height: 14),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('Retry'),
+              onPressed: () =>
+                  _openNodePage(_pagePub, _pageLabel, path: _pagePath),
+            ),
+          ]),
+        ),
+      );
+    }
+    if (_pageText == null) {
+      return Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const SizedBox(
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          const SizedBox(height: 14),
+          Text('Loading $_pagePath …',
+              style: const TextStyle(color: _gMuted, fontSize: 13)),
+        ]),
+      );
+    }
+    // Phase 1: raw micron source. (The micron renderer + links come next.)
+    return ListView(padding: const EdgeInsets.all(14), children: [
+      Text(_pagePath,
+          style: const TextStyle(
+              color: _gMuted, fontSize: 11, fontFamily: 'monospace')),
+      const SizedBox(height: 8),
+      SelectableText(_pageText!,
+          style: const TextStyle(
+              color: _gFg, fontSize: 12.5, fontFamily: 'monospace', height: 1.4)),
+    ]);
   }
 
   Widget _chatThreadBody() {

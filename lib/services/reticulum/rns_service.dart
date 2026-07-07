@@ -65,6 +65,7 @@ import 'lxmf/lxmf.dart'
     show kLxmfApp, kLxmfDeliveryAspects, kLxmfPropagationAspects;
 import 'lxmf/lxmf_message.dart';
 import 'lxmf/lxmf_router.dart';
+import 'nomad_node.dart';
 import 'observed_store.dart';
 import 'rns_announce.dart';
 import 'rns_ble_interface.dart';
@@ -130,6 +131,7 @@ class RnsService {
   FileSource? fileServeSource;
   // LXMF messaging (interop with Sideband/NomadNet/MeshChat).
   LxmfRouter? _lxmf;
+  NomadNode? _nomad; // NomadNet page fetcher
   final List<Map<String, dynamic>> _lxmfInbox = [];
 
   // Distributed NOSTR-like relay/indexer: a local event store + search, a relay
@@ -1562,6 +1564,19 @@ class RnsService {
         acceptUnverified: (m) => m.fields.containsKey(_kWappLxmfField),
       );
 
+      // NomadNet page fetcher — reads pages from nomadnetwork.node peers.
+      _nomad = NomadNode(
+        identity: _id!,
+        send: (raw) => _transport?.sendLinkAware(raw),
+        nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
+        nextHopForDest: (h) => _transport?.pathFor(h)?.nextHop,
+        hasPathForDest: (h) => _transport?.hasPath(h) ?? false,
+        nextHopMtuForDest: (h) =>
+            _transport?.nextHopInterfaceHwMtu(h) ?? kRnsMtu,
+        requestPath: (h) => _transport?.requestPath(h),
+        log: (m) => LogService.instance.add('RNS/nomad: $m'),
+      );
+
       // Per-file serve statistics (best-effort; never blocks node start).
       try {
         _serveStats = ServeStats.open(serveStatsPath ?? ':memory:');
@@ -2250,6 +2265,9 @@ class RnsService {
         return;
       }
       if (await _lxmf?.handlePacket(p) ?? false) return;
+      if (await _nomad?.handlePacket(p, arrivalHwMtu: arrivalMtu) ?? false) {
+        return;
+      }
       if (await _relay?.handlePacket(p) ?? false) return;
       if (_rvInboundDests.isNotEmpty && await _handleRvInbound(p)) return;
     }
@@ -3294,6 +3312,25 @@ class RnsService {
     } else {
       _mutedCalls.remove(k);
     }
+  }
+
+  /// Fetch a NomadNet page from a node. [pubkeyHex] is the node's 64-byte RNS
+  /// identity public key (a `node` device's meta.pubkey); [path] e.g.
+  /// "/page/index.mu". [fields] carries dynamic-page input, or null. Returns the
+  /// raw micron bytes, or null.
+  Future<Uint8List?> fetchNomadPage(String pubkeyHex, String path,
+      {Map<String, Object?>? fields}) async {
+    final n = _nomad;
+    if (!_up || n == null) return null;
+    final pub = _bytesFromHex(pubkeyHex);
+    if (pub == null || pub.length != 64) return null;
+    final RnsIdentity id;
+    try {
+      id = RnsIdentity.fromPublicKey(pub);
+    } catch (_) {
+      return null;
+    }
+    return n.fetchPage(id, path, fields: fields);
   }
 
   /// Resolved profile metadata for [callsign] ({name, about, picture}) or null.

@@ -115,6 +115,10 @@ class _GNode {
   final String dm;
   // NOSTR npub (from meta), for distinguishing same-nickname devices. '' if none.
   final String npub;
+  // First time we heard this node (epoch ms), and every hub/relayer it's been
+  // heard through — for the device-row subtitle.
+  final int firstSeenMs;
+  final List<String> relayers;
   _GNode(Map<String, dynamic> m)
       : id = (m['id'] ?? '').toString(),
         label = (m['label'] ?? m['id'] ?? '').toString(),
@@ -128,6 +132,11 @@ class _GNode {
         hops = (m['hops'] as num?)?.toInt() ?? 0,
         via = (m['via'] ?? '').toString(),
         meta = (m['meta'] as Map?)?.cast<String, dynamic>() ?? const {},
+        firstSeenMs = ((m['meta'] as Map?)?['firstSeen'] as num?)?.toInt() ?? 0,
+        relayers = ((m['meta'] as Map?)?['relayers'] as List?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            const [],
         childCount = ((m['meta'] as Map?)?['children'] as num?)?.toInt() ?? 0;
 }
 
@@ -246,10 +255,14 @@ class _GraphViewState extends State<_GraphView>
     }
   }
 
+  // Where a chat thread's back arrow returns to (the panel it was opened from —
+  // Devices, Geogram, People/chats, …). Defaults to the conversation list.
+  _Panel _chatReturn = _Panel.chats;
+
   // The single back arrow (in the host app bar) closes the current panel: a chat
-  // thread returns to the conversation list, every other panel to the graph.
+  // thread returns to where it was opened from, every other panel to the graph.
   void _closePanel() {
-    setState(() => _panel = _panel == _Panel.chat ? _Panel.chats : _Panel.none);
+    setState(() => _panel = _panel == _Panel.chat ? _chatReturn : _Panel.none);
   }
 
   // Tell the host app bar which panel (if any) is open, deduped on the title so
@@ -326,6 +339,9 @@ class _GraphViewState extends State<_GraphView>
     final k = peerHex.toLowerCase();
     RnsService.instance.lxmfEnsureConversation(k, name: name);
     RnsService.instance.lxmfMarkRead(k);
+    // Remember where we came from so the chat's back arrow returns there (the
+    // Devices list, a hub's devices, …) instead of always the conversation list.
+    if (_panel != _Panel.chat) _chatReturn = _panel;
     setState(() {
       _chatPeer = k;
       _chatName = name;
@@ -1594,6 +1610,7 @@ class _GraphViewState extends State<_GraphView>
       }
     }
 
+    final sub = _peerSubtitle(p);
     return InkWell(
       onTap: onRowTap,
       child: Padding(
@@ -1601,10 +1618,10 @@ class _GraphViewState extends State<_GraphView>
         child: Row(children: [
           // Leading: profile avatar for a geogram peer, else a status dot.
           if (avatar != null)
-            CircleAvatar(radius: 13, backgroundImage: avatar)
+            CircleAvatar(radius: 15, backgroundImage: avatar)
           else
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 6),
               child: Container(
                   width: 8,
                   height: 8,
@@ -1613,17 +1630,31 @@ class _GraphViewState extends State<_GraphView>
             ),
           const SizedBox(width: 10),
           Expanded(
-            child: Text(p.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: _gFg, fontSize: 13.5)),
+            child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Flexible(
+                      child: Text(p.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: _gFg, fontSize: 13.5)),
+                    ),
+                    if (tag.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Text(tag,
+                          style:
+                              const TextStyle(color: _gMuted, fontSize: 10.5)),
+                    ],
+                  ]),
+                  if (sub.isNotEmpty)
+                    Text(sub,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: _gMuted, fontSize: 11)),
+                ]),
           ),
-          if (tag.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(left: 8, right: 4),
-              child: Text(tag,
-                  style: const TextStyle(color: _gMuted, fontSize: 10.5)),
-            ),
           // Geogram: the row opens the profile, so give a direct Message
           // shortcut here. Others: a plain affordance.
           if (p.geogram && canMsg)
@@ -1644,6 +1675,30 @@ class _GraphViewState extends State<_GraphView>
         ]),
       ),
     );
+  }
+
+  // Row subtitle: how long ago we first heard the device + which hub(s) it's
+  // reachable through (or "N hubs" when present on several bridges).
+  String _peerSubtitle(_GNode p) {
+    final parts = <String>[];
+    if (p.firstSeenMs > 0) parts.add('first seen ${_ago(p.firstSeenMs)}');
+    final relayers =
+        p.relayers.isNotEmpty ? p.relayers : (p.relayer.isEmpty ? const <String>[] : [p.relayer]);
+    if (relayers.length > 1) {
+      parts.add('${relayers.length} hubs');
+    } else if (relayers.length == 1) {
+      parts.add(_hubLabel(relayers.first));
+    }
+    return parts.join('  ·  ');
+  }
+
+  // A relayer identity → a readable hub label (its graph node's label, else a
+  // short hex).
+  String _hubLabel(String relayerId) {
+    if (relayerId.isEmpty) return '';
+    final hub = _allNodes.where((n) => n.id == relayerId).firstOrNull;
+    if (hub != null && hub.label.isNotEmpty) return hub.label;
+    return 'hub ${_shorten(relayerId, head: 8, tail: 0)}';
   }
 
   Future<void> _newChatDialog() async {

@@ -890,6 +890,7 @@ class RnsService {
     n.hops = wireHops + 1;
     n.via = via;
     n.relayerHex = relayer == null ? null : _hex(relayer);
+    if (relayer != null) n.relayers.add(_hex(relayer));
     if (svc != null) {
       n.services.add(svc);
       if (svc == 'chat') {
@@ -1037,6 +1038,8 @@ class RnsService {
         'capacity': relay?.announcement.capacity ?? 0,
         'firstSeen': n.firstSeenMs,
         'lastSeen': n.lastSeenMs,
+        // Every relayer/hub this node is currently reachable through.
+        'relayers': n.relayers.toList(),
       },
     };
   }
@@ -4780,6 +4783,9 @@ class _ObservedNode {
   // Transport-id (hex) of the relayer we reach this node through; null = direct
   // neighbour of ours. Other nodes' relayer == a hub's identity.
   String? relayerHex;
+  // EVERY relayer/hub this node has been heard through this run (a device can be
+  // reachable via several hubs/bridges at once). Used for "found on N hubs".
+  final Set<String> relayers = {};
   // This node's NOSTR pubkey (hex), learned from its relay announce — encoded to
   // an npub for display so peers with the same callsign/nickname are tellable
   // apart. Null until we hear a relay announce carrying it.

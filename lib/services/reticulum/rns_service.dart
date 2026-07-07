@@ -682,36 +682,43 @@ class RnsService {
   Future<bool> enableWfdServer(int port, {String bindHost = '192.168.49.1'}) async {
     if (!_up || _transport == null) return false;
     if (_wfdServer != null) return true; // one group, one server
-    try {
-      final s = RnsTcpServerInterface(
-        port: port,
-        bindHost: bindHost,
-        transport: _transport!,
-        onPacket: _onInbound,
-        shared: false,
-        connSpeedRank: 4,
-        labelPrefix: 'wfd',
-        // A client just joined the group — re-announce our destinations over the
-        // fresh link so it learns a rank-4 path to each (RNS routes per-dest; an
-        // announce sent before it joined never reached it).
-        onConnect: () {
-          // ignore: discarded_futures
-          announce(_announceText);
-          // ignore: discarded_futures
-          _announceServiceDests();
-        },
-        log: (m) => LogService.instance.add('RNS/wfd: $m'),
-      );
-      await s.bind();
-      _wfdServer = s;
-      LogService.instance.add('RNS: WiFi-Direct server on $bindHost:$port');
-      await announce(_announceText);
-      await _announceServiceDests();
-      return true;
-    } catch (e) {
-      LogService.instance.add('RNS: WiFi-Direct server failed: $e');
-      return false;
+    final s = RnsTcpServerInterface(
+      port: port,
+      bindHost: bindHost,
+      transport: _transport!,
+      onPacket: _onInbound,
+      shared: false,
+      connSpeedRank: 4,
+      labelPrefix: 'wfd',
+      // A client just joined the group — re-announce our destinations over the
+      // fresh link so it learns a rank-4 path to each (RNS routes per-dest; an
+      // announce sent before it joined never reached it).
+      onConnect: () {
+        // ignore: discarded_futures
+        announce(_announceText);
+        // ignore: discarded_futures
+        _announceServiceDests();
+      },
+      log: (m) => LogService.instance.add('RNS/wfd: $m'),
+    );
+    // The GO's 192.168.49.1 is assigned to the p2p interface a moment AFTER
+    // createGroup returns, so the first bind can fail with errno 99 (address
+    // not yet assignable). Retry until the interface is configured.
+    for (var attempt = 0; attempt < 8; attempt++) {
+      try {
+        await s.bind();
+        _wfdServer = s;
+        LogService.instance.add('RNS: WiFi-Direct server on $bindHost:$port');
+        await announce(_announceText);
+        await _announceServiceDests();
+        return true;
+      } catch (e) {
+        LogService.instance
+            .add('RNS: WiFi-Direct bind ${attempt + 1}/8: $e');
+        await Future<void>.delayed(const Duration(milliseconds: 800));
+      }
     }
+    return false;
   }
 
   /// Client side: dial the GO's RNS server over the P2P link. Retries a few

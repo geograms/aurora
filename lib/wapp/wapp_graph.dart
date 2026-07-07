@@ -825,13 +825,17 @@ class _GraphViewState extends State<_GraphView>
   // window); the hub count is how many bootstrap hubs we currently hold a link
   // to. Tapping opens the bootstrap-hubs panel.
   Widget _buildReachBadge() {
-    final d = widget.data.value ?? const {};
-    final online = (d['online'] as num?)?.toInt() ??
-        (d['observed'] as num?)?.toInt() ??
-        _allNodes.where((n) => n.kind != 'self').length;
+    // Three DISTINCT categories, each its own count + list:
+    //  • geogram  — our devices;
+    //  • devices  — other Reticulum peers (NomadNet/Sideband/generic), NOT
+    //               geogram and NOT hubs;
+    //  • hubs     — connected bootstrap hubs.
+    final base = _allNodes.where((n) => n.kind != 'self').toList();
+    final geo = _dedupPeers(base.where((n) => n.geogram).toList()).length;
+    final online = _dedupPeers(
+            base.where((n) => n.kind != 'hub' && !n.geogram).toList())
+        .length;
     final hubs = _hubList.where((h) => h['connected'] == true).length;
-    final geo = (d['geogramReachable'] as num?)?.toInt() ??
-        _allNodes.where((n) => n.kind != 'self' && n.geogram).length;
     return Positioned(
       top: 54,
       right: 10,
@@ -850,40 +854,51 @@ class _GraphViewState extends State<_GraphView>
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Line 1 — reachable-now devices + connected hubs → device list.
-              InkWell(
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(8)),
-                onTap: () => setState(() => _panel = _Panel.devices),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    const Icon(Icons.lan_outlined, size: 15, color: _gSelf),
-                    const SizedBox(width: 6),
-                    Text('$online',
-                        style: const TextStyle(
-                            color: _gFg,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700)),
-                    const SizedBox(width: 4),
-                    Text(online == 1 ? 'device' : 'devices',
-                        style: const TextStyle(color: _gMuted, fontSize: 12)),
-                    const SizedBox(width: 8),
-                    const Text('·',
-                        style: TextStyle(color: _gMuted, fontSize: 12)),
-                    const SizedBox(width: 8),
-                    Text('$hubs',
-                        style: const TextStyle(
-                            color: _gFg,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600)),
-                    const SizedBox(width: 4),
-                    Text(hubs == 1 ? 'hub' : 'hubs',
-                        style: const TextStyle(color: _gMuted, fontSize: 12)),
-                  ]),
+              // Line 1 — two separate tap targets: "devices" (other Reticulum)
+              // and "hubs", each opening its OWN list.
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                InkWell(
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(8)),
+                  onTap: () => setState(() => _panel = _Panel.devices),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 7, 6, 7),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.lan_outlined, size: 15, color: _gSelf),
+                      const SizedBox(width: 6),
+                      Text('$online',
+                          style: const TextStyle(
+                              color: _gFg,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700)),
+                      const SizedBox(width: 4),
+                      Text(online == 1 ? 'device' : 'devices',
+                          style: const TextStyle(color: _gMuted, fontSize: 12)),
+                    ]),
+                  ),
                 ),
-              ),
+                Container(width: 1, height: 20, color: _gBorder),
+                InkWell(
+                  borderRadius:
+                      const BorderRadius.only(topRight: Radius.circular(8)),
+                  onTap: () => setState(() => _panel = _Panel.hubs),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 7, 10, 7),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.dns_outlined, size: 14, color: _gHub),
+                      const SizedBox(width: 5),
+                      Text('$hubs',
+                          style: const TextStyle(
+                              color: _gFg,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700)),
+                      const SizedBox(width: 4),
+                      Text(hubs == 1 ? 'hub' : 'hubs',
+                          style: const TextStyle(color: _gMuted, fontSize: 12)),
+                    ]),
+                  ),
+                ),
+              ]),
               const Divider(height: 1, thickness: 1, color: _gBorder),
               // Line 2 — geogram-reachable devices → list + 1:1 messaging.
               InkWell(
@@ -1213,21 +1228,24 @@ class _GraphViewState extends State<_GraphView>
             _reachableViaFor(n));
   }
 
-  // All reachable devices (geogram + NomadNet + generic), deduped. From the
-  // badge's "N devices" line.
+  // Other Reticulum devices (NomadNet / Sideband / generic) — NOT geogram and
+  // NOT hubs. From the badge's "N devices" line. (Geogram → its own list; hubs →
+  // the hubs panel.)
   Widget _devicesBody() {
-    final peers = _dedupPeers(_allNodes.where((n) => n.kind != 'self').toList()
+    final peers = _dedupPeers(_allNodes
+        .where((n) => n.kind != 'self' && n.kind != 'hub' && !n.geogram)
+        .toList()
       ..sort((a, b) {
-        if (a.geogram != b.geogram) return a.geogram ? -1 : 1;
         final am = a.dm.isNotEmpty, bm = b.dm.isNotEmpty;
-        if (am != bm) return am ? -1 : 1;
+        if (am != bm) return am ? -1 : 1; // messageable first
         return a.label.toLowerCase().compareTo(b.label.toLowerCase());
       }));
     if (peers.isEmpty) {
       return const Center(
         child: Padding(
           padding: EdgeInsets.all(24),
-          child: Text('No devices reachable right now.',
+          child: Text(
+              'No other Reticulum devices right now.\n\n(Your geogram devices are under the "geogram" list; hubs under "hubs".)',
               textAlign: TextAlign.center,
               style: TextStyle(color: _gMuted, fontSize: 13)),
         ),

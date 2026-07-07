@@ -265,6 +265,11 @@ class _GraphViewState extends State<_GraphView>
   // The single back arrow (in the host app bar) closes the current panel: a chat
   // thread returns to where it was opened from, every other panel to the graph.
   void _closePanel() {
+    // Inside the page browser, back walks the page history first.
+    if (_panel == _Panel.page && _pageHistory.isNotEmpty) {
+      _loadPage(_pageHistory.removeLast());
+      return;
+    }
     setState(() => _panel = _panel == _Panel.chat ? _chatReturn : _Panel.none);
   }
 
@@ -303,6 +308,8 @@ class _GraphViewState extends State<_GraphView>
   String? _pageText; // fetched page bytes as text (null = loading)
   String? _pageErr;
   int _pageSeq = 0; // guards against a stale fetch overwriting a newer one
+  final List<String> _pageHistory = []; // page paths visited, for in-page back
+  bool _pageSource = false; // false = rendered micron, true = raw source
 
   @override
   void initState() {
@@ -1779,23 +1786,32 @@ class _GraphViewState extends State<_GraphView>
   }
 
   // ── NomadNet page browser ──
-  // Open a NomadNet node's page (default its index) and fetch it over Reticulum.
+  // Open a node's page browser at its index (fresh history).
   void _openNodePage(String pubHex, String label,
       {String path = '/page/index.mu'}) {
+    _pageHistory.clear();
+    _pagePub = pubHex;
+    _pageLabel = label;
+    _loadPage(path);
+  }
+
+  // Fetch [path] on the current node ([_pagePub]) and show it. [fields] carries
+  // dynamic-page/chatroom input.
+  void _loadPage(String path, {Map<String, String>? fields}) {
     final seq = ++_pageSeq;
     setState(() {
-      _pagePub = pubHex;
-      _pageLabel = label;
       _pagePath = path;
       _pageText = null;
       _pageErr = null;
       _panel = _Panel.page;
     });
-    if (pubHex.isEmpty) {
+    if (_pagePub.isEmpty) {
       setState(() => _pageErr = 'No identity key for this node yet.');
       return;
     }
-    RnsService.instance.fetchNomadPage(pubHex, path).then((bytes) {
+    RnsService.instance
+        .fetchNomadPage(_pagePub, path, fields: fields)
+        .then((bytes) {
       if (!mounted || seq != _pageSeq) return;
       setState(() {
         if (bytes == null) {
@@ -1810,6 +1826,21 @@ class _GraphViewState extends State<_GraphView>
         }
       });
     });
+  }
+
+  // A micron link/submit was tapped. Navigate on the same node; a ":/path"
+  // target is node-relative. Pushes the current path so in-page back works.
+  void _onPageLink(String url, Map<String, String> fields) {
+    if (url.isEmpty) return;
+    var path = url.startsWith(':') ? url.substring(1) : url;
+    // A "hash:/path" target points at a DIFFERENT node — not yet supported.
+    if (RegExp(r'^[0-9a-fA-F]{16,}:').hasMatch(path)) {
+      setState(() => _pageErr = 'Links to other nodes are not supported yet.');
+      return;
+    }
+    if (!path.startsWith('/')) path = '/$path';
+    if (path != _pagePath) _pageHistory.add(_pagePath);
+    _loadPage(path, fields: fields.isEmpty ? null : fields);
   }
 
   Widget _pageBody() {
@@ -1847,15 +1878,42 @@ class _GraphViewState extends State<_GraphView>
         ]),
       );
     }
-    // Phase 1: raw micron source. (The micron renderer + links come next.)
-    return ListView(padding: const EdgeInsets.all(14), children: [
-      Text(_pagePath,
-          style: const TextStyle(
-              color: _gMuted, fontSize: 11, fontFamily: 'monospace')),
-      const SizedBox(height: 8),
-      SelectableText(_pageText!,
-          style: const TextStyle(
-              color: _gFg, fontSize: 12.5, fontFamily: 'monospace', height: 1.4)),
+    // A thin path/toggle bar, then the rendered micron (or raw source).
+    return Column(children: [
+      Container(
+        padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+        color: const Color(0x11FFFFFF),
+        child: Row(children: [
+          Expanded(
+            child: Text(_pagePath,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: _gMuted, fontSize: 11, fontFamily: 'monospace')),
+          ),
+          InkWell(
+            onTap: () => setState(() => _pageSource = !_pageSource),
+            borderRadius: BorderRadius.circular(6),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Text(_pageSource ? 'rendered' : 'source',
+                  style: const TextStyle(color: _gSelf, fontSize: 11.5)),
+            ),
+          ),
+        ]),
+      ),
+      Expanded(
+        child: _pageSource
+            ? ListView(padding: const EdgeInsets.all(14), children: [
+                SelectableText(_pageText!,
+                    style: const TextStyle(
+                        color: _gFg,
+                        fontSize: 12.5,
+                        fontFamily: 'monospace',
+                        height: 1.4)),
+              ])
+            : MicronView(_pageText!, onLink: _onPageLink),
+      ),
     ]);
   }
 

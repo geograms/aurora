@@ -37,6 +37,7 @@ import 'geoui/widgets/log_view_field.dart';
 import 'geoui/widgets/chat_palette.dart';
 import 'geoui/widgets/chat_view_field.dart';
 import 'geoui/widgets/activity_feed.dart';
+import 'geoui/widgets/micron_view.dart';
 import 'geoui/widgets/profile_route.dart';
 import 'geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../profile/profile_edit_page.dart';

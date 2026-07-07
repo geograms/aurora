@@ -117,6 +117,9 @@ class MainActivity : FlutterActivity() {
         // BLE 5 extended advertising/scanning for the Reticulum broadcast transport.
         Ble5(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
 
+        // WiFi Direct group management for the mesh bulk data plane.
+        WifiDirect(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+
         // Deep links (geogram.radio/circle/<key>): expose the launch URI and push
         // any later ones (onNewIntent) to Dart's DeepLinkService.
         linksChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, LINKS_CHANNEL)

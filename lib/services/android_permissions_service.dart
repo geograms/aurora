@@ -61,6 +61,14 @@ class AndroidPermissionsService {
       ],
     ),
     AppPermission(
+      key: 'nearby_wifi',
+      title: 'Nearby WiFi devices',
+      desc: 'Move large files between nearby devices over a direct WiFi link '
+          '(much faster than Bluetooth)',
+      icon: 'wifi',
+      perms: [Permission.nearbyWifiDevices],
+    ),
+    AppPermission(
       key: 'notifications',
       title: 'Notifications',
       desc: 'Alert you when a message arrives while the app is in the background',

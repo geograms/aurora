@@ -42,6 +42,13 @@
          pushes without WiFi power-save latency. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <!-- WiFi Direct bulk data plane: form/join P2P groups (BLE coordinates, the
+         P2P link carries >1MB Reticulum transfers). NEARBY_WIFI_DEVICES is the
+         API 33+ runtime permission; we never derive location from it. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+                     android:usesPermissionFlags="neverForLocation"/>
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false"/>
     <!-- Ask to be exempt from battery optimization (Doze) so the always-on
          background service isn't killed in deep sleep on aggressive OEMs. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>

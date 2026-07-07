@@ -13,6 +13,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../connections/bluetooth/ble_service.dart';
+import '../connections/wifi_direct/wifi_direct_service.dart';
 import 'mesh/mesh_bulk_spool.dart';
 import 'mesh/mesh_service.dart';
 import 'mesh/mesh_store.dart';
@@ -292,6 +293,39 @@ class RemoteApiService {
         }
         final ok = await I2pService.instance.discover(sha, ext);
         return _json(res, {'ok': ok});
+      }
+
+      // ── WiFi Direct bulk data plane (validation control) ──
+      if (req.method == 'GET' && path == '/api/wfd/status') {
+        final wfd = WifiDirectService.instance;
+        return _json(res, {
+          'supported': await wfd.supported(),
+          'group': await wfd.groupInfo(),
+        });
+      }
+      if (req.method == 'POST' && path == '/api/wfd/group') {
+        // Ensure/reuse THE group on this device; returns live credentials.
+        final creds = await WifiDirectService.instance.ensureGroup();
+        return _json(
+            res,
+            creds == null
+                ? {'ok': false}
+                : {'ok': true, ...creds.toJson()});
+      }
+      if (req.method == 'POST' && path == '/api/wfd/join') {
+        // {"ssid": "...", "psk": "..."} → silent credential join; waits for
+        // link-up and reports the GO ip.
+        final data = await _body(req);
+        final ssid = (data['ssid'] ?? '').toString();
+        final psk = (data['psk'] ?? '').toString();
+        final wfd = WifiDirectService.instance;
+        final started = await wfd.connectToGroup(ssid, psk);
+        if (!started) return _json(res, {'ok': false, 'error': 'connect refused'});
+        final goIp = await wfd.awaitConnected();
+        return _json(res, {'ok': goIp != null, 'goIp': goIp});
+      }
+      if (req.method == 'POST' && path == '/api/wfd/teardown') {
+        return _json(res, {'ok': await WifiDirectService.instance.removeGroup()});
       }
 
       // ── Reticulum (RNS) device-to-device validation ──

@@ -2571,12 +2571,18 @@ class RnsService {
     final f = _files;
     if (!_up || f == null) return null;
     // Bulk transfer: if the peer's best path is BLE, try to bring up a
-    // WiFi-Direct fast path first (self-organized, hands-free). Non-fatal — the
-    // fetch proceeds over whatever path exists either way.
+    // WiFi-Direct fast path first (self-organized, hands-free). Non-fatal AND
+    // strictly bounded — the fetch must NOT stall on this. A cold BLE
+    // negotiation can take ~a minute, but we only wait a short window here (a
+    // standing/already-up group attaches fast); if WiFi Direct isn't ready by
+    // then, we proceed on the existing (BLE/hub) path rather than block the
+    // caller. (Without this bound the hook could hang a fetch for its full
+    // negotiation budget — the endpoint-fetch stall seen in testing.)
     final hook = onWantFastPath;
     if (hook != null && isBlePath(peerDestHex)) {
       try {
-        await hook(peerDestHex);
+        await hook(peerDestHex)
+            .timeout(const Duration(seconds: 20), onTimeout: () => false);
       } catch (_) {}
     }
     final dh = _bytesFromHex(peerDestHex);

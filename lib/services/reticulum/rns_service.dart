@@ -966,6 +966,111 @@ class RnsService {
     (1 << 3, 'archive'),
   ];
 
+  static String _shortHex(String h) => h.length > 8 ? h.substring(0, 8) : h;
+
+  // A geogram device carries a geogram service (chat/relay/wapp/files/dht) — our
+  // own network. Bare LXMF and NomadNet ('node') services are NOT geogram.
+  static const _nonGeoSvc = {'lxmf', 'lxmf-prop', 'node'};
+  bool _isGeogramNode(_ObservedNode n) =>
+      n.services.any((s) => !_nonGeoSvc.contains(s));
+
+  /// Build a graph node JSON for an observed node (shared by [graphSnapshot] and
+  /// [observedDevices]).
+  Map<String, dynamic> _nodeJson(
+      _ObservedNode n, String kind, Map<String, RelayEntry> relayByHex) {
+    final relay = relayByHex[n.identityHex];
+    final caps = <String>[];
+    if (relay != null) {
+      for (final (bit, name) in _capNames) {
+        if (relay.announcement.caps & bit != 0) caps.add(name);
+      }
+    }
+    // In geogram the CALLSIGN is npub-derived (X1<4>); the NICKNAME is the peer's
+    // kind-0 display_name when fetched, else its announced text.
+    final pub = n.nostrPubHex;
+    var callsign = '';
+    if (pub != null && pub.length == 64) {
+      try {
+        callsign = 'X1${NostrCrypto.deriveCallsign(pub)}';
+      } catch (_) {}
+    }
+    final announced = (n.callsign ?? '').trim();
+    final profileName = _profileNameFor(pub);
+    final nickname = profileName.isNotEmpty ? profileName : announced;
+    final String label;
+    if (callsign.isNotEmpty &&
+        nickname.isNotEmpty &&
+        nickname.toUpperCase() != callsign.toUpperCase()) {
+      label = '$nickname ($callsign)';
+    } else if (callsign.isNotEmpty) {
+      label = callsign;
+    } else if (nickname.isNotEmpty) {
+      label = nickname;
+    } else {
+      label = _shortHex(n.identityHex);
+    }
+    return {
+      'id': n.identityHex,
+      'label': label,
+      'kind': kind,
+      'services': n.services.toList()..sort(),
+      'dm': kind == 'self'
+          ? ''
+          : n.services.contains('lxmf')
+              ? 'lxmf'
+              : n.services.contains('lxmf-prop')
+                  ? 'sf'
+                  : n.services.contains('chat')
+                      ? 'chat'
+                      : '',
+      'geogram': _isGeogramNode(n),
+      'hops': n.hops,
+      'via': n.via,
+      'relayer': n.relayerHex ?? '',
+      'meta': {
+        'callsign': callsign.isNotEmpty ? callsign : announced,
+        'nickname': nickname,
+        'pubkey': n.publicKeyHex,
+        'npub': _npubOrEmpty(n.nostrPubHex),
+        'role': relay?.announcement.role.name ?? '',
+        'caps': caps,
+        'capacity': relay?.announcement.capacity ?? 0,
+        'firstSeen': n.firstSeenMs,
+        'lastSeen': n.lastSeenMs,
+      },
+    };
+  }
+
+  /// EVERY other Reticulum device heard within the online window — NOT our
+  /// geogram devices and NOT hubs/relayers. Unlike [graphSnapshot] this is NOT
+  /// gated on a re-announce, so the hundreds a hub floods on connect are all
+  /// listed (that's what the wapp's "Devices" list wants). Newest-heard first.
+  List<Map<String, dynamic>> observedDevices() {
+    sweepObserved();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final relayByHex = <String, RelayEntry>{};
+    for (final e in _relayDir.entries()) {
+      relayByHex[e.idHex] = e;
+    }
+    // Hubs = identities that relay for some recently-heard node.
+    final hubIds = <String>{};
+    for (final n in _observed.values) {
+      if (nowMs - n.lastSeenMs > _onlineWindowMs) continue;
+      final r = n.relayerHex;
+      if (r != null && r.isNotEmpty) hubIds.add(r);
+    }
+    final out = <Map<String, dynamic>>[];
+    for (final n in _observed.values) {
+      if (nowMs - n.lastSeenMs > _onlineWindowMs) continue; // recent only
+      if (hubIds.contains(n.identityHex)) continue; // it's a hub
+      if (_isGeogramNode(n)) continue; // geogram → its own list
+      out.add(_nodeJson(n, 'leaf', relayByHex));
+    }
+    out.sort((a, b) => ((b['meta'] as Map)['lastSeen'] as int)
+        .compareTo((a['meta'] as Map)['lastSeen'] as int));
+    return out;
+  }
+
   /// A snapshot of the observed network as a {nodes,edges} graph for the wapp's
   /// webview. Topology is hub-centric: [self] in the centre, identified transport
   /// nodes (the relayers other nodes are reached through) as hubs, and the
@@ -986,10 +1091,7 @@ class RnsService {
     }
     // A geogram device carries a geogram service (chat/relay/wapp/files/dht) —
     // our own network. LXMF and NomadNet ('node') services are NOT geogram.
-    // Defined up here because reachability trusts it.
-    const nonGeoSvc = {'lxmf', 'lxmf-prop', 'node'};
-    bool isGeogram(_ObservedNode n) =>
-        n.services.any((s) => !nonGeoSvc.contains(s));
+    bool isGeogram(_ObservedNode n) => _isGeogramNode(n);
 
     // Which observed nodes to show. A recent lastSeen alone isn't enough: linking
     // a hub floods its cached announce table at us, so every long-dead node it
@@ -1043,85 +1145,9 @@ class RnsService {
     final emitted = <String>{};
     final childCount = <String, int>{};
 
-    String shortHex(String h) => h.length > 8 ? h.substring(0, 8) : h;
-    Map<String, dynamic> nodeJson(_ObservedNode n, String kind) {
-      final relay = relayByHex[n.identityHex];
-      final caps = <String>[];
-      if (relay != null) {
-        for (final (bit, name) in _capNames) {
-          if (relay.announcement.caps & bit != 0) caps.add(name);
-        }
-      }
-      // Identity for display. In geogram the CALLSIGN is derived from the npub
-      // (X1<4>), not the announced text — many devices announce the generic
-      // nickname "aurora", so that alone is useless. The NICKNAME is the peer's
-      // kind-0 display_name when we've fetched it, else its announced text.
-      final pub = n.nostrPubHex;
-      var callsign = '';
-      if (pub != null && pub.length == 64) {
-        try {
-          callsign = 'X1${NostrCrypto.deriveCallsign(pub)}';
-        } catch (_) {}
-      }
-      final announced = (n.callsign ?? '').trim();
-      final profileName = _profileNameFor(pub);
-      final nickname = profileName.isNotEmpty ? profileName : announced;
-      // Title: "nickname (callsign)" when both are known and differ; otherwise
-      // whichever we have, falling back to the short identity hex.
-      final String label;
-      if (callsign.isNotEmpty &&
-          nickname.isNotEmpty &&
-          nickname.toUpperCase() != callsign.toUpperCase()) {
-        label = '$nickname ($callsign)';
-      } else if (callsign.isNotEmpty) {
-        label = callsign;
-      } else if (nickname.isNotEmpty) {
-        label = nickname;
-      } else {
-        label = shortHex(n.identityHex);
-      }
-      return {
-        'id': n.identityHex,
-        'label': label,
-        'kind': kind,
-        'services': n.services.toList()..sort(),
-        // How this node can be reached for a 1:1 message, derived from what it
-        // announced: 'lxmf' = LXMF delivery dest (direct, the cross-Reticulum
-        // standard) · 'sf' = LXMF propagation only (store-and-forward) · 'chat' =
-        // geogram-native chat · '' = no 1:1 messaging heard. The wapp renders an
-        // indicator + a Message button from this (delivery dest derived from
-        // meta.pubkey). 'self' kind never carries one.
-        'dm': kind == 'self'
-            ? ''
-            : n.services.contains('lxmf')
-                ? 'lxmf'
-                : n.services.contains('lxmf-prop')
-                    ? 'sf'
-                    : n.services.contains('chat')
-                        ? 'chat'
-                        : '',
-        'geogram': isGeogram(n),
-        'hops': n.hops,
-        'via': n.via,
-        'relayer': n.relayerHex ?? '',
-        'meta': {
-          // Callsign = npub-derived (the stable geogram id); nickname = friendly
-          // name (kind-0 display_name, else announced text). Both surfaced so the
-          // detail panel can show them separately.
-          'callsign': callsign.isNotEmpty ? callsign : announced,
-          'nickname': nickname,
-          'pubkey': n.publicKeyHex,
-          // NOSTR npub (from the peer's relay announce) so same-nickname devices
-          // are distinguishable; empty if the peer never advertised one.
-          'npub': _npubOrEmpty(n.nostrPubHex),
-          'role': relay?.announcement.role.name ?? '',
-          'caps': caps,
-          'capacity': relay?.announcement.capacity ?? 0,
-          'firstSeen': n.firstSeenMs,
-          'lastSeen': n.lastSeenMs,
-        },
-      };
-    }
+    String shortHex(String h) => _shortHex(h);
+    Map<String, dynamic> nodeJson(_ObservedNode n, String kind) =>
+        _nodeJson(n, kind, relayByHex);
 
     void emit(_ObservedNode n, String kind) {
       if (emitted.add(n.identityHex)) nodes.add(nodeJson(n, kind));

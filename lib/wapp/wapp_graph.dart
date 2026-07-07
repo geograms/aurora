@@ -191,6 +191,10 @@ enum _Panel {
 class _GraphViewState extends State<_GraphView>
     with SingleTickerProviderStateMixin {
   List<_GNode> _allNodes = const [];
+  // Other Reticulum devices (NOT geogram, NOT hubs) heard on the hubs — the full
+  // observed set (NOT gated on re-announce), refreshed each data tick. This is
+  // what the badge's "N devices" list shows.
+  List<_GNode> _otherDevices = const [];
   List<_GEdge> _allEdges = const [];
   final Set<String> _expanded = {};
 
@@ -365,6 +369,12 @@ class _GraphViewState extends State<_GraphView>
       for (final e in edges)
         _GEdge((e as Map)['from'].toString(), e['to'].toString(),
             (e['kind'] ?? '').toString())
+    ];
+    // The full observed-devices set (heavy scan of the host registry) — refresh
+    // here on the ~2s data tick, not on every animation frame.
+    _otherDevices = [
+      for (final m in RnsService.instance.observedDevices())
+        _GNode(m.cast<String, dynamic>())
     ];
     _rebuildVisible();
   }
@@ -832,9 +842,9 @@ class _GraphViewState extends State<_GraphView>
     //  • hubs     — connected bootstrap hubs.
     final base = _allNodes.where((n) => n.kind != 'self').toList();
     final geo = _dedupPeers(base.where((n) => n.geogram).toList()).length;
-    final online = _dedupPeers(
-            base.where((n) => n.kind != 'hub' && !n.geogram).toList())
-        .length;
+    // "devices" = ALL other Reticulum peers heard on the hubs (the full observed
+    // set, not just the graph's re-announced nodes).
+    final online = _dedupPeers(_otherDevices).length;
     final hubs = _hubList.where((h) => h['connected'] == true).length;
     return Positioned(
       top: 54,
@@ -1232,9 +1242,7 @@ class _GraphViewState extends State<_GraphView>
   // NOT hubs. From the badge's "N devices" line. (Geogram → its own list; hubs →
   // the hubs panel.)
   Widget _devicesBody() {
-    final peers = _dedupPeers(_allNodes
-        .where((n) => n.kind != 'self' && n.kind != 'hub' && !n.geogram)
-        .toList()
+    final peers = _dedupPeers(_otherDevices.toList()
       ..sort((a, b) {
         final am = a.dm.isNotEmpty, bm = b.dm.isNotEmpty;
         if (am != bm) return am ? -1 : 1; // messageable first

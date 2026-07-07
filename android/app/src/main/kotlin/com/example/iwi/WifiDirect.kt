@@ -258,24 +258,46 @@ class WifiDirect(context: Context, messenger: BinaryMessenger) {
             return
         }
 
+        doConnect(ch, ssid, psk, result, retried = false)
+    }
+
+    private fun doConnect(
+        ch: WifiP2pManager.Channel, ssid: String, psk: String,
+        result: MethodChannel.Result, retried: Boolean) {
         val config = WifiP2pConfig.Builder()
             .setNetworkName(ssid)
             .setPassphrase(psk)
             .build()
         try {
-            manager.connect(ch, config, object : WifiP2pManager.ActionListener {
+            manager!!.connect(ch, config, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     // Join INITIATED. The 'connection' event (broadcast) reports
                     // the actual link-up with the GO address.
                     result.success(mapOf("ok" to true, "already" to false))
                 }
                 override fun onFailure(reason: Int) {
-                    result.success(mapOf("ok" to false, "error" to "connect failed reason=$reason"))
+                    // BUSY/ERROR usually = a stale group/membership from a prior
+                    // run. Clear it ONCE (removeGroup) then retry the join.
+                    if (!retried) {
+                        manager.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                            override fun onSuccess() { retryConnect(ch, ssid, psk, result) }
+                            override fun onFailure(r: Int) { retryConnect(ch, ssid, psk, result) }
+                        })
+                    } else {
+                        result.success(mapOf("ok" to false, "error" to "connect failed reason=$reason"))
+                    }
                 }
             })
         } catch (e: SecurityException) {
             result.error("wfd", "connect: $e", null)
         }
+    }
+
+    private fun retryConnect(
+        ch: WifiP2pManager.Channel, ssid: String, psk: String,
+        result: MethodChannel.Result) {
+        lastGroup = null; lastInfo = null
+        main.postDelayed({ doConnect(ch, ssid, psk, result, retried = true) }, 1500)
     }
 
     /** Tear down our group / leave the joined group (policy calls only). */

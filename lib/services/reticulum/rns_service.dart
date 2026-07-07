@@ -121,6 +121,12 @@ class RnsService {
   // LAN auto-peering interface for same-LAN discovery (co-located devices):
   // announces broadcast, data unicast to learned peers (no broadcast storm).
   RnsLanInterface? _lan;
+  // WiFi Direct data plane (deliberately separate from hub bookkeeping so the
+  // uplink reconnect logic never touches these). GO side runs a server bound to
+  // the group interface; the client side dials it. speedRank 4 > lan(3), so
+  // paths repoint onto the P2P pipe even when both devices share a WiFi LAN.
+  RnsTcpServerInterface? _wfdServer;
+  final List<RnsTcpInterface> _wfdClients = [];
   // Fixed UDP port every Aurora node broadcasts/listens on for LAN auto-peering.
   static const int _lanDiscoveryPort = 42671;
 
@@ -666,6 +672,120 @@ class RnsService {
 
   /// Whether this node is acting as a BLE↔internet edge-bridge.
   bool get isBleBridge => _bleBridge && (_transport?.edgeBridge ?? false);
+
+  // ── WiFi Direct data plane ──
+  // The P2P group is formed/joined by the WiFi Direct coordinator (BLE
+  // negotiation); these methods only attach/detach the RNS interfaces over it.
+
+  /// GO side: serve RNS on the group interface. Announce right after so
+  /// clients repoint their paths onto the rank-4 pipe.
+  Future<bool> enableWfdServer(int port, {String bindHost = '192.168.49.1'}) async {
+    if (!_up || _transport == null) return false;
+    if (_wfdServer != null) return true; // one group, one server
+    try {
+      final s = RnsTcpServerInterface(
+        port: port,
+        bindHost: bindHost,
+        transport: _transport!,
+        onPacket: _onInbound,
+        shared: false,
+        connSpeedRank: 4,
+        labelPrefix: 'wfd',
+        // A client just joined the group — re-announce our destinations over the
+        // fresh link so it learns a rank-4 path to each (RNS routes per-dest; an
+        // announce sent before it joined never reached it).
+        onConnect: () {
+          // ignore: discarded_futures
+          announce(_announceText);
+          // ignore: discarded_futures
+          _announceServiceDests();
+        },
+        log: (m) => LogService.instance.add('RNS/wfd: $m'),
+      );
+      await s.bind();
+      _wfdServer = s;
+      LogService.instance.add('RNS: WiFi-Direct server on $bindHost:$port');
+      await announce(_announceText);
+      await _announceServiceDests();
+      return true;
+    } catch (e) {
+      LogService.instance.add('RNS: WiFi-Direct server failed: $e');
+      return false;
+    }
+  }
+
+  /// Client side: dial the GO's RNS server over the P2P link. Retries a few
+  /// times — the client's DHCP lease can lag the connection event by seconds.
+  Future<bool> attachWfdClient(String goIp, int port) async {
+    if (!_up || _transport == null) return false;
+    if (_wfdClients.any((c) => c.label == 'wfd:$goIp:$port' && c.isConnected)) {
+      return true;
+    }
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        late RnsTcpInterface iface;
+        iface = RnsTcpInterface(
+          host: goIp,
+          port: port,
+          speedRank: 4,
+          label: 'wfd:$goIp:$port',
+          onPacket: (raw) => _onInbound(raw, iface.label),
+          onDisconnect: () {
+            _wfdClients.remove(iface);
+            _transport?.removeInterface(iface);
+            _ifaces.remove(iface);
+            LogService.instance.add('RNS: WiFi-Direct link down (${iface.label})');
+          },
+          log: (m) => LogService.instance.add('RNS/wfd: $m'),
+        );
+        await iface.connect(timeout: const Duration(seconds: 5));
+        _wfdClients.add(iface);
+        _transport!.addInterface(iface);
+        _ifaces.add(iface);
+        LogService.instance.add('RNS: WiFi-Direct link up ($goIp:$port)');
+        await announce(_announceText);
+        await _announceServiceDests();
+        return true;
+      } catch (e) {
+        LogService.instance
+            .add('RNS: WiFi-Direct dial ${attempt + 1}/3 failed: $e');
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
+    }
+    return false;
+  }
+
+  /// Tear down all WiFi-Direct RNS interfaces (group is going away).
+  Future<void> detachWfd() async {
+    final s = _wfdServer;
+    _wfdServer = null;
+    try {
+      await s?.close();
+    } catch (_) {}
+    for (final c in List.of(_wfdClients)) {
+      _wfdClients.remove(c);
+      _transport?.removeInterface(c);
+      _ifaces.remove(c);
+      try {
+        await c.close();
+      } catch (_) {}
+    }
+    if (s != null) LogService.instance.add('RNS: WiFi-Direct detached');
+  }
+
+  /// Active WiFi-Direct RNS interface labels (server conns + client dials).
+  List<String> wfdIfaceLabels() => [
+        for (final c in _wfdClients) c.label,
+        if (_wfdServer != null) 'wfd-server:${_wfdServer!.connectionCount}',
+      ];
+
+  /// Which interface (label) the current path to [destHex] uses, or null.
+  /// Validation/diagnostics: proves a transfer would ride 'wfd…' vs 'lan'.
+  String? pathViaFor(String destHex) {
+    final dh = _bytesFromHex(destHex);
+    if (dh == null) return null;
+    return _transport?.pathFor(dh)?.via;
+  }
 
   /// Seconds this node's Reticulum stack has been up this run (0 when down).
   /// Advertised on the wire (relay announce) and the API so peers can prefer

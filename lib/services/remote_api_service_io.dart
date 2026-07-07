@@ -41,6 +41,9 @@ import 'update_service.dart';
 import 'update_models.dart';
 import 'update_native.dart';
 
+/// Fixed RNS-over-WiFi-Direct port (the GO serves RNS here on 192.168.49.1).
+const int kWfdRnsPort = 4965;
+
 class RemoteApiService {
   RemoteApiService._();
   static final RemoteApiService instance = RemoteApiService._();
@@ -304,17 +307,16 @@ class RemoteApiService {
         });
       }
       if (req.method == 'POST' && path == '/api/wfd/group') {
-        // Ensure/reuse THE group on this device; returns live credentials.
+        // Ensure/reuse THE group on this device; returns live credentials and
+        // serves RNS on the group interface (rank-4 wfd data plane).
         final creds = await WifiDirectService.instance.ensureGroup();
-        return _json(
-            res,
-            creds == null
-                ? {'ok': false}
-                : {'ok': true, ...creds.toJson()});
+        if (creds == null) return _json(res, {'ok': false});
+        final rns = await RnsService.instance.enableWfdServer(kWfdRnsPort);
+        return _json(res, {'ok': true, 'rns': rns, ...creds.toJson()});
       }
       if (req.method == 'POST' && path == '/api/wfd/join') {
         // {"ssid": "...", "psk": "..."} → silent credential join; waits for
-        // link-up and reports the GO ip.
+        // link-up and dials the GO's RNS server over the P2P pipe.
         final data = await _body(req);
         final ssid = (data['ssid'] ?? '').toString();
         final psk = (data['psk'] ?? '').toString();
@@ -322,10 +324,42 @@ class RemoteApiService {
         final started = await wfd.connectToGroup(ssid, psk);
         if (!started) return _json(res, {'ok': false, 'error': 'connect refused'});
         final goIp = await wfd.awaitConnected();
-        return _json(res, {'ok': goIp != null, 'goIp': goIp});
+        if (goIp == null) return _json(res, {'ok': false, 'error': 'link timeout'});
+        final rns = await RnsService.instance.attachWfdClient(goIp, kWfdRnsPort);
+        return _json(res, {'ok': true, 'goIp': goIp, 'rns': rns});
       }
       if (req.method == 'POST' && path == '/api/wfd/teardown') {
+        await RnsService.instance.detachWfd();
         return _json(res, {'ok': await WifiDirectService.instance.removeGroup()});
+      }
+      if (req.method == 'POST' && path == '/api/wfd/fetch') {
+        // {"sha256": hex, "dest": destHex} → fetch the file from that peer and
+        // report WHICH interface the path used (must be wfd…, not lan) + speed.
+        final data = await _body(req);
+        final sha = (data['sha256'] ?? '').toString();
+        final dest = (data['dest'] ?? '').toString();
+        final shaBytes = _hexBytes(sha);
+        if (shaBytes == null || dest.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'sha256+dest required'},
+              status: HttpStatus.badRequest);
+        }
+        final viaBefore = RnsService.instance.pathViaFor(dest);
+        final t0 = DateTime.now();
+        final bytes = await RnsService.instance
+            .fetchFileFrom(shaBytes, dest, timeout: const Duration(minutes: 5));
+        final ms = DateTime.now().difference(t0).inMilliseconds;
+        final via = RnsService.instance.pathViaFor(dest);
+        return _json(res, {
+          'ok': bytes != null,
+          'bytes': bytes?.length ?? 0,
+          'ms': ms,
+          'kBps': bytes != null && ms > 0
+              ? ((bytes.length / 1024) / (ms / 1000)).round()
+              : 0,
+          'viaBefore': viaBefore,
+          'via': via,
+          'wfdIfaces': RnsService.instance.wfdIfaceLabels(),
+        });
       }
 
       // ── Reticulum (RNS) device-to-device validation ──
@@ -812,6 +846,21 @@ class RemoteApiService {
       }
     } catch (_) {}
     return null;
+  }
+
+  /// Decode a hex string into bytes (null on odd length / bad chars).
+  Uint8List? _hexBytes(String hex) {
+    final s = hex.trim().toLowerCase();
+    if (s.isEmpty || s.length.isOdd) return null;
+    try {
+      final out = Uint8List(s.length ~/ 2);
+      for (var i = 0; i < out.length; i++) {
+        out[i] = int.parse(s.substring(i * 2, i * 2 + 2), radix: 16);
+      }
+      return out;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Parse a JSON request body into a map (empty on no/invalid body).

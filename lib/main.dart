@@ -16,6 +16,7 @@ import 'services/reticulum/rns_autostart.dart';
 import 'services/update_service.dart';
 import 'services/notification_service.dart';
 import 'services/preferences_service.dart';
+import 'services/blossom_server.dart';
 import 'services/log_service.dart';
 import 'services/remote_api_service.dart';
 import 'services/deep_link_service.dart';
@@ -46,6 +47,10 @@ Future<void> main() async {
   };
   // Proof-of-binary marker — verify via /api/status "build" or /api/log.
   LogService.instance.add('Aurora started — build $kAuroraBuildTag');
+
+  // The shared-package Blossom server logs through this injectable sink
+  // (it no longer knows aurora's LogService directly).
+  BlossomServer.log = (m) => LogService.instance.add(m);
 
   // Resolve the writable storage root for this platform before any boot
   // task touches disk (Android/iOS have no $HOME — use the app sandbox).

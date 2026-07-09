@@ -111,13 +111,21 @@ class RnsService {
   /// went silent (e.g. the device's network changed). The owner (rns_autostart)
   /// wires this to kick an immediate reconnect across the bootstrap hub list.
   void Function()? onLinkDown;
-  // Wall-clock of the last inbound packet on any interface; a live hub floods
-  // announces continuously, so a long silence while "up" means the uplink died
-  // (a network change often kills the socket without a clean close). The
-  // watchdog reconnects on that silence.
-  int _lastInboundMs = 0;
+  // Per-uplink last-inbound wall-clock, keyed by the uplink's via tag
+  // ('tcp:host:port'). The global _lastInboundMs above masks a single wedged hub
+  // when another hub is still trickling packets; this lets the watchdog spot and
+  // reconnect JUST the silent uplink instead of tearing the whole mesh down.
+  final Map<String, int> _lastInboundPerVia = {};
   Timer? _linkWatchdog;
   static const Duration _linkSilenceTimeout = Duration(seconds: 30);
+  // Reachability self-heal: if the observed network collapses to zero reachable
+  // devices while we still hold hub uplinks, some segment wedged silently (the
+  // "tank2 showed zero devices until restart" case). We track the high-water mark
+  // of reachable geogram devices this session and the wall-clock we first saw the
+  // collapse, then force a full mesh redial if it persists.
+  int _reachHighWater = 0;
+  int _reachZeroSinceMs = 0;
+  static const Duration _reachCollapseGrace = Duration(minutes: 3);
   // LAN auto-peering interface for same-LAN discovery (co-located devices):
   // announces broadcast, data unicast to learned peers (no broadcast storm).
   RnsLanInterface? _lan;
@@ -557,6 +565,7 @@ class RnsService {
     _ifaces.remove(c);
     _clients.remove(c);
     _connectedHubs.remove('${c.host}:${c.port}');
+    _lastInboundPerVia.remove('tcp:${c.host}:${c.port}');
     // ignore: discarded_futures
     c.close();
   }
@@ -588,6 +597,113 @@ class RnsService {
     }
     final cb = onLinkDown;
     if (cb != null) cb();
+  }
+
+  /// Watchdog tick (every 10s while up with ≥1 uplink). Two layers of self-heal:
+  ///
+  ///  1. Per-uplink silence: a live hub floods signed announces continuously, so
+  ///     a single uplink going quiet past the timeout means THAT socket wedged
+  ///     (half-open after a network change). Reconnect just it. Only when EVERY
+  ///     uplink is silent do we tear the whole mesh down. This fixes the case a
+  ///     global silence check missed: one trickling hub kept the mesh "alive"
+  ///     while the hub carrying our device announces was dead.
+  ///
+  ///  2. Reachability collapse: even with a live-looking uplink, if the observed
+  ///     network drops from "we've seen geogram devices" to zero-reachable and
+  ///     stays there past the grace window, some segment wedged silently. Force a
+  ///     full mesh redial (the "restart the app fixed it" recovery, automated).
+  void _watchdogTick() {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    // Layer 1: per-uplink silence.
+    final silentClients = <RnsTcpInterface>[];
+    for (final c in List.of(_clients)) {
+      final via = 'tcp:${c.host}:${c.port}';
+      final last = _lastInboundPerVia[via] ?? 0;
+      // A freshly-added uplink hasn't necessarily heard anything yet; give it a
+      // grace period before judging it silent.
+      if (last == 0) {
+        _lastInboundPerVia[via] = nowMs;
+        continue;
+      }
+      if (nowMs - last > _linkSilenceTimeout.inMilliseconds) {
+        silentClients.add(c);
+      }
+    }
+    if (silentClients.isNotEmpty) {
+      if (silentClients.length >= _clients.length) {
+        _allLinksDown('no inbound on any uplink for '
+            '${_linkSilenceTimeout.inSeconds}s+');
+        return; // mesh redial in flight; skip the reachability check
+      }
+      for (final c in silentClients) {
+        final key = '${c.host}:${c.port}';
+        LogService.instance
+            .add('RNS: uplink $key silent — reconnecting just it');
+        _lastInboundPerVia.remove('tcp:$key');
+        // ignore: discarded_futures
+        _reconnectUplink(c);
+      }
+    }
+
+    // Layer 2: reachability collapse self-heal.
+    final reachable = _reachableGeogramCount(nowMs);
+    if (reachable > _reachHighWater) _reachHighWater = reachable;
+    if (reachable > 0) {
+      _reachZeroSinceMs = 0; // healthy — reset the collapse clock
+      return;
+    }
+    // reachable == 0. Only treat it as a wedge if we HAD reachable devices this
+    // session (an empty network is legitimately zero and must not trigger churn).
+    if (_reachHighWater == 0) return;
+    if (_reachZeroSinceMs == 0) {
+      _reachZeroSinceMs = nowMs;
+      return;
+    }
+    if (nowMs - _reachZeroSinceMs > _reachCollapseGrace.inMilliseconds) {
+      LogService.instance.add('RNS: reachable devices collapsed to 0 for '
+          '${(nowMs - _reachZeroSinceMs) ~/ 1000}s while up — forcing mesh '
+          'redial (was $_reachHighWater)');
+      _reachZeroSinceMs = 0;
+      _reachHighWater = 0;
+      _allLinksDown('reachability collapse');
+    }
+  }
+
+  /// Count of geogram devices reachable right now — the same freshness gate the
+  /// wapp headline uses ([graphSnapshot]'s isFresh), so the self-heal fires on
+  /// exactly the number the user sees hit zero.
+  int _reachableGeogramCount(int nowMs) {
+    var n = 0;
+    for (final node in _observed.values) {
+      if (nowMs - node.lastSeenMs > _onlineWindowMs) continue; // gone quiet
+      if (_isGeogramNode(node)) n++;
+    }
+    return n;
+  }
+
+  /// Drop one wedged uplink and immediately redial the same host:port. Best-
+  /// effort: on connect failure the periodic autostart top-up retries it later.
+  Future<void> _reconnectUplink(RnsTcpInterface c) async {
+    if (_mode != 'tcpclient' || _transport == null) return;
+    final host = c.host, port = c.port;
+    _dropClient(c);
+    if (_clients.isEmpty) {
+      // That was the last uplink — fall back to the full-mesh recovery path.
+      _allLinksDown('last uplink wedged');
+      return;
+    }
+    try {
+      await _attachTcpUplink(host, port);
+      _lastInboundPerVia['tcp:$host:$port'] =
+          DateTime.now().millisecondsSinceEpoch;
+      LogService.instance.add('RNS: reconnected uplink $host:$port');
+      // Re-announce on the fresh socket so peers behind it re-learn us promptly.
+      await announce(_announceText);
+      await _announceServiceDests();
+    } catch (e) {
+      LogService.instance.add('RNS: uplink $host:$port reconnect failed: $e');
+    }
   }
 
   /// Build, connect and register a single TCP uplink — the ONE place a Reticulum
@@ -2166,14 +2282,12 @@ class RnsService {
       // clean-close case faster). Only the tcpclient uplink needs this.
       _linkWatchdog?.cancel();
       if (mode == 'tcpclient') {
-        _lastInboundMs = DateTime.now().millisecondsSinceEpoch;
+        _lastInboundPerVia.clear();
+        _reachHighWater = 0;
+        _reachZeroSinceMs = 0;
         _linkWatchdog = Timer.periodic(const Duration(seconds: 10), (_) {
           if (!_up || _clients.isEmpty) return;
-          final silent =
-              DateTime.now().millisecondsSinceEpoch - _lastInboundMs;
-          if (silent > _linkSilenceTimeout.inMilliseconds) {
-            _allLinksDown('no inbound for ${silent ~/ 1000}s');
-          }
+          _watchdogTick();
         });
       }
       return true;
@@ -2419,7 +2533,8 @@ class RnsService {
     // 'tcp:host:port') keeps the mesh "alive"; LAN/gateway/server ('tcps#…')
     // chatter must not mask all hubs being dead.
     if (via == 'tcp' || via.startsWith('tcp:')) {
-      _lastInboundMs = DateTime.now().millisecondsSinceEpoch;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      _lastInboundPerVia[via] = nowMs; // per-uplink liveness (see watchdog)
     }
     // Remember which interface a link's traffic arrives on, so our outbound link
     // packets (resource parts, etc.) go ONLY there instead of every hub uplink.

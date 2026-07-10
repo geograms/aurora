@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -50,6 +51,30 @@ Future<void> main() async {
   };
   // Proof-of-binary marker — verify via /api/status "build" or /api/log.
   LogService.instance.add('Aurora started — build $kAuroraBuildTag');
+
+  // Wedge forensics. Two permanent probes, both cheap:
+  //  1. The Dart VM service URI (debug/profile builds) — when the app freezes,
+  //     this is the only way to pull live isolate stacks, and its auth token
+  //     rotates out of logcat within minutes. Persist it in our own log ring.
+  //  2. An event-loop lag probe: a 500ms heartbeat that logs when it fires
+  //     late — any long synchronous main-isolate operation shows up as a
+  //     timestamped 'perf: main isolate stalled' line next to whatever else
+  //     was logged at that moment.
+  unawaited(
+    developer.Service.getInfo().then((info) {
+      final uri = info.serverUri;
+      if (uri != null) LogService.instance.add('Dart VM service: $uri');
+    }).catchError((_) {}),
+  );
+  var lagExpected = DateTime.now().millisecondsSinceEpoch + 500;
+  Timer.periodic(const Duration(milliseconds: 500), (_) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final drift = now - lagExpected;
+    lagExpected = now + 500;
+    if (drift > 300) {
+      LogService.instance.add('perf: main isolate stalled ~${drift}ms');
+    }
+  });
 
   // The shared-package Blossom server logs through this injectable sink
   // (it no longer knows aurora's LogService directly).

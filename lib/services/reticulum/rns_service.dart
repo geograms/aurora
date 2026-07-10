@@ -93,7 +93,7 @@ class RnsService {
 
   RnsIdentity? _id;
   Uint8List? _destHash;
-  RnsTransport? _transport;
+  RnsTransportClient? _transport;
   final List<RnsInterface> _ifaces = [];
   RnsTcpServerInterface? _server;
   // Loopback "shared instance" so other geogram apps (e.g. GNPA) route through
@@ -1707,15 +1707,24 @@ class RnsService {
         // saturates its CPU + bandwidth and starves real traffic (it made large
         // file transfers crawl/stall). The hubs do the routing; we still announce
         // ourselves and reach peers through them.
-        _transport = RnsTransport(
+        // The packet plane lives in its own isolate (RnsTransportClient →
+        // rns-transport engine): announce validation, dedup, path tables,
+        // transit + rebroadcast never touch the UI isolate. Validated
+        // announces come back via onAnnounce (wired below, after the observed
+        // registry and wapp channels exist).
+        _transport = await RnsTransportClient.spawn(
           log: (m) => LogService.instance.add('RNS: $m'),
         );
+        _transport!.onAnnounce = (ann, hops, via) {
+          // ignore: discarded_futures
+          _onValidatedAnnounce(ann, hops, via);
+        };
         // Never let the public-hub announce flood drown out OUR overlay's
         // announces: register the name_hashes of every Aurora destination so the
         // transport's per-second verify budget always processes them. Without
         // this, peers fail to discover each other (no media fetch / FEED backfill)
         // on busy hubs. The name_hash is constant per app+aspects.
-        _transport!.priorityAnnounceNames.addAll([
+        _transport!.setPriorityAnnounceNames([
           _hex(RnsDestination.nameHash(_app, _aspects)), // chat (callsign)
           _hex(RnsDestination.nameHash(_app, _aspectsFiles)), // files
           _hex(RnsDestination.nameHash(_app, _aspectsDht)), // dht
@@ -2707,8 +2716,16 @@ class RnsService {
       if (await _relay?.handlePacket(p) ?? false) return;
       if (_rvInboundDests.isNotEmpty && await _handleRvInbound(p)) return;
     }
-    final ann = await _transport!.ingest(p, via);
-    if (ann == null) return;
+    // Announce path: validation, dedup, path learning, transit + rebroadcast
+    // all happen in the transport engine ISOLATE — the hub flood never costs
+    // this isolate crypto or table work. Validated announces come back via
+    // onAnnounce → _onValidatedAnnounce below.
+    _transport?.ingestRaw(raw, via);
+  }
+
+  /// A validated (or trusted re-) announce from the transport engine. This is
+  /// the continuation of what _onInbound used to do inline after ingest.
+  Future<void> _onValidatedAnnounce(RnsAnnounce ann, int hops, String via) async {
     // A cryptographically-valid announce proves the link really speaks
     // Reticulum (a wrong/dead endpoint can't forge one) — used to validate a
     // bootstrap before declaring the node up.
@@ -2721,7 +2738,7 @@ class RnsService {
     // Fold every (non-self) announce into the observed-node registry so the
     // reticulum wapp can visualize the network we've heard. Done BEFORE the
     // wapp-channel early-return below so wapp/rv destinations are observed too.
-    _observeAnnounce(ann, p.hops, via);
+    _observeAnnounce(ann, hops, via);
     // Wapp datagram channel: a datagram arrives as an announce of the sender's
     // "geogram/wapp" destination carrying RAW app_data [tagLen:1][tag][payload].
     // Route it to the matching per-tag queue and stop — not a chat/route announce.
@@ -2778,7 +2795,7 @@ class RnsService {
       kRelayAspects,
     );
     if (RnsCrypto.constantTimeEquals(ann.destHash, relayHash)) {
-      final e = _relayDir.observe(ann.identity, ann.appData, hops: p.hops + 1);
+      final e = _relayDir.observe(ann.identity, ann.appData, hops: hops + 1);
       // If this relay belongs to a followed author we couldn't reach before,
       // its npub→identity is now known — try fetching its profile.
       final pk = e?.announcement.pubkey;
@@ -5432,6 +5449,7 @@ class RnsService {
     _lan = null;
     _files = null;
     _ifaces.clear();
+    _transport?.close(); // kill the transport engine isolate
     _transport = null;
     _up = false;
     _localReady = false;

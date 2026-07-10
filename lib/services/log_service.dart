@@ -18,11 +18,20 @@ class LogService {
   static final LogService instance = LogService._();
 
   static const int _max = 2000;
+
+  /// Per-line cap. Announce/profile log lines can embed multi-KB payloads
+  /// (inline base64 avatars in announce app_data) — retaining 2000 of those
+  /// held ~50MB of heap on a live node and kept the GC churning. A diagnostic
+  /// line's value is in its head; the tail of a blob is noise.
+  static const int _maxLineLen = 512;
   final List<String> _lines = <String>[];
 
   /// Append one line (timestamped). Oldest lines are dropped past [_max].
   void add(String line) {
-    _lines.add('${DateTime.now().toIso8601String()}  $line');
+    final capped = line.length <= _maxLineLen
+        ? line
+        : '${line.substring(0, _maxLineLen)}…[+${line.length - _maxLineLen}]';
+    _lines.add('${DateTime.now().toIso8601String()}  $capped');
     if (_lines.length > _max) {
       _lines.removeRange(0, _lines.length - _max);
     }

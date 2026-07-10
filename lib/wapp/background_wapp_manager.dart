@@ -107,8 +107,11 @@ class BackgroundWappManager {
       await engine.load(wasm);
       final svc = _WappBackgroundService(name, wappDir, engine, prefs);
       _running[name] = svc;
-      await svc.start(); // registers the monitor task, runs init, starts ticking
-      debugPrint('BackgroundWapp: started $name (tick ${svc.interval.inMilliseconds}ms)');
+      await svc
+          .start(); // registers the monitor task, runs init, starts ticking
+      debugPrint(
+        'BackgroundWapp: started $name (tick ${svc.interval.inMilliseconds}ms)',
+      );
       _onRunningChanged();
     } catch (e) {
       debugPrint('BackgroundWapp: failed to start $name: $e');
@@ -198,7 +201,9 @@ class BackgroundWappManager {
     }
     // Also drive any foreground pages kept alive for background playback.
     for (final tick in _pageTicks.values) {
-      try { tick(); } catch (_) {}
+      try {
+        tick();
+      } catch (_) {}
     }
   }
 }
@@ -209,14 +214,14 @@ class BackgroundWappManager {
 /// service (a main-isolate plugin); the governor auto-pauses a runaway tick.
 class _WappBackgroundService extends BackgroundService {
   _WappBackgroundService(String name, this.wappDir, this.engine, this.prefs)
-      : super(
-          id: 'wapp.bg.$name',
-          name: name,
-          serviceName: 'wapps',
-          priority: TaskPriority.normal,
-          interval: Duration(milliseconds: engine.tickIntervalMs),
-          description: 'Background wapp: $name',
-        );
+    : super(
+        id: 'wapp.bg.$name',
+        name: name,
+        serviceName: 'wapps',
+        priority: TaskPriority.normal,
+        interval: Duration(milliseconds: engine.tickIntervalMs),
+        description: 'Background wapp: $name',
+      );
 
   final String wappDir;
   final WappEngine engine;
@@ -224,13 +229,15 @@ class _WappBackgroundService extends BackgroundService {
 
   /// Geo-chat archive for this wapp (shared with the foreground page via the
   /// data dir), so Live messages are persisted even while running headless.
-  late final GeoChatArchive _geoArchive =
-      GeoChatArchive.forStorage(wappDataStorageFor(prefs, name));
+  late final GeoChatArchive _geoArchive = GeoChatArchive.forStorage(
+    wappDataStorageFor(prefs, name),
+  );
 
   /// Activity feed archive (shared with the foreground page), so posts received
   /// while running headless show up when the user later opens the Activity tab.
-  late final ActivityArchive _activityArchive =
-      ActivityArchive.forStorage(wappDataStorageFor(prefs, name));
+  late final ActivityArchive _activityArchive = ActivityArchive.forStorage(
+    wappDataStorageFor(prefs, name),
+  );
 
   // Conversation stores shared with the foreground page via the SAME
   // messages/<field>.json files. Without this, a 1:1 received while running
@@ -271,7 +278,8 @@ class _WappBackgroundService extends BackgroundService {
         await data.createDirectory(_convDir);
         for (final f in fields) {
           final store = _convStores[f];
-          if (store != null) await data.writeJson('$_convDir/$f.json', store.toJson());
+          if (store != null)
+            await data.writeJson('$_convDir/$f.json', store.toJson());
         }
       } catch (_) {
         _convDirty.addAll(fields);
@@ -303,7 +311,8 @@ class _WappBackgroundService extends BackgroundService {
         await data.createDirectory(_convDir);
         for (final f in _convDirty) {
           final store = _convStores[f];
-          if (store != null) await data.writeJson('$_convDir/$f.json', store.toJson());
+          if (store != null)
+            await data.writeJson('$_convDir/$f.json', store.toJson());
         }
       } catch (_) {}
       _convDirty.clear();
@@ -355,7 +364,9 @@ class _WappBackgroundService extends BackgroundService {
       if (type == 'host.run_command') {
         final cmd = data['command'] as String?;
         if (cmd != null && cmd.isNotEmpty) {
-          engine.sendMessage(jsonEncode({'command': cmd, 'fields': _savedFields()}));
+          engine.sendMessage(
+            jsonEncode({'command': cmd, 'fields': _savedFields()}),
+          );
           engine.handleEvent();
         }
       } else if (type == 'ui.chat.append') {
@@ -410,7 +421,20 @@ class _WappBackgroundService extends BackgroundService {
         final from = (data['from'] ?? '').toString();
         if (mid.isNotEmpty && from.isNotEmpty) {
           _activityArchive.setReaction(
-              mid, from, data['like'] == true, data['mine'] == true);
+            mid,
+            from,
+            data['like'] == true,
+            data['mine'] == true,
+          );
+        }
+      } else if (type == 'unread') {
+        final count = (data['count'] as num?)?.toInt();
+        if (count != null) {
+          WappUnreadService.instance.setCount(
+            name,
+            count,
+            intent: data['intent']?.toString(),
+          );
         }
       } else if (type == 'notify') {
         final levelStr = (data['level'] as String? ?? 'info').toLowerCase();
@@ -420,18 +444,24 @@ class _WappBackgroundService extends BackgroundService {
           'error' || 'err' => NotificationLevel.error,
           _ => NotificationLevel.info,
         };
-        NotificationService.instance.show(GeogramNotification(
-          level: level,
-          title: data['title'] as String? ?? name,
-          body: data['body'] as String?,
-          source: 'wapp:$name',
-          tag: data['tag'] as String?,
-          scope: NotificationScope.both,
-        ));
+        NotificationService.instance.show(
+          GeogramNotification(
+            level: level,
+            title: data['title'] as String? ?? name,
+            body: data['body'] as String?,
+            source: 'wapp:$name',
+            tag: data['tag'] as String?,
+            scope: NotificationScope.both,
+          ),
+        );
         // A background wapp can't render UI, so surface activity as an unread
         // count on its launcher tile (e.g. the APRS app icon). Cleared/reset to
         // the authoritative value when the user opens the wapp.
-        WappUnreadService.instance.add(name, 1);
+        WappUnreadService.instance.add(
+          name,
+          1,
+          intent: data['intent']?.toString(),
+        );
       }
       // ui.* and everything else: no UI in the background — ignore.
     }

@@ -20,6 +20,7 @@ import 'dart:convert';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding, FrameTiming;
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -29,9 +30,13 @@ import '../wapp/wapp_file_handler.dart';
 import '../profile/welcome_page.dart';
 import '../services/battery_optimization.dart';
 import '../services/event_bus.dart';
+import '../services/log_service.dart';
 import '../services/notification_service.dart';
+import '../services/notification_store.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/preferences_service.dart';
+import '../services/launch_count_store.dart';
+import '../services/novelties_service.dart';
 import '../services/remote_api_service.dart';
 import '../services/android_permissions_service.dart';
 import '../services/update_service.dart';
@@ -62,6 +67,14 @@ part 'launcher_app.dart';
 part 'launcher_page.dart';
 part 'settings_page.dart';
 part 'wapp_runner_page.dart';
+part 'home_header.dart';
+part 'connection_indicator.dart';
+part 'novelties_carousel.dart';
+part 'quick_launch_row.dart';
+part 'home_modules.dart';
+part 'all_apps_sheet.dart';
+part 'notifications_page.dart';
+part 'app_drawer.dart';
 
 /// Global messenger key. Held outside any widget so the
 /// [NotificationService] can drive snackbars without needing a

@@ -15,6 +15,7 @@ import 'services/i2p/i2p_background_service.dart';
 import 'services/reticulum/rns_autostart.dart';
 import 'services/update_service.dart';
 import 'services/notification_service.dart';
+import 'services/notification_store.dart';
 import 'services/preferences_service.dart';
 import 'services/blossom_server.dart';
 import 'services/log_service.dart';
@@ -35,8 +36,10 @@ Future<void> main() async {
 
   // Lock to portrait — the UI is designed portrait-first and auto-rotation is
   // disorienting on phones (the manifest also pins screenOrientation=portrait).
-  await SystemChrome.setPreferredOrientations(
-      const [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
+  await SystemChrome.setPreferredOrientations(const [
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
 
   // Mirror everything the app prints into the in-memory log buffer so the
   // remote-control API can serve it over /api/log.
@@ -76,6 +79,7 @@ Future<void> main() async {
     mode: BootStart.parallel,
     init: () async {
       NotificationService.instance.init();
+      NotificationStore.instance.init();
     },
   );
   BootOrchestrator.instance.register(

@@ -17,6 +17,7 @@ import 'dart:async';
 
 import '../models/monitored_task.dart';
 import 'event_bus.dart';
+import 'log_service.dart';
 
 /// Singleton registry. Access via `TaskMonitorService()` or
 /// `TaskMonitorService.instance` — both return the same instance.
@@ -85,6 +86,13 @@ class TaskMonitorService {
       task.totalCpuMs += task.lastDuration!.inMilliseconds;
     }
     task.lastError = null;
+    // Attribution for UI stalls: every monitored task runs on the main
+    // isolate, so a tick longer than ~3 frames is a felt touch freeze. Log the
+    // culprit by name (rate-limited per task via the streak below).
+    final costMs = task.lastDuration?.inMilliseconds ?? 0;
+    if (costMs > 48 && task.type == TaskType.periodic) {
+      LogService.instance.add('perf: ${task.id} tick took ${costMs}ms');
+    }
     // Feed the governor with this run's cost. If the task has been
     // overrunning its budget, it gets auto-paused instead of going idle.
     final paused = _governorShouldPause(task);

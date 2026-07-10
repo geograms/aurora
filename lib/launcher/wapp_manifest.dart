@@ -25,6 +25,7 @@ class WappManifest {
 
   final String kind;
   final String? icon;
+
   /// Optional launcher tile colour from `manifest.color` (a hex string like
   /// "#B71C1C" / "0xFFB71C1C" / "B71C1C"). Null → auto-pick from the id hash.
   final String? colorHex;
@@ -66,6 +67,9 @@ class WappManifest {
   /// [WappFileAssociations].
   final List<WappFileHandler> fileHandlers;
 
+  /// Host-launchable view intents declared under `provides.intents`.
+  final List<String> providedIntents;
+
   /// OS platforms this wapp advertises support for (`manifest.platforms`)
   /// — linux/windows/macos/android/ios/web. Empty = unspecified (any).
   final List<String> supportedPlatforms;
@@ -96,6 +100,7 @@ class WappManifest {
     this.requiredHal = const [],
     this.requiredEvents = const [],
     this.fileHandlers = const [],
+    this.providedIntents = const [],
     this.supportedPlatforms = const [],
     this.supportedHardware = const [],
     this.userModified = false,
@@ -128,8 +133,9 @@ class WappManifest {
     final manifestTitle = hasTitle
         ? (json['title'] as String).trim()
         : (json['description'] as String? ?? '');
-    final manifestDescription =
-        hasTitle ? (json['description'] as String? ?? '') : '';
+    final manifestDescription = hasTitle
+        ? (json['description'] as String? ?? '')
+        : '';
     final manifestSummary = json['summary'] as String? ?? '';
 
     // Parse provides.functionalities — accepts both bare strings
@@ -158,8 +164,9 @@ class WappManifest {
 
     // Parse provides.file_handlers → WappFileHandler list. Drives the
     // "Open with…" picker. Bare/malformed entries are skipped.
-    final handlerList =
-        provides is Map<String, dynamic> ? provides['file_handlers'] : null;
+    final handlerList = provides is Map<String, dynamic>
+        ? provides['file_handlers']
+        : null;
     final fileHandlers = <WappFileHandler>[];
     if (handlerList is List) {
       for (final e in handlerList) {
@@ -168,6 +175,17 @@ class WappManifest {
         }
       }
     }
+
+    final intentList = provides is Map<String, dynamic>
+        ? provides['intents']
+        : null;
+    final providedIntents = intentList is List
+        ? intentList
+              .whereType<String>()
+              .map((s) => s.trim().toLowerCase())
+              .where((s) => s.isNotEmpty)
+              .toList()
+        : const <String>[];
 
     // Parse requires.* — each is a plain list of string IDs/tags. A
     // missing or malformed section yields an empty list so a wapp with
@@ -209,6 +227,7 @@ class WappManifest {
       requiredHal: reqList('hal'),
       requiredEvents: reqList('events'),
       fileHandlers: fileHandlers,
+      providedIntents: providedIntents,
       supportedPlatforms: topList('platforms'),
       supportedHardware: topList('hardware'),
       userModified: json['user_modified'] == true,
@@ -276,4 +295,3 @@ class WappManifest {
     return v == null ? null : Color(v);
   }
 }
-

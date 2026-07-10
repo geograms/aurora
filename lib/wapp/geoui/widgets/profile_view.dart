@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../../util/media_ref.dart';
+import '../../../services/social/note_text.dart';
 import '../../shared_media_fetch.dart' show mediaSizeHint;
 import 'activity_feed.dart' show activityFormatMentions;
 import 'chat_view_field.dart' show viaTagColor;
@@ -152,9 +153,11 @@ class _ProfileViewState extends State<ProfileView> {
     final newest = posts.reversed.toList();
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.displayName?.trim().isNotEmpty == true
-            ? widget.displayName!.trim()
-            : callsign),
+        title: Text(
+          widget.displayName?.trim().isNotEmpty == true
+              ? widget.displayName!.trim()
+              : callsign,
+        ),
         actions: [
           if (!widget.isSelf &&
               (widget.onSetBlock != null || widget.onSetMute != null))
@@ -170,10 +173,11 @@ class _ProfileViewState extends State<ProfileView> {
                     child: Row(
                       children: [
                         Icon(
-                            _muted
-                                ? Icons.notifications_active_outlined
-                                : Icons.notifications_off_outlined,
-                            size: 18),
+                          _muted
+                              ? Icons.notifications_active_outlined
+                              : Icons.notifications_off_outlined,
+                          size: 18,
+                        ),
                         const SizedBox(width: 8),
                         Text(_muted ? 'Unmute $callsign' : 'Mute $callsign'),
                       ],
@@ -184,12 +188,16 @@ class _ProfileViewState extends State<ProfileView> {
                     value: 'block',
                     child: Row(
                       children: [
-                        Icon(_blocked ? Icons.check_circle_outline : Icons.block,
-                            size: 18, color: _blocked ? null : Colors.red),
+                        Icon(
+                          _blocked ? Icons.check_circle_outline : Icons.block,
+                          size: 18,
+                          color: _blocked ? null : Colors.red,
+                        ),
                         const SizedBox(width: 8),
-                        Text(_blocked ? 'Unblock $callsign' : 'Block $callsign',
-                            style:
-                                TextStyle(color: _blocked ? null : Colors.red)),
+                        Text(
+                          _blocked ? 'Unblock $callsign' : 'Block $callsign',
+                          style: TextStyle(color: _blocked ? null : Colors.red),
+                        ),
                       ],
                     ),
                   ),
@@ -205,11 +213,12 @@ class _ProfileViewState extends State<ProfileView> {
             children: [
               if (widget.bannerImage != null)
                 Image(
-                    image: widget.bannerImage!,
-                    height: 150,
-                    width: double.infinity,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+                  image: widget.bannerImage!,
+                  height: 150,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                ),
               _header(context, cs),
               Divider(height: 1, color: cs.outlineVariant.withAlpha(60)),
               if (widget.showDevices) ...[
@@ -220,9 +229,13 @@ class _ProfileViewState extends State<ProfileView> {
                 Padding(
                   padding: const EdgeInsets.all(24),
                   child: Center(
-                    child: Text('No posts from $callsign yet.',
-                        style:
-                            TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+                    child: Text(
+                      'No posts from $callsign yet.',
+                      style: TextStyle(
+                        color: cs.onSurfaceVariant,
+                        fontSize: 13,
+                      ),
+                    ),
                   ),
                 )
               else
@@ -254,21 +267,28 @@ class _ProfileViewState extends State<ProfileView> {
         child: Row(
           children: [
             SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: cs.onSurfaceVariant)),
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
             const SizedBox(width: 10),
-            Text('Looking for devices on the network…',
-                style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+            Text(
+              'Looking for devices on the network…',
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
+            ),
           ],
         ),
       );
     } else if (devices.isEmpty) {
       body = Padding(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-        child: Text('No devices seen on the Reticulum network yet.',
-            style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13)),
+        child: Text(
+          'No devices seen on the Reticulum network yet.',
+          style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
+        ),
       );
     } else {
       final onlineN = devices.where((d) => d['online'] == true).length;
@@ -278,8 +298,9 @@ class _ProfileViewState extends State<ProfileView> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: Text(
-                '$onlineN of ${devices.length} online',
-                style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
+              '$onlineN of ${devices.length} online',
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
+            ),
           ),
           for (final d in devices) _deviceRow(cs, d),
         ],
@@ -290,11 +311,14 @@ class _ProfileViewState extends State<ProfileView> {
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-          child: Text('Reticulum devices',
-              style: TextStyle(
-                  color: cs.onSurface,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 14)),
+          child: Text(
+            'Reticulum devices',
+            style: TextStyle(
+              color: cs.onSurface,
+              fontWeight: FontWeight.w700,
+              fontSize: 14,
+            ),
+          ),
         ),
         body,
       ],
@@ -304,8 +328,7 @@ class _ProfileViewState extends State<ProfileView> {
   Widget _deviceRow(ColorScheme cs, Map<String, dynamic> d) {
     final online = d['online'] == true;
     final dest = (d['dest'] ?? '').toString();
-    final shortDest =
-        dest.length > 12 ? '${dest.substring(0, 12)}…' : dest;
+    final shortDest = dest.length > 12 ? '${dest.substring(0, 12)}…' : dest;
     final hops = (d['hops'] is int) ? d['hops'] as int : 0;
     final ageSec = (d['ageSec'] is int) ? d['ageSec'] as int : 0;
     final services = (d['services'] ?? '').toString();
@@ -335,31 +358,39 @@ class _ProfileViewState extends State<ProfileView> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(shortDest,
+                Text(
+                  shortDest,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: cs.onSurface,
+                    fontSize: 13,
+                    fontFamily: 'monospace',
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+                if (detail.isNotEmpty)
+                  Text(
+                    detail,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                        color: cs.onSurface,
-                        fontSize: 13,
-                        fontFamily: 'monospace',
-                        fontFeatures: const [FontFeature.tabularFigures()])),
-                if (detail.isNotEmpty)
-                  Text(detail,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          TextStyle(color: cs.onSurfaceVariant, fontSize: 11.5)),
+                      color: cs.onSurfaceVariant,
+                      fontSize: 11.5,
+                    ),
+                  ),
               ],
             ),
           ),
           const SizedBox(width: 8),
-          Text(status,
-              style: TextStyle(
-                  color: online
-                      ? const Color(0xFF4CAF50)
-                      : cs.onSurfaceVariant,
-                  fontSize: 12,
-                  fontWeight: online ? FontWeight.w600 : FontWeight.w400)),
+          Text(
+            status,
+            style: TextStyle(
+              color: online ? const Color(0xFF4CAF50) : cs.onSurfaceVariant,
+              fontSize: 12,
+              fontWeight: online ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
         ],
       ),
     );
@@ -380,17 +411,23 @@ class _ProfileViewState extends State<ProfileView> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(_name,
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
+                    Text(
+                      _name,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     // Callsign as secondary line when a nickname is shown.
                     if (_name != callsign)
-                      Text(callsign,
-                          style: TextStyle(
-                              color: Colors.white.withAlpha(140),
-                              fontSize: 13)),
+                      Text(
+                        callsign,
+                        style: TextStyle(
+                          color: Colors.white.withAlpha(140),
+                          fontSize: 13,
+                        ),
+                      ),
                     if (npub != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 2),
@@ -399,16 +436,16 @@ class _ProfileViewState extends State<ProfileView> {
                             Clipboard.setData(ClipboardData(text: npub!));
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
-                                  content: Text('npub copied'),
-                                  duration: Duration(seconds: 1)),
+                                content: Text('npub copied'),
+                                duration: Duration(seconds: 1),
+                              ),
                             );
                           },
                           child: Text(
                             npub!.length > 22
                                 ? '${npub!.substring(0, 12)}…${npub!.substring(npub!.length - 6)}'
                                 : npub!,
-                            style: TextStyle(
-                                color: cs.primary, fontSize: 12.5),
+                            style: TextStyle(color: cs.primary, fontSize: 12.5),
                           ),
                         ),
                       ),
@@ -440,30 +477,50 @@ class _ProfileViewState extends State<ProfileView> {
           ),
           if (_about.isNotEmpty) ...[
             const SizedBox(height: 10),
-            Text(activityFormatMentions(_about, widget.mentionResolver),
-                style: const TextStyle(
-                    color: Colors.white, fontSize: 14, height: 1.35)),
+            Text(
+              activityFormatMentions(_about, widget.mentionResolver),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                height: 1.35,
+              ),
+            ),
           ],
           if (widget.nip05?.trim().isNotEmpty == true)
             _metaRow(cs, Icons.verified_outlined, widget.nip05!.trim()),
           if (widget.website?.trim().isNotEmpty == true)
-            _metaRow(cs, Icons.link, widget.website!.trim(),
-                link: true, color: cs.primary),
+            _metaRow(
+              cs,
+              Icons.link,
+              widget.website!.trim(),
+              link: true,
+              color: cs.primary,
+            ),
           if (widget.lud16?.trim().isNotEmpty == true)
-            _metaRow(cs, Icons.bolt, widget.lud16!.trim(),
-                color: const Color(0xFFF7931A)),
+            _metaRow(
+              cs,
+              Icons.bolt,
+              widget.lud16!.trim(),
+              color: const Color(0xFFF7931A),
+            ),
           const SizedBox(height: 12),
           Row(
             children: [
               Icon(Icons.schedule, size: 14, color: cs.onSurfaceVariant),
               const SizedBox(width: 5),
-              Text('First seen ${_firstSeen()}',
-                  style:
-                      TextStyle(color: cs.onSurfaceVariant, fontSize: 12.5)),
+              Text(
+                'First seen ${_firstSeen()}',
+                style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12.5),
+              ),
               const SizedBox(width: 16),
-              Text('$postCount ${postCount == 1 ? 'post' : 'posts'}',
-                  style: const TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12.5)),
+              Text(
+                '$postCount ${postCount == 1 ? 'post' : 'posts'}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12.5,
+                ),
+              ),
             ],
           ),
           if ((widget.reachableVia ?? const []).isNotEmpty)
@@ -472,12 +529,20 @@ class _ProfileViewState extends State<ProfileView> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.lan_outlined, size: 14, color: cs.onSurfaceVariant),
+                  Icon(
+                    Icons.lan_outlined,
+                    size: 14,
+                    color: cs.onSurfaceVariant,
+                  ),
                   const SizedBox(width: 5),
                   Expanded(
-                    child: Text('Reachable via ${widget.reachableVia!.join(', ')}',
-                        style: TextStyle(
-                            color: cs.onSurfaceVariant, fontSize: 12.5)),
+                    child: Text(
+                      'Reachable via ${widget.reachableVia!.join(', ')}',
+                      style: TextStyle(
+                        color: cs.onSurfaceVariant,
+                        fontSize: 12.5,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -489,8 +554,13 @@ class _ProfileViewState extends State<ProfileView> {
                 children: [
                   const Icon(Icons.block, size: 14, color: Colors.red),
                   const SizedBox(width: 5),
-                  Text('Blocked — their messages are hidden',
-                      style: TextStyle(color: Colors.red.withAlpha(200), fontSize: 12)),
+                  Text(
+                    'Blocked — their messages are hidden',
+                    style: TextStyle(
+                      color: Colors.red.withAlpha(200),
+                      fontSize: 12,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -499,15 +569,23 @@ class _ProfileViewState extends State<ProfileView> {
     );
   }
 
-  Widget _metaRow(ColorScheme cs, IconData icon, String text,
-      {bool link = false, Color? color}) {
+  Widget _metaRow(
+    ColorScheme cs,
+    IconData icon,
+    String text, {
+    bool link = false,
+    Color? color,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: InkWell(
         onTap: () {
           Clipboard.setData(ClipboardData(text: text));
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Copied'), duration: Duration(seconds: 1)),
+            const SnackBar(
+              content: Text('Copied'),
+              duration: Duration(seconds: 1),
+            ),
           );
         },
         child: Row(
@@ -515,14 +593,18 @@ class _ProfileViewState extends State<ProfileView> {
             Icon(icon, size: 15, color: color ?? cs.onSurfaceVariant),
             const SizedBox(width: 6),
             Expanded(
-              child: Text(text,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      color: color ?? Colors.white.withAlpha(200),
-                      fontSize: 13,
-                      decoration:
-                          link ? TextDecoration.underline : TextDecoration.none)),
+              child: Text(
+                text,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color ?? Colors.white.withAlpha(200),
+                  fontSize: 13,
+                  decoration: link
+                      ? TextDecoration.underline
+                      : TextDecoration.none,
+                ),
+              ),
             ),
           ],
         ),
@@ -540,8 +622,7 @@ class _ProfileViewState extends State<ProfileView> {
     return FilledButton(
       onPressed: _toggleFollow,
       style: FilledButton.styleFrom(
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       ),
       child: const Text('Follow'),
     );
@@ -552,8 +633,18 @@ class _ProfileViewState extends State<ProfileView> {
     if (ms == null || ms == 0) return 'unknown';
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     return '${d.day} ${months[d.month - 1]} ${d.year}';
   }
@@ -564,9 +655,13 @@ class _ProfileViewState extends State<ProfileView> {
     final via = (p['via'] ?? '').toString();
     final convo = (p['convo'] ?? '').toString();
     final mid = (p['mid'] ?? '').toString();
-    final body = activityFormatMentions(_stripTokens(raw), widget.mentionResolver);
+    final body = activityFormatMentions(
+      _stripTokens(raw),
+      widget.mentionResolver,
+    );
     final refs = MediaRef.findAll(raw);
-    final tappable = widget.onPostTap != null && (convo.isNotEmpty || mid.isNotEmpty);
+    final tappable =
+        widget.onPostTap != null && (convo.isNotEmpty || mid.isNotEmpty);
     return InkWell(
       onTap: tappable ? () => widget.onPostTap!(p) : null,
       child: Padding(
@@ -578,9 +673,13 @@ class _ProfileViewState extends State<ProfileView> {
               Row(
                 children: [
                   if (time.isNotEmpty)
-                    Text(time,
-                        style: TextStyle(
-                            color: Colors.white.withAlpha(120), fontSize: 12)),
+                    Text(
+                      time,
+                      style: TextStyle(
+                        color: Colors.white.withAlpha(120),
+                        fontSize: 12,
+                      ),
+                    ),
                   if (via.isNotEmpty) ...[
                     const SizedBox(width: 6),
                     _viaChip(via),
@@ -590,9 +689,14 @@ class _ProfileViewState extends State<ProfileView> {
             if (body.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 3),
-                child: Text(body,
-                    style: const TextStyle(
-                        color: Colors.white, fontSize: 14, height: 1.3)),
+                child: Text(
+                  body,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    height: 1.3,
+                  ),
+                ),
               ),
             if (refs.isNotEmpty)
               Padding(
@@ -603,7 +707,10 @@ class _ProfileViewState extends State<ProfileView> {
                   children: [
                     for (final r in refs)
                       MediaThumbnail(
-                          ref: r, size: mediaSizeHint(raw), from: callsign),
+                        ref: r,
+                        size: mediaSizeHint(raw),
+                        from: callsign,
+                      ),
                   ],
                 ),
               ),
@@ -621,39 +728,57 @@ class _ProfileViewState extends State<ProfileView> {
     final reposted = widget.isReposted?.call(mid) ?? false;
     const muted = Color(0xFF8899A6);
 
-    Widget act(IconData icon, String? label, Color color, VoidCallback? onTap) =>
-        InkWell(
-          borderRadius: BorderRadius.circular(4),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(icon, size: 17, color: color),
-              if (label != null && label.isNotEmpty) ...[
-                const SizedBox(width: 4),
-                Text(label, style: TextStyle(color: color, fontSize: 12)),
-              ],
-            ]),
-          ),
-        );
+    Widget act(
+      IconData icon,
+      String? label,
+      Color color,
+      VoidCallback? onTap,
+    ) => InkWell(
+      borderRadius: BorderRadius.circular(4),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 17, color: color),
+            if (label != null && label.isNotEmpty) ...[
+              const SizedBox(width: 4),
+              Text(label, style: TextStyle(color: color, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+    );
 
     return Padding(
       padding: const EdgeInsets.only(top: 8),
-      child: Row(children: [
-        act(Icons.chat_bubble_outline, replies > 0 ? '$replies' : null, muted,
-            widget.onReplyPost == null ? null : () => widget.onReplyPost!(p)),
-        const SizedBox(width: 18),
-        act(Icons.repeat, null,
+      child: Row(
+        children: [
+          act(
+            Icons.chat_bubble_outline,
+            replies > 0 ? '$replies' : null,
+            muted,
+            widget.onReplyPost == null ? null : () => widget.onReplyPost!(p),
+          ),
+          const SizedBox(width: 18),
+          act(
+            Icons.repeat,
+            null,
             reposted ? const Color(0xFF00BA7C) : muted,
-            widget.onRepost == null ? null : () => widget.onRepost!(p)),
-        const SizedBox(width: 18),
-        act(
-          like.mine ? Icons.favorite : Icons.favorite_border,
-          like.count > 0 ? '${like.count}' : null,
-          like.mine ? Colors.pink : muted,
-          widget.onLike == null ? null : () => widget.onLike!(mid, !like.mine),
-        ),
-      ]),
+            widget.onRepost == null ? null : () => widget.onRepost!(p),
+          ),
+          const SizedBox(width: 18),
+          act(
+            like.mine ? Icons.favorite : Icons.favorite_border,
+            like.count > 0 ? '${like.count}' : null,
+            like.mine ? Colors.pink : muted,
+            widget.onLike == null
+                ? null
+                : () => widget.onLike!(mid, !like.mine),
+          ),
+        ],
+      ),
     );
   }
 
@@ -666,9 +791,10 @@ class _ProfileViewState extends State<ProfileView> {
         borderRadius: BorderRadius.circular(4),
         border: Border.all(color: c.withAlpha(120), width: 0.6),
       ),
-      child: Text(via.toUpperCase(),
-          style:
-              TextStyle(color: c, fontSize: 8.5, fontWeight: FontWeight.w700)),
+      child: Text(
+        via.toUpperCase(),
+        style: TextStyle(color: c, fontSize: 8.5, fontWeight: FontWeight.w700),
+      ),
     );
   }
 
@@ -681,18 +807,5 @@ class _ProfileViewState extends State<ProfileView> {
     return GeneratedAvatar(seed: call, size: radius * 2);
   }
 
-  static final _fileRe = RegExp(r'file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}');
-  static final _httpMediaRe = RegExp(
-      r'https?://[^\s]+?\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|mov|webm|m4v)(?:\?[^\s]*)?',
-      caseSensitive: false);
-  static String _stripTokens(String s) => s
-      .replaceAll(_fileRe, '')
-      // A NOSTR post's inline image/video URL (shown as media, not raw text).
-      .replaceAll(_httpMediaRe, '')
-      // Inline thumbnail preview: tn:<base64url> (may carry '=' padding).
-      .replaceAll(RegExp(r'\btn:[A-Za-z0-9_-]+=*'), '')
-      .replaceAll(RegExp(r'\bih:[0-9a-fA-F]{40}\b'), '')
-      .replaceAll(RegExp(r'\bsz:\d+\b'), '')
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
+  static String _stripTokens(String s) => stripNoteTokens(s);
 }

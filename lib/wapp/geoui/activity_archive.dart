@@ -306,6 +306,46 @@ class ActivityArchive {
     return out;
   }
 
+  /// The stored post with this [mid], in the same map shape [recent] emits, or
+  /// null. Lets the host open a thread for a post it learned about elsewhere
+  /// (e.g. the launcher hero card).
+  Map<String, dynamic>? byMid(String mid) {
+    final db = _ensureDb();
+    if (db == null || mid.isEmpty) return null;
+    ResultSet rows;
+    try {
+      rows = db.select(
+        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
+        'FROM activity WHERE mid = ? LIMIT 1',
+        [mid],
+      );
+    } catch (_) {
+      return null;
+    }
+    if (rows.isEmpty) return null;
+    final r = rows.first;
+    final m = <String, dynamic>{
+      't': r['t'],
+      'dir': r['dir'] ?? 'in',
+      'from': r['from_call'] ?? '',
+      'text': r['text'] ?? '',
+      'kind': r['kind'] ?? 'msg',
+      'mid': (r['mid'] ?? '').toString(),
+      'parent': (r['parent'] ?? '').toString(),
+      'time': (r['time'] ?? '').toString(),
+      'pop': (r['pop'] as int?) ?? 0,
+    };
+    for (final f in const ['convo', 'via', 'meta']) {
+      final v = (r[f] ?? '').toString();
+      if (v.isNotEmpty) m[f] = v;
+    }
+    final lat = (r['lat'] as num?)?.toDouble();
+    final lon = (r['lon'] as num?)?.toDouble();
+    if (lat != null) m['lat'] = lat;
+    if (lon != null) m['lon'] = lon;
+    return m;
+  }
+
   /// Whether a post with this [mid] is already stored (content-hash dedup, used
   /// to avoid re-inserting backfilled notes we already have).
   bool hasMid(String mid) {

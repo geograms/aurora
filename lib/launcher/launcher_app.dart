@@ -12,6 +12,7 @@ class _IwiAppState extends State<IwiApp> {
   PreferencesService? _prefs;
   bool _gateReady = false;   // prefs + permission status both loaded
   bool _permsGranted = false;
+  int _lastJankLogMs = 0;
 
   @override
   void initState() {
@@ -22,7 +23,26 @@ class _IwiAppState extends State<IwiApp> {
     // (b) profile switches re-route storage paths and trigger a
     //     launcher rescan on the fresh apps/ folder.
     ProfileService.instance.activeProfileNotifier.addListener(_onProfileChanged);
+    // UI-stall telemetry: log frames that took >100ms (a felt touch hiccup),
+    // rate-limited to one line per 5s so a bad stretch can't flood the log.
+    // Per-task attribution lives in TaskMonitorService; this catches the total.
+    SchedulerBinding.instance.addTimingsCallback(_onFrameTimings);
     _loadGate();
+  }
+
+  void _onFrameTimings(List<FrameTiming> timings) {
+    for (final t in timings) {
+      final ms = t.totalSpan.inMilliseconds;
+      if (ms < 100) continue;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - _lastJankLogMs < 5000) return;
+      _lastJankLogMs = now;
+      LogService.instance.add(
+        'perf: frame ${ms}ms (build ${t.buildDuration.inMilliseconds}ms, '
+        'raster ${t.rasterDuration.inMilliseconds}ms)',
+      );
+      return;
+    }
   }
 
   // Load prefs + current permission status, both needed to decide whether the

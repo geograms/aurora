@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../platform/platform.dart' as platform;
+import '../profile/profile_service.dart';
 
 /// Persistent user preferences backed by shared_preferences.
 /// Works on all platforms including web (uses localStorage on web).
@@ -33,17 +34,25 @@ class PreferencesService {
   double get terminalFontSize => _prefs.getDouble('terminal.fontSize') ?? 16.0;
   set terminalFontSize(double v) => _prefs.setDouble('terminal.fontSize', v);
 
-  String get terminalFontFamily => _prefs.getString('terminal.fontFamily') ?? 'RobotoMono';
-  set terminalFontFamily(String v) => _prefs.setString('terminal.fontFamily', v);
+  String get terminalFontFamily =>
+      _prefs.getString('terminal.fontFamily') ?? 'RobotoMono';
+  set terminalFontFamily(String v) =>
+      _prefs.setString('terminal.fontFamily', v);
 
-  double get terminalLineHeight => _prefs.getDouble('terminal.lineHeight') ?? 1.5;
-  set terminalLineHeight(double v) => _prefs.setDouble('terminal.lineHeight', v);
+  double get terminalLineHeight =>
+      _prefs.getDouble('terminal.lineHeight') ?? 1.5;
+  set terminalLineHeight(double v) =>
+      _prefs.setDouble('terminal.lineHeight', v);
 
-  String get terminalColorScheme => _prefs.getString('terminal.colorScheme') ?? 'dark';
-  set terminalColorScheme(String v) => _prefs.setString('terminal.colorScheme', v);
+  String get terminalColorScheme =>
+      _prefs.getString('terminal.colorScheme') ?? 'dark';
+  set terminalColorScheme(String v) =>
+      _prefs.setString('terminal.colorScheme', v);
 
-  bool get terminalShowTimestamps => _prefs.getBool('terminal.showTimestamps') ?? false;
-  set terminalShowTimestamps(bool v) => _prefs.setBool('terminal.showTimestamps', v);
+  bool get terminalShowTimestamps =>
+      _prefs.getBool('terminal.showTimestamps') ?? false;
+  set terminalShowTimestamps(bool v) =>
+      _prefs.setBool('terminal.showTimestamps', v);
 
   int get terminalMaxLines => _prefs.getInt('terminal.maxLines') ?? 5000;
   set terminalMaxLines(int v) => _prefs.setInt('terminal.maxLines', v);
@@ -111,7 +120,8 @@ class PreferencesService {
 
   // Whether to serve files while on a metered/cellular connection. Off by
   // default — receiving still works; we just don't spend cellular data serving.
-  bool get fileServeOnCellular => _prefs.getBool('files.serveOnCellular') ?? false;
+  bool get fileServeOnCellular =>
+      _prefs.getBool('files.serveOnCellular') ?? false;
   set fileServeOnCellular(bool v) => _prefs.setBool('files.serveOnCellular', v);
 
   // Store-and-forward hosting: act as a NOSTR relay + Blossom host for other
@@ -184,6 +194,84 @@ class PreferencesService {
       ids.remove(_commsWappId);
     }
     return ids.toList();
+  }
+
+  String get _activeProfileId =>
+      ProfileService.instance.activeProfile?.id ?? '_no_profile';
+
+  String _launchCountKey(String wappId) =>
+      'launch.count.$_activeProfileId.$wappId';
+  String _launchLastKey(String wappId) =>
+      'launch.last.$_activeProfileId.$wappId';
+
+  int getWappLaunchCount(String wappId) =>
+      _prefs.getInt(_launchCountKey(wappId)) ?? 0;
+
+  int getWappLastLaunch(String wappId) =>
+      _prefs.getInt(_launchLastKey(wappId)) ?? 0;
+
+  Future<void> incrementWappLaunch(String wappId) async {
+    final count = getWappLaunchCount(wappId) + 1;
+    await _prefs.setInt(_launchCountKey(wappId), count);
+    await _prefs.setInt(
+      _launchLastKey(wappId),
+      DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  List<String> topLaunchedWapps(int n) {
+    final pid = _activeProfileId;
+    final prefix = 'launch.count.$pid.';
+    final rows = <({String id, int count, int last})>[];
+    for (final key in _prefs.getKeys()) {
+      if (!key.startsWith(prefix)) continue;
+      final id = key.substring(prefix.length);
+      final count = _prefs.getInt(key) ?? 0;
+      if (id.isEmpty || count <= 0) continue;
+      rows.add((id: id, count: count, last: getWappLastLaunch(id)));
+    }
+    rows.sort((a, b) {
+      final byCount = b.count.compareTo(a.count);
+      if (byCount != 0) return byCount;
+      return b.last.compareTo(a.last);
+    });
+    return rows.take(n).map((r) => r.id).toList(growable: false);
+  }
+
+  // ── Home-screen pins ────────────────────────────────────────────────────
+  //
+  // Two user-curated wapp slots on the launcher: the rectangular "module" bars
+  // in the middle of the home screen, and the icon "dock" row in the collapsed
+  // all-apps peek. Empty list = fall back to the most-used ranking above, so a
+  // user who never pins anything still gets a useful home screen.
+
+  String _homeModulesKey() => 'home.modules.$_activeProfileId';
+  String _homeDockKey() => 'home.dock.$_activeProfileId';
+
+  List<String> get homeModules =>
+      _prefs.getStringList(_homeModulesKey()) ?? const [];
+
+  List<String> get homeDock => _prefs.getStringList(_homeDockKey()) ?? const [];
+
+  bool isPinnedToModules(String wappId) => homeModules.contains(wappId);
+
+  bool isPinnedToDock(String wappId) => homeDock.contains(wappId);
+
+  Future<void> setPinnedToModules(String wappId, bool pinned) =>
+      _togglePin(_homeModulesKey(), wappId, pinned);
+
+  Future<void> setPinnedToDock(String wappId, bool pinned) =>
+      _togglePin(_homeDockKey(), wappId, pinned);
+
+  Future<void> _togglePin(String key, String wappId, bool pinned) async {
+    final list = List<String>.of(_prefs.getStringList(key) ?? const []);
+    if (pinned) {
+      if (list.contains(wappId)) return;
+      list.add(wappId);
+    } else {
+      if (!list.remove(wappId)) return;
+    }
+    await _prefs.setStringList(key, list);
   }
 
   // Whether the Android BootReceiver should auto-start the background service
@@ -319,8 +407,8 @@ class PreferencesService {
     final sep = full.contains('_')
         ? full.indexOf('_')
         : full.contains('-')
-            ? full.indexOf('-')
-            : -1;
+        ? full.indexOf('-')
+        : -1;
     return sep < 0 ? full.toLowerCase() : full.substring(0, sep).toLowerCase();
   }
 
@@ -368,7 +456,7 @@ class PreferencesService {
   set rnsBootstrapServers(List<String> v) {
     final cleaned = [
       for (final s in v)
-        if (s.trim().isNotEmpty) s.trim()
+        if (s.trim().isNotEmpty) s.trim(),
     ];
     _prefs.setStringList('rns.bootstrapServers', cleaned);
   }

@@ -803,6 +803,9 @@ class _WappPageState extends State<WappPage>
     }
     // Repaint the Activity stream when a followed peer's profile is fetched.
     RnsService.instance.addProfileListener(_onProfilesChanged);
+    // Repaint (throttled) when the NOSTR engine pushes fresh stats/events, so
+    // an open thread's like/reply counts update the moment they arrive.
+    RnsService.instance.addNostrListener(_onNostrChanged);
     // Periodically recover FEED posts lost over APRS-IS from Reticulum peers.
     _feedBackfillTimer = Timer.periodic(
       const Duration(minutes: 3),
@@ -862,6 +865,18 @@ class _WappPageState extends State<WappPage>
 
   void _onProfilesChanged() {
     if (mounted) setState(() {});
+  }
+
+  // Engine pushes arrive up to every 400ms; throttle the repaint so an open
+  // thread updates its counts promptly without rebuilding on every tick.
+  int _lastNostrRepaintMs = 0;
+  void _onNostrChanged() {
+    if (!mounted) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastNostrRepaintMs < 500) return;
+    _lastNostrRepaintMs = now;
+    _activityRev.value++; // repaints an open ActivityThreadPage
+    setState(() {});
   }
 
   @override
@@ -3191,6 +3206,7 @@ class _WappPageState extends State<WappPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     RnsService.instance.removeProfileListener(_onProfilesChanged);
+    RnsService.instance.removeNostrListener(_onNostrChanged);
     _nostrSearchCtl.dispose();
     _feedBackfillTimer?.cancel();
     _fastBackfillTimer?.cancel();
@@ -4442,20 +4458,14 @@ class _WappPageState extends State<WappPage>
               },
               // Per-post Like / Reply / Retweet, same wiring as the feed.
               mentionResolver: RnsService.instance.nostrMentionName,
-              likeInfo: (m) {
-                final s = _wappPostStats[m];
-                if (s != null) return (count: s.likes, mine: s.mine);
-                return _activityArchive?.likeInfo(m) ?? (count: 0, mine: false);
-              },
+              likeInfo: _likeInfoFor,
               onLike: (m, like) {
                 _fieldValues['activity_mid'] = m;
                 _fieldValues['activity_unlike'] = !like;
                 _sendCommand('activity_like');
                 setState(() {});
               },
-              replyCount: (m) =>
-                  _wappPostStats[m]?.replies ??
-                  (_activityArchive?.replyCount(m) ?? 0),
+              replyCount: _replyCountFor,
               onReplyPost: (post) {
                 Navigator.of(context).pop();
                 _openActivityThread(post);
@@ -4644,9 +4654,7 @@ class _WappPageState extends State<WappPage>
           _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
       return ActivityFeed(
         posts: posts,
-        replyCount: (mid) =>
-            _wappPostStats[mid]?.replies ??
-            (_activityArchive?.replyCount(mid) ?? 0),
+        replyCount: _replyCountFor,
         onAttach: _attachImageOrVideoToChat,
         onItemTap: _openConvoFromFeed,
         onSenderTap: _feedSenderTap,
@@ -4669,14 +4677,7 @@ class _WappPageState extends State<WappPage>
           _fieldValues['activity_call'] = from;
           _sendCommand('activity_mute');
         },
-        likeInfo: (mid) {
-          // A wapp can push absolute counts via ui.activity.stats (e.g. a NOSTR
-          // wapp reporting relay reactions); otherwise fall back to the archive's
-          // own like tally.
-          final s = _wappPostStats[mid];
-          if (s != null) return (count: s.likes, mine: s.mine);
-          return _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false);
-        },
+        likeInfo: _likeInfoFor,
         isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
         savedPosts: () =>
             _activityArchive?.savedPosts() ?? const <Map<String, dynamic>>[],
@@ -4740,14 +4741,8 @@ class _WappPageState extends State<WappPage>
         mentionResolver: RnsService.instance.nostrMentionName,
         onSenderTap: _feedSenderTap,
         onOpenThread: _openActivityThread,
-        replyCount: (mid) =>
-            _wappPostStats[mid]?.replies ??
-            (_activityArchive?.replyCount(mid) ?? 0),
-        likeInfo: (mid) {
-          final s = _wappPostStats[mid];
-          if (s != null) return (count: s.likes, mine: s.mine);
-          return _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false);
-        },
+        replyCount: _replyCountFor,
+        likeInfo: _likeInfoFor,
       );
     }
     final stored = _fieldValues[name];
@@ -5033,6 +5028,28 @@ class _WappPageState extends State<WappPage>
   /// Open a publication's full-screen forum thread (the post + its replies).
   /// Replies post via the same `activity_reply` wire (the wapp wraps them as
   /// "+<mid> text"). The thread refreshes live via [_activityRev].
+  /// Like tally for a post, best source first: the wapp's live stats push,
+  /// the wapp's own archive, then the NOSTR engine — whose tallies are now
+  /// seeded from persisted reaction receipts, so a hero-opened thread shows
+  /// its counts instantly instead of waiting for a relay round trip.
+  ({int count, bool mine}) _likeInfoFor(String mid) {
+    final s = _wappPostStats[mid];
+    if (s != null) return (count: s.likes, mine: s.mine);
+    final a = _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false);
+    if (a.count > 0) return a;
+    final hub = RnsService.instance.nostrStats(mid);
+    return hub.likes > 0 ? (count: hub.likes, mine: hub.mine) : a;
+  }
+
+  /// Reply tally, same source order as [_likeInfoFor].
+  int _replyCountFor(String mid) {
+    final live = _wappPostStats[mid]?.replies;
+    if (live != null && live > 0) return live;
+    final archived = _activityArchive?.replyCount(mid) ?? 0;
+    if (archived > 0) return archived;
+    return RnsService.instance.nostrStats(mid).replies;
+  }
+
   /// Open the thread for [mid] as soon as its post exists in the activity
   /// archive. On a fresh launch the post usually isn't stored yet — the wapp
   /// has just been told (via `view.open`) to subscribe to it — so poll briefly
@@ -5066,14 +5083,8 @@ class _WappPageState extends State<WappPage>
               loadThread: (rootMid) =>
                   _activityArchive?.threadReplies(rootMid) ??
                   const <Map<String, dynamic>>[],
-              replyCount: (m) =>
-                  _wappPostStats[m]?.replies ??
-                  (_activityArchive?.replyCount(m) ?? 0),
-              likeInfo: (m) {
-                final s = _wappPostStats[m];
-                if (s != null) return (count: s.likes, mine: s.mine);
-                return _activityArchive?.likeInfo(m) ?? (count: 0, mine: false);
-              },
+              replyCount: _replyCountFor,
+              likeInfo: _likeInfoFor,
               onLike: (m, like) {
                 _fieldValues['activity_mid'] = m;
                 _fieldValues['activity_unlike'] = !like;

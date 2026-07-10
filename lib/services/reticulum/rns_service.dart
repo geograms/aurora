@@ -2057,7 +2057,7 @@ class RnsService {
               storePath: '${base}nostr_feed.sqlite3',
               persistPath: '${base}nostr_relays.json',
               selfPubHex: selfPubHex,
-            ).then((c) => _nostrHub = c);
+            ).then((c) => _nostrHub = c..onChanged = _notifyNostrListeners);
           }
         } catch (e) {
           LogService.instance.add(
@@ -3725,6 +3725,20 @@ class RnsService {
   void _retryWantedProfiles() {
     for (final cs in _wantProfiles) {
       if (!_profileMeta.containsKey(cs)) fetchFollowedProfile(cs);
+    }
+  }
+
+  /// Fired whenever the NOSTR engine pushes fresh state to this isolate
+  /// (events, stats, profiles) — lets an open feed/thread repaint with new
+  /// like/reply counts without polling.
+  final List<void Function()> _nostrListeners = [];
+  void addNostrListener(void Function() cb) => _nostrListeners.add(cb);
+  void removeNostrListener(void Function() cb) => _nostrListeners.remove(cb);
+  void _notifyNostrListeners() {
+    for (final c in List.of(_nostrListeners)) {
+      try {
+        c();
+      } catch (_) {}
     }
   }
 

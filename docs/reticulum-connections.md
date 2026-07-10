@@ -26,6 +26,10 @@ opens directly is at risk of being opened two or three times at once.
 Verified on-device: TCP connections to the RNS port (4242) show one connection
 per *distinct* hub (the deliberate multi-hub mesh), with no hub appearing twice.
 
+Since Chat v0.2.109, Reticulum is the Chat wapp's **primary** transport (1:1,
+groups, geo-chat, Activity feed and manual beacons all ride RNS first); BLE is
+the local path and APRS-IS is legacy/opt-in (licensed callsign required).
+
 ## APRS-IS — why it duplicated, and the fix
 
 The APRS wapp did NOT go through a singleton: it opened a raw TCP socket itself

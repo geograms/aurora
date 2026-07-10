@@ -1,21 +1,26 @@
-# APRS transport — internet (APRS‑IS) and the iGate
+# APRS transport — internet (APRS‑IS) and the iGate (LEGACY)
 
-APRS is one of Aurora's two **message** transports (the other is
-[BLE](ble.md)). It carries chat over the global amateur **APRS‑IS** network when
-the internet is up. The *message‑level conventions* (groups, threads, reactions,
-signed/encrypted messages, media references) are the same on every transport and
-are documented separately in [aprx.md](aprx.md); this doc is about the APRS
-**wire + connection** layer as implemented in the APRS wapp
-([`wapps/aprs/`](../../wapps/aprs/): `aprs.c`, `main.c`).
+APRS is a **legacy, opt‑in** message transport. **Reticulum is the primary
+transport** (with [BLE](ble.md) as the local off‑grid path and NOSTR relays as
+store‑and‑forward backup); APRS‑IS carries chat onto the global amateur radio
+network only when the user opts in with a **government‑issued amateur‑radio
+callsign and its verified passcode**. The *message‑level conventions* (groups,
+threads, reactions, signed/encrypted messages, media references) are the same
+on every transport and are documented separately in [aprx.md](aprx.md); this
+doc is about the APRS **wire + connection** layer as implemented in the Chat
+wapp ([`wapps/chat/`](../../wapps/chat/): `chat.c`, `main.c`).
 
 ---
 
 ## 1. APRS‑IS connection
 
 - **Server:** a configurable APRS‑IS host (default `rotate.aprs2.net:14580`).
-- **Login & passcode:** the passcode is computed from the callsign
-  (`aprs_passcode`); internet APRS‑IS needs only that computed passcode — no
-  licence is required to transmit to the IS network.
+- **Login & passcode:** APRS‑IS is **off by default** and gated behind a
+  licensed‑callsign opt‑in: the user must enter an authority‑assigned callsign
+  (auto‑generated X1/X3 callsigns are rejected) and the matching numeric
+  passcode, which is verified against `aprs_passcode(call)` before the switch
+  takes effect. Without this opt‑in Aurora never connects to APRS‑IS;
+  messaging runs over Reticulum (primary) and Bluetooth.
 - **Server‑side filter (`g/` + `b/`):** on login Aurora sends a filter built by
   `build_gfilter` so the server only pushes relevant traffic:
   - `g/<own-call>` — messages addressed to us,

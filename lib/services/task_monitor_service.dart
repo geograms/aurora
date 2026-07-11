@@ -82,6 +82,14 @@ class TaskMonitorService {
         final s = ev.entries.map((e) => '${e.key}=${e.value}').join(' ');
         LogService.instance.add('perf: nostr-engine $s');
       }
+      // Connectionless probes. `silent` is the number of inbound queries we
+      // answered with NOTHING — each of which used to cost a full Curve25519
+      // link handshake to say "I have nothing".
+      final npd = RnsService.instance.drainNpdStats();
+      if (npd.values.any((v) => v > 0)) {
+        final s = npd.entries.map((e) => '${e.key}=${e.value}').join(' ');
+        LogService.instance.add('perf: npd $s');
+      }
       // The transport isolate's load is the raw announce flood it parses,
       // dedups, path-tables and (as a transport node) rebroadcasts — all of
       // which happen BEFORE any signature check, so a low verify count says

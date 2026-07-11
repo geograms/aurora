@@ -18,6 +18,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' show Random;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
@@ -60,6 +61,7 @@ import '../preferences_service.dart';
 import '../../util/nostr_crypto.dart';
 import '../../util/nostr_nip19.dart';
 import '../../util/nostr_event.dart';
+import '../../util/npd.dart';
 import '../../util/aprx_sign.dart';
 import 'lxmf/lxmf.dart'
     show kLxmfApp, kLxmfDeliveryAspects, kLxmfPropagationAspects;
@@ -1980,6 +1982,10 @@ class RnsService {
             identity: _id!,
             store: _relayStore!,
             send: (raw) => _transport?.sendLinkAware(raw),
+            // Query peers WITHOUT a link where they support it: a probe costs
+            // neither side a handshake, and a peer holding nothing answers with
+            // silence. Falls back to a link automatically for older nodes.
+            probeQuery: _probeRelay,
             nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
             nextHopForDest: (h) => _transport?.pathFor(h)?.nextHop,
             hasPathForDest: (h) => _transport?.hasPath(h) ?? false,
@@ -2700,6 +2706,17 @@ class RnsService {
     if (p.destType == RnsDestType.link) {
       _transport?.noteLinkIface(p.destHash, via);
     }
+    // Connectionless NOSTR-encrypted probe (NPD). Handled FIRST and returned
+    // immediately: the whole point is that a "do you have this?" query never
+    // touches the link machinery. When we hold nothing we answer with silence,
+    // which costs no crypto at all — that case was 98 of 98 inbound queries and
+    // was buying a full Curve25519 handshake each time.
+    if (p.destType == RnsDestType.plain &&
+        p.packetType == RnsPacketType.data &&
+        p.context == kNpdContext) {
+      await _handleNpdInbound(p, via);
+      return;
+    }
     // Link / file-transfer packets (link requests + link-addressed data) are
     // handled by the files node, not the announce path.
     if (p.packetType != RnsPacketType.announce) {
@@ -3210,6 +3227,242 @@ class RnsService {
   /// Owner side: a connectionless DATA packet to one of our rendezvous dests is a
   /// join request from an applicant that resolved our beacon. Decrypt it with the
   /// rv identity and hand the payload to the circles wapp inbox (it is the same
+  // ── Connectionless NOSTR probe (NPD) ──────────────────────────────────────
+  //
+  // Counters so the win is provable rather than asserted: how many probes we
+  // answered with SILENCE (the case that used to cost a full handshake), how
+  // many we actually answered, and how many we rejected.
+  int npdSilent = 0;
+  int npdAnswered = 0;
+  // Kept apart on purpose. A REPLAY is benign and expected — the same probe
+  // reaches us once per interface, and NPD is dispatched ahead of the
+  // transport's packet dedup. A BAD MAC is not benign: it means tampering, or a
+  // bug. Lumping them into one "rejected" number would hide the second behind
+  // the first.
+  int npdReplay = 0;
+  int npdBadMac = 0;
+  int npdRateLimited = 0;
+
+  Map<String, int> drainNpdStats() {
+    final out = {
+      'silent': npdSilent,
+      'answered': npdAnswered,
+      'replay': npdReplay,
+      'badmac': npdBadMac,
+      'ratelimited': npdRateLimited,
+    };
+    npdSilent = 0;
+    npdAnswered = 0;
+    npdReplay = 0;
+    npdBadMac = 0;
+    npdRateLimited = 0;
+    return out;
+  }
+
+  // Replay window: a nonce we have already served. Bounded FIFO — an unbounded
+  // set here would be a memory leak fed by strangers.
+  final Set<String> _npdSeenNonces = {};
+  final List<String> _npdNonceOrder = [];
+  static const int _npdMaxNonces = 2048;
+
+  // Anti-amplification: cap how often we will ANSWER a given peer. A silent
+  // drop is free, so only replies are rate-limited.
+  final Map<String, int> _npdLastReplyMs = {};
+  static const int _npdMinReplyGapMs = 250;
+
+  /// An inbound NOSTR Probe Datagram: a connectionless "do you have this?".
+  ///
+  /// The whole point is what does NOT happen here — no link, no handshake, and
+  /// when we hold nothing, no reply and no crypto beyond a cached-key AES
+  /// decrypt. The peer learns "you have nothing" from our silence.
+  Future<void> _handleNpdInbound(RnsPacket p, String via) async {
+    final privHex = _profilePrivHex();
+    if (privHex == null) return;
+
+    // Cleartext header first — no crypto. Junk dies here.
+    final head = npdPeek(p.data);
+    if (head == null) return; // not an NPD at all — not worth counting
+
+    // Replay: we already served this exact probe.
+    final nonceKey = '${_hex(head.senderPub)}:${_hex(head.nonce)}';
+    if (!_npdSeenNonces.add(nonceKey)) {
+      npdReplay++; // same probe on another interface: benign, and expected
+      return;
+    }
+    _npdNonceOrder.add(nonceKey);
+    while (_npdNonceOrder.length > _npdMaxNonces) {
+      _npdSeenNonces.remove(_npdNonceOrder.removeAt(0));
+    }
+
+    // Decrypt with the CACHED pairwise key (one secp256k1 mult per peer, ever).
+    // A bad MAC is indistinguishable from junk.
+    final BigInt d;
+    try {
+      d = BigInt.parse(privHex, radix: 16);
+    } catch (_) {
+      return;
+    }
+    final npd = npdDecode(p.data, d);
+    if (npd == null) {
+      npdBadMac++; // tampered, or encrypted to a key that is not ours
+      return;
+    }
+
+    // An ANSWER to a probe we sent: match it to the waiting query by the nonce
+    // it echoes back. (A reply carries the requester's nonce precisely so this
+    // correlation needs no per-peer state.)
+    if (npd.type == NpdType.result || npd.type == NpdType.have) {
+      final waiting = _npdPending.remove(_hex(npd.nonce));
+      if (waiting != null && !waiting.isCompleted) {
+        waiting.complete(npd.body);
+      }
+      return;
+    }
+    if (npd.type != NpdType.req) return;
+
+    // Route by the destination it was addressed to — the SAME dest hashes that
+    // today receive LINKREQUESTs, so peers already hold paths to them.
+    final answer = await _answerNpdQuery(p.destHash, npd);
+
+    if (answer == null) {
+      // We hold nothing. Say nothing. This is the 98-out-of-98 case.
+      npdSilent++;
+      return;
+    }
+
+    final peer = _hex(npd.senderPub);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final last = _npdLastReplyMs[peer] ?? 0;
+    if (nowMs - last < _npdMinReplyGapMs) {
+      npdRateLimited++; // anti-amplification: no peer can make us fire at will
+      return;
+    }
+    _npdLastReplyMs[peer] = nowMs;
+
+    final selfPub = selfPubHex;
+    if (selfPub == null) return;
+    final reply = npdEncode(
+      type: answer.type,
+      d: d,
+      senderPub: _hexToBytes(selfPub)!,
+      peerPub: npd.senderPub,
+      replyDest: Uint8List(16), // we are answering; nobody replies to a reply
+      body: answer.body,
+      // ECHO the requester's nonce: it is how they match this answer to the
+      // query they are waiting on, without either side keeping per-peer state.
+      nonce: npd.nonce,
+    );
+    if (reply == null) return;
+
+    // Route the answer back to the dest the prober named. sendDataTo picks
+    // HEADER_2 + transport when a path is known, which is what makes this work
+    // multi-hop.
+    _transport?.sendPlainTo(npd.replyDest, reply, context: kNpdContext);
+    npdAnswered++;
+  }
+
+  // Outstanding probes we sent, keyed by nonce, awaiting an answer.
+  final Map<String, Completer<Uint8List?>> _npdPending = {};
+
+  /// How long to wait before concluding a peer's SILENCE means "I hold nothing".
+  ///
+  /// Silence is the signal, so this is also how long a dropped packet takes to
+  /// look like an empty answer. Kept short: these queries are re-run on the
+  /// feed's refresh cycle, so a lost probe costs freshness, never correctness.
+  static const Duration _npdSilenceTimeout = Duration(seconds: 4);
+
+  /// Query [peer] with a connectionless probe instead of a link. Wired into
+  /// [RelayNode.probeQuery]; see that field for the tri-state contract.
+  Future<({bool supported, Uint8List? body})> _probeRelay(
+      RnsIdentity peer, Uint8List reqBytes) async {
+    const no = (supported: false, body: null);
+
+    // Only probe a peer that advertises it (RelayCap.probe) and whose NOSTR
+    // pubkey we know — both come from its relay announcement, so there is
+    // nothing to guess and no timeout to wait out for older nodes.
+    final entry = _relayDir.byIdentity(peer);
+    final ann = entry?.announcement;
+    final peerPubHex = ann?.pubkey;
+    if (ann == null ||
+        (ann.caps & RelayCap.probe) == 0 ||
+        peerPubHex == null ||
+        peerPubHex.isEmpty) {
+      return no;
+    }
+
+    final privHex = _profilePrivHex();
+    final selfPub = selfPubHex;
+    final t = _transport;
+    if (privHex == null || selfPub == null || t == null) return no;
+
+    // A probe is one shot with no handshake, so it can only travel where we
+    // already hold a path. Without one, let the link path run — it knows how to
+    // pull a path first (RnsLink.ensurePath).
+    final destHash = RnsDestination.hash(peer, kRelayApp, kRelayAspects);
+    if (!t.hasPath(destHash)) {
+      t.requestPath(destHash); // warm it for next time
+      return no;
+    }
+
+    final peerPub = _hexToBytes(peerPubHex);
+    final myPub = _hexToBytes(selfPub);
+    if (peerPub == null || myPub == null || peerPub.length != 32) return no;
+
+    final BigInt d;
+    try {
+      d = BigInt.parse(privHex, radix: 16);
+    } catch (_) {
+      return no;
+    }
+
+    final nonce = Uint8List(8);
+    final rnd = Random.secure();
+    for (var i = 0; i < 8; i++) {
+      nonce[i] = rnd.nextInt(256);
+    }
+
+    final packet = npdEncode(
+      type: NpdType.req,
+      d: d,
+      senderPub: myPub,
+      peerPub: peerPub,
+      // Answer to OUR relay dest — peers already hold paths to it, so the reply
+      // routes home multi-hop with nothing extra to set up.
+      replyDest: _relay?.relayDestHash ?? Uint8List(16),
+      body: reqBytes,
+      nonce: nonce,
+    );
+    if (packet == null) return no; // does not fit a datagram -> use a link
+
+    final key = _hex(nonce);
+    final done = Completer<Uint8List?>();
+    _npdPending[key] = done;
+    t.sendPlainTo(destHash, packet, context: kNpdContext);
+
+    // Silence IS the answer: a peer holding nothing simply never replies.
+    final body = await done.future
+        .timeout(_npdSilenceTimeout, onTimeout: () => null)
+        .whenComplete(() => _npdPending.remove(key));
+    return (supported: true, body: body);
+  }
+
+  /// Evaluate a probe against whichever node owns [destHash]. Returns null when
+  /// we hold nothing — the caller then stays silent.
+  Future<({int type, Uint8List body})?> _answerNpdQuery(
+      Uint8List destHash, Npd npd) async {
+    final relay = _relay;
+    if (relay != null &&
+        RnsCrypto.constantTimeEquals(destHash, relay.relayDestHash)) {
+      return relay.answerProbe(npd.body);
+    }
+    final files = _files;
+    if (files != null &&
+        RnsCrypto.constantTimeEquals(destHash, files.rpcDestHash)) {
+      return files.answerProbe(npd.body);
+    }
+    return null;
+  }
+
   /// signed `jr` datagram the wapp would get over LXMF; handle_jr verifies it).
   Future<bool> _handleRvInbound(RnsPacket p) async {
     if (p.packetType != RnsPacketType.data ||

@@ -262,13 +262,78 @@ a patch** — hence flagged here rather than taken.
 If adopted: keep the pure-Dart path as the fallback (`cryptography` already does
 this), and verify wire compatibility against the Python reference before shipping.
 
-### 6.2 Should a phone be a relay indexer at all?
+### 6.2 The handshake tax — SOLVED by connectionless probes (NPD)
 
-We answer strangers' relay queries, mostly with **zero events**, and pay a full
-link handshake for each. On a phone that is a battery cost with no user benefit.
-Options: don't advertise indexer capacity on mobile; rate-limit inbound links;
-or answer cheaply (reject before the handshake) when we hold no matching data.
-This is a **product decision** about what a phone node owes the network.
+*This section was an open question. It now has an answer, kept here because the
+reasoning generalises.*
+
+We were answering strangers' relay queries — 98 times out of 98 with **zero
+events** — and paying a full Curve25519 link handshake for each.
+
+The fix is not to refuse the queries (peers legitimately fetch our posts and
+profile that way). It is to answer them **without a link**, and to answer "I have
+nothing" with **silence**:
+
+**NPD — NOSTR Probe Datagram** (`reticulum-dart/lib/src/util/npd.dart`): a
+connectionless PLAIN Reticulum packet carrying a query encrypted to the target's
+**NOSTR npub**.
+
+The insight that makes it free:
+
+| | key material | can the ECDH be cached? |
+|---|---|---|
+| Reticulum link | **ephemeral** per link | **No** — 2 scalar mults + a signature, *every query, forever* |
+| NPD | **long-term** (our nsec × their npub) | **Yes** — one secp256k1 mult per peer, *ever* |
+
+After first contact with a peer, an exchange is symmetric AES only: **zero
+asymmetric crypto**. And a node holding nothing sends **no packet at all**.
+
+Design points worth keeping in mind:
+
+- **Silence is the signal.** A reply *implies* the peer has data. Honest cost: a
+  dropped packet is indistinguishable from "nothing" — acceptable because these
+  queries re-run on the feed's refresh cycle, so a lost probe costs freshness,
+  never correctness.
+- **The cleartext header is deliberate** (`magic/ver/type/senderPub/replyDest/nonce`):
+  traffic stays classifiable on the wire while its *contents* stay encrypted.
+- **Encrypt-then-MAC, over the header too.** AES-CBC is malleable, and the header
+  carries `replyDest` — without a MAC over it, an attacker could aim our reply at
+  a victim and turn every probe into an amplification vector.
+- **A nonce is mandatory**: the transport dedups by packet hash, so two identical
+  probes would otherwise be silently dropped. The reply *echoes* it, which is how
+  an answer finds its waiting query with no per-peer state.
+- **Capability-negotiated** (`RelayCap.probe` in the relay announcement) so old
+  nodes keep getting links and interop is preserved with no timeout guessing.
+  **Leaves advertise it too** — a leaf still answers queries about its own posts,
+  and is the node that can least afford handshakes.
+- **NOT for private mail.** Static-key ECDH has no forward secrecy (the same
+  property NIP-04 DMs already have). Fine for queries about *public* NOSTR data;
+  that is exactly why LXMF is out of scope.
+
+Also fixed alongside: `RelayNode._accept` / `_acceptDhtLink` did **no link-id
+dedup** and ran *ahead* of the transport's packet dedup, so one peer's single
+LINKREQUEST arriving on N interfaces bought **N full handshakes**. Duplicates now
+re-send a cached proof (re-calling `buildProof` would sign again).
+
+Measured, two devices, release-grade AOT:
+
+```
+perf: npd silent=6 answered=1 replay=2 badmac=0 ratelimited=0
+```
+
+`silent` = real inbound queries answered with no link, no handshake, no packet.
+On the node whose peer supports probes, link handshakes fell to `x25519Gen=3`/min
+and relay REQs served over links dropped to 1.
+
+**Still open:** the benefit on the *responder* side only fully arrives as the
+network updates — old peers keep opening links until they carry `RelayCap.probe`.
+And **multi-hop through a reference `rnsd` hub is unproven**: `_maybeForward`
+forwards HEADER_2 transport-addressed packets and `_forwardToward` preserves
+`destType`, and Python RNS routes by `transport_id` + destination table
+independently of dest type — but that needs testing with the two phones on
+*different networks*. If reference RNS drops PLAIN, fall back to connectionless
+SINGLE (the `rvSend` pattern): still 1 op instead of 3, and the ECDH cache still
+applies to the body.
 
 ### 6.3 Cheap wins not yet taken
 

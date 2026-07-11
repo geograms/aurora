@@ -325,15 +325,74 @@ perf: npd silent=6 answered=1 replay=2 badmac=0 ratelimited=0
 On the node whose peer supports probes, link handshakes fell to `x25519Gen=3`/min
 and relay REQs served over links dropped to 1.
 
+**Multi-hop through a reference `rnsd` hub: PROVEN.** This was the one assumption
+the design rested on that could not be checked by reading our own code — the
+intermediaries are Python RNS, not us. Tested with C61 on home Wi-Fi
+(`192.168.178.0/24`) and TANK2 on a phone hotspot (`172.20.10.0/24`), mutually
+unreachable at IP level, so every packet between them had to traverse a public
+hub:
+
+```
+C61   RNS: npd tx req to 33603ff5 via tcp:use.inertia.chat:4242 hops=2
+TANK2 RNS: npd rx req  from eebc6d47 via tcp:use.inertia.chat:4242 hops=1   <- arrived, MAC ok
+C61   RNS: npd rx have from 1b4e5d36 via tcp:use.inertia.chat:4242 hops=1   <- reply came home
+C61   RNS: npd answer from 33603ff5
+perf: npd silent=1 answered=1 replay=0 badmac=0 ratelimited=0
+```
+
+Reference RNS forwards PLAIN by `transport_id` + destination table without
+regard to dest type, and does not mangle the payload (`badmac=0` end to end). The
+connectionless-SINGLE fallback is **not needed**.
+
 **Still open:** the benefit on the *responder* side only fully arrives as the
 network updates — old peers keep opening links until they carry `RelayCap.probe`.
-And **multi-hop through a reference `rnsd` hub is unproven**: `_maybeForward`
-forwards HEADER_2 transport-addressed packets and `_forwardToward` preserves
-`destType`, and Python RNS routes by `transport_id` + destination table
-independently of dest type — but that needs testing with the two phones on
-*different networks*. If reference RNS drops PLAIN, fall back to connectionless
-SINGLE (the `rvSend` pattern): still 1 op instead of 3, and the ECDH cache still
-applies to the body.
+
+### 6.2.1 The bug this test uncovered: a stale "fastest medium" pin
+
+The multi-hop test could not even start, because C61 could not reach TANK2 by
+**any** transport — link, LXMF, or PLAIN. Not a PLAIN problem: a routing bug.
+
+`RnsTransport._identityFastVia` pins an identity to the fastest interface it has
+been heard on, so a co-located peer is reached over the LAN even when that one
+destination's (lossy, broadcast) LAN announce was missed. The pin was
+**permanent**. When a peer *leaves* the LAN, every hub-heard announce was still
+rewritten back to `via: lan, hops: 1, nextHop: null` — aiming all its traffic at
+a network it had left.
+
+It could not self-heal, because the path-preference rule refuses to replace a
+faster-ranked (LAN) entry with a slower-ranked (hub) one: the dead path outranked
+the live one **forever**, and the peer stayed unreachable until the app restarted.
+
+Two things kept it invisible:
+- the rewrite refreshes `updatedMs`, so the dead path looks *fresh* (`ageMs` of a
+  few seconds) — this is what fooled the first diagnosis;
+- `existing.via == via`, so it never logs a path transition.
+
+`/api/rns/route` is what exposed it: `via: lan, hops: 1` for a peer on a
+different subnet is a contradiction — the phones could not even ICMP each other.
+**A `via` that names a medium the peer cannot possibly be on is the signature of
+a stale pin.** This is almost certainly the same bug as the original "TANK2 shows
+zero devices until the app is killed" report; restart-clears-it is its fingerprint.
+
+Fixed in `rns_transport.dart`: the pin is now **evidence, not a fact** — it
+carries a last-heard-on-that-interface timestamp (12-min TTL, comfortably beyond
+the 5-min worst-case announce cadence) and a miss counter (4 announces heard on a
+slower medium with none on the pinned one). On expiry the paths it pinned are
+**actively demoted** (`_demoteIdentityPaths`) — dropping the pin alone is not
+enough, precisely because of the rank rule above. A false demote is cheap (traffic
+takes the hub: slower, but *working*); a false pin is a black hole. It errs toward
+demoting.
+
+Locked by `reticulum-dart/test/path_pin_staleness_test.dart`, which fails on the
+pre-fix code and passes after — including the case that must NOT regress: a peer
+still on the LAN keeps its fast path despite interleaved hub announces.
+
+> Note on the device evidence: the deploy restarted both phones, which *also*
+> clears the pin, so the live LXMF-now-succeeds result does not by itself isolate
+> the fix from the restart. The unit test is what discriminates. The remaining
+> device check is the self-heal *without* a restart: form the pin on a shared LAN,
+> move one phone to another network, confirm it recovers within the TTL/miss
+> window.
 
 ### 6.3 Cheap wins not yet taken
 

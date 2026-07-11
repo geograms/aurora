@@ -3308,6 +3308,13 @@ class RnsService {
       return;
     }
 
+    // The interface and hop count are the whole proof that a connectionless
+    // PLAIN packet survives forwarding by a reference (Python) rnsd hub — the
+    // one assumption in this design we cannot check by reading our own code.
+    LogService.instance.add(
+        'RNS: npd rx ${NpdType.name(npd.type)} from '
+        '${_hex(npd.senderPub).substring(0, 8)} via $via hops=${p.hops}');
+
     // An ANSWER to a probe we sent: match it to the waiting query by the nonce
     // it echoes back. (A reply carries the requester's nonce precisely so this
     // correlation needs no per-peer state.)
@@ -3437,12 +3444,19 @@ class RnsService {
     final key = _hex(nonce);
     final done = Completer<Uint8List?>();
     _npdPending[key] = done;
+    final path = t.pathInfo(destHash);
+    LogService.instance.add(
+        'RNS: npd tx req to ${_hex(destHash).substring(0, 8)} '
+        'via ${path?['via']} hops=${path?['hops']}');
     t.sendPlainTo(destHash, packet, context: kNpdContext);
 
     // Silence IS the answer: a peer holding nothing simply never replies.
     final body = await done.future
         .timeout(_npdSilenceTimeout, onTimeout: () => null)
         .whenComplete(() => _npdPending.remove(key));
+    LogService.instance.add(
+        'RNS: npd ${body == null ? 'silence' : 'answer'} '
+        'from ${_hex(destHash).substring(0, 8)}');
     return (supported: true, body: body);
   }
 

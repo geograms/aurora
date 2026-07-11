@@ -163,9 +163,12 @@ class PreferencesService {
   // must keep receiving + notifying in the background even when its page (or the
   // whole app) is closed. Other wapps default off. The user can still turn it
   // off explicitly.
-  static const String _commsWappId = 'chat';
+  // A messaging wapp is useless if it only receives while you are looking at it:
+  // a direct message must land (and notify) with the page — or the whole app —
+  // closed. So both comms wapps default ON.
+  static const Set<String> _commsWappIds = {'chat', 'messages'};
   bool getWappAutostart(String wappId) =>
-      _prefs.getBool('wapp.autostart.$wappId') ?? (wappId == _commsWappId);
+      _prefs.getBool('wapp.autostart.$wappId') ?? _commsWappIds.contains(wappId);
   Future<void> setWappAutostart(String wappId, bool v) =>
       _prefs.setBool('wapp.autostart.$wappId', v);
 
@@ -188,10 +191,12 @@ class PreferencesService {
         .where((k) => k.startsWith(prefix) && (_prefs.getBool(k) ?? false))
         .map((k) => k.substring(prefix.length))
         .toSet();
-    if (_prefs.getBool('$prefix$_commsWappId') ?? true) {
-      ids.add(_commsWappId);
-    } else {
-      ids.remove(_commsWappId);
+    for (final id in _commsWappIds) {
+      if (_prefs.getBool('$prefix$id') ?? true) {
+        ids.add(id);
+      } else {
+        ids.remove(id); // the user turned it off explicitly
+      }
     }
     return ids.toList();
   }

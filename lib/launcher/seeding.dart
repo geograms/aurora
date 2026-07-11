@@ -4,7 +4,15 @@ part of 'launcher.dart';
 
 /// Folder names always auto-installed on first run, on top of every
 /// `kind: "system"` wapp. Keeps the default set in one place.
-const _kDefaultSeedNames = {'install', 'chat', 'mp4player', 'circles', 'reticulum', 'social'};
+const _kDefaultSeedNames = {
+  'install',
+  'messages',
+  'chat',
+  'mp4player',
+  'circles',
+  'reticulum',
+  'social',
+};
 
 /// One-time migration for the wapp rename aprs -> chat (folder name 'aprs' was
 /// the comms wapp's install key). Renames the installed folder and moves its

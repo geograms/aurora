@@ -66,6 +66,18 @@ android {
                 signingConfigs.getByName("debug")
             }
         }
+        // Profile builds carry the Dart VM service (isolate stacks, CPU
+        // profiler, heap) with release-grade AOT performance — the only way to
+        // profile what users actually run. Sign them with the SAME key as
+        // release so a profile build can update an installed release in place,
+        // instead of forcing an uninstall that would wipe the device identity.
+        getByName("profile") {
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
+        }
     }
 }
 

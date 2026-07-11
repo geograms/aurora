@@ -4607,6 +4607,19 @@ class RnsService {
   /// Profile (kind-0 metadata) for an author pubkey: {name, pic, about, nip05,
   /// website, lud16, banner, npub}. Parsed by the engine; empty until it arrives
   /// (this call also triggers the fetch).
+  /// Transport-engine load: the inbound announce rate it is chewing through,
+  /// the size of the path table, and whether it has shed relaying (passive).
+  /// Parse/dedup/path/rebroadcast all happen BEFORE any signature check, so
+  /// the crypto counters say nothing about this — it needs its own numbers.
+  double get announceRatePerSec => _transport?.announceRatePerSec ?? 0;
+  int get pathCount => _transport?.pathCount ?? 0;
+  bool get passive => _transport?.passive ?? false;
+
+  /// Inbound relay-event rates from the NOSTR engine isolate (seen / stored /
+  /// reactions / dropped since its last push). The public-relay firehose is
+  /// that isolate's entire workload, so this is how its CPU gets attributed.
+  Map<String, int> get nostrEventStats => _nostrHub?.eventStats ?? const {};
+
   Map<String, String> nostrProfile(String pubHex) =>
       _nostrHub?.profile(pubHex) ?? const {};
 

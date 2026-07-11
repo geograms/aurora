@@ -15,9 +15,12 @@
 
 import 'dart:async';
 
+import 'package:reticulum/reticulum.dart' show RnsCrypto;
+
 import '../models/monitored_task.dart';
 import 'event_bus.dart';
 import 'log_service.dart';
+import 'reticulum/rns_service.dart';
 
 /// Singleton registry. Access via `TaskMonitorService()` or
 /// `TaskMonitorService.instance` — both return the same instance.
@@ -63,6 +66,35 @@ class TaskMonitorService {
   }
 
   void _logCpuSummary(Duration window) {
+    // Worker-isolate load. Monitored tasks only cover the MAIN isolate, but the
+    // crypto worker and the NOSTR relay engine can each burn a core — invisible
+    // to the UI (no stalls) and lethal to the battery. Attribute them by the
+    // work they actually did.
+    try {
+      final crypto = RnsCrypto.drainCryptoStats();
+      if (crypto.isNotEmpty) {
+        final s =
+            crypto.entries.map((e) => '${e.key}=${e.value}').join(' ');
+        LogService.instance.add('perf: crypto-worker $s');
+      }
+      final ev = RnsService.instance.nostrEventStats;
+      if (ev.isNotEmpty && ev.values.any((v) => v > 0)) {
+        final s = ev.entries.map((e) => '${e.key}=${e.value}').join(' ');
+        LogService.instance.add('perf: nostr-engine $s');
+      }
+      // The transport isolate's load is the raw announce flood it parses,
+      // dedups, path-tables and (as a transport node) rebroadcasts — all of
+      // which happen BEFORE any signature check, so a low verify count says
+      // nothing about it.
+      final rns = RnsService.instance;
+      if (rns.isUp) {
+        LogService.instance.add(
+          'perf: rns-transport announces/s=${rns.announceRatePerSec.toStringAsFixed(1)} '
+          'paths=${rns.pathCount} passive=${rns.passive}',
+        );
+      }
+    } catch (_) {/* telemetry must never break the app */}
+
     final rows = <({String id, int ms, int runs})>[];
     var totalMs = 0;
     for (final t in _tasks.values) {

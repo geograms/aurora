@@ -483,14 +483,17 @@ NodeSprite spriteOfRnsNode(
         labelMinPx: 2.5,
       );
     case 'hub':
+      // Anchors carry the "how big is this hub" number as their badge —
+      // that number IS the point of the orb, so it renders at any distance.
       return NodeSprite(
-        radius: 40,
+        radius: 56,
         coreColor: n.iface.color,
-        haloScale: 2.8,
+        haloScale: 2.6,
         ringColor: Colors.white70,
         secondaryColor: n.geogram ? geogramGreen : null,
         badge:
             n.members > 0 && n.id != expandedHubId ? '${n.members}' : null,
+        badgeMinPx: 2.5,
         label: n.label,
         labelMinPx: 2.5,
       );

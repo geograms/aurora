@@ -1379,13 +1379,22 @@ class RnsService {
     };
   }
 
-  /// EVERY other Reticulum device heard within the online window — NOT our
-  /// geogram devices and NOT hubs/relayers. Unlike [graphSnapshot] this is NOT
-  /// gated on a re-announce, so the hundreds a hub floods on connect are all
-  /// listed (that's what the wapp's "Devices" list wants). Newest-heard first.
+  /// Other Reticulum devices ALIVE right now — NOT our geogram devices and
+  /// NOT hubs/relayers. Gated like [graphSnapshot]'s isFresh: a hub dumps its
+  /// cached announce table at us on connect and stamps hundreds of long-dead
+  /// nodes "heard just now", so being recent is not enough — a generic remote
+  /// node must re-announce over a span to count as online. LAN neighbours are
+  /// never flood ghosts and count immediately. Newest-heard first.
   List<Map<String, dynamic>> observedDevices() {
     sweepObserved();
     final nowMs = DateTime.now().millisecondsSinceEpoch;
+    bool alive(_ObservedNode n) {
+      if (nowMs - n.lastSeenMs > _onlineWindowMs) return false; // gone quiet
+      if (n.via == 'lan') return true; // our LAN — real
+      return n.heardCount >= 2 &&
+          n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
+    }
+
     final relayByHex = <String, RelayEntry>{};
     for (final e in _relayDir.entries()) {
       relayByHex[e.idHex] = e;
@@ -1399,7 +1408,7 @@ class RnsService {
     }
     final out = <Map<String, dynamic>>[];
     for (final n in _observed.values) {
-      if (nowMs - n.lastSeenMs > _onlineWindowMs) continue; // recent only
+      if (!alive(n)) continue; // live now, not a connect-flood ghost
       if (hubIds.contains(n.identityHex)) continue; // it's a hub
       if (_isGeogramNode(n)) continue; // geogram → its own list
       out.add(_nodeJson(n, 'leaf', relayByHex));

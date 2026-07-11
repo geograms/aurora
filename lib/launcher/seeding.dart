@@ -4,7 +4,7 @@ part of 'launcher.dart';
 
 /// Folder names always auto-installed on first run, on top of every
 /// `kind: "system"` wapp. Keeps the default set in one place.
-const _kDefaultSeedNames = {'install', 'chat', 'mp4player', 'circles', 'reticulum', 'nostr'};
+const _kDefaultSeedNames = {'install', 'chat', 'mp4player', 'circles', 'reticulum', 'social'};
 
 /// One-time migration for the wapp rename aprs -> chat (folder name 'aprs' was
 /// the comms wapp's install key). Renames the installed folder and moves its
@@ -41,6 +41,72 @@ Future<void> migrateAprsToChat() async {
     debugPrint('migrateAprsToChat data: $e');
   }
   await prefs.migrateWappAutostart('aprs', 'chat');
+}
+
+/// One-time migration for the wapp rename nostr -> social (folder name 'nostr'
+/// was the social wapp's install key). Same shape as [migrateAprsToChat]:
+/// renames the installed program dir + data dir + autostart pref. Additionally
+/// renames the entry inside the two offered-sets (.seed_offered.json and
+/// .seeded.json) — without that, upgradeBundledWapps would treat the renamed
+/// social.wapp bundle as a first-time addition and reinstall it even for a
+/// user who had deliberately uninstalled the NOSTR wapp. Idempotent.
+Future<void> migrateNostrToSocial() async {
+  if (ProfileService.instance.activeProfile == null) return;
+  final prefs = await PreferencesService.instance();
+  final installed = installedAppsStorage();
+  // Program dir (wapps/nostr -> wapps/social): the extracted .wapp package.
+  try {
+    if (await installed.directoryExists('nostr') &&
+        !await installed.directoryExists('social')) {
+      await installed.renameDirectory('nostr', 'social');
+      debugPrint('migrateNostrToSocial: program nostr -> social');
+    }
+  } catch (e) {
+    debugPrint('migrateNostrToSocial program: $e');
+  }
+  // Data dir (data/nostr -> data/social): feed archive + settings, keyed by
+  // wapp name. Honours the user's wappDataDir override via wappsDataStorage.
+  try {
+    final data = wappsDataStorage(prefs);
+    if (await data.directoryExists('nostr') &&
+        !await data.directoryExists('social')) {
+      await data.renameDirectory('nostr', 'social');
+      debugPrint('migrateNostrToSocial: data nostr -> social');
+    }
+  } catch (e) {
+    debugPrint('migrateNostrToSocial data: $e');
+  }
+  await prefs.migrateWappAutostart('nostr', 'social');
+  // Offered-sets: carry the "was offered" record across the rename so an
+  // uninstall of the old NOSTR wapp keeps sticking for the social bundle.
+  try {
+    final j = jsonDecode(await installed.readString('.seed_offered.json') ?? '');
+    if (j is Map && j['offered'] is List) {
+      final offered = (j['offered'] as List).whereType<String>().toSet();
+      if (offered.remove('nostr')) {
+        offered.add('social');
+        await installed
+            .writeJson('.seed_offered.json', {'offered': offered.toList()});
+        debugPrint('migrateNostrToSocial: .seed_offered nostr -> social');
+      }
+    }
+  } catch (_) {}
+  try {
+    final profileRoot = activeProfileRoot();
+    final marker = await profileRoot.readJson('.seeded.json');
+    final offeredList = marker?['offered'];
+    if (marker != null && offeredList is List) {
+      final offered = offeredList.map((e) => e.toString()).toSet();
+      if (offered.remove('nostr')) {
+        offered.add('social');
+        await profileRoot
+            .writeJson('.seeded.json', {...marker, 'offered': offered.toList()});
+        debugPrint('migrateNostrToSocial: .seeded offered nostr -> social');
+      }
+    }
+  } catch (e) {
+    debugPrint('migrateNostrToSocial seeded marker: $e');
+  }
 }
 
 /// First-run bootstrap, run as a boot task BEFORE the UI so the launcher

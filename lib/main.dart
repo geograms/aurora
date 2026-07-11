@@ -182,6 +182,18 @@ Future<void> main() async {
     init: migrateAprsToChat,
   );
   BootOrchestrator.instance.register(
+    id: 'migrate-nostr-to-social',
+    name: 'Migrate nostr wapp to social',
+    description:
+        'One-time rename of the social wapp folder nostr->social (data dir, '
+        'autostart preference and offered-set markers included) so existing '
+        'profiles transition to the renamed "Social" wapp with history intact. '
+        'Idempotent; runs before seeding + bundled-wapp upgrade so the renamed '
+        'install picks up the new bundle.',
+    mode: BootStart.sequential,
+    init: migrateNostrToSocial,
+  );
+  BootOrchestrator.instance.register(
     id: 'seed-default-wapps',
     name: 'Seed default wapps',
     description:

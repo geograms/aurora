@@ -13,15 +13,15 @@ through how the text/addressee fields are filled in:
 - group messages (bulletins) with **local vs global** scope,
 - message **threads** (replies),
 - **reactions** ("likes"),
-- **public‑key announcements** (callsign → key, for later encrypted DMs),
+- **public‑key announcements** (callsign → key, for signature verification),
 - **geo‑chat** (area broadcast text).
 
 There is **no new packet type, no binary framing, no handshake**. If you can
 send and receive APRS messages/bulletins/position reports, you can speak APRX.
 
 This document is the wire contract so other apps can interoperate. It describes
-two transports — APRS‑IS (TNC2) and APRS‑over‑BLE — but the *semantics* are the
-same on both.
+the payload conventions for APRS/TNC2 packets and APRS‑over‑BLE; the
+*semantics* are the same wherever the same text fields are carried.
 
 ---
 
@@ -33,37 +33,37 @@ same on both.
 2. **Stateless & derivable.** A message's identity is *computed from its own
    content* (§3), so any receiver derives the same id without a registry,
    sequence negotiation, or extra fields. Threads/likes reference that id.
-3. **Transport‑agnostic.** The same conventions ride APRS‑IS and BLE. The only
-   difference is framing/size limits.
+3. **Transport‑agnostic.** The same conventions ride normal APRS frames and BLE.
+   The only difference is framing/size limits.
 4. **Scope is a receiver concept.** "Local" vs "global" is decided by *how you
    filter*, not by anything on the wire (§7). The transmitted bytes are
    identical.
 
 ### Limits
 
-| | APRS‑IS (TNC2) | BLE compact advert |
+| | APRS/TNC2 | BLE compact advert |
 |---|---|---|
 | Message body | **67** chars (`APRS_MAX_MSG_LEN`) | keep whole frame ≤ ~27 bytes |
 | Bulletin body | 67 chars/line, up to **10 lines** (BLN0–BLN9) | as above |
 | Position comment | 107 chars | as above |
 
-Anything longer is split (§5) on APRS‑IS, or sent over the chunked/GATT BLE
+Anything longer is split (§5) in APRS/TNC2 frames, or sent over the chunked/GATT BLE
 parcel transport on capable hardware (see `BLE_PROTOCOL.md`).
 
 ---
 
 ## 2. Transports
 
-### 2.1 APRS‑IS / TNC2
+### 2.1 APRS / TNC2
 
-Standard APRS over an APRS‑IS connection. Frames are normal TNC2 lines. Login
-uses a computed passcode; the server‑side filter is `r/<lat>/<lon>/<km>`
-optionally extended with `g/...` terms (§7).
+Standard APRS packets represented as TNC2 lines. Frames use normal APRS
+message, bulletin, and position payloads. Optional APRS paths are omitted in the
+examples for brevity.
 
-- **Direct message:** `FROM>APRS,TCPIP*::ADDRESSEE :text{seq`
+- **Direct message:** `FROM>APRS::ADDRESSEE :text{seq`
   - `ADDRESSEE` is the callsign, **uppercased and space‑padded to 9 chars**.
   - `{seq` is an incrementing message number (used for ack + multi‑line merge).
-- **Bulletin (group):** `FROM>APRS,TCPIP*::BLN<id><GROUP>:text`
+- **Bulletin (group):** `FROM>APRS::BLN<id><GROUP>:text`
   - addressee = `BLN` + one line‑id char + group name, **padded to 9 chars**.
   - bulletins carry **no `{seq`** and are never acked.
 - **Position:** `FROM>APRS,<path>:!<DDMM.mmN><symtable><DDDMM.mmW><symcode><comment>`
@@ -85,7 +85,7 @@ separated by the unit‑separator byte `0x1F`:
 
 The **payload semantics below (threads, likes, pubkey, geo‑chat) apply
 identically to the BLE `text` field.** See `BLE_PROTOCOL.md` for the byte‑level
-advert format, dedup, and BLE↔APRS‑IS relaying.
+advert format and dedup.
 
 ---
 
@@ -133,7 +133,7 @@ Plain APRS messages addressed to a callsign. No APRX additions beyond §5
 (multi‑line). Threads/likes/scope do **not** apply to 1:1.
 
 ```
-X10EGL>APRS,TCPIP*::CT1ABC   :see you at the repeater{12
+X10EGL>APRS::CT1ABC   :see you at the repeater{12
 ```
 
 ---
@@ -156,9 +156,9 @@ are rejoined with a single space.
   (`BLN0`–`BLN9`). Receiver orders by line id. (`aprs_send_bulletin_multi`.)
 
 ```
-X10EGL>APRS,TCPIP*::BLN0NET  :Weekly net tonight 2000Z on the
-X10EGL>APRS,TCPIP*::BLN1NET  :club repeater — all welcome, bring
-X10EGL>APRS,TCPIP*::BLN2NET  :a friend.
+X10EGL>APRS::BLN0NET  :Weekly net tonight 2000Z on the
+X10EGL>APRS::BLN1NET  :club repeater — all welcome, bring
+X10EGL>APRS::BLN2NET  :a friend.
 ```
 
 ---
@@ -180,7 +180,7 @@ The frame's **`from` field is the author's callsign**. Bulletins are broadcast:
 anyone whose filter selects them receives them.
 
 ```
-X10EGL>APRS,TCPIP*::BLN0NEWS :repeater PI3UTR back on air
+X10EGL>APRS::BLN0NEWS :repeater PI3UTR back on air
 ```
 
 Over BLE the same message is `from 0x1F #NEWS 0x1F repeater PI3UTR back on air`.
@@ -197,20 +197,12 @@ Over BLE the same message is `from 0x1F #NEWS 0x1F repeater PI3UTR back on air`.
 
 **Scope is not on the wire.** The transmitted bulletin for `NEWS` is the same
 whether the sender thinks of it as local or global. Scope is how the *receiver*
-chooses to pull the group:
+chooses to pull or filter the group:
 
-- **Local** — rely on the standard area filter `r/<lat>/<lon>/<km>`. You see a
-  group's bulletins only from senders inside your radius. (APRS‑IS positions the
-  sender; BLE is inherently in‑range.)
-- **Global** — additionally ask APRS‑IS for the group worldwide with a bulletin
-  filter term. Geogram adds a single catch‑all **`g/BLN*`** when any global group
-  is subscribed, then files only the groups the user actually joined.
-
-> **APRS‑IS `g/` gotcha (verified live against aprsc):** `g/` has **no
-> mid‑string wildcard**. `g/BLN?NEWS` and `g/BLN*NEWS` both **miss**. Only an
-> exact addressee (`g/BLN0NEWS`) or a **trailing** wildcard (`g/BLN*`) match.
-> Because worldwide bulletin volume is tiny, the `g/BLN*` catch‑all + local
-> filtering is the practical approach.
+- **Local** — filter by position/range. You see a group's bulletins only from
+  senders inside your chosen radius; BLE is inherently in range.
+- **Global** — subscribe without the local range constraint, then file only the
+  groups the user actually joined. APRX adds no global marker to the wire.
 
 A client may represent the two views as two subscriptions (e.g. `#NEWS` local,
 `#NEWS*` global). That `*` is a **local UI marker only** — it is stripped before
@@ -231,7 +223,7 @@ A reply is an ordinary group message whose **body begins with a thread marker**:
 - one space, then the reply text.
 
 ```
-X1BOB>APRS,TCPIP*::BLN0TEST :+b9fb agreed, see you there
+X1BOB>APRS::BLN0TEST :+b9fb agreed, see you there
 ```
 
 Receiver behaviour:
@@ -259,7 +251,7 @@ A like is an ordinary group message whose **entire body** is:
 - the verb is exactly `like` or `unlike`.
 
 ```
-X1ZED>APRS,TCPIP*::BLN0TEST :b9fb:like
+X1ZED>APRS::BLN0TEST :b9fb:like
 ```
 
 Receiver behaviour:
@@ -270,40 +262,40 @@ Receiver behaviour:
 - The deliberately human‑readable form (no special byte) lets **any** APRS
   client like a message by sending e.g. `b9fb:like` to the group.
 
-Likes are group‑only and ride the same transports (APRS‑IS bulletin / BLE
+Likes are group‑only and ride the same payload forms (APRS bulletin / BLE
 `#GRP`).
 
 ---
 
 ## 10. Public‑key announcement
 
-Every node **periodically announces its Nostr public key on APRS‑IS** — this is
-**on by default**. A station advertises its public key so peers can build a
-**callsign → public‑key** map and later send it **encrypted** messages (and verify
-its **signed** ones, §14). It is the public‑key *beacon*; in the wapp it is
+Every node **periodically announces its Nostr public key** — this is **on by
+default**. A station advertises its public key so peers can build a
+**callsign → public‑key** map and verify its **signed** messages (§14). It is
+the public‑key *beacon*; in the wapp it is
 `pkbeacon_send` (`wapps/aprs/main.c`), gated by the `g_pubkey_beacon` flag
 (default on, persisted in KV `pkbeacon`, toggled by "Broadcast my public key" in
 Settings).
 
-- Transport: a **bulletin to the reserved group `NOSTR`** (§6) on **APRS‑IS**,
-  and the same over BLE (`#NOSTR`) — whichever transports are up. It fires only
-  once a profile key exists.
+- Transport: a **bulletin to the reserved group `NOSTR`** (§6), and the same
+  over BLE (`#NOSTR`) — whichever transports are up. It fires only once a
+  profile key exists.
 - **Body = the 32‑byte public key, base64url‑encoded, no padding = 43 chars.**
   (The key is a Nostr/`secp256k1` x‑only public key — the 32 bytes an `npub`
   bech32 string encodes. base64url is used instead of the 63‑char `npub` so the
   record fits one 67‑char APRS message and a small BLE advert.)
 
 ```
-X10EGL>APRS,TCPIP*::BLN0NOSTR:flH3-_InWKh9SjUYCetLr5rBgozalyqyTiJA1fH4kHI
+X10EGL>APRS::BLN0NOSTR:flH3-_InWKh9SjUYCetLr5rBgozalyqyTiJA1fH4kHI
 ```
 
 Mapping for a receiver:
 - `callsign` = frame `from` (here `X10EGL`),
-- `pubkey`  = `base64url_decode(body)` → 32 raw bytes (use directly for NIP‑04 /
-  NIP‑44 encryption, or re‑encode to `npub` for display).
+- `pubkey`  = `base64url_decode(body)` → 32 raw bytes (use directly for
+  signature verification, or re‑encode to `npub` for display).
 
 Recommended cadence: low (the key rarely changes) — Geogram sends one **every
-hour**, on whichever transports are up (APRS‑IS and/or BLE). A receiver should
+hour**, on whichever transports are up. A receiver should
 treat repeats as refreshes of the same record. Geogram only **persists** the keys
 of callsigns it actually interacts with (chats with or follows): a NOSTR beacon
 from a stranger is parked in memory and promoted to the stored map the moment you
@@ -321,7 +313,7 @@ Free‑text "anyone around?" chatter tied to a location, carried as the **commen
 of a position report**, prefixed with `>>`:
 
 ```
-X10EGL>APRS,TCPIP*:!3843.34N/00908.36W>>>net starting now
+X10EGL>APRS:!3843.34N/00908.36W>>>net starting now
 ```
 
 (`>` is the symbol code; `>>` then begins the comment.) Long geo‑chat is sent as
@@ -335,21 +327,20 @@ Receivers show these on a location‑scoped "live" view rather than as a
 
 ## 12. Worked end‑to‑end example
 
-A small `TEST` group thread with a like and the author's key, as seen on
-APRS‑IS:
+A small `TEST` group thread with a like and the author's key, as TNC2 lines:
 
 ```
 # 1. original post  (mid = sha1("X1TX|hi there")[0:4] = … )
-X1TX>APRS,TCPIP*::BLN0TEST :hi there
+X1TX>APRS::BLN0TEST :hi there
 
 # 2. a reply to it  (parent = <mid of #1>; this reply has its own mid)
-X1BOB>APRS,TCPIP*::BLN0TEST :+<mid1> agreed
+X1BOB>APRS::BLN0TEST :+<mid1> agreed
 
 # 3. someone likes the original (counts once per callsign)
-X1ZED>APRS,TCPIP*::BLN0TEST :<mid1>:like
+X1ZED>APRS::BLN0TEST :<mid1>:like
 
-# 4. X1TX advertises its public key for encrypted replies
-X1TX>APRS,TCPIP*::BLN0NOSTR:flH3-_InWKh9SjUYCetLr5rBgozalyqyTiJA1fH4kHI
+# 4. X1TX advertises its public key for signature verification
+X1TX>APRS::BLN0NOSTR:flH3-_InWKh9SjUYCetLr5rBgozalyqyTiJA1fH4kHI
 ```
 
 A plain APRS client renders #1–#3 as readable bulletin text and #4 as a 43‑char
@@ -375,7 +366,7 @@ To receive APRX:
 8. Otherwise it's a normal group message.
 9. Position comments beginning `>>` → geo‑chat.
 10. Any word matching `file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}` → an **embedded
-    media reference** (§16): classify it by its extension and look the hash up
+    media reference** (§15): classify it by its extension and look the hash up
     in the local media archive.
 
 To send APRX: emit the same forms. Keep each frame within the limits in §1;
@@ -448,8 +439,8 @@ line** — so a signed message is the body line(s) followed by a last line that 
 just `~<sig>`:
 
 ```
-X10EGL>APRS,TCPIP*::BLN0TEST :hi there            (body, line 0)
-X10EGL>APRS,TCPIP*::BLN1TEST :~<60-char signature> (signature, last line)
+X10EGL>APRS::BLN0TEST :hi there            (body, line 0)
+X10EGL>APRS::BLN1TEST :~<60-char signature> (signature, last line)
 ```
 
 For a direct message the parts are separate messages with consecutive `{seq`,
@@ -499,81 +490,7 @@ sig)` to verify. A client SHOULD also check the callsign matches the key
 
 ---
 
-## 15. Encrypted 1:1 messages
-
-Status: **implemented** (APRS wapp ≥ 0.2.28). A direct message to a callsign
-whose public key is in the keys database (§10) is end‑to‑end encrypted so only
-that station can read it. Group messages are never encrypted.
-
-> **⚠ Legal restriction — no encryption over licensed RF.** Amateur‑radio
-> regulations (ITU Radio Regulation 25.2A and national rules such as FCC
-> Part 97.113(a)(4)) forbid transmissions that obscure their meaning on
-> licensed amateur frequencies. An `ENC1:` message must therefore **never be
-> transmitted — or be forwardable — over licensed RF**: it may travel only on
-> transports where encryption is lawful (e.g. Bluetooth LE,
-> Reticulum). Any path that could put the frame on the air — an RF TNC, a
-> digipeater, or an iGate gating traffic IS→RF — is off‑limits for encrypted
-> bodies on frequencies requiring a license; implementations must suppress
-> encryption (or refuse to send) when such a path cannot be ruled out, and
-> gateways must drop `ENC1:` frames rather than forward them onto RF.
-> Operators remain responsible for compliance with the regulations of their
-> own jurisdiction.
-
-### 15.1 Scheme
-
-ECDH over secp256k1 + AES‑256‑CBC (NIP‑04‑style), using the same key pair behind
-the npub/callsign:
-
-```
-shared = X coordinate of (my_private_scalar × lift_x(their_pubkey))   // 32 bytes
-iv     = 16 random bytes
-ct     = AES-256-CBC(key = shared, iv, PKCS7(plaintext))
-blob   = iv ‖ ct
-```
-
-The X coordinate is parity‑independent, so `ecdh(a, B) == ecdh(b, A)` — sender
-and recipient derive the same key, and the sender can also decrypt its own copy
-(for the local echo). Confidentiality only; **the ciphertext is always signed
-(§14)** so authenticity + integrity (and AES‑CBC malleability) are covered by the
-signature, not by the cipher.
-
-### 15.2 On‑air format
-
-```
-ENC1:<base64url(iv ‖ ct)>  ~<base85 signature>
-```
-
-`ENC1:` marks an encrypted body; the rest is the base64url blob; the message is
-then signed (§14) and word‑split into multi‑line APRS (§5). Because the base64url
-body has no spaces, multi‑line reassembly inserts artifact spaces into it — the
-receiver **strips all spaces after `ENC1:`** before verifying the signature and
-decrypting (the signature is computed over the space‑free `ENC1:<base64>`).
-
-### 15.3 Send / receive
-
-- **Send** (1:1 only): if the recipient's pubkey is known → encrypt to it,
-  prefix `ENC1:`, sign, transmit. Otherwise send plaintext (e.g. to non‑APRX
-  stations). Encryption is automatic when a key is on file.
-- **Receive**: detect `ENC1:`, canonicalise (strip reassembly spaces), verify the
-  signature with the sender's key, then decrypt with the **peer's** key (the
-  sender for incoming; the recipient for our own echo) + our private key. Show
-  the plaintext with a lock badge; if the peer's key is unknown or decryption
-  fails, show `[encrypted - no key]` / `[encrypted - cannot decrypt]`.
-
-### 15.4 Notes
-
-- The private key never leaves the host (HAL `hal_encrypt` / `hal_decrypt`).
-- Local message history is stored decrypted (the device owner reads their own
-  chats); only the wire is encrypted.
-- A station learns peers' keys passively from their §10 `NOSTR` beacons, so
-  encryption “just works” once two APRX stations have heard each other's key.
-- Encryption is a **transport‑gated** feature: it applies only on encryption‑
-  legal transports (APRS‑IS, BLE, Reticulum). See the legal restriction at the
-  top of this section — `ENC1:` bodies must never reach licensed RF.
-
----
-
-## 16. Embedded media references
+## 15. Embedded media references
 
 Status: **specified** (token grammar + local archive implemented host‑side;
 sending/rendering in the wapp is future work).
@@ -604,11 +521,11 @@ or a generic file attachment.
 Example (token embedded mid‑sentence, then as the entire body):
 
 ```
-X1ABCD>APRS,TCPIP*::BLN0FEED :sunset from the hill file:qL0gJ9smPmKBcGGNUx0a2RkYJyhYzv2ZUKKcUemZ3-A.jpg
-X1ABCD>APRS,TCPIP*::X1WXYZ   :file:qL0gJ9smPmKBcGGNUx0a2RkYJyhYzv2ZUKKcUemZ3-A.pdf{42
+X1ABCD>APRS::BLN0FEED :sunset from the hill file:qL0gJ9smPmKBcGGNUx0a2RkYJyhYzv2ZUKKcUemZ3-A.jpg
+X1ABCD>APRS::X1WXYZ   :file:qL0gJ9smPmKBcGGNUx0a2RkYJyhYzv2ZUKKcUemZ3-A.pdf{42
 ```
 
-### 16.1 Grammar
+### 15.1 Grammar
 
 ```
 token   = "file:" hash "." ext
@@ -624,16 +541,16 @@ Receiver extraction regex: `file:[A-Za-z0-9_-]{43}\.[a-z0-9]{1,18}`
   sentence) falls naturally outside the match.
 - A message may contain **multiple tokens**, separated by ordinary text.
 - Tokens compose with everything else in this spec: they are plain body text,
-  so threading (§8), signing (§14) and encryption (§15) apply unchanged.
+  so threading (§8) and signing (§14) apply unchanged.
 
-### 16.2 Length invariant
+### 15.2 Length invariant
 
 `5 ("file:") + 43 (hash) + 1 (".") + 18 (max ext) = 67` — exactly the APRS
 message‑text limit (§1). A token therefore always fits on one line: the §5
 word‑splitter never breaks words, so even a worst‑case token travels intact
 (real extensions are 2–4 chars, ≈ 52 chars total).
 
-### 16.3 Display classification
+### 15.3 Display classification
 
 | Kind    | Extensions                                                          |
 |---------|---------------------------------------------------------------------|
@@ -645,7 +562,7 @@ word‑splitter never breaks words, so even a worst‑case token travels intact
 `gif` is classified as video — it is presented as a looping clip. Unknown
 extensions degrade gracefully to a generic file attachment.
 
-### 16.4 Local media archive
+### 15.4 Local media archive
 
 Each station keeps a **content‑addressed local archive** mapping
 `sha256 → bytes`: when a token arrives and the hash is in the archive, the
@@ -670,7 +587,7 @@ many messages, senders or apps reference it. Per entry the archive keeps:
 The reference implementation is a single SQLite database (`media.sqlite3`,
 WAL‑journalled) shared by all wapps on the device.
 
-### 16.5 Out of scope (for now)
+### 15.5 Out of scope (for now)
 
 **How the bytes travel is deliberately not specified here.** A token only
 *identifies* media; fetching the content for an unknown hash (peer query,
@@ -681,10 +598,9 @@ also exactly what a non‑APRX client sees: retro‑compatible by construction.
 ---
 
 *This spec documents the Geogram APRS wapp implementation (`wapps/aprs`). The
-APRS-IS framing helpers live in `aprs.c`/`aprs.h`; the BLE compact form in
-`BLE_PROTOCOL.md`; the host-side crypto in `geogram/lib/util/aprx_sign.dart`
-(exposed via `hal_identity_sign`/`hal_verify`/`hal_encrypt`/`hal_decrypt`);
-the media token parser in `geogram/lib/util/media_ref.dart` and the media
-archive in `geogram/lib/util/media_archive.dart`. Signed messages (§14) ship
-in wapp 0.2.18; encrypted 1:1 (§15) in 0.2.28; media references (§16) are
-specified as of 0.2.35.*
+TNC2 framing helpers live in `aprs.c`/`aprs.h`; the BLE compact form in
+`BLE_PROTOCOL.md`; the host-side signing in `geogram/lib/util/aprx_sign.dart`
+(exposed via `hal_identity_sign`/`hal_verify`); the media token parser in
+`geogram/lib/util/media_ref.dart` and the media archive in
+`geogram/lib/util/media_archive.dart`. Signed messages (§14) ship in wapp
+0.2.18; media references (§15) are specified as of 0.2.35.*

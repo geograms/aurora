@@ -398,22 +398,37 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     );
   }
 
-  // Tap on an orb: a hub with hidden peers toggles its cluster (and lists its
-  // devices, as before); everything else opens the detail panel.
+  // Tap on an orb. A hub with hidden peers expands in place — its members
+  // burst out of the orb and the camera swings to face the cluster; a second
+  // tap opens its detail panel (device list lives there), and the recenter
+  // button folds the cluster home. Everything else opens the detail panel.
   void _onNodeTap(int id) {
     if (id < 1 || id > _scene.renderNodes.length) return;
     _userNavigated = true;
     final node = _scene.renderNodes[id - 1].data;
     if (node.effectiveKind == 'hub' && node.members > 0) {
-      setState(() {
-        _expandedHubId = _expandedHubId == node.id ? null : node.id;
-        _selectedId = node.id;
-        _panelHubId = node.id;
-        _panel = _Panel.hubDevices;
-      });
-      _scene.selectNode(id);
-      _rebuildScene();
-      if (_expandedHubId != null) _frameCluster(node.id);
+      if (_expandedHubId != node.id) {
+        // First tap: the cluster bursts out of the orb, camera swings to
+        // face it. The graph is the answer — no panel yet.
+        setState(() {
+          _expandedHubId = node.id;
+          _selectedId = node.id;
+          if (_panel == _Panel.detail || _panel == _Panel.hubDevices) {
+            _panel = _Panel.none;
+          }
+        });
+        _scene.selectNode(id);
+        _rebuildScene();
+        _frameCluster(node.id);
+      } else {
+        // Second tap on the open hub: its detail panel (with the device
+        // list). The recenter button folds the cluster home.
+        _scene.selectNode(id);
+        setState(() {
+          _selectedId = node.id;
+          _panel = _Panel.detail;
+        });
+      }
       return;
     }
     _scene.selectNode(id);
@@ -500,6 +515,14 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     return ColoredBox(
       color: _gBg,
       child: Stack(children: [
+        // The space behind the mesh: a static starfield and a faint polar
+        // grid, painted once into a picture and replayed — no per-frame cost.
+        const Positioned.fill(
+          child: RepaintBoundary(
+            child: CustomPaint(
+                painter: _GraphBackdropPainter(), size: Size.infinite),
+          ),
+        ),
         Positioned.fill(
           child: Graph3DView<RnsGraphNode>.sprites(
             controller: _scene,
@@ -2029,6 +2052,100 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
       ),
     ]);
   }
+}
+
+// ── Backdrop ───────────────────────────────────────────────────────────────
+// Static starfield + faint polar grid (ported from graph3d's mesh_demo).
+class _GraphBackdropPainter extends CustomPainter {
+  const _GraphBackdropPainter();
+
+  static ui.Picture? _picture;
+  static Size _pictureSize = Size.zero;
+
+  static ui.Picture _record(Size size) {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // Deep-space wash: barely-blue at the top fading to black.
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()
+        ..shader = ui.Gradient.linear(
+          Offset(size.width / 2, 0),
+          Offset(size.width / 2, size.height),
+          const <Color>[Color(0xFF06141B), Color(0xFF020408)],
+        ),
+    );
+
+    // Stars: three brightness tiers, deterministic.
+    var state = 0x9E3779B9;
+    double next() {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return (state & 0xFFFFFF) / 0xFFFFFF;
+    }
+
+    final star = Paint();
+    for (var i = 0; i < 260; i++) {
+      final x = next() * size.width;
+      final y = next() * size.height;
+      final tier = next();
+      if (tier > 0.92) {
+        star.color = const Color(0xB0CFF6FF);
+        canvas.drawCircle(Offset(x, y), 1.4, star);
+      } else if (tier > 0.7) {
+        star.color = const Color(0x66A9D8E6);
+        canvas.drawCircle(Offset(x, y), 1.0, star);
+      } else {
+        star.color = const Color(0x3370A5B8);
+        canvas.drawCircle(Offset(x, y), 0.7, star);
+      }
+    }
+
+    // A faint polar grid low in the frame: the "floor" of the scene.
+    final grid = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = const Color(0x1230C8D8);
+    final centre = Offset(size.width / 2, size.height * 0.58);
+    for (var ring = 1; ring <= 6; ring++) {
+      canvas.drawOval(
+        Rect.fromCenter(
+          center: centre,
+          width: size.width * 0.28 * ring,
+          height: size.width * 0.1 * ring,
+        ),
+        grid,
+      );
+    }
+    for (var spoke = 0; spoke < 12; spoke++) {
+      final angle = spoke * pi / 6;
+      canvas.drawLine(
+        centre,
+        centre +
+            Offset(
+              cos(angle) * size.width * 0.9,
+              sin(angle) * size.width * 0.32,
+            ),
+        grid,
+      );
+    }
+
+    return recorder.endRecording();
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (_picture == null || _pictureSize != size) {
+      _picture = _record(size);
+      _pictureSize = size;
+    }
+    canvas.drawPicture(_picture!);
+  }
+
+  @override
+  bool shouldRepaint(_GraphBackdropPainter oldDelegate) => false;
 }
 
 // ── _WappPageState integration ─────────────────────────────────────────────

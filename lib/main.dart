@@ -261,6 +261,12 @@ Future<void> main() async {
     );
   }
 
+  // Main-isolate CPU attribution: one line a minute ranking which monitored
+  // tasks (wapp ticks, service loops) actually burned the main isolate. This
+  // is what tells us — with evidence, not guesswork — which workloads are
+  // worth moving into a worker isolate, and proves the move afterwards.
+  TaskMonitorService.instance.startCpuSummary();
+
   // Power governor: pause non-critical background tasks on low battery, resume
   // when power recovers (complements the task monitor's CPU-budget governor).
   unawaited(PowerGovernor.instance.start());

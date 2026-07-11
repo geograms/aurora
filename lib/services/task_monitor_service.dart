@@ -47,6 +47,44 @@ class TaskMonitorService {
   /// Avoids reacting to a single slow tick (GC pause, cold cache).
   int overrunWindow = 3;
 
+  // ── Main-isolate CPU attribution ───────────────────────────────────
+  //
+  // Every monitored task runs on the main isolate, so their combined CPU IS
+  // the app's main-isolate load. A 60s summary of who burned it turns "the UI
+  // feels heavy" into a ranked list — the evidence that decides what is worth
+  // moving to a worker isolate (and proves it afterwards). Cheap: one log line
+  // per minute, computed from counters the monitor already keeps.
+  Timer? _cpuSummaryTimer;
+  final Map<String, int> _cpuAtLastSummary = {};
+
+  void startCpuSummary({Duration every = const Duration(seconds: 60)}) {
+    _cpuSummaryTimer?.cancel();
+    _cpuSummaryTimer = Timer.periodic(every, (_) => _logCpuSummary(every));
+  }
+
+  void _logCpuSummary(Duration window) {
+    final rows = <({String id, int ms, int runs})>[];
+    var totalMs = 0;
+    for (final t in _tasks.values) {
+      final prev = _cpuAtLastSummary[t.id] ?? 0;
+      final delta = t.totalCpuMs - prev;
+      _cpuAtLastSummary[t.id] = t.totalCpuMs;
+      if (delta <= 0) continue;
+      totalMs += delta;
+      rows.add((id: t.id, ms: delta, runs: t.runCount));
+    }
+    if (rows.isEmpty) return;
+    rows.sort((a, b) => b.ms.compareTo(a.ms));
+    final windowMs = window.inMilliseconds;
+    final pct = (totalMs * 100 / windowMs).toStringAsFixed(1);
+    final top = rows
+        .take(5)
+        .map((r) => '${r.id}=${r.ms}ms(${(r.ms * 100 / windowMs).toStringAsFixed(1)}%)')
+        .join(' ');
+    LogService.instance
+        .add('perf: cpu tasks total ${totalMs}ms ($pct% of main) — $top');
+  }
+
   final StreamController<TaskStateChangedEvent> _stateChanges =
       StreamController<TaskStateChangedEvent>.broadcast();
 

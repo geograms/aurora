@@ -1,14 +1,19 @@
 // Scene assembly for the reticulum wapp's 3D network graph: turns the wapp's
 // `ui.graph.set` {nodes,edges} snapshot into a graph3d scene — node parsing,
-// interface classification, orb styling, ego layout. Pure data + math, no
-// widgets, so it is unit-testable and keeps wapp_graph.dart (a part of
-// wapp_page.dart) free of extra imports.
+// interface classification, uplink grouping, orb styling, ego layout. Pure
+// data + math, no widgets, so it is unit-testable and keeps wapp_graph.dart
+// (a part of wapp_page.dart) free of extra imports.
 //
-// The topology mirrors what one Reticulum vantage node can actually know:
-// self at the centre, direct neighbours on an inner shell, the hubs it routes
-// through on an outer shell, and each hub's heard peers behind it. Relayed
-// leaves stay aggregated behind their hub's badge until it is expanded (one
-// cluster at a time keeps hundreds-of-node snapshots bounded).
+// The point of the whole view: show WHAT is connected to this device and
+// FROM WHERE. The snapshot alone can't say — a hub floods hundreds of cached
+// announces at us and most arrive with no relayer (the transport path table
+// only records a nextHop for destinations it routed), so naively every
+// remote node looks like a direct neighbour and the graph collapses into an
+// unreadable starburst. What every announce DOES carry is `via`: the local
+// connection it arrived through ('tcp:host:port', 'lan', 'ble'). So the view
+// groups by uplink: the hops==1 node heard on a tcp connection anchors it,
+// everything else heard on that connection clusters behind the anchor, and
+// the overview is self + one orb per uplink + true local peers.
 
 import 'dart:math' as math;
 import 'dart:ui';
@@ -37,7 +42,7 @@ enum RnsIface {
 }
 
 /// Classify a node's `via` tag (the local interface its announce arrived on:
-/// 'lan', 'ble', 'ble5', 'tcp:host:port', 'wfd…', …). An empty via — the
+/// 'lan', 'ble', 'ble5', 'tcp:host:port', 'wfd…'). An empty via — the
 /// synthesized self node or a hub we route through but never heard announce —
 /// falls back to its relayer's network, else the internet (bootstrap hubs are
 /// TCP endpoints today).
@@ -59,7 +64,7 @@ RnsIface classifyVia(String via, {RnsIface? relayerIface}) {
 class RnsGraphNode {
   final String id;
   final String label;
-  final String kind; // self | hub | leaf
+  final String kind; // self | hub | leaf (as the snapshot saw it)
   final bool geogram;
   final String relayer;
   final List<String> services;
@@ -73,9 +78,27 @@ class RnsGraphNode {
   final int firstSeenMs;
   final List<String> relayers;
 
-  /// The network this node is reached over — resolved after parsing (empty-via
-  /// nodes inherit their relayer's network, see [resolveIfaces]).
+  /// The network this node is reached over — resolved after parsing.
   RnsIface iface = RnsIface.internet;
+
+  /// Who this node actually sits behind on the canvas. Starts as the
+  /// snapshot's relayer; [regroupByUplink] fills it in from the shared `via`
+  /// connection when the snapshot left it empty. Empty = a true direct peer.
+  String effectiveRelayer = '';
+
+  /// Promoted to an uplink anchor by [regroupByUplink]: the direct node a
+  /// whole connection's worth of remote announces clusters behind.
+  bool promotedHub = false;
+
+  /// Members clustered behind this node (snapshot children + regrouped).
+  int members = 0;
+
+  /// How the view treats this node, after regrouping.
+  String get effectiveKind => kind == 'self'
+      ? 'self'
+      : (kind == 'hub' || promotedHub)
+          ? 'hub'
+          : 'leaf';
 
   RnsGraphNode(Map<String, dynamic> m)
       : id = (m['id'] ?? '').toString(),
@@ -96,11 +119,40 @@ class RnsGraphNode {
                 ?.map((e) => e.toString())
                 .toList() ??
             const [],
-        childCount = ((m['meta'] as Map?)?['children'] as num?)?.toInt() ?? 0;
+        childCount = ((m['meta'] as Map?)?['children'] as num?)?.toInt() ?? 0 {
+    effectiveRelayer = relayer;
+    members = childCount;
+  }
+
+  /// A synthesized uplink anchor for a connection whose direct peer we never
+  /// heard announce (e.g. the hub only forwards). Keyed by the via string so
+  /// it keeps its identity — and any expansion state — across snapshots.
+  RnsGraphNode.uplink(String viaTag)
+      : id = 'uplink:$viaTag',
+        label = uplinkLabel(viaTag),
+        kind = 'hub',
+        dm = '',
+        npub = '',
+        geogram = false,
+        relayer = '',
+        services = const [],
+        hops = 1,
+        via = viaTag,
+        meta = const {},
+        firstSeenMs = 0,
+        relayers = const [],
+        childCount = 0;
+}
+
+/// 'tcp:use.inertia.chat:4242' → 'use.inertia.chat' — the readable name of a
+/// connection when no announce named its far end.
+String uplinkLabel(String via) {
+  final parts = via.split(':');
+  return parts.length >= 2 ? parts[1] : via;
 }
 
 /// Resolve every node's network, letting empty-via nodes inherit from their
-/// relayer. Mutates [nodes] in place (iface is the one non-final field).
+/// relayer.
 void resolveIfaces(List<RnsGraphNode> nodes) {
   final byId = {for (final n in nodes) n.id: n};
   for (final n in nodes) {
@@ -114,19 +166,85 @@ void resolveIfaces(List<RnsGraphNode> nodes) {
   }
 }
 
-class RnsGraphEdge {
-  final String from, to, kind; // kind: uplink | relay | direct
-  RnsGraphEdge(this.from, this.to, this.kind);
+/// Group the flood behind its uplinks. Remote nodes (hops > 1) whose snapshot
+/// relayer is empty cluster behind the direct (hops == 1) node heard on the
+/// same point-to-point connection — its `via` names the connection. Local
+/// broadcast networks (lan/ble) have no single far end, so their nodes are
+/// left as they came. Returns the full node list, plus a synthesized anchor
+/// per connection that had remote nodes but no direct peer to anchor them.
+///
+/// Call AFTER [resolveIfaces]; mutates effectiveRelayer/promotedHub/members.
+List<RnsGraphNode> regroupByUplink(List<RnsGraphNode> nodes) {
+  bool pointToPoint(String via) =>
+      via.startsWith('tcp') || via.startsWith('udp');
+
+  // One anchor per connection: prefer the snapshot's own hub for that via,
+  // else the direct node with the most to say for itself (a relay, then the
+  // most services), else synthesize.
+  final anchorByVia = <String, RnsGraphNode>{};
+  for (final n in nodes) {
+    if (n.hops != 1 || !pointToPoint(n.via)) continue;
+    final current = anchorByVia[n.via];
+    if (current == null || _anchorRank(n) > _anchorRank(current)) {
+      anchorByVia[n.via] = n;
+    }
+  }
+
+  final out = List<RnsGraphNode>.from(nodes);
+  final needAnchor = <String>{};
+  for (final n in nodes) {
+    if (n.effectiveRelayer.isNotEmpty) continue; // snapshot already knew
+    if (n.effectiveKind != 'leaf') continue;
+    if (n.hops <= 1 || !pointToPoint(n.via)) continue;
+    final anchor = anchorByVia[n.via];
+    if (anchor != null) {
+      n.effectiveRelayer = anchor.id;
+    } else {
+      n.effectiveRelayer = 'uplink:${n.via}';
+      needAnchor.add(n.via);
+    }
+  }
+  for (final via in needAnchor) {
+    final synth = RnsGraphNode.uplink(via)..iface = classifyVia(via);
+    anchorByVia[via] = synth;
+    out.add(synth);
+  }
+
+  // Promote anchors and count everyone's clustered members.
+  final memberCount = <String, int>{};
+  for (final n in out) {
+    if (n.effectiveRelayer.isNotEmpty) {
+      memberCount[n.effectiveRelayer] =
+          (memberCount[n.effectiveRelayer] ?? 0) + 1;
+    }
+  }
+  final byId = {for (final n in out) n.id: n};
+  memberCount.forEach((id, count) {
+    final anchor = byId[id];
+    if (anchor == null) return;
+    anchor.members = math.max(anchor.childCount, count);
+    if (anchor.effectiveKind == 'leaf') anchor.promotedHub = true;
+  });
+  return out;
+}
+
+int _anchorRank(RnsGraphNode n) {
+  var rank = 0;
+  if (n.kind == 'hub') rank += 100;
+  if (n.services.contains('relay')) rank += 10;
+  rank += n.services.length;
+  return rank;
 }
 
 // Ego-layout shells (world units; graph3d's own scale reference is a
 // 120-wide card, orbs 17-46).
 const double kPeerShell = 620; // direct neighbours
-const double kHubShell = 1300; // hubs / relayers
-const double kHopSpacing = 340; // extra radius per hop behind a hub
+const double kHubShell = 1300; // uplink anchors / relayers
+const double kHopSpacing = 340; // extra radius per hop behind an anchor
 
-/// Which snapshot nodes are on the canvas: self + hubs + direct leaves
-/// always; relayed leaves only while their hub is the expanded one.
+/// Which nodes are on the canvas: self, every uplink anchor and true direct
+/// peer always; clustered members only while their anchor is the expanded
+/// one (one cluster at a time keeps busy-hub snapshots bounded).
 List<RnsGraphNode> visibleRnsNodes(
   List<RnsGraphNode> allNodes,
   String? expandedHubId,
@@ -138,75 +256,87 @@ List<RnsGraphNode> visibleRnsNodes(
   }
 
   for (final n in allNodes) {
-    if (n.kind == 'self' || n.kind == 'hub') add(n);
+    if (n.effectiveKind == 'self' || n.effectiveKind == 'hub') add(n);
   }
   for (final n in allNodes) {
-    if (n.kind != 'leaf') continue;
-    if (n.relayer.isEmpty || n.relayer == expandedHubId) add(n);
+    if (n.effectiveKind != 'leaf') continue;
+    if (n.effectiveRelayer.isEmpty || n.effectiveRelayer == expandedHubId) {
+      add(n);
+    }
   }
   return vis;
 }
 
 /// Build the graph3d scene for one snapshot: visible nodes keyed by identity
-/// (so the 2s refresh glides instead of flickering), edges styled by network
-/// colour, and the ego layout.
+/// (so the 2s refresh glides instead of flickering), edges DERIVED from the
+/// grouping (the snapshot's own edges predate it), and the ego layout.
 ({GraphScene<RnsGraphNode> scene, LayoutStrategy<RnsGraphNode> layout})
     buildRnsScene({
   required List<RnsGraphNode> allNodes,
-  required List<RnsGraphEdge> allEdges,
   required String? expandedHubId,
 }) {
   final vis = visibleRnsNodes(allNodes, expandedHubId);
   final idOf = <String, int>{
     for (var i = 0; i < vis.length; i++) vis[i].id: i + 1,
   };
-  final byId = {for (final n in vis) n.id: n};
+  int? selfId;
+  for (final n in vis) {
+    if (n.effectiveKind == 'self') selfId = idOf[n.id];
+  }
 
   final nodes = <SceneNode<RnsGraphNode>>[
     for (final n in vis) SceneNode<RnsGraphNode>(key: n.id, data: n),
   ];
 
   final edges = <SceneEdge>[];
-  for (final e in allEdges) {
-    final from = idOf[e.from];
-    final to = idOf[e.to];
-    if (from == null || to == null) continue;
-    final target = byId[e.to]!;
-    switch (e.kind) {
-      case 'uplink': // self → hub
-        edges.add(SceneEdge(
-          from,
-          to,
-          style: EdgeStyle(
-            color: target.iface.color.withValues(alpha: 0.75),
-            width: 1.6,
-            glow: true,
-            crawler: true,
-            pulseCount: 2,
-          ),
-        ));
-      case 'relay': // hub → expanded leaf; extra hops render as ghost ticks
-        final ghost = target.hops > 2;
-        edges.add(SceneEdge(
-          from,
-          to,
-          style: EdgeStyle(
-            color: target.iface.color.withValues(alpha: 0.3),
-            width: 0.8,
-            dashed: ghost,
-            ticks: ghost ? target.hops - 2 : 0,
-          ),
-        ));
-      default: // direct: self → neighbour
-        edges.add(SceneEdge(
-          from,
-          to,
-          style: EdgeStyle(
-            color: target.iface.color.withValues(alpha: 0.65),
-            width: 1.0,
-            glow: true,
-          ),
-        ));
+  for (final n in vis) {
+    final to = idOf[n.id]!;
+    switch (n.effectiveKind) {
+      case 'self':
+        break;
+      case 'hub': // uplink: self → anchor, traffic crawling along it
+        if (selfId != null) {
+          edges.add(SceneEdge(
+            selfId,
+            to,
+            style: EdgeStyle(
+              color: n.iface.color.withValues(alpha: 0.75),
+              width: 1.6,
+              glow: true,
+              crawler: true,
+              pulseCount: 2,
+            ),
+          ));
+        }
+      default:
+        final from =
+            n.effectiveRelayer.isEmpty ? selfId : idOf[n.effectiveRelayer];
+        if (from == null) break;
+        if (n.effectiveRelayer.isEmpty) {
+          // A true local peer.
+          edges.add(SceneEdge(
+            from,
+            to,
+            style: EdgeStyle(
+              color: n.iface.color.withValues(alpha: 0.65),
+              width: 1.0,
+              glow: true,
+            ),
+          ));
+        } else {
+          // An expanded cluster member; extra hops render as ghost ticks.
+          final ghost = n.hops > 2;
+          edges.add(SceneEdge(
+            from,
+            to,
+            style: EdgeStyle(
+              color: n.iface.color.withValues(alpha: 0.3),
+              width: 0.8,
+              dashed: ghost,
+              ticks: ghost ? n.hops - 2 : 0,
+            ),
+          ));
+        }
     }
   }
 
@@ -216,12 +346,13 @@ List<RnsGraphNode> visibleRnsNodes(
   );
 }
 
-/// Azimuth sector per network present among the direct ring (hubs + direct
-/// leaves), width proportional to sqrt(member count), fixed enum order.
+/// Azimuth sector per network present on the direct ring (anchors + direct
+/// peers), width proportional to sqrt(member count), fixed enum order.
 Map<RnsIface, (double, double)> _egoSectors(List<RnsGraphNode> all) {
   final counts = <RnsIface, int>{};
   for (final n in all) {
-    if (n.kind == 'hub' || (n.kind == 'leaf' && n.relayer.isEmpty)) {
+    if (n.effectiveKind == 'hub' ||
+        (n.effectiveKind == 'leaf' && n.effectiveRelayer.isEmpty)) {
       counts[n.iface] = (counts[n.iface] ?? 0) + 1;
     }
   }
@@ -244,10 +375,10 @@ Map<RnsIface, (double, double)> _egoSectors(List<RnsGraphNode> all) {
   return sectors;
 }
 
-/// Ego layout: self at the origin, direct neighbours scattered on their
-/// network's sector of the inner shell, hubs on the equator of the outer
-/// shell, and an expanded hub's peers coned behind it with radius growing by
-/// hop count (equal-hop nodes read as rings).
+/// Ego layout: self at the origin, direct peers scattered on their network's
+/// sector of the inner shell, uplink anchors on the equator of the outer
+/// shell, and an expanded anchor's members coned behind it with radius
+/// growing by hop count (equal-hop nodes read as rings).
 LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
   final all = <RnsGraphNode>[for (final n in nodes) n.data];
   final sectors = _egoSectors(all);
@@ -259,11 +390,11 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
   final byIfaceHubs = <RnsIface, List<int>>{};
   for (var i = 0; i < all.length; i++) {
     final n = all[i];
-    if (n.kind == 'self') {
+    if (n.effectiveKind == 'self') {
       positions[i] = Vector3.zero();
-    } else if (n.kind == 'hub') {
+    } else if (n.effectiveKind == 'hub') {
       byIfaceHubs.putIfAbsent(n.iface, () => <int>[]).add(i);
-    } else if (n.relayer.isEmpty) {
+    } else if (n.effectiveRelayer.isEmpty) {
       byIfacePeers.putIfAbsent(n.iface, () => <int>[]).add(i);
     }
   }
@@ -297,12 +428,13 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
     }
   });
 
-  // Expanded-hub peers: a cone of hop shells behind the hub, golden-ratio
-  // elevation jitter so big clusters fill the fan instead of a line.
+  // Expanded-cluster members: a cone of hop shells behind the anchor,
+  // golden-ratio elevation jitter so big clusters fill the fan.
   final perHubCount = <String, int>{};
   for (final n in all) {
-    if (positionsPending(n)) {
-      perHubCount[n.relayer] = (perHubCount[n.relayer] ?? 0) + 1;
+    if (n.effectiveKind == 'leaf' && n.effectiveRelayer.isNotEmpty) {
+      perHubCount[n.effectiveRelayer] =
+          (perHubCount[n.effectiveRelayer] ?? 0) + 1;
     }
   }
   final perHubSeen = <String, int>{};
@@ -310,9 +442,10 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
   for (var i = 0; i < all.length; i++) {
     if (positions[i] != null) continue;
     final n = all[i];
-    final hubAzimuth = azimuthOf[n.relayer] ?? 0;
-    final siblings = perHubCount[n.relayer] ?? 1;
-    final ordinal = perHubSeen.update(n.relayer, (v) => v + 1, ifAbsent: () => 0);
+    final hubAzimuth = azimuthOf[n.effectiveRelayer] ?? 0;
+    final siblings = perHubCount[n.effectiveRelayer] ?? 1;
+    final ordinal =
+        perHubSeen.update(n.effectiveRelayer, (v) => v + 1, ifAbsent: () => 0);
     final spreadHalf = siblings > 40 ? 0.5 : 0.28;
     final theta =
         hubAzimuth + ((ordinal + 0.5) / siblings - 0.5) * 2 * spreadHalf;
@@ -331,10 +464,6 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
   ]);
 }
 
-/// A node still awaiting a position after the direct passes: a relayed leaf.
-bool positionsPending(RnsGraphNode n) =>
-    n.kind == 'leaf' && n.relayer.isNotEmpty;
-
 /// How each node looks as an orb: hierarchy by size and dressing, network by
 /// colour. Geogram devices wear a green second ring (the 2D view's code).
 NodeSprite spriteOfRnsNode(
@@ -343,7 +472,7 @@ NodeSprite spriteOfRnsNode(
 }) {
   final n = node.data;
   const geogramGreen = Color(0xFF3FB950);
-  switch (n.kind) {
+  switch (n.effectiveKind) {
     case 'self':
       return NodeSprite(
         radius: 46,
@@ -359,14 +488,14 @@ NodeSprite spriteOfRnsNode(
         coreColor: n.iface.color,
         haloScale: 2.8,
         ringColor: Colors.white70,
-        badge: n.childCount > 0 && n.id != expandedHubId
-            ? '${n.childCount}'
-            : null,
+        secondaryColor: n.geogram ? geogramGreen : null,
+        badge:
+            n.members > 0 && n.id != expandedHubId ? '${n.members}' : null,
         label: n.label,
         labelMinPx: 2.5,
       );
     default:
-      final direct = n.relayer.isEmpty;
+      final direct = n.effectiveRelayer.isEmpty;
       return NodeSprite(
         radius: direct ? 22 : 17,
         coreColor: n.iface.color,

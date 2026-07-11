@@ -84,7 +84,6 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   // observed set (NOT gated on re-announce), refreshed each data tick. This is
   // what the badge's "N devices" list shows.
   List<RnsGraphNode> _otherDevices = const [];
-  List<RnsGraphEdge> _allEdges = const [];
 
   // The 3D scene. Node keys are identity hashes, so the wapp's 2s snapshot
   // refresh glides persisting nodes to their new poses (and keeps selection)
@@ -96,6 +95,11 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   String? _expandedHubId; // one expanded hub cluster max
   RnsIface? _focusedIface; // legend-chip group focus
   bool _framedOnce = false; // first non-empty snapshot frames the view
+  // The camera follows the growing network (announces trickle in for minutes
+  // after connect) until the user takes the stick; the recenter button hands
+  // control back.
+  bool _userNavigated = false;
+  double _framedRadius = 0;
 
   // Panel state.
   _Panel _panel = _Panel.none;
@@ -187,11 +191,16 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    _scene.addListener(_onSceneChange);
     widget.data.addListener(_onData);
     widget.hubs.addListener(_onHubs);
     RnsService.instance.addLxmfListener(_onLxmf);
     _onData();
     _onHubs();
+  }
+
+  void _onSceneChange() {
+    if (_scene.isDragging) _userNavigated = true;
   }
 
   void _onLxmf() {
@@ -217,6 +226,7 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     _hubCtl.dispose();
     _chatCtl.dispose();
     _chatScroll.dispose();
+    _scene.removeListener(_onSceneChange);
     _scene.dispose();
     super.dispose();
   }
@@ -267,16 +277,13 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     final d = widget.data.value;
     if (d == null) return;
     final nodes = (d['nodes'] as List?) ?? const [];
-    final edges = (d['edges'] as List?) ?? const [];
-    _allNodes = [
+    final parsed = [
       for (final m in nodes) RnsGraphNode((m as Map).cast<String, dynamic>())
     ];
-    resolveIfaces(_allNodes);
-    _allEdges = [
-      for (final e in edges)
-        RnsGraphEdge((e as Map)['from'].toString(), e['to'].toString(),
-            (e['kind'] ?? '').toString())
-    ];
+    resolveIfaces(parsed);
+    // Cluster the hub-flood behind its uplink connections — the snapshot's
+    // own edges predate the grouping, so the scene derives its edges itself.
+    _allNodes = regroupByUplink(parsed);
     // The full observed-devices set (heavy scan of the host registry) — refresh
     // here on the ~2s data tick, not on every animation frame.
     _otherDevices = [
@@ -301,7 +308,6 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     }
     final built = buildRnsScene(
       allNodes: _allNodes,
-      allEdges: _allEdges,
       expandedHubId: _expandedHubId,
     );
 
@@ -311,7 +317,7 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         _scene.renderNodes[i].key: _scene.poses[i].position,
     };
     Vector3 sourceOf(RnsGraphNode n) =>
-        positionById[n.relayer] ?? Vector3.zero();
+        positionById[n.effectiveRelayer] ?? Vector3.zero();
 
     _scene.setScene(
       built.scene,
@@ -326,6 +332,13 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     if (!_framedOnce && _allNodes.length > 1) {
       _framedOnce = true;
       _resetView(immediate: true);
+    } else if (_framedOnce && !_userNavigated && _expandedHubId == null) {
+      // The network keeps growing after connect; until the user flies the
+      // camera themselves, keep the whole scene in frame.
+      final radius = _scene.geometry.radius;
+      if (radius > _framedRadius * 1.2 || radius < _framedRadius * 0.6) {
+        _resetView();
+      }
     }
     if (mounted) setState(() {});
   }
@@ -333,6 +346,7 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   void _resetView({bool immediate = false}) {
     final radius = _scene.geometry.radius + 300;
     if (radius <= 300) return;
+    _framedRadius = _scene.geometry.radius;
     // Fitting the whole ego sphere on a portrait phone would shrink the core
     // to specks; frame the heart of it and let the fringe overflow — panning
     // is tethered, nothing gets lost.
@@ -349,24 +363,37 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   }
 
   // Frame an expanded hub's cluster from off-axis, so the hop shells behind
-  // it read as depth instead of collapsing onto one line of sight.
+  // it read as depth instead of collapsing onto one line of sight. The
+  // extent tracks the cluster's real footprint — a live hub can fan out a
+  // hundred members over several hop shells.
   void _frameCluster(String hubId) {
     final i = _scene.renderNodes.indexWhere((n) => n.key == hubId);
     if (i < 0) return;
     _scene.advancePoses();
-    _scene.camera.maxFrameDistance = 9000;
+    _scene.camera.maxFrameDistance = 12000;
     final anchor = _scene.geometry.poses[i].position;
     final outward =
         anchor.length < 1 ? Vector3(0, 0, 1) : anchor.normalized();
+    var members = 0;
+    var maxHops = 2;
+    for (final n in _allNodes) {
+      if (n.effectiveRelayer != hubId) continue;
+      members++;
+      if (n.hops > maxHops) maxHops = n.hops;
+    }
+    final spreadHalf = members > 40 ? 0.5 : 0.28;
+    final fanRadius = kHubShell + kHopSpacing * max(1, maxHops - 1);
+    final depth = kHopSpacing * max(2, maxHops - 1).toDouble();
+    final lateral = fanRadius * spreadHalf + 250;
+    final vertical = fanRadius * (members > 40 ? 0.45 : 0.23) + 150;
     final side = Vector3(outward.z, 0, -outward.x);
     final viewDirection =
         (outward + side * 0.9 + Vector3(0, 0.42, 0)).normalized();
-    final centre = anchor + outward * (kHopSpacing * 2.0);
+    final centre = anchor + outward * (depth * 0.55);
     _scene.camera.frameFacing(
       Pose(centre, lookAtQuaternion(centre, centre + viewDirection)),
-      halfExtent:
-          Vector3(kHopSpacing * 2.4, kHopSpacing * 2.6, kHopSpacing * 2.0),
-      sceneRadius: kHopSpacing * 6,
+      halfExtent: Vector3(lateral, vertical, depth),
+      sceneRadius: fanRadius,
       durationMs: 1400,
     );
   }
@@ -375,8 +402,9 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   // devices, as before); everything else opens the detail panel.
   void _onNodeTap(int id) {
     if (id < 1 || id > _scene.renderNodes.length) return;
+    _userNavigated = true;
     final node = _scene.renderNodes[id - 1].data;
-    if (node.kind == 'hub' && node.childCount > 0) {
+    if (node.effectiveKind == 'hub' && node.members > 0) {
       setState(() {
         _expandedHubId = _expandedHubId == node.id ? null : node.id;
         _selectedId = node.id;
@@ -491,6 +519,7 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
             _buildTopBar(),
             _buildReachBadge(),
             _buildLegend(),
+            _buildRecenter(),
           ])),
         ),
         _buildPanel(),
@@ -509,6 +538,38 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
           ),
         ),
       );
+
+  // Recenter: fold the open cluster, drop focus/selection, frame everything
+  // — and resume following the network as it grows.
+  Widget _buildRecenter() {
+    return Positioned(
+      right: 12,
+      bottom: 96,
+      child: Material(
+        color: const Color(0xE6161B22),
+        shape: const CircleBorder(side: BorderSide(color: _gBorder)),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: () {
+            setState(() {
+              _focusedIface = null;
+              _expandedHubId = null;
+              _selectedId = null;
+              _userNavigated = false;
+            });
+            _scene.highlightKeys = const <String>{};
+            _scene.clearSelection();
+            _rebuildScene();
+            _resetView();
+          },
+          child: const Padding(
+            padding: EdgeInsets.all(12),
+            child: Icon(Icons.center_focus_strong, size: 22, color: _gFg),
+          ),
+        ),
+      ),
+    );
+  }
 
   // ── Top control bar (search + filters + Hubs/Settings icons) ──
   Widget _buildTopBar() {
@@ -939,16 +1000,16 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
 
   Widget _detailBody(RnsGraphNode n) {
     final m = n.meta;
-    final kindName = n.kind == 'self'
+    final kindName = n.effectiveKind == 'self'
         ? 'This node'
-        : n.kind == 'hub'
+        : n.effectiveKind == 'hub'
             ? 'Hub / transport node'
             : 'Peer';
     final pubkey = (m['pubkey'] ?? '').toString();
     final canMessage = n.kind != 'self' && n.dm.isNotEmpty && pubkey.isNotEmpty;
-    final color = n.kind == 'self'
+    final color = n.effectiveKind == 'self'
         ? _gSelf
-        : n.kind == 'hub'
+        : n.effectiveKind == 'hub'
             ? _gHub
             : (n.geogram ? _gGeo : _gGeneric);
     final initial = n.label.isNotEmpty ? n.label.substring(0, 1).toUpperCase() : '?';
@@ -1026,14 +1087,14 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         ),
       ],
       const SizedBox(height: 16),
-      if (n.kind == 'hub' && n.childCount > 0)
+      if (n.effectiveKind == 'hub' && n.members > 0)
         Padding(
           padding: const EdgeInsets.only(bottom: 10),
           child: SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
               icon: const Icon(Icons.list, size: 16),
-              label: Text('List ${n.childCount} devices'),
+              label: Text('List ${n.members} devices'),
               onPressed: () {
                 setState(() {
                   _panelHubId = n.id;
@@ -1058,8 +1119,8 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         _kv('Capabilities', (m['caps'] as List).join(', ')),
       if (n.kind != 'self') _kv('Hops', '${n.hops}'),
       if (n.via.isNotEmpty) _kv('Via', n.via),
-      if (n.kind == 'hub' && n.childCount > 0)
-        _kv('Peers heard', '≈ ${n.childCount} (sample)'),
+      if (n.effectiveKind == 'hub' && n.members > 0)
+        _kv('Peers heard', '≈ ${n.members} (sample)'),
       if (m['firstSeen'] != null) _kv('First seen', _ago(m['firstSeen'])),
       if (n.npub.isNotEmpty) _kv('npub', n.npub),
       if (n.id.isNotEmpty) _kv('Identity', n.id),
@@ -1128,7 +1189,7 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     final labels = <String>{};
     for (final o in _allNodes) {
       if (_peerKey(o) != key) continue;
-      final r = o.relayer;
+      final r = o.effectiveRelayer;
       if (r.isEmpty) continue;
       final hub = _allNodes.where((h) => h.id == r).firstOrNull;
       labels.add(hub != null ? hub.label : 'hub ${_shorten(r, head: 8, tail: 0)}');
@@ -1177,7 +1238,8 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   }
 
   Widget _hubDevicesBody(String hubId) {
-    final peers = _allNodes.where((n) => n.relayer == hubId).toList()
+    final peers =
+        _allNodes.where((n) => n.effectiveRelayer == hubId).toList()
       ..sort((a, b) {
         // Messageable people first, then by name — so the useful rows are on top.
         if (a.geogram != b.geogram) return a.geogram ? -1 : 1;
@@ -1580,7 +1642,11 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     final parts = <String>[];
     if (p.firstSeenMs > 0) parts.add('first seen ${_ago(p.firstSeenMs)}');
     final relayers =
-        p.relayers.isNotEmpty ? p.relayers : (p.relayer.isEmpty ? const <String>[] : [p.relayer]);
+        p.relayers.isNotEmpty
+            ? p.relayers
+            : (p.effectiveRelayer.isEmpty
+                ? const <String>[]
+                : [p.effectiveRelayer]);
     if (relayers.length > 1) {
       parts.add('${relayers.length} hubs');
     } else if (relayers.length == 1) {

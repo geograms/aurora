@@ -17,6 +17,12 @@ class LogService {
   LogService._();
   static final LogService instance = LogService._();
 
+  /// The Dart VM service URI (debug/profile builds), pinned OUTSIDE the ring —
+  /// on a busy node the announce flood evicts the boot line within minutes,
+  /// and it's exactly what you need hours later to attach to a wedged app.
+  /// Served by /api/status.
+  String? vmServiceUri;
+
   static const int _max = 2000;
 
   /// Per-line cap. Announce/profile log lines can embed multi-KB payloads

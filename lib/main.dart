@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -63,7 +65,10 @@ Future<void> main() async {
   unawaited(
     developer.Service.getInfo().then((info) {
       final uri = info.serverUri;
-      if (uri != null) LogService.instance.add('Dart VM service: $uri');
+      if (uri == null) return;
+      LogService.instance
+        ..vmServiceUri = '$uri' // pinned; /api/status serves it
+        ..add('Dart VM service: $uri');
     }).catchError((_) {}),
   );
   var lagExpected = DateTime.now().millisecondsSinceEpoch + 500;
@@ -75,6 +80,19 @@ Future<void> main() async {
       LogService.instance.add('perf: main isolate stalled ~${drift}ms');
     }
   });
+
+  // Bound the image cache on phones. Flutter's default (100MB / 1000 images)
+  // is sized for desktops; this app feeds it full-resolution network photos
+  // from the launcher's novelties carousel, so the default lets decoded bitmaps
+  // pile up against the Android heap limit. 32MB / 100 images is ample for a
+  // carousel plus a chat's inline media, and keeps the app well clear of the
+  // allocation pressure that fed the GC spiral.
+  if (defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS) {
+    PaintingBinding.instance.imageCache
+      ..maximumSizeBytes = 32 << 20
+      ..maximumSize = 100;
+  }
 
   // The shared-package Blossom server logs through this injectable sink
   // (it no longer knows aurora's LogService directly).

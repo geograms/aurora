@@ -965,6 +965,12 @@ class RemoteApiService {
     return {
       'app': 'aurora',
       'build': kAuroraBuildTag,
+      // Wedge forensics: the Dart VM service URI (with its auth token) is the
+      // only way to pull live isolate stacks/heaps from a stuck app, and it is
+      // useless if you can't find it — it scrolls out of the log ring within
+      // minutes on a busy node, and out of logcat too. Pin it here so it is
+      // always one request away.
+      'vmService': LogService.instance.vmServiceUri,
       'mesh': mesh,
       'platform': platform.platformName(),
       'apiPort': _port,

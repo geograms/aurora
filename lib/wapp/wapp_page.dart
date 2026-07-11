@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show File;
-import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -20,6 +19,8 @@ import 'package:flutter/services.dart'
         LogicalKeyboardKey;
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:graph3d/graph3d.dart';
+import 'package:vector_math/vector_math_64.dart' show Quaternion, Vector3;
 
 import '../connections/internet/http_transport.dart';
 import '../platform/platform.dart' as platform;
@@ -78,6 +79,7 @@ import 'wapp_social_store.dart';
 import '../launcher/launcher.dart' show WappManifest;
 import 'functionality_broker.dart';
 import 'functionality_registry.dart';
+import 'wapp_graph_scene.dart';
 import 'wapp_icons.dart';
 import 'wapp_engine.dart';
 import '../services/mesh/mesh_custody.dart';
@@ -357,8 +359,8 @@ class _WappPageState extends State<WappPage>
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
   bool _hasMap = false;
   // Native graph state (generic `$type:"graph"` GeoUI group). The wapp pushes a
-  // {nodes,edges} snapshot via `ui.graph.set`; the host lays it out on a
-  // background isolate and paints it on a CustomPainter canvas. See wapp_graph.dart.
+  // {nodes,edges} snapshot via `ui.graph.set`; the host renders it with the
+  // graph3d 3D engine. See wapp_graph.dart.
   final ValueNotifier<Map<String, dynamic>?> _graphData =
       ValueNotifier<Map<String, dynamic>?>(null);
   // Configured bootstrap hubs [{endpoint,connected}] pushed via ui.graph.hubs,
@@ -3786,9 +3788,9 @@ class _WappPageState extends State<WappPage>
         .firstOrNull;
     if (mapGroup != null) return _buildMapScreen(screen, mapGroup);
 
-    // Native graph group — a generic `$type:"graph"` node-link surface, drawn
-    // full-bleed on a CustomPainter canvas with layout computed off the main
-    // thread. Mirrors the map full-bleed branch.
+    // Native graph group — a generic `$type:"graph"` node-link surface,
+    // rendered full-bleed by the graph3d 3D engine. Mirrors the map
+    // full-bleed branch.
     final graphGroup = screen.children
         .where((c) => c.keyword == 'group' && c.type == 'graph')
         .firstOrNull;

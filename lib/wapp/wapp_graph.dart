@@ -1,15 +1,15 @@
-// Native node-link graph widget for the generic GeoUI `$type:"graph"` group.
-// Drawn entirely with a CustomPainter (no webview, no web). The expensive part —
-// laying out the nodes — runs in a BACKGROUND ISOLATE (Isolate.run); the UI
-// thread only tweens to the returned positions and paints, so it never blocks
-// even with thousands of nodes. Interaction (pan / pinch / scroll-zoom / tap)
-// mirrors the slippy map in wapp_maps.dart.
+// Native node-link graph widget for the generic GeoUI `$type:"graph"` group,
+// rendered by the graph3d 3D engine (glowing orbs, Google-Earth navigation,
+// depth fog). Scene assembly — snapshot parsing, interface classification,
+// orb styling, ego layout — lives in wapp_graph_scene.dart; this file wires
+// it to the wapp's data stream and hosts the chrome.
 //
 // All chrome lives in this widget as full-height side panels (no popups): a
 // node detail panel, a hub device-list (tap a hub → its peers; tap a peer →
 // select it on the graph), a bootstrap-hub manager, and a settings panel —
 // reached from a compact icon row at the top-right. Clustering keeps it
-// scalable: hubs collapse their peers behind a "⊕N" badge by default.
+// scalable: hubs collapse their peers behind a count badge by default and
+// only one hub is expanded at a time.
 //
 // Part of the wapp_page library — see wapp_page.dart.
 part of 'wapp_page.dart';
@@ -24,126 +24,6 @@ const _gSelf = Color(0xFF58A6FF);
 const _gHub = Color(0xFFD29922);
 const _gGeo = Color(0xFF3FB950);
 const _gGeneric = Color(0xFF6E7681);
-
-// ── Layout, computed off the main thread ───────────────────────────────────
-// Pure, top-level (isolate-safe); invoked with Isolate.run. Self at the centre;
-// hubs on a ring; self's direct neighbours on an inner ring; each expanded hub's
-// peers fanned onto concentric arcs around that hub. Deterministic O(n) — no
-// iterative simulation to burn CPU.
-Map<String, dynamic> _computeGraphLayout(Map<String, dynamic> req) {
-  final nodes = (req['nodes'] as List).cast<Map>();
-  final w = (req['w'] as num).toDouble();
-  final h = (req['h'] as num).toDouble();
-  final n = nodes.length;
-  final ids = <String>[for (final nd in nodes) nd['id'] as String];
-  final kind = <String>[for (final nd in nodes) (nd['kind'] as String?) ?? 'leaf'];
-  final relayer = <String>[for (final nd in nodes) (nd['relayer'] as String?) ?? ''];
-  final pos = Float32List(n * 2);
-  final idIndex = {for (var i = 0; i < n; i++) ids[i]: i};
-
-  final span = (w < h ? w : h);
-  final rHub = span * 0.34;
-  final rDirect = span * 0.15;
-
-  var selfI = -1;
-  final hubIdx = <int>[];
-  final directIdx = <int>[];
-  final byHub = <String, List<int>>{};
-  for (var i = 0; i < n; i++) {
-    if (kind[i] == 'self') {
-      selfI = i;
-    } else if (kind[i] == 'hub') {
-      hubIdx.add(i);
-    } else if (relayer[i].isEmpty) {
-      directIdx.add(i);
-    } else {
-      (byHub[relayer[i]] ??= <int>[]).add(i);
-    }
-  }
-
-  void place(int i, double x, double y) {
-    pos[i * 2] = x;
-    pos[i * 2 + 1] = y;
-  }
-
-  if (selfI >= 0) place(selfI, 0, 0);
-  for (var k = 0; k < hubIdx.length; k++) {
-    final a = (2 * pi * k / (hubIdx.isEmpty ? 1 : hubIdx.length)) - pi / 2;
-    place(hubIdx[k], cos(a) * rHub, sin(a) * rHub);
-  }
-  for (var k = 0; k < directIdx.length; k++) {
-    final a = 2 * pi * k / (directIdx.isEmpty ? 1 : directIdx.length);
-    place(directIdx[k], cos(a) * rDirect, sin(a) * rDirect);
-  }
-  byHub.forEach((hubId, peers) {
-    final hi = idIndex[hubId] ?? -1;
-    final hx = hi >= 0 ? pos[hi * 2] : 0.0;
-    final hy = hi >= 0 ? pos[hi * 2 + 1] : 0.0;
-    final base = atan2(hy, hx); // outward from the centre
-    const perRing = 12;
-    const spread = 2.2; // ~126° fan
-    for (var k = 0; k < peers.length; k++) {
-      final ring = k ~/ perRing;
-      final inRing = (peers.length - ring * perRing) < perRing
-          ? (peers.length - ring * perRing)
-          : perRing;
-      final j = k % perRing;
-      final frac = inRing <= 1 ? 0.5 : j / (inRing - 1);
-      final a = base + (frac - 0.5) * spread;
-      final rr = 72.0 + ring * 50.0;
-      place(peers[k], hx + cos(a) * rr, hy + sin(a) * rr);
-    }
-  });
-
-  return {'pos': pos, 'ids': ids};
-}
-
-// ── Parsed node/edge ───────────────────────────────────────────────────────
-class _GNode {
-  final String id;
-  final String label;
-  final String kind; // self | hub | leaf
-  final bool geogram;
-  final String relayer;
-  final List<String> services;
-  final int hops;
-  final String via;
-  final Map<String, dynamic> meta;
-  final int childCount;
-  // 1:1 reachability hint from the host: 'lxmf' | 'sf' | 'chat' | '' (see
-  // graphSnapshot). Drives the detail-panel indicator + Message button.
-  final String dm;
-  // NOSTR npub (from meta), for distinguishing same-nickname devices. '' if none.
-  final String npub;
-  // First time we heard this node (epoch ms), and every hub/relayer it's been
-  // heard through — for the device-row subtitle.
-  final int firstSeenMs;
-  final List<String> relayers;
-  _GNode(Map<String, dynamic> m)
-      : id = (m['id'] ?? '').toString(),
-        label = (m['label'] ?? m['id'] ?? '').toString(),
-        kind = (m['kind'] ?? 'leaf').toString(),
-        dm = (m['dm'] ?? '').toString(),
-        npub = ((m['meta'] as Map?)?['npub'] ?? '').toString(),
-        geogram = m['geogram'] == true,
-        relayer = (m['relayer'] ?? '').toString(),
-        services =
-            (m['services'] as List?)?.map((e) => e.toString()).toList() ?? const [],
-        hops = (m['hops'] as num?)?.toInt() ?? 0,
-        via = (m['via'] ?? '').toString(),
-        meta = (m['meta'] as Map?)?.cast<String, dynamic>() ?? const {},
-        firstSeenMs = ((m['meta'] as Map?)?['firstSeen'] as num?)?.toInt() ?? 0,
-        relayers = ((m['meta'] as Map?)?['relayers'] as List?)
-                ?.map((e) => e.toString())
-                .toList() ??
-            const [],
-        childCount = ((m['meta'] as Map?)?['children'] as num?)?.toInt() ?? 0;
-}
-
-class _GEdge {
-  final String from, to, kind;
-  _GEdge(this.from, this.to, this.kind);
-}
 
 // ── The widget ─────────────────────────────────────────────────────────────
 class _GraphView extends StatefulWidget {
@@ -198,37 +78,30 @@ enum _Panel {
   page, // a NomadNet node page (browser)
 }
 
-class _GraphViewState extends State<_GraphView>
-    with SingleTickerProviderStateMixin {
-  List<_GNode> _allNodes = const [];
+class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
+  List<RnsGraphNode> _allNodes = const [];
   // Other Reticulum devices (NOT geogram, NOT hubs) heard on the hubs — the full
   // observed set (NOT gated on re-announce), refreshed each data tick. This is
   // what the badge's "N devices" list shows.
-  List<_GNode> _otherDevices = const [];
-  List<_GEdge> _allEdges = const [];
-  final Set<String> _expanded = {};
+  List<RnsGraphNode> _otherDevices = const [];
+  List<RnsGraphEdge> _allEdges = const [];
 
-  List<_GNode> _vis = const [];
-  List<_GEdge> _visEdges = const [];
-  final Map<String, Offset> _posById = {};
-  Map<String, Offset> _from = {};
-  Map<String, Offset> _to = {};
-
-  double _scale = 1;
-  Offset _translate = Offset.zero;
-  bool _fitted = false;
-  Size _size = Size.zero;
-
-  String _visSig = '';
-  int _layoutSeq = 0;
-  bool _laying = false;
+  // The 3D scene. Node keys are identity hashes, so the wapp's 2s snapshot
+  // refresh glides persisting nodes to their new poses (and keeps selection)
+  // instead of rebuilding from scratch.
+  late final GraphSceneController<RnsGraphNode> _scene =
+      GraphSceneController<RnsGraphNode>(vsync: this)
+        ..camera.rotateSpeed = 0.24
+        ..camera.dampingFactor = 0.18;
+  String? _expandedHubId; // one expanded hub cluster max
+  RnsIface? _focusedIface; // legend-chip group focus
+  bool _framedOnce = false; // first non-empty snapshot frames the view
 
   // Panel state.
   _Panel _panel = _Panel.none;
   String? _selectedId; // highlighted node
   String? _panelHubId; // hub whose devices are listed
-  String? _lastNavTitle = ' '; // last title reported to the host app bar
-  late final AnimationController _anim;
+  String? _lastNavTitle = ' '; // last title reported to the host app bar
 
   // The title the host app bar should show for the open panel (null = graph).
   String? _panelTitle() {
@@ -236,7 +109,7 @@ class _GraphViewState extends State<_GraphView>
       case _Panel.none:
         return null;
       case _Panel.detail:
-        final n = _vis.where((e) => e.id == _selectedId).firstOrNull;
+        final n = _allNodes.where((e) => e.id == _selectedId).firstOrNull;
         return n?.label ?? 'Device';
       case _Panel.devices:
         return 'Devices';
@@ -314,9 +187,6 @@ class _GraphViewState extends State<_GraphView>
   @override
   void initState() {
     super.initState();
-    _anim = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 350))
-      ..addListener(_onTween);
     widget.data.addListener(_onData);
     widget.hubs.addListener(_onHubs);
     RnsService.instance.addLxmfListener(_onLxmf);
@@ -347,7 +217,7 @@ class _GraphViewState extends State<_GraphView>
     _hubCtl.dispose();
     _chatCtl.dispose();
     _chatScroll.dispose();
-    _anim.dispose();
+    _scene.dispose();
     super.dispose();
   }
 
@@ -398,202 +268,194 @@ class _GraphViewState extends State<_GraphView>
     if (d == null) return;
     final nodes = (d['nodes'] as List?) ?? const [];
     final edges = (d['edges'] as List?) ?? const [];
-    _allNodes = [for (final m in nodes) _GNode((m as Map).cast<String, dynamic>())];
+    _allNodes = [
+      for (final m in nodes) RnsGraphNode((m as Map).cast<String, dynamic>())
+    ];
+    resolveIfaces(_allNodes);
     _allEdges = [
       for (final e in edges)
-        _GEdge((e as Map)['from'].toString(), e['to'].toString(),
+        RnsGraphEdge((e as Map)['from'].toString(), e['to'].toString(),
             (e['kind'] ?? '').toString())
     ];
     // The full observed-devices set (heavy scan of the host registry) — refresh
     // here on the ~2s data tick, not on every animation frame.
     _otherDevices = [
       for (final m in RnsService.instance.observedDevices())
-        _GNode(m.cast<String, dynamic>())
+        RnsGraphNode(m.cast<String, dynamic>())
     ];
-    _rebuildVisible();
+    _rebuildScene();
   }
 
-  void _rebuildVisible() {
-    final byId = {for (final nd in _allNodes) nd.id: nd};
-    final visIds = <String>{};
-    final vis = <_GNode>[];
-    void add(_GNode nd) {
-      if (visIds.add(nd.id)) vis.add(nd);
+  // Rebuild the scene from the latest snapshot + expansion state. Old poses
+  // are snapshotted BEFORE setScene (the controller's lists are mid-swap
+  // during the diff): new nodes burst from their relayer, vanishing ones fold
+  // back the same way.
+  void _rebuildScene() {
+    if (_expandedHubId != null &&
+        !_allNodes.any((n) => n.id == _expandedHubId)) {
+      _expandedHubId = null;
     }
+    if (_selectedId != null && !_allNodes.any((n) => n.id == _selectedId)) {
+      _selectedId = null;
+      if (_panel == _Panel.detail) _panel = _Panel.none;
+    }
+    final built = buildRnsScene(
+      allNodes: _allNodes,
+      allEdges: _allEdges,
+      expandedHubId: _expandedHubId,
+    );
 
-    for (final nd in _allNodes) {
-      if (nd.kind == 'self' || nd.kind == 'hub') add(nd);
-    }
-    for (final nd in _allNodes) {
-      if (nd.kind != 'leaf') continue;
-      if (nd.relayer.isEmpty || _expanded.contains(nd.relayer)) add(nd);
-    }
-    _vis = vis;
-    _visEdges = [
-      for (final e in _allEdges)
-        if (visIds.contains(e.from) && visIds.contains(e.to)) e
-    ];
-    if (_selectedId != null && !byId.containsKey(_selectedId)) _selectedId = null;
-
-    final sig = (vis.map((e) => e.id).toList()..sort()).join('|');
-    if (sig != _visSig) {
-      _visSig = sig;
-      _relayout();
-    } else if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<void> _relayout() async {
-    if (_size.isEmpty) return;
-    final seq = ++_layoutSeq;
-    _laying = true;
-    final req = <String, dynamic>{
-      'w': _size.width,
-      'h': _size.height,
-      'nodes': [
-        for (final nd in _vis)
-          {'id': nd.id, 'kind': nd.kind, 'relayer': nd.relayer}
-      ],
+    _scene.advancePoses();
+    final positionById = <String, Vector3>{
+      for (var i = 0; i < _scene.renderNodes.length; i++)
+        _scene.renderNodes[i].key: _scene.poses[i].position,
     };
-    final result = await Isolate.run(() => _computeGraphLayout(req));
-    if (!mounted || seq != _layoutSeq) return;
-    _laying = false;
-    final pos = result['pos'] as Float32List;
-    final ids = (result['ids'] as List).cast<String>();
-    final target = <String, Offset>{};
-    for (var i = 0; i < ids.length; i++) {
-      target[ids[i]] = Offset(pos[i * 2], pos[i * 2 + 1]);
-    }
-    _startTween(target);
-  }
+    Vector3 sourceOf(RnsGraphNode n) =>
+        positionById[n.relayer] ?? Vector3.zero();
 
-  void _startTween(Map<String, Offset> target) {
-    final from = <String, Offset>{};
-    for (final nd in _vis) {
-      from[nd.id] = _posById[nd.id] ??
-          (nd.relayer.isNotEmpty
-              ? (_posById[nd.relayer] ?? Offset.zero)
-              : Offset.zero);
-    }
-    _from = from;
-    _to = target;
-    _anim.forward(from: 0);
-    _onTween();
-    if (!_fitted) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _fitToContent(target));
-    }
-  }
+    _scene.setScene(
+      built.scene,
+      layout: built.layout,
+      enterPoseOf: _framedOnce
+          ? (node) => Pose(sourceOf(node.data), Quaternion.identity())
+          : null,
+      exitPoseOf: (node) => Pose(sourceOf(node.data), Quaternion.identity()),
+      reframe: false,
+    );
 
-  void _onTween() {
-    final t = Curves.easeOutCubic.transform(_anim.value);
-    for (final nd in _vis) {
-      final a = _from[nd.id] ?? Offset.zero;
-      final b = _to[nd.id] ?? a;
-      _posById[nd.id] = Offset.lerp(a, b, t)!;
+    if (!_framedOnce && _allNodes.length > 1) {
+      _framedOnce = true;
+      _resetView(immediate: true);
     }
     if (mounted) setState(() {});
   }
 
-  void _fitToContent(Map<String, Offset> pts) {
-    if (pts.isEmpty || _size.isEmpty) return;
-    var minX = double.infinity, minY = double.infinity;
-    var maxX = -double.infinity, maxY = -double.infinity;
-    for (final p in pts.values) {
-      minX = min(minX, p.dx);
-      minY = min(minY, p.dy);
-      maxX = max(maxX, p.dx);
-      maxY = max(maxY, p.dy);
-    }
-    final cw = (maxX - minX).abs(), ch = (maxY - minY).abs();
-    const padX = 90.0, padTop = 64.0, padBot = 40.0;
-    final sx = cw < 1 ? 1.0 : (_size.width - padX) / cw;
-    final sy = ch < 1 ? 1.0 : (_size.height - padTop - padBot) / ch;
-    final s = (min(sx, sy)).clamp(0.1, 1.8);
-    final cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-    setState(() {
-      _scale = s;
-      _translate = Offset(_size.width / 2 - cx * s,
-          (padTop + (_size.height - padTop - padBot) / 2) - cy * s);
-      _fitted = true;
-    });
+  void _resetView({bool immediate = false}) {
+    final radius = _scene.geometry.radius + 300;
+    if (radius <= 300) return;
+    // Fitting the whole ego sphere on a portrait phone would shrink the core
+    // to specks; frame the heart of it and let the fringe overflow — panning
+    // is tethered, nothing gets lost.
+    _scene.camera.maxFrameDistance = 12500;
+    _scene.camera.frameFacing(
+      Pose(
+        Vector3.zero(),
+        lookAtQuaternion(Vector3.zero(), Vector3(0, 0.5, 1)),
+      ),
+      halfExtent: Vector3(radius, radius * 0.62, radius * 0.9),
+      sceneRadius: radius,
+      durationMs: immediate ? 0 : 1200,
+    );
   }
 
-  Offset _screenToWorld(Offset s) => (s - _translate) / _scale;
-
-  void _centerOn(String id) {
-    final p = _posById[id];
-    if (p == null || _size.isEmpty) return;
-    setState(() {
-      _translate = Offset(
-          _size.width / 2 - p.dx * _scale, _size.height / 2 - p.dy * _scale);
-    });
+  // Frame an expanded hub's cluster from off-axis, so the hop shells behind
+  // it read as depth instead of collapsing onto one line of sight.
+  void _frameCluster(String hubId) {
+    final i = _scene.renderNodes.indexWhere((n) => n.key == hubId);
+    if (i < 0) return;
+    _scene.advancePoses();
+    _scene.camera.maxFrameDistance = 9000;
+    final anchor = _scene.geometry.poses[i].position;
+    final outward =
+        anchor.length < 1 ? Vector3(0, 0, 1) : anchor.normalized();
+    final side = Vector3(outward.z, 0, -outward.x);
+    final viewDirection =
+        (outward + side * 0.9 + Vector3(0, 0.42, 0)).normalized();
+    final centre = anchor + outward * (kHopSpacing * 2.0);
+    _scene.camera.frameFacing(
+      Pose(centre, lookAtQuaternion(centre, centre + viewDirection)),
+      halfExtent:
+          Vector3(kHopSpacing * 2.4, kHopSpacing * 2.6, kHopSpacing * 2.0),
+      sceneRadius: kHopSpacing * 6,
+      durationMs: 1400,
+    );
   }
 
-  // ── Gestures ──
-  Offset _lastFocal = Offset.zero;
-  void _onScaleStart(ScaleStartDetails d) => _lastFocal = d.focalPoint;
-  void _onScaleUpdate(ScaleUpdateDetails d) {
-    setState(() {
-      _translate += d.focalPoint - _lastFocal;
-      _lastFocal = d.focalPoint;
-      if (d.scale != 1.0) {
-        final newScale = (_scale * d.scale).clamp(0.04, 6.0);
-        final f = newScale / _scale;
-        _translate = d.focalPoint - (d.focalPoint - _translate) * f;
-        _scale = newScale;
-      }
-    });
-  }
-
-  void _zoomAround(Offset focus, double factor) {
-    final newScale = (_scale * factor).clamp(0.04, 6.0);
-    final f = newScale / _scale;
-    setState(() {
-      _translate = focus - (focus - _translate) * f;
-      _scale = newScale;
-    });
-  }
-
-  void _onTapUp(TapUpDetails d) {
-    final world = _screenToWorld(d.localPosition);
-    const tolPx = 22.0;
-    final tolWorld = tolPx / _scale;
-    _GNode? hit;
-    var best = double.infinity;
-    for (final nd in _vis) {
-      final p = _posById[nd.id];
-      if (p == null) continue;
-      final dd = (p - world).distanceSquared;
-      if (dd < best) {
-        best = dd;
-        hit = nd;
-      }
-    }
-    if (hit == null || best > tolWorld * tolWorld) {
-      setState(() {
-        _selectedId = null;
-        if (_panel == _Panel.detail || _panel == _Panel.hubDevices) {
-          _panel = _Panel.none;
-        }
-      });
-      return;
-    }
-    final node = hit;
+  // Tap on an orb: a hub with hidden peers toggles its cluster (and lists its
+  // devices, as before); everything else opens the detail panel.
+  void _onNodeTap(int id) {
+    if (id < 1 || id > _scene.renderNodes.length) return;
+    final node = _scene.renderNodes[id - 1].data;
     if (node.kind == 'hub' && node.childCount > 0) {
       setState(() {
-        if (!_expanded.add(node.id)) _expanded.remove(node.id);
+        _expandedHubId = _expandedHubId == node.id ? null : node.id;
         _selectedId = node.id;
         _panelHubId = node.id;
         _panel = _Panel.hubDevices;
       });
-      _rebuildVisible();
-    } else {
-      setState(() {
-        _selectedId = node.id;
-        _panel = _Panel.detail;
-      });
+      _scene.selectNode(id);
+      _rebuildScene();
+      if (_expandedHubId != null) _frameCluster(node.id);
+      return;
     }
+    _scene.selectNode(id);
+    _scene.advancePoses();
+    _scene.camera
+        .flyToPoint(_scene.poses[id - 1].position, distance: 1500,
+            durationMs: 1100);
+    setState(() {
+      _selectedId = node.id;
+      _panel = _Panel.detail;
+    });
+  }
+
+  // Select a node by identity and fly the camera to it (device-list rows).
+  void _centerOn(String id) {
+    final i = _scene.renderNodes.indexWhere((n) => n.key == id);
+    if (i < 0) return;
+    _scene.selectNode(i + 1);
+    _scene.advancePoses();
+    _scene.camera.flyToPoint(_scene.poses[i].position,
+        distance: 1500, durationMs: 1100);
+  }
+
+  // Tapping a legend chip: light every device on that network and fly the
+  // camera to face the group. Tapping the same chip again lets go.
+  void _focusIface(RnsIface iface) {
+    if (_focusedIface == iface) {
+      setState(() => _focusedIface = null);
+      _scene.highlightKeys = const <String>{};
+      _resetView();
+      return;
+    }
+    setState(() => _focusedIface = iface);
+    _scene.advancePoses();
+    final keys = <String>{};
+    var centroid = Vector3.zero();
+    var members = 0;
+    for (var i = 0; i < _scene.liveCount; i++) {
+      final n = _scene.renderNodes[i].data;
+      if (n.kind == 'self' || n.iface != iface) continue;
+      keys.add(n.id);
+      centroid += _scene.geometry.poses[i].position;
+      members++;
+    }
+    _scene.highlightKeys = keys;
+    if (members == 0) return;
+    centroid /= members.toDouble();
+
+    var spread = 0.0;
+    for (var i = 0; i < _scene.liveCount; i++) {
+      final n = _scene.renderNodes[i].data;
+      if (n.kind == 'self' || n.iface != iface) continue;
+      final d = (_scene.geometry.poses[i].position - centroid).length;
+      if (d > spread) spread = d;
+    }
+    spread = max(spread + 250, 900);
+
+    // Face the group from outside, keeping self visible behind it.
+    final outward =
+        centroid.length < 1 ? Vector3(0, 0, 1) : centroid.normalized();
+    final side = Vector3(outward.z, 0, -outward.x);
+    final viewDirection =
+        (outward + side * 0.55 + Vector3(0, 0.4, 0)).normalized();
+    _scene.camera.maxFrameDistance = 14000;
+    _scene.camera.frameFacing(
+      Pose(centroid, lookAtQuaternion(centroid, centroid + viewDirection)),
+      halfExtent: Vector3(spread, spread * 0.85, spread * 0.8),
+      sceneRadius: spread + 500,
+      durationMs: 1400,
+    );
   }
 
   // ── Commands ──
@@ -607,55 +469,46 @@ class _GraphViewState extends State<_GraphView>
   @override
   Widget build(BuildContext context) {
     _reportNav(); // keep the host app bar's title + back in sync with the panel
-    return LayoutBuilder(builder: (context, box) {
-      final size = Size(box.maxWidth, box.maxHeight);
-      if (size != _size) {
-        _size = size;
-        if (!_fitted && _vis.isNotEmpty && !_laying) {
-          WidgetsBinding.instance.addPostFrameCallback((_) => _relayout());
-        }
-      }
-      return ColoredBox(
-        color: _gBg,
-        child: Stack(children: [
-          Positioned.fill(
-            child: Listener(
-              onPointerSignal: (s) {
-                if (s is PointerScrollEvent) {
-                  _zoomAround(
-                      s.localPosition, s.scrollDelta.dy < 0 ? 1.12 : 1 / 1.12);
-                }
-              },
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onScaleStart: _onScaleStart,
-                onScaleUpdate: _onScaleUpdate,
-                onTapUp: _onTapUp,
-                child: CustomPaint(
-                  size: Size.infinite,
-                  painter: _GraphPainter(
-                    nodes: _vis,
-                    edges: _visEdges,
-                    posById: _posById,
-                    expanded: _expanded,
-                    scale: _scale,
-                    translate: _translate,
-                    selectedId: _selectedId,
-                    repaint: _anim,
-                  ),
-                ),
-              ),
-            ),
+    return ColoredBox(
+      color: _gBg,
+      child: Stack(children: [
+        Positioned.fill(
+          child: Graph3DView<RnsGraphNode>.sprites(
+            controller: _scene,
+            spriteOf: (node) =>
+                spriteOfRnsNode(node, expandedHubId: _expandedHubId),
+            onNodeTap: _onNodeTap,
+            initialReframe: false,
           ),
-          if (_vis.where((n) => n.kind != 'self').isEmpty) _buildEmpty(),
-          _buildTopBar(),
-          _buildReachBadge(),
-          _buildLegend(),
-          _buildPanel(),
-        ]),
-      );
-    });
+        ),
+        if (_allNodes.where((n) => n.kind != 'self').isEmpty) _buildEmpty(),
+        // The HUD steps aside while the user flies the camera: chrome fades
+        // and stops eating touches, so a drag that starts over it still moves
+        // the world. The chrome's own Positioned widgets live in a nested
+        // Stack — a Positioned can't sit below the fade's render objects.
+        Positioned.fill(
+          child: _hudFade(Stack(children: [
+            _buildTopBar(),
+            _buildReachBadge(),
+            _buildLegend(),
+          ])),
+        ),
+        _buildPanel(),
+      ]),
+    );
   }
+
+  Widget _hudFade(Widget child) => AnimatedBuilder(
+        animation: _scene,
+        builder: (context, _) => IgnorePointer(
+          ignoring: _scene.isDragging,
+          child: AnimatedOpacity(
+            opacity: _scene.isDragging ? 0.08 : 1,
+            duration: const Duration(milliseconds: 220),
+            child: child,
+          ),
+        ),
+      );
 
   // ── Top control bar (search + filters + Hubs/Settings icons) ──
   Widget _buildTopBar() {
@@ -813,51 +666,69 @@ class _GraphViewState extends State<_GraphView>
     }
   }
 
-  // ── Legend ──
+  // ── Legend: one chip per network with a live device count. Tap a chip to
+  // light that group on the graph and fly to face it; tap again to let go.
+  // Forward-looking networks (LoRa, radio) render dimmed while empty. ──
   Widget _buildLegend() {
-    Widget dot(Color c, {bool ring = false}) => Container(
-          width: 9,
-          height: 9,
-          margin: const EdgeInsets.only(right: 6),
-          decoration: BoxDecoration(
-            color: c,
-            shape: BoxShape.circle,
-            border: ring ? Border.all(color: _gGeo, width: 2) : null,
-          ),
-        );
-    const muted = TextStyle(color: _gMuted, fontSize: 11);
+    final counts = <RnsIface, int>{};
+    for (final n in _allNodes) {
+      if (n.kind == 'self') continue;
+      counts[n.iface] = (counts[n.iface] ?? 0) + 1;
+    }
     return Positioned(
       left: 10,
+      right: 10,
       bottom: 12,
-      child: IgnorePointer(
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (final iface in RnsIface.values)
+            if ((counts[iface] ?? 0) > 0 || iface.forwardLooking)
+              _legendChip(iface, counts[iface] ?? 0),
+        ],
+      ),
+    );
+  }
+
+  Widget _legendChip(RnsIface iface, int count) {
+    final active = _focusedIface == iface;
+    final dimmed = iface.forwardLooking && count == 0;
+    return Opacity(
+      opacity: dimmed ? 0.45 : 1,
+      child: InkWell(
+        onTap: dimmed ? null : () => _focusIface(iface),
+        borderRadius: BorderRadius.circular(16),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            color: const Color(0xE6161B22),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: _gBorder),
+            color: active
+                ? iface.color.withValues(alpha: 0.22)
+                : const Color(0xE6161B22),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+                color: active ? iface.color : _gBorder,
+                width: active ? 1.4 : 1),
           ),
-          child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(mainAxisSize: MainAxisSize.min, children: [
-                  dot(_gSelf),
-                  const Text('this node', style: muted)
-                ]),
-                Row(mainAxisSize: MainAxisSize.min, children: [
-                  dot(_gHub),
-                  const Text('hub / transport', style: muted)
-                ]),
-                Row(mainAxisSize: MainAxisSize.min, children: [
-                  dot(_gGeo, ring: true),
-                  const Text('geogram node', style: muted)
-                ]),
-                Row(mainAxisSize: MainAxisSize.min, children: [
-                  dot(_gGeneric),
-                  const Text('other Reticulum', style: muted)
-                ]),
-              ]),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 8,
+              height: 8,
+              margin: const EdgeInsets.only(right: 6),
+              decoration:
+                  BoxDecoration(color: iface.color, shape: BoxShape.circle),
+            ),
+            Text(iface.label,
+                style: TextStyle(
+                    color: active ? iface.color : _gFg, fontSize: 11.5)),
+            const SizedBox(width: 5),
+            Text('$count',
+                style: TextStyle(
+                    color: active ? iface.color : _gMuted,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700)),
+          ]),
         ),
       ),
     );
@@ -992,7 +863,7 @@ class _GraphViewState extends State<_GraphView>
     Widget content;
     switch (_panel) {
       case _Panel.detail:
-        final n = _vis.where((e) => e.id == _selectedId).firstOrNull;
+        final n = _allNodes.where((e) => e.id == _selectedId).firstOrNull;
         if (n == null) return const SizedBox.shrink();
         content = _detailBody(n);
         break;
@@ -1066,7 +937,7 @@ class _GraphViewState extends State<_GraphView>
     return '${s ~/ 86400}d ago';
   }
 
-  Widget _detailBody(_GNode n) {
+  Widget _detailBody(RnsGraphNode n) {
     final m = n.meta;
     final kindName = n.kind == 'self'
         ? 'This node'
@@ -1163,12 +1034,14 @@ class _GraphViewState extends State<_GraphView>
             child: OutlinedButton.icon(
               icon: const Icon(Icons.list, size: 16),
               label: Text('List ${n.childCount} devices'),
-              onPressed: () => setState(() {
-                _panelHubId = n.id;
-                _expanded.add(n.id);
-                _panel = _Panel.hubDevices;
-                _rebuildVisible();
-              }),
+              onPressed: () {
+                setState(() {
+                  _panelHubId = n.id;
+                  _expandedHubId = n.id;
+                  _panel = _Panel.hubDevices;
+                });
+                _rebuildScene();
+              },
             ),
           ),
         ),
@@ -1196,7 +1069,7 @@ class _GraphViewState extends State<_GraphView>
   // Open (or start) an LXMF conversation with a graph node. The conversation is
   // keyed by the node's LXMF delivery-dest — derived from its announced pubkey —
   // so incoming replies (same address) land in the same thread.
-  void _messagePeer(_GNode n, String pubkey) {
+  void _messagePeer(RnsGraphNode n, String pubkey) {
     final dest = RnsService.instance.lxmfDestForPubkey(pubkey);
     if (dest == null) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
@@ -1226,7 +1099,7 @@ class _GraphViewState extends State<_GraphView>
   // Devices on a hub: tap a device → select + centre it on the graph.
   // A stable dedup key for a person: their npub (cross-device identity),
   // else their callsign, else their raw id.
-  String _peerKey(_GNode n) {
+  String _peerKey(RnsGraphNode n) {
     if (n.npub.isNotEmpty) return 'npub:${n.npub}';
     final call = (n.meta['callsign'] ?? '').toString();
     if (call.isNotEmpty) return 'call:${call.toUpperCase()}';
@@ -1235,9 +1108,9 @@ class _GraphViewState extends State<_GraphView>
 
   // Collapse the same person heard from several identities/hubs into one row
   // (keeps the first, which is the best-labelled after sorting).
-  List<_GNode> _dedupPeers(List<_GNode> src) {
+  List<RnsGraphNode> _dedupPeers(List<RnsGraphNode> src) {
     final seen = <String>{};
-    final out = <_GNode>[];
+    final out = <RnsGraphNode>[];
     for (final n in src) {
       if (RnsService.instance.isMutedCallsign(
           (n.meta['callsign'] ?? '').toString())) {
@@ -1250,7 +1123,7 @@ class _GraphViewState extends State<_GraphView>
 
   // Hubs a peer is reachable through NOW — the labels of every node sharing this
   // peer's key (same person on several identities → several hubs).
-  List<String> _reachableViaFor(_GNode n) {
+  List<String> _reachableViaFor(RnsGraphNode n) {
     final key = _peerKey(n);
     final labels = <String>{};
     for (final o in _allNodes) {
@@ -1265,7 +1138,7 @@ class _GraphViewState extends State<_GraphView>
 
   // Open the shared full profile page for a geogram peer (Follow / Message /
   // Mute + observed first-seen + reachable-via hubs).
-  void _openPeerProfile(_GNode n) {
+  void _openPeerProfile(RnsGraphNode n) {
     final callsign = (n.meta['callsign'] ?? '').toString().isNotEmpty
         ? (n.meta['callsign']).toString()
         : n.label;
@@ -1601,7 +1474,7 @@ class _GraphViewState extends State<_GraphView>
   //  • geogram peer → row opens its full PROFILE (avatar + a send shortcut);
   //  • other messageable peer (NomadNet/Sideband) → row opens a chat;
   //  • bare node/relay → row opens the graph detail.
-  Widget _peerRow(_GNode p) {
+  Widget _peerRow(RnsGraphNode p) {
     final pubkey = (p.meta['pubkey'] ?? '').toString();
     final canMsg = p.dm.isNotEmpty && pubkey.isNotEmpty;
     final color = p.geogram
@@ -1703,7 +1576,7 @@ class _GraphViewState extends State<_GraphView>
 
   // Row subtitle: how long ago we first heard the device + which hub(s) it's
   // reachable through (or "N hubs" when present on several bridges).
-  String _peerSubtitle(_GNode p) {
+  String _peerSubtitle(RnsGraphNode p) {
     final parts = <String>[];
     if (p.firstSeenMs > 0) parts.add('first seen ${_ago(p.firstSeenMs)}');
     final relayers =
@@ -2090,150 +1963,6 @@ class _GraphViewState extends State<_GraphView>
       ),
     ]);
   }
-}
-
-// ── Painter ────────────────────────────────────────────────────────────────
-class _GraphPainter extends CustomPainter {
-  _GraphPainter({
-    required this.nodes,
-    required this.edges,
-    required this.posById,
-    required this.expanded,
-    required this.scale,
-    required this.translate,
-    required this.selectedId,
-    required Listenable repaint,
-  }) : super(repaint: repaint);
-  final List<_GNode> nodes;
-  final List<_GEdge> edges;
-  final Map<String, Offset> posById;
-  final Set<String> expanded;
-  final double scale;
-  final Offset translate;
-  final String? selectedId;
-
-  Offset _s(Offset w) => w * scale + translate;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final uplink = Path(), relay = Path(), direct = Path();
-    for (final e in edges) {
-      final a = posById[e.from], b = posById[e.to];
-      if (a == null || b == null) continue;
-      final sa = _s(a), sb = _s(b);
-      final p = e.kind == 'uplink'
-          ? uplink
-          : e.kind == 'relay'
-              ? relay
-              : direct;
-      p.moveTo(sa.dx, sa.dy);
-      p.lineTo(sb.dx, sb.dy);
-    }
-    canvas.drawPath(
-        relay,
-        Paint()
-          ..color = const Color(0x66484F58)
-          ..strokeWidth = 1
-          ..style = PaintingStyle.stroke);
-    canvas.drawPath(
-        direct,
-        Paint()
-          ..color = const Color(0x883FB950)
-          ..strokeWidth = 1
-          ..style = PaintingStyle.stroke);
-    canvas.drawPath(
-        uplink,
-        Paint()
-          ..color = const Color(0xCC58A6FF)
-          ..strokeWidth = 2
-          ..style = PaintingStyle.stroke);
-
-    final bounds = (Offset.zero & size).inflate(40);
-    for (final n in nodes) {
-      final wp = posById[n.id];
-      if (wp == null) continue;
-      final p = _s(wp);
-      if (!bounds.contains(p)) continue;
-      _paintNode(canvas, n, p);
-    }
-  }
-
-  void _paintNode(Canvas canvas, _GNode n, Offset p) {
-    double r;
-    Color c;
-    switch (n.kind) {
-      case 'self':
-        r = 9;
-        c = _gSelf;
-        break;
-      case 'hub':
-        r = 8;
-        c = _gHub;
-        break;
-      default:
-        r = 5.5;
-        c = n.geogram ? _gGeo : _gGeneric;
-    }
-    final selected = n.id == selectedId;
-    if (n.kind == 'hub') {
-      final path = Path()
-        ..moveTo(p.dx, p.dy - r)
-        ..lineTo(p.dx + r, p.dy)
-        ..lineTo(p.dx, p.dy + r)
-        ..lineTo(p.dx - r, p.dy)
-        ..close();
-      canvas.drawPath(path, Paint()..color = c);
-    } else {
-      canvas.drawCircle(p, r, Paint()..color = c);
-      if (n.geogram && n.kind != 'self') {
-        canvas.drawCircle(
-            p,
-            r + 1.5,
-            Paint()
-              ..color = _gGeo
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 1.5);
-      }
-    }
-    if (selected) {
-      canvas.drawCircle(
-          p,
-          r + 4,
-          Paint()
-            ..color = _gSelf
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 2);
-    }
-    if (n.kind == 'hub' && n.childCount > 0 && !expanded.contains(n.id)) {
-      _text(canvas, '⊕ ${n.childCount}', p + const Offset(11, -6), _gHub, 10);
-    }
-    // Labels: self + hubs always; leaves only when zoomed in or selected
-    // (keeps dense hub clusters readable instead of an overlapping mess).
-    final showLabel = n.kind == 'self' ||
-        n.kind == 'hub' ||
-        selected ||
-        scale > 1.5;
-    if (showLabel && n.label.isNotEmpty) {
-      _text(canvas, n.label, p + Offset(0, r + 3),
-          selected ? _gSelf : _gFg, 10,
-          center: true);
-    }
-  }
-
-  final Map<String, TextPainter> _tpCache = {};
-  void _text(Canvas canvas, String s, Offset at, Color color, double size,
-      {bool center = false}) {
-    final tp = _tpCache.putIfAbsent('$s|$color|$size', () {
-      return TextPainter(
-        text: TextSpan(text: s, style: TextStyle(color: color, fontSize: size)),
-        textDirection: TextDirection.ltr,
-      )..layout();
-    });
-    tp.paint(canvas, center ? at - Offset(tp.width / 2, 0) : at);
-  }
-
-  @override
-  bool shouldRepaint(_GraphPainter o) => true;
 }
 
 // ── _WappPageState integration ─────────────────────────────────────────────

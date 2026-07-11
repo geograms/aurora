@@ -447,6 +447,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.2.5"
+  graph3d:
+    dependency: "direct main"
+    description:
+      path: "../3d/graph3d"
+      relative: true
+    source: path
+    version: "0.1.0"
   hex:
     dependency: "direct main"
     description:
@@ -1060,7 +1067,7 @@ packages:
     source: hosted
     version: "1.2.5"
   vector_math:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: vector_math
       sha256: d530bd74fea330e6e364cda7a85019c434070188383e1cd8d9777ee586914c5b

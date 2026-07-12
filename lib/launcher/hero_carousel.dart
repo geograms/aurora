@@ -133,30 +133,89 @@ class _HeroCarouselState extends State<_HeroCarousel> {
   }
 }
 
+/// What the hero shows before it has anything to show.
+///
+/// This is the first thing a new user sees, so it is a card in its own right —
+/// not a grey box with an apology in it. The old one said "Start Reticulum to
+/// see network activity" even while Reticulum was running, which reads as a
+/// broken app rather than an empty one.
 class _HeroEmpty extends StatelessWidget {
   const _HeroEmpty();
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final up = RnsService.instance.isUp;
+    final hasFollows = RnsService.instance.follows.asSet.isNotEmpty;
+
+    final (IconData icon, String title, String body) = !up
+        ? (
+            Icons.hub_outlined,
+            'The mesh is asleep',
+            'Start Reticulum and the news people are posting will land here.',
+          )
+        : hasFollows
+            ? (
+                Icons.podcasts,
+                'Listening',
+                'Nothing new from the people you follow just yet.',
+              )
+            : (
+                Icons.auto_awesome,
+                'Finding what people are reading',
+                'Follow someone in Social and their posts land here first.',
+              );
+
     return Container(
       height: 172,
-      margin: const EdgeInsets.fromLTRB(20, 18, 20, 8),
+      margin: const EdgeInsets.fromLTRB(6, 18, 6, 0),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(22),
-        gradient: LinearGradient(
-          colors: [
-            cs.primaryContainer.withValues(alpha: 0.65),
-            cs.secondaryContainer.withValues(alpha: 0.45),
-          ],
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF1B2A4A), Color(0xFF16233B), Color(0xFF0C0C0F)],
         ),
+        border: Border.all(color: _heroBlue.withValues(alpha: 0.22)),
       ),
-      alignment: Alignment.center,
-      child: Text(
-        RnsService.instance.isUp
-            ? 'Listening for network activity...'
-            : 'Start Reticulum to see network activity',
-        style: TextStyle(color: cs.onSurfaceVariant),
+      padding: const EdgeInsets.fromLTRB(22, 0, 22, 0),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: _heroBlue.withValues(alpha: 0.16),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon, color: _heroBlue, size: 24),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  body,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.72),
+                    fontSize: 13,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

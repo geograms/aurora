@@ -28,10 +28,14 @@ class NostrHeroSource implements HeroSource {
 
   static const int _bufferCap = 40;
 
-  /// How long to wait for the like-ranked discovery feed before falling back to
-  /// the unranked firehose. Discovery needs to see reactions accumulate, which
-  /// takes a few refresh cycles on a cold start.
-  static const int _firehoseGraceMs = 45 * 1000;
+  /// How long to hold out for the like-ranked discovery feed before falling back
+  /// to whatever the mesh has relayed to us.
+  ///
+  /// Discovery has to watch reactions accumulate before it knows which posts are
+  /// worth fetching, so it cannot answer instantly. But an empty hero is the
+  /// first thing a new user sees, and making them stare at it is worse than
+  /// showing them an unranked post: 15 seconds, not 45.
+  static const int _firehoseGraceMs = 15 * 1000;
   int? _firstLoadMs;
 
   // Newest-first buffers, keyed by event id so a redelivered event is one row.

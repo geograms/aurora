@@ -48,18 +48,35 @@ List<_LauncherEntry> _resolveHomeSlot(
 ///
 /// The module BARS deliberately do not do this: they are the user's chosen
 /// shortcuts and must stay put.
+///
+/// [onBars] is what those bars are already showing. The dock skips them and
+/// takes the next wapps down the list instead — the same wapp as a big bar AND
+/// a dock icon is a wasted slot on both, on a home screen that only has seven.
+/// An explicit dock pin still wins: if the user deliberately pinned it to both,
+/// that is their call, not a bug.
 List<_LauncherEntry> _resolveDockSlot(
   List<_LauncherEntry> entries,
   List<String> preferred,
   Map<String, int> unread,
-  int count,
-) {
-  final base = _resolveHomeSlot(entries, preferred, count);
+  int count, {
+  Set<String> onBars = const {},
+}) {
+  final prefs = PreferencesService.instanceSync;
+  final pool = onBars.isEmpty
+      ? entries
+      : [
+          for (final e in entries)
+            if (e.wappId == null ||
+                !onBars.contains(e.wappId) ||
+                (prefs?.isPinnedToDock(e.wappId!) ?? false))
+              e,
+        ];
+  final base = _resolveHomeSlot(pool, preferred, count);
   int unreadOf(_LauncherEntry e) =>
       e.wappId == null ? 0 : WappUnreadService.instance.totalFor(e.wappId!);
 
   final alerting = [
-    for (final e in entries)
+    for (final e in pool)
       if (e.wappId != null && unreadOf(e) > 0) e,
   ];
   if (alerting.isEmpty) return base;

@@ -866,7 +866,9 @@ class _AppIcon extends StatelessWidget {
               children: [
                 Icon(Icons.edit, size: 18),
                 SizedBox(width: 10),
-                Text('Edit'),
+                // Same action as the wapp page's overflow menu, so the same
+                // words: this opens the wapp's SOURCE, not anything inside it.
+                Text('Edit wapp'),
               ],
             ),
           ),

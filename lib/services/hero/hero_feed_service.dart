@@ -82,6 +82,14 @@ class HeroRefresher {
   /// how often we go back to the buffer it has already filled.
   static const Duration _every = Duration(minutes: 5);
 
+  /// …but an EMPTY hero is a different situation. On a cold start the relays are
+  /// still answering, and making the user wait out a five-minute tick to see the
+  /// first post is the difference between an app that works and one that looks
+  /// broken. Check back quickly until there is something on screen, then settle.
+  /// This costs nothing on the network — it re-reads a buffer the hub has
+  /// already filled.
+  static const Duration _whileEmpty = Duration(seconds: 20);
+
   /// On becoming visible, refresh at once if what's on screen is older than
   /// this. Without it, returning to the launcher after an hour would show a
   /// stale hero for up to five more minutes.
@@ -126,10 +134,24 @@ class HeroRefresher {
     if (last == null || DateTime.now().difference(last) > _staleAfter) {
       _safeRefresh();
     }
-    _timer = Timer.periodic(_every, (_) => _safeRefresh());
+    _arm();
+  }
+
+  /// Fast while the hero has nothing to show, slow once it does.
+  bool _fast = true;
+
+  void _arm() {
+    _fast = HeroFeedService.instance.items.value.isEmpty;
+    _timer?.cancel();
+    _timer = Timer.periodic(_fast ? _whileEmpty : _every, (_) => _safeRefresh());
   }
 
   void _safeRefresh() {
-    unawaited(refresh().catchError((_) {}));
+    unawaited(refresh().then((_) {
+      // The moment the first post lands, drop back to the slow cadence — the
+      // fast one exists only to get something on screen, not to keep polling.
+      if (!LauncherVisibility.instance.visible.value) return;
+      if (_fast != HeroFeedService.instance.items.value.isEmpty) _arm();
+    }).catchError((_) {}));
   }
 }

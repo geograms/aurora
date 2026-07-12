@@ -33,11 +33,17 @@ class _AllAppsSheetState extends State<_AllAppsSheet> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // The system navigation bar sits ON TOP of the sheet (the launcher draws
+    // edge to edge). On a phone with a gesture/3-button bar — the C61 has one,
+    // the TANK2 doesn't — it lands right across the dock and the drag handle,
+    // so the user is fighting the system bar to lift the sheet. Reserve its
+    // height: the peek grows by it, and the peek's content is padded above it.
+    final navBar = MediaQuery.viewPaddingOf(context).bottom;
     return LayoutBuilder(
       builder: (context, constraints) {
         final peek = constraints.maxHeight <= 0
             ? 0.14
-            : (_peekPx / constraints.maxHeight).clamp(0.08, 0.5);
+            : ((_peekPx + navBar) / constraints.maxHeight).clamp(0.08, 0.5);
         return NotificationListener<DraggableScrollableNotification>(
           onNotification: (n) {
             _expand.value =
@@ -102,12 +108,13 @@ class _AllAppsSheetState extends State<_AllAppsSheet> {
                             },
                             child: _QuickLaunchRow(entries: entries),
                           ),
-                          const SizedBox(height: 8),
+                          // Clear of the system navigation bar (see above).
+                          SizedBox(height: 8 + navBar),
                         ],
                       ),
                     ),
                     SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+                      padding: EdgeInsets.fromLTRB(24, 0, 24, 32 + navBar),
                       sliver: SliverGrid(
                         gridDelegate:
                             const SliverGridDelegateWithMaxCrossAxisExtent(

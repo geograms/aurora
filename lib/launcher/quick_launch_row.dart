@@ -16,6 +16,11 @@ class _QuickLaunchRowState extends State<_QuickLaunchRow> {
   static const int _slots = 4;
 
   List<String> _preferred = const [];
+
+  /// What the module bars are showing, so the dock can resolve around them: the
+  /// same wapp as a big bar AND a dock icon wastes one of only four dock slots
+  /// on something already a thumb's width away.
+  List<String> _moduleFavourites = const [];
   String _signature = '';
 
   @override
@@ -44,7 +49,13 @@ class _QuickLaunchRowState extends State<_QuickLaunchRow> {
 
   Future<void> _load() async {
     final preferred = await LaunchCountStore.instance.preferredDock(_slots);
-    if (mounted) setState(() => _preferred = preferred);
+    final modules = await LaunchCountStore.instance.preferredModules(3);
+    if (mounted) {
+      setState(() {
+        _preferred = preferred;
+        _moduleFavourites = modules;
+      });
+    }
   }
 
   @override
@@ -54,8 +65,19 @@ class _QuickLaunchRowState extends State<_QuickLaunchRow> {
     return ValueListenableBuilder<Map<String, int>>(
       valueListenable: WappUnreadService.instance.counts,
       builder: (context, unread, _) {
-        final selected =
-            _resolveDockSlot(widget.entries, _preferred, unread, _slots);
+        // The bars resolve themselves from the same inputs, so resolving them
+        // again here gives exactly the set they are showing.
+        final onBars = {
+          for (final e in _resolveHomeSlot(widget.entries, _moduleFavourites, 3))
+            if (e.wappId != null) e.wappId!,
+        };
+        final selected = _resolveDockSlot(
+          widget.entries,
+          _preferred,
+          unread,
+          _slots,
+          onBars: onBars,
+        );
         if (selected.isEmpty) return const SizedBox.shrink();
         return SizedBox(
           height: 86,

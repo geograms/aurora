@@ -14,49 +14,15 @@
  */
 
 import 'dart:async';
-import 'dart:isolate';
 
 import 'package:flutter/material.dart';
 
 import 'iwi_profile.dart';
 import 'identity_backup.dart';
+import 'vanity_callsign_page.dart';
 import 'profile_service.dart';
-import '../util/nostr_key_generator.dart';
 import '../services/android_permissions_service.dart';
 import '../services/preferences_service.dart';
-
-/// Background isolate that brute-forces vanity callsigns. The main isolate
-/// sends `{pattern, batchSize}`; we generate that many keypairs and reply with
-/// `{keysGenerated, matches}` where each match's callsign contains the pattern.
-/// Looping (one batch per reply) keeps the UI responsive and stoppable.
-void _vanityIsolate(SendPort mainSendPort) {
-  final port = ReceivePort();
-  mainSendPort.send(port.sendPort);
-  port.listen((message) {
-    if (message == 'stop') {
-      port.close();
-      return;
-    }
-    if (message is Map) {
-      final pattern = message['pattern'] as String;
-      final batchSize = message['batchSize'] as int;
-      var generated = 0;
-      final matches = <Map<String, String>>[];
-      for (var i = 0; i < batchSize; i++) {
-        final keys = NostrKeyGenerator.generateKeyPair();
-        generated++;
-        if (keys.callsign.contains(pattern)) {
-          matches.add({
-            'npub': keys.npub,
-            'nsec': keys.nsec,
-            'callsign': keys.callsign,
-          });
-        }
-      }
-      mainSendPort.send({'keysGenerated': generated, 'matches': matches});
-    }
-  });
-}
 
 class WelcomePage extends StatefulWidget {
   /// Fired once the profile has been persisted and activated. The
@@ -120,7 +86,6 @@ class _WelcomePageState extends State<WelcomePage> {
   /// Save a restored identity and hand off to the launcher. Reuses
   /// [ProfileService.buildFromNsec] so the callsign/npub are re-derived.
   Future<void> _restore(RestorableIdentity id) async {
-    if (_vanityRunning) _stopVanity();
     setState(() {
       _isFinalizing = true;
       _error = null;
@@ -147,7 +112,6 @@ class _WelcomePageState extends State<WelcomePage> {
   /// Manual restore: grant storage access if needed, unlock an encrypted backup
   /// with a passphrase, then restore (or pick when several identities exist).
   Future<void> _restoreFromBackup() async {
-    if (_vanityRunning) _stopVanity();
     // Android: the backup lives on public storage behind all-files-access.
     if (!await AndroidPermissionsService.instance.hasAllFilesAccess()) {
       final ok =
@@ -291,91 +255,23 @@ class _WelcomePageState extends State<WelcomePage> {
     );
   }
 
-  // ── Vanity callsign generator ──────────────────────────────────────
-  final _patternController = TextEditingController();
-  bool _vanityRunning = false;
-  int _vanityTried = 0;
-  Duration _vanityElapsed = Duration.zero;
-  Timer? _vanityTimer;
-  Stopwatch? _vanityWatch;
-  final List<IwiProfile> _vanityMatches = [];
-  Isolate? _isolate;
-  ReceivePort? _receivePort;
-  SendPort? _sendPort;
-  bool _disposed = false;
-
   @override
   void dispose() {
-    _disposed = true;
-    _stopVanity();
     _nicknameController.dispose();
-    _patternController.dispose();
     super.dispose();
   }
 
-  Future<void> _startVanity() async {
-    final pattern = _patternController.text.trim().toUpperCase();
-    if (pattern.isEmpty || pattern.length > 4) return;
-    setState(() {
-      _vanityRunning = true;
-      _vanityTried = 0;
-      _vanityElapsed = Duration.zero;
-      _vanityMatches.clear();
-      _error = null;
-    });
-    _vanityWatch = Stopwatch()..start();
-    _vanityTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-      if (mounted) setState(() => _vanityElapsed = _vanityWatch!.elapsed);
-    });
-    _receivePort = ReceivePort();
-    _isolate = await Isolate.spawn(_vanityIsolate, _receivePort!.sendPort);
-    _receivePort!.listen((message) {
-      if (message is SendPort) {
-        _sendPort = message;
-        _requestBatch(pattern);
-      } else if (message is Map) {
-        if (mounted) {
-          setState(() {
-            _vanityTried += message['keysGenerated'] as int;
-            for (final m in (message['matches'] as List)) {
-              final mm = (m as Map).cast<String, String>();
-              final cs = mm['callsign']!;
-              if (_vanityMatches.any((p) => p.callsign == cs)) continue;
-              _vanityMatches.insert(
-                0,
-                IwiProfile(
-                  id: cs,
-                  nickname: '',
-                  callsign: cs,
-                  npub: mm['npub']!,
-                  nsec: mm['nsec']!,
-                  createdAt: DateTime.now().millisecondsSinceEpoch,
-                ),
-              );
-              if (_vanityMatches.length > 50) _vanityMatches.removeLast();
-            }
-          });
-        }
-        if (_vanityRunning && mounted) _requestBatch(pattern);
-      }
-    });
-  }
 
-  void _requestBatch(String pattern) =>
-      _sendPort?.send({'pattern': pattern, 'batchSize': 1000});
-
-  void _stopVanity() {
-    _sendPort?.send('stop');
-    _isolate?.kill(priority: Isolate.immediate);
-    _isolate = null;
-    _receivePort?.close();
-    _receivePort = null;
-    _sendPort = null;
-    _vanityRunning = false;
-    _vanityTimer?.cancel();
-    _vanityTimer = null;
-    _vanityWatch?.stop();
-    if (mounted && !_disposed) setState(() {});
+  /// Open the full-screen generator and adopt whatever the user picked. The
+  /// search runs on its own isolate inside that page, so it never competes with
+  /// this screen for frames.
+  Future<void> _openVanityPage() async {
+    final picked = await Navigator.of(context).push<IwiProfile>(
+      MaterialPageRoute(
+        builder: (_) => VanityCallsignPage(currentCallsign: _preview.callsign),
+      ),
+    );
+    if (picked != null && mounted) _selectVanity(picked);
   }
 
   /// Use a found vanity match as the active preview (so Continue keeps it).
@@ -387,14 +283,7 @@ class _WelcomePageState extends State<WelcomePage> {
     });
   }
 
-  static String _fmtElapsed(Duration d) {
-    final m = d.inMinutes;
-    final s = d.inSeconds % 60;
-    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-  }
-
   void _regenerate() {
-    if (_vanityRunning) _stopVanity();
     setState(() {
       _previous = _preview;
       _preview = ProfileService.instance.generatePreview(
@@ -415,7 +304,6 @@ class _WelcomePageState extends State<WelcomePage> {
   }
 
   Future<void> _importNsec() async {
-    if (_vanityRunning) _stopVanity();
     final controller = TextEditingController();
     final nsec = await showDialog<String>(
       context: context,
@@ -470,7 +358,6 @@ class _WelcomePageState extends State<WelcomePage> {
   }
 
   Future<void> _finalize() async {
-    if (_vanityRunning) _stopVanity();
     setState(() {
       _isFinalizing = true;
       _error = null;
@@ -721,8 +608,11 @@ class _WelcomePageState extends State<WelcomePage> {
                       ),
 
                       const SizedBox(height: 24),
-                      // Vanity callsign generator — search for a callsign that
-                      // contains letters the user likes (e.g. their initials).
+                      // Choosing a callsign you like is a whole task of its own
+                      // (type a pattern, watch a brute-force search, pick from
+                      // matches), and it does not belong squeezed in beside the
+                      // preview card and the Continue button. One button; the
+                      // work happens on its own full screen.
                       Text(
                         'Custom callsign (optional)',
                         style: theme.textTheme.titleMedium?.copyWith(
@@ -731,102 +621,21 @@ class _WelcomePageState extends State<WelcomePage> {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Search for a callsign containing letters you like — '
-                        'it tries random identities until one matches. Longer '
-                        'patterns take much longer to find.',
+                        'Want your initials in it? Search for a callsign that '
+                        'contains letters you like.',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: cs.onSurfaceVariant,
                         ),
                       ),
                       const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _patternController,
-                              enabled: !_vanityRunning && !_isFinalizing,
-                              textCapitalization: TextCapitalization.characters,
-                              maxLength: 4,
-                              decoration: const InputDecoration(
-                                labelText: 'Pattern (1–4 chars)',
-                                hintText: 'e.g. CAT',
-                                border: OutlineInputBorder(),
-                                counterText: '',
-                              ),
-                              onChanged: (_) => setState(() {}),
-                              onSubmitted: (_) {
-                                if (!_vanityRunning &&
-                                    _patternController.text.trim().isNotEmpty) {
-                                  _startVanity();
-                                }
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          FilledButton.icon(
-                            onPressed: _isFinalizing
-                                ? null
-                                : (_vanityRunning
-                                    ? _stopVanity
-                                    : (_patternController.text.trim().isEmpty
-                                        ? null
-                                        : _startVanity)),
-                            icon: Icon(
-                                _vanityRunning ? Icons.stop : Icons.search,
-                                size: 18),
-                            label: Text(_vanityRunning ? 'Stop' : 'Search'),
-                          ),
-                        ],
+                      OutlinedButton.icon(
+                        onPressed: _isFinalizing ? null : _openVanityPage,
+                        icon: const Icon(Icons.search, size: 18),
+                        label: const Text('Choose a custom callsign'),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(48),
+                        ),
                       ),
-                      if (_vanityRunning || _vanityTried > 0) ...[
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            if (_vanityRunning) ...[
-                              const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2),
-                              ),
-                              const SizedBox(width: 8),
-                            ],
-                            Text(
-                              'Tried $_vanityTried keys · '
-                              '${_fmtElapsed(_vanityElapsed)}',
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: cs.onSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                      if (_vanityMatches.isNotEmpty) ...[
-                        const SizedBox(height: 10),
-                        Text(
-                          'Tap a match to use it:',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: cs.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            for (final m in _vanityMatches)
-                              ChoiceChip(
-                                label: Text(
-                                  m.callsign,
-                                  style:
-                                      const TextStyle(fontFamily: 'monospace'),
-                                ),
-                                selected: _preview.callsign == m.callsign,
-                                onSelected: (_) => _selectVanity(m),
-                              ),
-                          ],
-                        ),
-                      ],
 
                       const SizedBox(height: 20),
                       Text(

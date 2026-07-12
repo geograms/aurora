@@ -215,6 +215,10 @@ class _PermissionsIntroPageState extends State<PermissionsIntroPage>
         return Icons.folder_outlined;
       case 'wifi':
         return Icons.wifi;
+      case 'location':
+        return Icons.location_on_outlined;
+      case 'battery':
+        return Icons.battery_charging_full;
       default:
         return Icons.check_circle_outline;
     }

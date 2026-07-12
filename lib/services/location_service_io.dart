@@ -36,12 +36,15 @@ class LocationService {
   Future<void> _start() async {
     try {
       if (!await Geolocator.isLocationServiceEnabled()) return;
-      var perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied) {
-        perm = await Geolocator.requestPermission();
-      }
+      // NEVER prompt from here. This runs when a background wapp first reaches
+      // for GPS — which, on a fresh install, is moments after the user picked a
+      // callsign. That is the ambush prompt we set out to remove. Location is
+      // offered on the permissions intro like everything else; if it was not
+      // granted there, we simply have no fix, and callers fall back.
+      final perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied ||
           perm == LocationPermission.deniedForever) {
+        debugPrint('LocationService: not granted — no fix (asked in onboarding)');
         return;
       }
       try {
@@ -57,10 +60,11 @@ class LocationService {
     }
   }
 
-  /// Fetch a fresh fix on demand (driving the permission prompt if needed).
-  /// Returns (lat, lon) or null on any failure — no GPS, denied permission, or
-  /// no location plugin on this platform (e.g. desktop Linux). Used by the map's
-  /// "centre on my location" button.
+  /// Fetch a fresh fix on demand. This one MAY prompt: it runs only when the
+  /// user taps "centre on my location", and a prompt that answers a tap the user
+  /// just made is expected, not an ambush. Returns (lat, lon) or null on any
+  /// failure — no GPS, denied permission, or no location plugin on this platform
+  /// (e.g. desktop Linux).
   Future<({double lat, double lon})?> currentPosition() async {
     try {
       if (!await Geolocator.isLocationServiceEnabled()) return null;

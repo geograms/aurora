@@ -12,13 +12,12 @@ import 'editor/editor_install.dart';
 import 'wapp/host_event_bridge.dart';
 import 'wapp/native/media_capability.dart';
 import 'wapp/native/wasm_video_session.dart';
-import 'wapp/background_wapp_manager.dart';
 import 'services/power_governor.dart';
 import 'services/i2p/i2p_background_service.dart';
-import 'services/reticulum/rns_autostart.dart';
 import 'services/update_service.dart';
 import 'services/notification_service.dart';
 import 'services/notification_store.dart';
+import 'services/permission_gate.dart';
 import 'services/preferences_service.dart';
 import 'services/blossom_server.dart';
 import 'services/log_service.dart';
@@ -259,7 +258,15 @@ Future<void> main() async {
         'boot never blocks on the bootstrap connection.',
     mode: BootStart.parallel,
     init: () async {
-      startRnsAutostart();
+      // Gated: bringing the node up also brings up the BLE5 interface, and on
+      // Android touching BLE raises a system permission dialog. Boot runs
+      // before runApp(), so an ungated start threw that dialog at the user
+      // BEFORE the permissions intro had even rendered. A user who has not yet
+      // been through the intro gets nothing started here; the intro's
+      // completion starts it (PermissionGate.startGatedServices).
+      if (await PermissionGate.ready) {
+        await PermissionGate.startGatedServices();
+      }
     },
   );
 
@@ -295,10 +302,15 @@ Future<void> main() async {
     unawaited(I2pBackgroundService().start());
   }
 
-  // Background wapp services the user enabled (autostart) — keep e.g. APRS
-  // receiving over BLE/APRS-IS without its page open. Fire-and-forget so a
-  // slow/failed engine never blocks startup.
-  unawaited(BackgroundWappManager.instance.startAutostart());
+  // Background wapp services the user enabled (autostart) — keep e.g. Chat
+  // receiving over BLE without its page open. Gated: these wapps scan/advertise
+  // over BLE, read GPS and run under a foreground-service notification, every
+  // one of which raises an Android permission dialog. Started here only for a
+  // user who already granted everything (the returning user); a first-run user
+  // gets them started by the permissions intro instead.
+  if (await PermissionGate.ready) {
+    unawaited(PermissionGate.startGatedServices());
+  }
 
   // Deep links (Android): open geogram.radio/circle/<key> straight on the
   // circles "apply to join" flow. Needs the navigator live (after runApp).

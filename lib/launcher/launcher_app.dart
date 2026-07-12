@@ -127,6 +127,12 @@ class _IwiAppState extends State<IwiApp> {
         // creation becomes reachable.
         await prefs.setOnboardingComplete(true);
         final granted = await AndroidPermissionsService.instance.allGranted();
+        // NOW start the services that touch permission-guarded APIs (BLE, GPS,
+        // foreground-service notifications). Boot deliberately did not, so the
+        // OS could not throw its own dialogs at the user before this screen had
+        // explained what they are for — nor again after the callsign screen.
+        // This intro is the only place a permission prompt comes from.
+        unawaited(PermissionGate.startGatedServices());
         if (mounted) setState(() => _permsGranted = granted);
       });
     }

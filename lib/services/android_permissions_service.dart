@@ -28,6 +28,10 @@ class AppPermission {
   /// instead of an inline dialog; the panel re-checks status on app resume.
   final bool special;
 
+  /// Nice-to-have, not a blocker: offered here (so the prompt happens HERE and
+  /// not later, mid-app) but the user can leave the intro without it.
+  final bool optional;
+
   const AppPermission({
     required this.key,
     required this.title,
@@ -36,6 +40,7 @@ class AppPermission {
     this.perms = const [],
     this.info = false,
     this.special = false,
+    this.optional = false,
   });
 }
 
@@ -85,6 +90,32 @@ class AndroidPermissionsService {
       special: true,
     ),
     AppPermission(
+      key: 'location',
+      title: 'Location',
+      desc: 'Put your position on the map and on the beacons you send — and '
+          'let Android scan for nearby Bluetooth devices',
+      icon: 'location',
+      perms: [Permission.locationWhenInUse],
+      // Optional: plenty of people will want to message without broadcasting
+      // where they are. Offered HERE so that the prompt happens with the others;
+      // if it is declined, nothing asks again (LocationService no longer
+      // prompts on its own).
+      optional: true,
+    ),
+    AppPermission(
+      key: 'battery',
+      title: 'Run in the background',
+      desc: 'Let the app keep receiving messages when the screen is off — '
+          'Android otherwise puts it to sleep',
+      icon: 'battery',
+      perms: [Permission.ignoreBatteryOptimizations],
+      special: true,
+      // Optional: it must not trap a user behind a disabled Continue. But it is
+      // offered HERE so the prompt lands with the others instead of ambushing
+      // the user right after they pick a callsign, which is what it used to do.
+      optional: true,
+    ),
+    AppPermission(
       key: 'internet',
       title: 'Internet',
       desc: 'Connect to the internet relays and the wapp store (automatic)',
@@ -93,8 +124,14 @@ class AndroidPermissionsService {
     ),
   ];
 
-  /// Items that require an actual grant (excludes informational rows).
-  List<AppPermission> get required => [for (final i in items) if (!i.info) i];
+  /// Items that BLOCK leaving the intro (excludes informational + optional rows).
+  List<AppPermission> get required =>
+      [for (final i in items) if (!i.info && !i.optional) i];
+
+  /// Every item the user can actually grant — including the optional ones, so
+  /// "Grant all" offers them too. Nothing here may be requested outside the
+  /// intro; that is the whole contract of this screen.
+  List<AppPermission> get grantable => [for (final i in items) if (!i.info) i];
 
   /// Live grant status of one item (true when all its perms are granted).
   /// Informational items are always "granted". Always true off Android.
@@ -159,7 +196,7 @@ class AndroidPermissionsService {
   /// dialog / settings screen). Used by the intro panel's "Grant all" button.
   Future<void> requestAll() async {
     if (!_isAndroid) return;
-    for (final i in required) {
+    for (final i in grantable) {
       if (!await isGranted(i)) await requestItem(i);
     }
   }

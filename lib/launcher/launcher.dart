@@ -28,7 +28,6 @@ import '../platform/platform.dart' as platform;
 
 import '../wapp/wapp_file_handler.dart';
 import '../profile/welcome_page.dart';
-import '../services/battery_optimization.dart';
 import '../services/event_bus.dart';
 import '../services/log_service.dart';
 import '../services/notification_service.dart';
@@ -39,6 +38,7 @@ import '../services/launch_count_store.dart';
 import '../services/novelties_service.dart';
 import '../services/remote_api_service.dart';
 import '../services/android_permissions_service.dart';
+import '../services/permission_gate.dart';
 import '../services/update_service.dart';
 import '../version.dart';
 import 'update_page.dart';

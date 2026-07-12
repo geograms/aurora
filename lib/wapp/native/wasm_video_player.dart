@@ -29,6 +29,18 @@ import '../wapp_file_associations.dart';
 import 'wasm_audio_output.dart';
 import 'wasm_video_session.dart';
 
+/// Handler wapps able to decode HEADLESSLY for the host's codec-free A/V
+/// sink: they declare the frame-push HAL (`requires.hal` contains "video",
+/// i.e. hal_video_frame). A handler that instead drives a host media backend
+/// (e.g. the Movies wapp via the media.video functionality) matches the
+/// extension but can never feed this player a frame — filter those out so an
+/// installed Movies wapp can't shadow the Player wapp here.
+List<WappAssociation> framePushPlayersFor(String ext) =>
+    WappFileAssociations.instance
+        .lookupForFile('x.$ext', mode: 'view')
+        .where((a) => a.manifest.requiredHal.contains('video'))
+        .toList();
+
 /// Generates a still poster (the first decoded frame) for a video by running
 /// the player wapp's wasm decoder headlessly. Used to show a thumbnail in the
 /// stream so people can tell what a clip is about before playing. The result
@@ -50,8 +62,7 @@ class WasmVideoThumbnailer {
   }
 
   static Future<Uint8List?> _generate(Uint8List media, String ext) async {
-    final matches =
-        WappFileAssociations.instance.lookupForFile('x.$ext', mode: 'view');
+    final matches = framePushPlayersFor(ext);
     if (matches.isEmpty) return null;
     final wasm = await wappPackageStorage(matches.first.manifest.dirPath)
         .readBytes('app.wasm');
@@ -218,6 +229,11 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
   Directory? _tempDir;
   String _status = 'loading'; // loading | playing | error
   String _err = '';
+  // Flipped by the first decoder output (config/frame/pcm). If the decoder
+  // stays silent past the timeout, the codec is unsupported — say so instead
+  // of leaving a black box.
+  bool _sawSignal = false;
+  Timer? _decodeTimeout;
   bool _playing = true; // play/pause state (audio UI)
   int _durationMs = 0; // from media.meta (audio UI progress)
   int _lastUiMs = 0; // throttle audio-UI rebuilds
@@ -230,10 +246,14 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
 
   Future<void> _start() async {
     try {
-      final matches = WappFileAssociations.instance
-          .lookupForFile('x.${widget.ext}', mode: 'view');
+      final matches = framePushPlayersFor(widget.ext);
       if (matches.isEmpty) {
-        _fail('No media player installed.\nInstall the Player wapp.');
+        final anyHandler = WappFileAssociations.instance
+            .lookupForFile('x.${widget.ext}', mode: 'view')
+            .isNotEmpty;
+        _fail(anyHandler
+            ? 'No installed player can decode .${widget.ext} files.'
+            : 'No media player installed.\nInstall the Player wapp.');
         return;
       }
       final pkg = wappPackageStorage(matches.first.manifest.dirPath);
@@ -253,9 +273,18 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
       session.masterClock =
           () => audioOut.active ? audioOut.playedPosition : null;
       final engine = WappEngine()
-        ..onVideoConfig = session.configure
-        ..onVideoFrame = session.pushFrame
-        ..onAudioPcm = audioOut.pushPcm
+        ..onVideoConfig = ((w, h, fmt) {
+          _sawSignal = true;
+          session.configure(w, h, fmt);
+        })
+        ..onVideoFrame = ((bytes, w, h, fmt, pts) {
+          _sawSignal = true;
+          session.pushFrame(bytes, w, h, fmt, pts);
+        })
+        ..onAudioPcm = ((pcm, rate, ch, fmt, pts) {
+          _sawSignal = true;
+          audioOut.pushPcm(pcm, rate, ch, fmt, pts);
+        })
         ..onVideoEnd = session.markEnded;
       await engine.load(wasm);
       engine.init();
@@ -281,6 +310,15 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
         _engine = engine;
         _tempDir = dir;
         _status = 'playing';
+      });
+      // If the decoder never produces config/frames/pcm, the codec inside the
+      // container isn't supported (e.g. HEVC before the player wapp gained
+      // it) — fail visibly instead of leaving a silent black box.
+      _decodeTimeout = Timer(const Duration(seconds: 8), () {
+        if (_sawSignal || !mounted) return;
+        _ticker?.cancel();
+        _fail("Can't decode this ${widget.isAudio ? 'audio' : 'video'} "
+            '(unsupported codec).');
       });
       _ticker = Timer.periodic(const Duration(milliseconds: 16), (_) {
         final e = _engine;
@@ -356,6 +394,7 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
 
   @override
   void dispose() {
+    _decodeTimeout?.cancel();
     _ticker?.cancel();
     _engine?.dispose();
     _session?.dispose();

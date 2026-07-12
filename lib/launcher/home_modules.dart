@@ -175,7 +175,10 @@ Future<void> _applyHomePinChoice(
 class _ModuleBars extends StatefulWidget {
   final List<_LauncherEntry> entries;
 
-  const _ModuleBars({required this.entries});
+  /// Tap target for the status bar — the fourth rectangle, which is not a wapp.
+  final VoidCallback? onStatusTap;
+
+  const _ModuleBars({required this.entries, this.onStatusTap});
 
   @override
   State<_ModuleBars> createState() => _ModuleBarsState();
@@ -220,6 +223,8 @@ class _ModuleBarsState extends State<_ModuleBars> {
   Widget build(BuildContext context) {
     final selected = _resolveHomeSlot(widget.entries, _preferred, _slots);
     if (selected.isEmpty) return const SizedBox.shrink();
+    // Four rectangles now: three wapps and the network status. They are a little
+    // shorter than they were so the fourth fits without crowding the hero.
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
       child: Column(
@@ -227,9 +232,10 @@ class _ModuleBarsState extends State<_ModuleBars> {
         children: [
           for (final e in selected)
             Padding(
-              padding: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.only(bottom: 9),
               child: _ModuleBar(entry: e),
             ),
+          _StatusBar(onTap: widget.onStatusTap),
         ],
       ),
     );
@@ -262,7 +268,10 @@ class _ModuleBar extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: accent.withValues(alpha: 0.55), width: 1.2),
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          // Shorter than it was: the home screen now carries four of these plus
+          // the hero, and two lines of description was more than a launcher row
+          // needs to say. One line, tighter padding.
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(
             children: [
               _ModuleBarIcon(entry: entry, accent: accent),
@@ -278,7 +287,7 @@ class _ModuleBar extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: cs.onSurface,
-                        fontSize: 17,
+                        fontSize: 16,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -286,11 +295,11 @@ class _ModuleBar extends StatelessWidget {
                       const SizedBox(height: 2),
                       Text(
                         entry.subtitle,
-                        maxLines: 2,
+                        maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: cs.onSurfaceVariant,
-                          fontSize: 13,
+                          fontSize: 12.5,
                         ),
                       ),
                     ],
@@ -307,7 +316,7 @@ class _ModuleBar extends StatelessWidget {
   }
 }
 
-/// The 48x48 rounded icon chip on the left of a module bar. Mirrors the tile
+/// The 42x42 rounded icon chip on the left of a module bar. Mirrors the tile
 /// icon rules: SVG, then emoji/text, then a Material glyph.
 class _ModuleBarIcon extends StatelessWidget {
   final _LauncherEntry entry;
@@ -352,8 +361,8 @@ class _ModuleBarIcon extends StatelessWidget {
       inner = Icon(entry.icon, color: Colors.white, size: 26);
     }
     return Container(
-      width: 48,
-      height: 48,
+      width: 42,
+      height: 42,
       decoration: BoxDecoration(
         color: accent.withValues(alpha: 0.32),
         borderRadius: BorderRadius.circular(12),

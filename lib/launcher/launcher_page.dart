@@ -286,6 +286,15 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
     await _openWapp(manifest, initialView: item.deepLink);
   }
 
+  /// The status bar's tap: open the wapp that can actually explain the numbers
+  /// it is showing. A no-op if the user uninstalled it — the bar is still worth
+  /// reading on its own.
+  Future<void> _openStatusWapp() async {
+    final manifest = _wappForSource('reticulum');
+    if (manifest == null) return;
+    await _openWapp(manifest);
+  }
+
   /// The installed wapp whose folder name is [sourceId] — the same id the wapp
   /// message dispatchers key on when a wapp publishes a hero item.
   WappManifest? _wappForSource(String sourceId) {
@@ -470,7 +479,10 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
             children: [
               _HeroCarousel(onOpenItem: _openHeroItem),
               const SizedBox(height: 20),
-              _ModuleBars(entries: entries),
+              _ModuleBars(
+                entries: entries,
+                onStatusTap: _openStatusWapp,
+              ),
             ],
           ),
         ),

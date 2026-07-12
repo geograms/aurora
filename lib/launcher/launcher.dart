@@ -17,6 +17,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -33,8 +34,10 @@ import '../services/log_service.dart';
 import '../services/notification_service.dart';
 import '../services/notification_store.dart';
 import '../services/reticulum/rns_service.dart';
+import '../services/mesh/mesh_service.dart';
 import '../services/preferences_service.dart';
 import '../services/launch_count_store.dart';
+import '../services/hero/hero_brightness.dart';
 import '../services/hero/hero_feed_service.dart';
 import '../services/hero/hero_inbox.dart';
 import '../services/hero/hero_item.dart';
@@ -78,6 +81,7 @@ part 'connection_indicator.dart';
 part 'hero_carousel.dart';
 part 'quick_launch_row.dart';
 part 'home_modules.dart';
+part 'status_bar.dart';
 part 'all_apps_sheet.dart';
 part 'notifications_page.dart';
 part 'app_drawer.dart';

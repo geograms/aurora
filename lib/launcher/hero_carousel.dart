@@ -244,8 +244,15 @@ class _HeroCard extends StatelessWidget {
   Color get _accent =>
       _heroAccents[item.id.hashCode.abs() % _heroAccents.length];
 
-  /// Gradient placeholder used when the post brings no picture (or while the
-  /// network image is still loading / failed).
+  /// Backdrop for a post that brings no picture (and the placeholder under one
+  /// that is still loading).
+  ///
+  /// A flat gradient over half the carousel looked like the app had failed to
+  /// load something. So the gradient gets a quiet generated texture on top —
+  /// arcs and dots seeded from the post's own id, so a given post always draws
+  /// the same pattern and the card doesn't shimmer between refreshes. It is
+  /// deliberately low-contrast: this is wallpaper behind text, not decoration
+  /// competing with it.
   Widget _gradientBackdrop() => DecoratedBox(
     decoration: BoxDecoration(
       gradient: LinearGradient(
@@ -257,6 +264,11 @@ class _HeroCard extends StatelessWidget {
           const Color(0xFF101216),
         ],
       ),
+    ),
+    child: CustomPaint(
+      painter: _HeroPatternPainter(seed: item.id.hashCode, accent: _accent),
+      // A painter with no child paints nothing unless it is told how big it is.
+      child: const SizedBox.expand(),
     ),
   );
 
@@ -428,39 +440,7 @@ class _HeroCard extends StatelessWidget {
                 left: 18,
                 right: 96,
                 bottom: 18,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      item.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w800,
-                        height: 1.05,
-                        // Belt and braces for the pathological all-white photo.
-                        shadows: [
-                          Shadow(blurRadius: 6, color: Colors.black54),
-                        ],
-                      ),
-                    ),
-                    if (item.summary.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Text(
-                        item.summary,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.90),
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
+                child: _TextBlock(item: item, accent: _accent),
               ),
               if (item.likes > 0 || item.replies > 0)
                 Positioned(
@@ -511,4 +491,141 @@ class _HeroCard extends StatelessWidget {
     fontSize: 12,
     fontWeight: FontWeight.w700,
   );
+}
+
+/// The quiet texture behind a picture-less hero card.
+///
+/// Everything is derived from one integer seed (the post's id hash), so the same
+/// post always gets the same pattern — a card that redrew a different texture on
+/// every refresh would flicker under the user's eyes. No randomness at paint
+/// time, and no state: [shouldRepaint] is false because nothing here can change.
+class _HeroPatternPainter extends CustomPainter {
+  final int seed;
+  final Color accent;
+
+  const _HeroPatternPainter({required this.seed, required this.accent});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rnd = math.Random(seed);
+
+    // Two big soft arcs sweeping across the card. Low alpha, wide stroke: they
+    // read as light falling on a surface, not as shapes.
+    final arc = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    for (var i = 0; i < 2; i++) {
+      final r = size.width * (0.45 + rnd.nextDouble() * 0.45);
+      final cx = size.width * (rnd.nextDouble() * 1.2 - 0.1);
+      final cy = size.height * (rnd.nextDouble() * 1.4 - 0.2);
+      arc
+        ..strokeWidth = 10 + rnd.nextDouble() * 26
+        ..color = Colors.white.withValues(alpha: 0.045 + rnd.nextDouble() * 0.03);
+      canvas.drawCircle(Offset(cx, cy), r, arc);
+    }
+
+    // A scatter of dots, denser toward the top-right (the corner the text never
+    // occupies), thinning out where the title and summary will land.
+    final dot = Paint()..style = PaintingStyle.fill;
+    for (var i = 0; i < 26; i++) {
+      final x = rnd.nextDouble() * size.width;
+      final y = rnd.nextDouble() * size.height;
+      // Fade the dot out as it approaches the lower-left text zone.
+      final textZone = (1 - x / size.width) * (y / size.height);
+      final alpha = (0.10 - textZone * 0.09).clamp(0.012, 0.10);
+      dot.color = Colors.white.withValues(alpha: alpha);
+      canvas.drawCircle(Offset(x, y), 1.2 + rnd.nextDouble() * 2.6, dot);
+    }
+
+    // One accent-tinted glow in a corner, so cards of different colours don't
+    // all look like the same grey texture.
+    final glow = Paint()
+      ..shader = RadialGradient(
+        colors: [accent.withValues(alpha: 0.22), accent.withValues(alpha: 0)],
+      ).createShader(Rect.fromCircle(
+        center: Offset(size.width * (0.72 + rnd.nextDouble() * 0.2),
+            size.height * (rnd.nextDouble() * 0.35)),
+        radius: size.width * 0.42,
+      ));
+    canvas.drawRect(Offset.zero & size, glow);
+  }
+
+  @override
+  bool shouldRepaint(covariant _HeroPatternPainter old) =>
+      old.seed != seed || old.accent != accent;
+}
+
+/// Title + summary, with a plate behind them when the photo underneath is pale.
+///
+/// White bold text over a photo is fine until the photo is a snow field or an
+/// overexposed sky, and then the headline simply disappears. The bottom scrim
+/// cannot be made dark enough to fix that case without dimming every other card
+/// into mud. So the card MEASURES the image where the text actually sits
+/// (HeroBrightness — a 32px decode, once per item, cached) and puts a soft dark
+/// plate behind the words only when it needs to.
+class _TextBlock extends StatelessWidget {
+  final HeroItem item;
+  final Color accent;
+
+  const _TextBlock({required this.item, required this.accent});
+
+  @override
+  Widget build(BuildContext context) {
+    // Cheap and de-duplicated: the first build of a card starts the measurement,
+    // and the notifier below rebuilds just this block when the verdict lands.
+    HeroBrightness.instance.probe(item);
+
+    return ValueListenableBuilder<int>(
+      valueListenable: HeroBrightness.instance.revision,
+      builder: (context, _, __) {
+        final bright = HeroBrightness.instance.verdictFor(item) ?? false;
+        final text = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              item.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+                height: 1.05,
+                shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
+              ),
+            ),
+            if (item.summary.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                item.summary,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.90),
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ],
+        );
+
+        if (!bright) return text;
+
+        // The plate. Rounded and slightly inset so it reads as a label on the
+        // photo rather than a bug — and translucent, so the picture is still
+        // visible through it.
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 9),
+            child: text,
+          ),
+        );
+      },
+    );
+  }
 }

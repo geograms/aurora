@@ -100,10 +100,15 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
   Timer? _poll;
   bool _requested = false; // a tap-to-download was triggered
   bool _playing = false; // video tapped → playing embedded in the stream
+  // An explicit Play tap on a clip that wasn't local yet: start playback the
+  // moment the download completes (single-tap UX). Never set by auto-fetch.
+  bool _playWhenReady = false;
 
   /// Bump when the poster-generation algorithm improves so already-thumbnailed
-  /// videos regenerate once with the better picker.
-  static const int _thumbAlgoVersion = 3;
+  /// videos regenerate once with the better picker. v4: the player wapp
+  /// gained HEVC/H.265 + AV1 decoders, so clips whose poster generation
+  /// failed under v3 (typically phone videos) get one retry.
+  static const int _thumbAlgoVersion = 4;
 
   /// sha256 of videos we've tried to thumbnail THIS session (the frequently
   /// rebuilt widget must only kick off one decode per clip).
@@ -190,6 +195,7 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
     if (old.ref.sha256 != widget.ref.sha256) {
       _preview = null;
       _playing = false;
+      _playWhenReady = false;
       _requested = false;
       _poll?.cancel();
       _poll = null;
@@ -231,6 +237,10 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
       final arch = sharedMediaArchive();
       if (arch != null && arch.getMeta(ref.sha256) != null) {
         t.cancel(); // complete — the bytes are local now
+        if (_playWhenReady) {
+          _playWhenReady = false;
+          _playing = true; // explicit Play tap → start playback on arrival
+        }
         if (mounted) setState(() {});
         return;
       }
@@ -281,6 +291,8 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
   void _download() {
     if (_requested) return;
     _requested = true;
+    _playWhenReady =
+        ref.kind == MediaKind.video || ref.kind == MediaKind.audio;
     _beginWindow();
     if (mounted) setState(() {});
   }
@@ -289,6 +301,8 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
   /// attempt window now (resets this file's once-a-day cooldown).
   void _retry() {
     _requested = true;
+    _playWhenReady =
+        ref.kind == MediaKind.video || ref.kind == MediaKind.audio;
     _beginWindow();
     if (mounted) setState(() {});
   }

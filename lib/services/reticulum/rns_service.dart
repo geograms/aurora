@@ -706,6 +706,24 @@ class RnsService {
     return n;
   }
 
+  /// Geogram devices we can reach right now — the launcher's status bar shows
+  /// this, and it is the same freshness gate the reticulum wapp's headline uses,
+  /// so the two never disagree.
+  int get reachableDevices =>
+      _reachableGeogramCount(DateTime.now().millisecondsSinceEpoch);
+
+  /// Kind-1 posts we are holding — all of them, or only those written by
+  /// [authors]. An indexed COUNT, cheap enough for the launcher's status bar.
+  int nostrPostCount({List<String>? authors}) {
+    final store = _relayStore;
+    if (store == null) return 0;
+    try {
+      return store.count(NostrFilter(kinds: const [1], authors: authors));
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Drop one wedged uplink and immediately redial the same host:port. Best-
   /// effort: on connect failure the periodic autostart top-up retries it later.
   Future<void> _reconnectUplink(RnsTcpInterface c) async {

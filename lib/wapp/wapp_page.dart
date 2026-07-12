@@ -27,6 +27,7 @@ import '../platform/platform.dart' as platform;
 
 import 'native/media_capability.dart';
 import 'native/wasm_audio_output.dart';
+import 'native/wasm_video_player.dart' show WasmVideoThumbnailer;
 import 'native/wasm_video_session.dart';
 
 import 'file_folder_picker.dart';
@@ -5402,28 +5403,40 @@ class _WappPageState extends State<WappPage>
     );
   }
 
-  /// If [text] references a held IMAGE via a `file:` token, embed a tiny PNG
-  /// preview as a `tn:<base64url>` token so peers can render a thumbnail for the
-  /// post WITHOUT downloading the full file. Only the first image, only when the
-  /// encoded preview stays small; otherwise [text] is returned unchanged.
+  /// If [text] references a held image or video via a `file:` token, embed a
+  /// tiny PNG preview as a `tn:<base64url>` token so peers can render a
+  /// thumbnail for the post WITHOUT downloading the full file. Only the first
+  /// media that yields a preview, only when the encoded form stays small;
+  /// otherwise [text] is returned unchanged.
   Future<String> _embedNoteThumbnail(String text) async {
     try {
       if (text.contains(' tn:')) return text; // already carries a preview
       final archive = sharedMediaArchive();
       if (archive == null) return text;
       for (final r in MediaRef.findAll(text)) {
-        if (r.kind != MediaKind.image) continue;
-        // Reuse a cached preview if one exists, else generate + cache it.
-        var png = archive.getScreenshot(r.sha256);
-        if (png == null) {
+        if (r.kind != MediaKind.image && r.kind != MediaKind.video) continue;
+        // Reuse a cached poster if one exists, else generate + cache it.
+        // Video posters come from the player wapp's wasm decoder (headless).
+        var poster = archive.getScreenshot(r.sha256);
+        if (poster == null) {
           final full = archive.get(r.sha256);
           if (full == null) continue; // not held — can't make a preview
-          png = await _thumbnailPng(full, 128);
-          if (png == null) continue;
-          archive.setScreenshot(r.sha256, png);
+          poster = r.kind == MediaKind.image
+              ? await _thumbnailPng(full, 128)
+              : await WasmVideoThumbnailer.generate(full, r.ext);
+          if (poster == null) continue;
+          archive.setScreenshot(r.sha256, poster);
         }
-        final b64 = base64Url.encode(png);
-        if (b64.length > 40000) return text; // too large to inline
+        // Wire copy: cached posters can be up to 360px — re-downscale so the
+        // inline token stays small, dropping to 96px if 128px still busts the
+        // cap (relay ingest allows 64 KB of content; stay well under).
+        var wire = await _thumbnailPng(poster, 128) ?? poster;
+        var b64 = base64Url.encode(wire);
+        if (b64.length > 40000) {
+          wire = await _thumbnailPng(poster, 96) ?? wire;
+          b64 = base64Url.encode(wire);
+          if (b64.length > 40000) continue; // too large to inline
+        }
         return '$text tn:$b64';
       }
     } catch (_) {}

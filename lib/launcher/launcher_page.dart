@@ -286,6 +286,32 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
     await _openWapp(manifest, initialView: item.deepLink);
   }
 
+  /// The description shown under a wapp's name on the home bars.
+  ///
+  /// Manifests routinely open with the wapp's own title ("Social — follow
+  /// people…", "Messages — one inbox…"), which is written for a store listing,
+  /// where the name is not already three centimetres above it. On the launcher
+  /// the row shows the name AND this line, so the title is simply said twice and
+  /// the useful half of a one-line description gets pushed off the end. Strip a
+  /// leading self-reference; anything else is left exactly as the author wrote it.
+  static String _describe(WappManifest wapp) {
+    final text =
+        wapp.description.isNotEmpty ? wapp.description : wapp.summary;
+    final title = wapp.title.isNotEmpty ? wapp.title : wapp.name;
+    if (title.isEmpty || !text.toLowerCase().startsWith(title.toLowerCase())) {
+      return text;
+    }
+    // Only when a separator follows — a description that legitimately BEGINS
+    // with the word ("Maps of the world") must not be beheaded.
+    final rest = text.substring(title.length).trimLeft();
+    final m = RegExp(r'^[—–\-:·|]\s*').firstMatch(rest);
+    if (m == null) return text;
+    final out = rest.substring(m.end).trimLeft();
+    if (out.isEmpty) return text;
+    // Re-capitalise: "follow people…" reads as a fragment mid-row.
+    return out[0].toUpperCase() + out.substring(1);
+  }
+
   /// The status bar's tap: open the wapp that can actually explain the numbers
   /// it is showing. A no-op if the user uninstalled it — the bar is still worth
   /// reading on its own.
@@ -510,9 +536,7 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
           onEdit: () => _editWapp(wapp),
           wappId: BackgroundWappManager.folderName(wapp.dirPath),
           wappDir: wapp.dirPath,
-          subtitle: wapp.description.isNotEmpty
-              ? wapp.description
-              : wapp.summary,
+          subtitle: _describe(wapp),
         ),
       if (systemWapps.isNotEmpty)
         _LauncherEntry(

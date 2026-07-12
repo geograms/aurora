@@ -17,6 +17,7 @@ import '../../native/wasm_video_player.dart';
 import 'package:http/http.dart' as http;
 
 import '../../../util/media_ref.dart';
+import '../../../util/time_ago.dart';
 import '../../shared_media_fetch.dart' show mediaSizeHint;
 import 'chat_palette.dart';
 import 'chat_view_field.dart' show viaTagColor;
@@ -674,33 +675,18 @@ const _activityMonths = [
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
 ];
 
-/// Human label for a post's time. Within 2 days it's a RELATIVE age ("just now",
-/// "14 minutes ago", "3 hours ago", "yesterday"); older than that it's an
-/// absolute date ("Jun 26" / "Jun 26 2024"). Falls back to the wapp's `time`
-/// clock string when no epoch (`t`, ms) is present.
+/// Human label for a post's time — [timeAgo], plus this feed's own fallback:
+/// with no epoch (`t`, ms) there is nothing to be relative to, so the wapp's
+/// `time` clock string stands in. Same wording as the launcher hero.
 String activityTimeLabel(Map<String, dynamic> p) {
   final time = (p['time'] ?? '').toString();
   final t = (p['t'] as num?)?.toInt() ?? 0;
   if (t <= 0) return time; // no absolute time — keep the wapp's clock string
   final dt = DateTime.fromMillisecondsSinceEpoch(t);
-  final now = DateTime.now();
-  final diff = now.difference(dt);
-  final secs = diff.inSeconds;
-  if (secs < -60) {
-    // Future-skew (bad clock) — just show the clock string.
-    return time.isNotEmpty ? time : 'now';
-  }
-  if (secs < 45) return 'just now';
-  final mins = diff.inMinutes;
-  if (mins < 60) return '$mins minute${mins == 1 ? '' : 's'} ago';
-  final hours = diff.inHours;
-  if (hours < 24) return '$hours hour${hours == 1 ? '' : 's'} ago';
-  final days = diff.inDays;
-  if (days < 2) return 'yesterday';
-  final mon = _activityMonths[dt.month - 1];
-  return dt.year == now.year
-      ? '$mon ${dt.day}'
-      : '$mon ${dt.day} ${dt.year}';
+  final label = timeAgo(dt);
+  // Future-skew (bad clock): prefer the clock string when the wapp gave us one.
+  if (label == 'now' && time.isNotEmpty) return time;
+  return label;
 }
 
 /// Compact time for the crowded post header ("now", "18m", "2h", "3d", "Jun 26")

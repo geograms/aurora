@@ -63,6 +63,7 @@ import '../services/location_service.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/wapp_unread_service.dart';
+import '../services/hero/hero_inbox.dart';
 import '../profile/profile_service.dart';
 import '../profile/profile_storage.dart';
 import 'coin/coin_host_bridge.dart';
@@ -1829,6 +1830,12 @@ class _WappPageState extends State<WappPage>
               intent: data['intent']?.toString(),
             );
           }
+        } else if (type.startsWith('hero.')) {
+          // A card on the launcher's hero carousel. Handled identically here and
+          // in BackgroundWappManager, because a wapp that publishes one is
+          // usually headless when it does (a blog fetching in the background is
+          // the motivating case).
+          HeroInbox.instance.handleMessage(_wappName, data);
         } else if (type == 'wapp.fetch_index') {
           unawaited(_handleFetchIndex(data));
         } else if (type == 'wapp.install') {

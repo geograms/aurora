@@ -2081,7 +2081,11 @@ class RnsService {
               storePath: '${base}nostr_feed.sqlite3',
               persistPath: '${base}nostr_relays.json',
               selfPubHex: selfPubHex,
-            ).then((c) => _nostrHub = c..onChanged = _notifyNostrListeners);
+            ).then((c) {
+              _nostrHub = c..onChanged = _notifyNostrListeners;
+              // Start keeping (and serving) what the people we follow post.
+              startFollowsMirror();
+            });
           }
         } catch (e) {
           LogService.instance.add(
@@ -4779,10 +4783,123 @@ class RnsService {
     _follows.add(key);
     // We just followed someone — pull their profile (if reachable) right away.
     refreshFollowedProfiles();
+    startFollowsMirror();
   }
 
   /// Drop [key] from the follow set.
-  void unfollowPubkey(String key) => _follows.remove(key);
+  void unfollowPubkey(String key) {
+    _follows.remove(key);
+    startFollowsMirror();
+  }
+
+  // ── The follows mirror ─────────────────────────────────────────────────────
+  //
+  // Keep what the people we follow post, and SERVE it to other peers.
+  //
+  // The two stores are easy to confuse, and the difference is the whole reason
+  // this exists: the NOSTR hub isolate writes `nostr_feed.sqlite3` (its own
+  // scratch cache of the public firehose), while RelayNode — the thing that
+  // answers other Reticulum peers' REQs — serves `_relayStore`
+  // (`social.sqlite3`). Nothing ever copied between them, so a followed
+  // author's posts lived only in a cache we never served and would happily
+  // evict. This subscription is the copy.
+  //
+  // Once an event is in _relayStore, RelayNode serves it with no further work —
+  // that is the entire "be a mini-relay for the people you follow" feature.
+
+  String? _mirrorSub;
+  String _mirrorKey = '';
+  Timer? _mirrorTimer;
+
+  /// (Re)arm the mirror for the current follow set. Idempotent; called on every
+  /// follow/unfollow and once the hub comes up.
+  void startFollowsMirror() {
+    final hub = _nostrHub;
+    if (hub == null || _relayStore == null) return;
+    final follows = _follows.asSet.toList()..sort();
+    final key = follows.join(',');
+    if (key == _mirrorKey && (_mirrorSub != null || follows.isEmpty)) return;
+    _mirrorKey = key;
+
+    // Close the old one FIRST. A leaked NOSTR subscription keeps re-querying the
+    // relays and paying a signature verify on every event it pulls, forever —
+    // see docs/performance.md §3.5 (the discoF leak) and the engine-dispose fix
+    // in wapp_engine.dart. Never let one dangle.
+    final stale = _mirrorSub;
+    if (stale != null) hub.unsubscribe(stale);
+    _mirrorSub = null;
+
+    if (follows.isEmpty) {
+      _mirrorTimer?.cancel();
+      _mirrorTimer = null;
+      return;
+    }
+
+    // Kinds 0 (profile), 1 (notes), 3 (their contact list) — and deliberately
+    // NOT 6/7. Persisting the reaction firehose is an unbatched INSERT per
+    // inbound like, for rows nobody reads, and it pegged a core once already
+    // (docs/performance.md §3.2). Likes/replies come from the engine's in-memory
+    // tallies instead.
+    _mirrorSub = nostrSubscribe(jsonEncode({
+      'kinds': [0, 1, 3],
+      'authors': follows,
+      'limit': 500,
+    }));
+
+    _mirrorTimer ??=
+        Timer.periodic(const Duration(minutes: 2), (_) => _drainFollowsMirror());
+  }
+
+  void _drainFollowsMirror() {
+    final sub = _mirrorSub;
+    final store = _relayStore;
+    final hub = _nostrHub;
+    if (sub == null || store == null || hub == null) return;
+
+    final raws = hub.drainEvents(sub, max: 100);
+    if (raws.isEmpty) return; // cheap no-op — the common case
+
+    final started = DateTime.now();
+    final batch = <NostrEvent>[];
+    var dropped = 0;
+    for (final j in raws) {
+      try {
+        final ev = NostrEvent.fromJson(j);
+        final tier = tierOf(
+          ev.pubkey,
+          selfPubHex: selfPubHex,
+          followsHex: _follows.asSet,
+        );
+        // The subscription is by author, but a relay can send us anything.
+        if (tier == Tier.stranger) {
+          dropped++;
+          continue;
+        }
+        batch.add(ev);
+      } catch (_) {
+        dropped++;
+      }
+    }
+    if (batch.isEmpty) return;
+
+    try {
+      // putAllVerified, NOT put: these events were already verified inside the
+      // nostr-engine isolate. put() re-checks the Schnorr signature, and this
+      // store lives on the MAIN isolate — re-verifying a followed author's whole
+      // history here would put secp256k1 back on the UI thread, which is the
+      // pattern that froze the app for hours (docs/performance.md §3.1).
+      // One transaction, so a batch of 100 is one fsync, not 100.
+      final stored = store.putAllVerified(batch, tier: Tier.followed.index);
+      final ms = DateTime.now().difference(started).inMilliseconds;
+      if (stored > 0 || dropped > 0) {
+        LogService.instance.add(
+          'perf: hero mirror stored=$stored dropped=$dropped ms=$ms',
+        );
+      }
+    } catch (e) {
+      LogService.instance.add('RNS/relay: follows mirror failed: $e');
+    }
+  }
 
   /// True if [pubHex] (64-char hex) is followed.
   bool isFollowedPubkey(String pubHex) => _follows.contains(pubHex);
@@ -4791,8 +4908,13 @@ class RnsService {
   /// strangers' slice + note cap + retention). Used by the relay/archive tiering.
   HostQuota hostQuota() {
     final p = PreferencesService.instanceSync;
-    final ceilingGb = p?.hostCeilingGb ?? 100;
-    final sliceGb = p?.hostStrangerSliceGb ?? 100;
+    // 10 GB, not 100: at 100 the eviction planner ran hourly and never evicted
+    // anything, which made the whole quota decorative. Text is never in the
+    // evictable inventory (planEviction is fed hostedInventory(), which is blobs
+    // only), so this bounds MEDIA — followed people's notes are kept whatever
+    // happens to their pictures.
+    final ceilingGb = p?.hostCeilingGb ?? 10;
+    final sliceGb = p?.hostStrangerSliceGb ?? 2;
     final notes = p?.hostStrangerNotesPerMonth ?? 1000;
     final days = p?.hostStrangerRetentionDays ?? 1825;
     return HostQuota(

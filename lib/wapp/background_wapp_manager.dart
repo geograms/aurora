@@ -36,6 +36,7 @@ import '../services/log_service.dart';
 import '../services/notification_service.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/wapp_unread_service.dart';
+import '../services/hero/hero_inbox.dart';
 import '../services/preferences_service.dart';
 import 'android_foreground_service.dart';
 import 'wapp_engine.dart';
@@ -460,6 +461,12 @@ class _WappBackgroundService extends BackgroundService {
             intent: data['intent']?.toString(),
           );
         }
+      } else if (type.startsWith('hero.')) {
+        // The headless half of the hero API — and the one that matters most: a
+        // background wapp publishes its card with nobody watching, and it has to
+        // be waiting on the launcher when the user next looks. HeroInbox
+        // persists it, so it survives a restart too.
+        HeroInbox.instance.handleMessage(name, data);
       } else if (type == 'notify') {
         final levelStr = (data['level'] as String? ?? 'info').toLowerCase();
         final level = switch (levelStr) {

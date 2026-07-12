@@ -135,11 +135,15 @@ class PreferencesService {
   set hostCapacityGated(bool v) => _prefs.setBool('host.capacityGated', v);
 
   // Whole-node hosting ceiling (everything we store for others), in GB.
-  int get hostCeilingGb => _prefs.getInt('host.ceilingGb') ?? 100;
+  // Bounds MEDIA in practice: the eviction planner is fed the hosted-blob
+  // inventory, so text notes are never candidates. At the old 100 GB default it
+  // never evicted anything and the quota was decorative.
+  int get hostCeilingGb => _prefs.getInt('host.ceilingGb') ?? 10;
   set hostCeilingGb(int v) => _prefs.setInt('host.ceilingGb', v < 0 ? 0 : v);
 
-  // Strangers' (non-followed) slice of the ceiling, in GB.
-  int get hostStrangerSliceGb => _prefs.getInt('host.strangerSliceGb') ?? 100;
+  // Strangers' (non-followed) slice of the ceiling, in GB. Small on purpose:
+  // the ceiling is mostly there to hold the media of people you follow.
+  int get hostStrangerSliceGb => _prefs.getInt('host.strangerSliceGb') ?? 2;
   set hostStrangerSliceGb(int v) =>
       _prefs.setInt('host.strangerSliceGb', v < 0 ? 0 : v);
 

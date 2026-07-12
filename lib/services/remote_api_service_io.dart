@@ -37,6 +37,10 @@ import 'log_service.dart';
 import 'reticulum/rns_service.dart';
 import 'folders/folder_event.dart' show FolderShareType;
 import 'preferences_service.dart';
+import 'hero/hero_feed_service.dart';
+import 'wapp_unread_service.dart';
+import 'hero/hero_inbox.dart';
+import 'hero/launcher_visibility.dart';
 import 'torrent_service.dart';
 import 'update_service.dart';
 import 'update_models.dart';
@@ -121,6 +125,71 @@ class RemoteApiService {
         final ok = await _launch(id);
         return _json(res, {'ok': ok, 'wapp': id},
             status: ok ? HttpStatus.ok : HttpStatus.notFound);
+      }
+      // --- launcher hero (inspect the feed; publish a card as a wapp would) ---
+      if (req.method == 'GET' && path == '/api/hero') {
+        final items = HeroFeedService.instance.items.value;
+        return _json(res, {
+          // Whether the hero is refreshing at all: it is gated on the launcher
+          // actually being on screen, so `visible:false` is the first thing to
+          // check when the carousel looks stale.
+          'visible': LauncherVisibility.instance.visible.value,
+          'lastRefresh':
+              HeroFeedService.instance.lastRefresh?.toIso8601String(),
+          'items': [
+            for (final i in items)
+              {
+                'id': i.id,
+                'source': i.sourceId,
+                'title': i.title,
+                'author': i.authorName,
+                'ageMinutes':
+                    DateTime.now().difference(i.createdAt).inMinutes,
+                'likes': i.likes,
+                'replies': i.replies,
+                'image': i.imageUrl,
+              },
+          ],
+        });
+      }
+      // Exactly what a wapp's hal_msg_send({"type":"hero.publish", …}) does —
+      // same HeroInbox entry point, same validation. Lets a hero card be tested
+      // without shipping a wapp that publishes one.
+      if (req.method == 'POST' && path == '/api/hero/publish') {
+        final body = await utf8.decoder.bind(req).join();
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          return _json(res, {'error': 'expected a JSON object'},
+              status: HttpStatus.badRequest);
+        }
+        final wapp = (decoded['wapp'] ?? 'debug').toString();
+        final handled = HeroInbox.instance.handleMessage(wapp, {
+          'type': decoded['type'] ?? 'hero.publish',
+          if (decoded['replace'] != null) 'replace': decoded['replace'],
+          if (decoded['items'] != null) 'items': decoded['items'],
+          if (decoded['id'] != null) 'id': decoded['id'],
+        });
+        unawaited(HeroFeedService.instance.refresh());
+        return _json(res, {'ok': handled, 'wapp': wapp});
+      }
+      // Same entry point a wapp's {"type":"unread"} message lands on. The dock
+      // floats wapps with unread to the front, and that is otherwise only
+      // testable by convincing a real wapp to receive a real message.
+      if (req.method == 'POST' && path == '/api/unread') {
+        final body = await utf8.decoder.bind(req).join();
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          return _json(res, {'error': 'expected a JSON object'},
+              status: HttpStatus.badRequest);
+        }
+        final wapp = (decoded['wapp'] ?? '').toString();
+        final count = (decoded['count'] as num?)?.toInt() ?? 0;
+        if (wapp.isEmpty) {
+          return _json(res, {'error': 'wapp is required'},
+              status: HttpStatus.badRequest);
+        }
+        WappUnreadService.instance.setCount(wapp, count);
+        return _json(res, {'ok': true, 'wapp': wapp, 'count': count});
       }
       // --- headless media / BitTorrent control (drive a node with no UI) ---
       if (req.method == 'GET' && path == '/api/media/torrents') {
@@ -830,6 +899,8 @@ class RemoteApiService {
           'POST /api/wapp/stop {"wapp":"<id>"}',
           'POST /api/wapp/cmd {"wapp":"<id>","msg":{"command":"…",…}}',
           'POST /api/wapp/tick {"wapp":"<id>","n":1}',
+          'GET  /api/hero',
+          'POST /api/hero/publish {"wapp":"blog","items":[{"id":…,"title":…}]}',
           'GET /api/media/torrents',
           'GET /api/media/has?sha256=<hex|b64u>',
           'POST /api/media/fetch {"sha256":"<hex|b64u>","ext":"png","ih":"<40hex?>"}',

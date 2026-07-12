@@ -1,16 +1,16 @@
 part of 'launcher.dart';
 
-class _NoveltiesCarousel extends StatefulWidget {
-  /// Tap on a hero card — opens the post in the social wapp.
-  final void Function(NoveltyItem item)? onOpenItem;
+class _HeroCarousel extends StatefulWidget {
+  /// Tap on a hero card — opens it in the wapp that published it.
+  final void Function(HeroItem item)? onOpenItem;
 
-  const _NoveltiesCarousel({this.onOpenItem});
+  const _HeroCarousel({this.onOpenItem});
 
   @override
-  State<_NoveltiesCarousel> createState() => _NoveltiesCarouselState();
+  State<_HeroCarousel> createState() => _HeroCarouselState();
 }
 
-class _NoveltiesCarouselState extends State<_NoveltiesCarousel> {
+class _HeroCarouselState extends State<_HeroCarousel> {
   static const Duration _advanceEvery = Duration(seconds: 6);
 
   /// Start far from zero so the user can swipe "left of the first slide" and
@@ -22,7 +22,7 @@ class _NoveltiesCarouselState extends State<_NoveltiesCarousel> {
     viewportFraction: 0.9,
     initialPage: _basePage,
   );
-  late final NoveltiesRefresher _refresher;
+  late final HeroRefresher _refresher;
   Timer? _advance;
   int _page = _basePage;
   int _count = 0;
@@ -30,16 +30,30 @@ class _NoveltiesCarouselState extends State<_NoveltiesCarousel> {
   @override
   void initState() {
     super.initState();
-    _refresher = NoveltiesRefresher(NoveltiesService.instance.refresh)..start();
-    _startAdvance();
+    _refresher = HeroRefresher(HeroFeedService.instance.refresh)..start();
+    LauncherVisibility.instance.visible.addListener(_onVisibility);
+    _onVisibility();
   }
 
   @override
   void dispose() {
     _advance?.cancel();
+    LauncherVisibility.instance.visible.removeListener(_onVisibility);
     _refresher.stop();
     _controller.dispose();
     super.dispose();
+  }
+
+  /// Animating a PageView nobody is looking at is pure waste — it keeps the
+  /// raster thread awake behind a wapp page. Stop when hidden, resume when the
+  /// launcher comes back (docs/performance.md §6.3).
+  void _onVisibility() {
+    if (LauncherVisibility.instance.visible.value) {
+      _startAdvance();
+    } else {
+      _advance?.cancel();
+      _advance = null;
+    }
   }
 
   /// Rotate the hero on its own. Restarted whenever the user swipes, so a
@@ -59,10 +73,10 @@ class _NoveltiesCarouselState extends State<_NoveltiesCarousel> {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<List<NoveltyItem>>(
-      valueListenable: NoveltiesService.instance.novelties,
+    return ValueListenableBuilder<List<HeroItem>>(
+      valueListenable: HeroFeedService.instance.items,
       builder: (context, items, _) {
-        if (items.isEmpty) return const _NoveltiesEmpty();
+        if (items.isEmpty) return const _HeroEmpty();
         _count = items.length;
         final activePage = (_page % items.length).abs();
         return Column(
@@ -74,8 +88,8 @@ class _NoveltiesCarouselState extends State<_NoveltiesCarousel> {
               // and give them a fresh interval once they let go.
               child: Listener(
                 onPointerDown: (_) => _advance?.cancel(),
-                onPointerUp: (_) => _startAdvance(),
-                onPointerCancel: (_) => _startAdvance(),
+                onPointerUp: (_) => _onVisibility(),
+                onPointerCancel: (_) => _onVisibility(),
                 child: PageView.builder(
                   controller: _controller,
                   // No itemCount: virtually endless, so swiping left on the
@@ -83,7 +97,7 @@ class _NoveltiesCarouselState extends State<_NoveltiesCarousel> {
                   onPageChanged: (value) => setState(() => _page = value),
                   itemBuilder: (context, index) {
                     final item = items[index % items.length];
-                    return _NoveltyCard(
+                    return _HeroCard(
                       item: item,
                       onTap: widget.onOpenItem == null
                           ? null
@@ -119,8 +133,8 @@ class _NoveltiesCarouselState extends State<_NoveltiesCarousel> {
   }
 }
 
-class _NoveltiesEmpty extends StatelessWidget {
-  const _NoveltiesEmpty();
+class _HeroEmpty extends StatelessWidget {
+  const _HeroEmpty();
 
   @override
   Widget build(BuildContext context) {
@@ -161,11 +175,11 @@ const List<Color> _heroAccents = [
   _heroViolet,
 ];
 
-class _NoveltyCard extends StatelessWidget {
-  final NoveltyItem item;
+class _HeroCard extends StatelessWidget {
+  final HeroItem item;
   final VoidCallback? onTap;
 
-  const _NoveltyCard({required this.item, this.onTap});
+  const _HeroCard({required this.item, this.onTap});
 
   /// Stable per-post accent so a card keeps its colour across refreshes.
   Color get _accent =>
@@ -190,12 +204,31 @@ class _NoveltyCard extends StatelessWidget {
   Widget _backdrop() {
     final url = item.imageUrl;
     final thumb = item.thumbnail;
-    // Sharpest source first: full image over the network, the post's inline
-    // tn: preview while it loads (or when the fetch fails), gradient last.
+    // Sharpest source first: the full image, the post's inline tn: preview while
+    // it loads (or when the fetch fails), gradient last.
     final under = thumb != null
         ? Image.memory(thumb, fit: BoxFit.cover)
         : _gradientBackdrop();
     if (url == null) return under;
+
+    // A followed author's picture we have already mirrored into the archive:
+    // render it from disk — instant, and it works with no network at all.
+    if (FollowedMediaCache.isLocal(url)) {
+      final bytes = sharedMediaArchive()?.get(url);
+      if (bytes == null) return under;
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          under,
+          // Bounded decode, exactly like the network branch: Flutter's image
+          // cache is capped to 32MB/100 on mobile (main.dart), and a full-res
+          // local decode would evict the whole thing on every swipe.
+          Image.memory(bytes, fit: BoxFit.cover, cacheWidth: 1024,
+              gaplessPlayback: true),
+        ],
+      );
+    }
+
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -215,6 +248,60 @@ class _NoveltyCard extends StatelessWidget {
     );
   }
 
+  /// The readability scrim.
+  ///
+  /// A flat top-to-bottom wash (what this used to be) has to choose between
+  /// dimming the whole photo and leaving the summary unreadable — over a bright
+  /// picture it managed both. This is bottom-anchored instead: the top half of
+  /// the image is untouched, and the fade ramps to near-black under the text.
+  /// The intermediate stops are what make it read as a smooth transition rather
+  /// than a visible band across the card.
+  Widget _scrim() => const DecoratedBox(
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        stops: [0.0, 0.42, 0.62, 0.80, 1.0],
+        colors: [
+          Colors.transparent,
+          Color(0x1A000000), // 0.10
+          Color(0x73000000), // 0.45
+          Color(0xD1000000), // 0.82
+          Color(0xF5000000), // 0.96
+        ],
+      ),
+    ),
+  );
+
+  /// A light wash under the top chips, so the author name and the timestamp
+  /// stay legible on a photo that is white up there.
+  Widget _topScrim() => const Align(
+    alignment: Alignment.topCenter,
+    child: FractionallySizedBox(
+      heightFactor: 0.32,
+      widthFactor: 1,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0x47000000), Colors.transparent],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Widget _chip(Widget child, {Color? border}) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+    decoration: BoxDecoration(
+      color: Colors.black.withValues(alpha: 0.42),
+      borderRadius: BorderRadius.circular(999),
+      border: border == null ? null : Border.all(color: border),
+    ),
+    child: child,
+  );
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -227,39 +314,55 @@ class _NoveltyCard extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               _backdrop(),
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.black.withValues(alpha: 0.10),
-                      Colors.black.withValues(alpha: 0.78),
-                    ],
-                  ),
-                ),
-              ),
+              _topScrim(),
+              _scrim(),
               Positioned(
                 left: 18,
+                right: 18,
                 top: 16,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.42),
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(color: _accent.withValues(alpha: 0.55)),
-                  ),
-                  child: Text(
-                    item.authorName,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: _chip(
+                        Text(
+                          item.authorName.isEmpty
+                              ? item.sourceId
+                              : item.authorName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        border: _accent.withValues(alpha: 0.55),
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 8),
+                    // When it happened. The hero shows posts that may be hours
+                    // old (a quiet timeline is backfilled from the local
+                    // mirror), so "19 minutes ago" vs "yesterday" is the
+                    // difference between news and history.
+                    _chip(
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.schedule,
+                              size: 11, color: Colors.white70),
+                          const SizedBox(width: 4),
+                          Text(
+                            timeAgo(item.createdAt),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ),
               Positioned(
@@ -279,6 +382,10 @@ class _NoveltyCard extends StatelessWidget {
                         fontSize: 20,
                         fontWeight: FontWeight.w800,
                         height: 1.05,
+                        // Belt and braces for the pathological all-white photo.
+                        shadows: [
+                          Shadow(blurRadius: 6, color: Colors.black54),
+                        ],
                       ),
                     ),
                     if (item.summary.isNotEmpty) ...[
@@ -288,7 +395,7 @@ class _NoveltyCard extends StatelessWidget {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.82),
+                          color: Colors.white.withValues(alpha: 0.90),
                           fontSize: 13,
                         ),
                       ),

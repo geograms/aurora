@@ -16,7 +16,10 @@ import 'dart:async';
 import '../../profile/profile_service.dart';
 import '../../profile/storage_paths.dart';
 import '../../wapp/android_foreground_service.dart';
+import '../blossom_server.dart';
 import '../files/media_file_source.dart';
+import '../hero/followed_media_cache.dart';
+import '../hero/hero_inbox.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
 import '../../util/media_archive.dart';
@@ -43,6 +46,19 @@ Future<void> ensureRnsAutostart() async {
     final ws = wappsDataStorage(prefs);
     final arch = MediaArchive.forDirectory(ws.getAbsolutePath(''));
     rns.fileServeSource = MediaFileSource(arch);
+
+    // Serve our hosted blobs over Blossom (GET /<sha256>). This used to start
+    // only from inside hal_media_infohash — i.e. only on a device that had
+    // *shared* something — so a device that merely followed people cached their
+    // media and then served it to nobody. start() is idempotent.
+    if (prefs.hostEnabled) {
+      unawaited(BlossomServer.instance.start(arch));
+    }
+
+    // The launcher hero: where wapps' published cards are kept across restarts,
+    // and which followed-media URLs we have already fetched (or failed to).
+    HeroInbox.instance.bind(ws.getAbsolutePath('hero_inbox.json'));
+    FollowedMediaCache.instance.bind(ws.getAbsolutePath('hero_media.json'));
 
     // Persist the social relay/index DB + folder key-store / disk-folder
     // registry / subscriptions under the shared wapp-data root.

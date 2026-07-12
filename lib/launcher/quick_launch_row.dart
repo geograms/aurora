@@ -49,30 +49,41 @@ class _QuickLaunchRowState extends State<_QuickLaunchRow> {
 
   @override
   Widget build(BuildContext context) {
-    final selected = _resolveHomeSlot(widget.entries, _preferred, _slots);
-    if (selected.isEmpty) return const SizedBox.shrink();
-    return SizedBox(
-      height: 86,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          for (final e in selected)
-            Expanded(
-              child: _AppIcon(
-                name: e.name,
-                icon: e.icon,
-                textIcon: e.textIcon,
-                svgIconPath: e.svgIconPath,
-                color: e.color,
-                modified: e.modified,
-                onTap: e.onTap,
-                onEdit: e.onEdit,
-                wappId: e.wappId,
-                wappDir: e.wappDir,
-              ),
-            ),
-        ],
-      ),
+    // Rebuild on every unread change: a wapp that just gained a notification has
+    // to be able to float into the dock immediately, not at the next scan.
+    return ValueListenableBuilder<Map<String, int>>(
+      valueListenable: WappUnreadService.instance.counts,
+      builder: (context, unread, _) {
+        final selected =
+            _resolveDockSlot(widget.entries, _preferred, unread, _slots);
+        if (selected.isEmpty) return const SizedBox.shrink();
+        return SizedBox(
+          height: 86,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              for (final e in selected)
+                Expanded(
+                  // Keyed by wapp so Flutter moves the existing icon when the
+                  // order changes instead of rebuilding a fresh one in place.
+                  key: ValueKey(e.wappId),
+                  child: _AppIcon(
+                    name: e.name,
+                    icon: e.icon,
+                    textIcon: e.textIcon,
+                    svgIconPath: e.svgIconPath,
+                    color: e.color,
+                    modified: e.modified,
+                    onTap: e.onTap,
+                    onEdit: e.onEdit,
+                    wappId: e.wappId,
+                    wappDir: e.wappDir,
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

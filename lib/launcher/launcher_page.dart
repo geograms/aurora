@@ -16,7 +16,7 @@ class LauncherPage extends StatefulWidget {
   State<LauncherPage> createState() => _LauncherPageState();
 }
 
-class _LauncherPageState extends State<LauncherPage> {
+class _LauncherPageState extends State<LauncherPage> with RouteAware {
   List<WappManifest>? _wapps;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
@@ -33,8 +33,34 @@ class _LauncherPageState extends State<LauncherPage> {
     );
   }
 
+  // The launcher stays MOUNTED under every pushed wapp page, so "am I built?"
+  // says nothing about whether anyone can see me. RouteAware is what actually
+  // knows, and the hero's timers hang off it.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) {
+      launcherRouteObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void didPush() => LauncherVisibility.instance.setRouteOnTop(true);
+
+  /// A wapp page (or settings, or a profile) was pushed over us.
+  @override
+  void didPushNext() => LauncherVisibility.instance.setRouteOnTop(false);
+
+  /// It was popped — we are back on top.
+  @override
+  void didPopNext() => LauncherVisibility.instance.setRouteOnTop(true);
+
   @override
   void dispose() {
+    // RouteAware subscriptions leak across hot reload if this is skipped.
+    launcherRouteObserver.unsubscribe(this);
+    LauncherVisibility.instance.setRouteOnTop(false);
     ProfileService.instance.activeProfileNotifier.removeListener(
       _onProfileChanged,
     );
@@ -213,34 +239,60 @@ class _LauncherPageState extends State<LauncherPage> {
     await _openWapp(manifest, initialView: normalized);
   }
 
-  /// Hero-card tap: open the post's thread in whatever wapp declares the
-  /// `social` intent. No-op when none is installed — the card is then just a
-  /// headline.
-  Future<void> _openNoveltyPost(NoveltyItem item) async {
+  /// Hero-card tap: open the item in the wapp it came from.
+  ///
+  /// Two ways in, because a hero item has two origins. A NOSTR post is a *host*
+  /// item with no wapp behind it, so it routes by intent — whatever wapp
+  /// declares `social` shows the thread. A wapp-published card (a blog entry,
+  /// say) routes back to its publisher by id, falling back to its declared
+  /// intent if the wapp has since been uninstalled and reinstalled elsewhere.
+  Future<void> _openHeroItem(HeroItem item) async {
     if (item.id.isEmpty) return;
-    final manifest = _wappForIntent('social');
-    if (manifest == null) return;
-    // Hand the post we already hold to the wapp page, so the thread opens
-    // instantly with the hero's content instead of waiting for the wapp to
-    // re-download it. Same row shape the activity archive emits; 'from' is
-    // the 12-char pubkey prefix the feed uses to key author profiles.
-    await _openWapp(
-      manifest,
-      initialView: 'post:${item.id}',
-      initialPost: {
-        't': item.createdAt.millisecondsSinceEpoch,
-        'dir': 'in',
-        'from': item.authorPubkey.length >= 12
-            ? item.authorPubkey.substring(0, 12)
-            : item.authorPubkey,
-        'text': item.rawText,
-        'kind': 'msg',
-        'mid': item.id,
-        'parent': '',
-        'time': '',
-        'pop': 0,
-      },
-    );
+
+    if (item.isNostr) {
+      final manifest = _wappForIntent(item.intent ?? 'social');
+      if (manifest == null) return;
+      final pubkey = item.authorPubkey ?? '';
+      // Hand the post we already hold to the wapp page, so the thread opens
+      // instantly with the hero's content instead of waiting for the wapp to
+      // re-download it. Same row shape the activity archive emits; 'from' is
+      // the 12-char pubkey prefix the feed uses to key author profiles.
+      await _openWapp(
+        manifest,
+        initialView: item.deepLink,
+        initialPost: {
+          't': item.createdAt.millisecondsSinceEpoch,
+          'dir': 'in',
+          'from': pubkey.length >= 12 ? pubkey.substring(0, 12) : pubkey,
+          'text': (item.payload?['content'] ?? '').toString(),
+          'kind': 'msg',
+          'mid': (item.payload?['id'] ?? '').toString(),
+          'parent': '',
+          'time': '',
+          'pop': 0,
+        },
+      );
+      return;
+    }
+
+    final manifest = _wappForSource(item.sourceId) ??
+        (item.intent == null ? null : _wappForIntent(item.intent!));
+    if (manifest == null) {
+      // Its publisher is gone; the card would open nothing. Drop it rather than
+      // leave a dead tile on the hero.
+      HeroInbox.instance.forget(item.sourceId);
+      return;
+    }
+    await _openWapp(manifest, initialView: item.deepLink);
+  }
+
+  /// The installed wapp whose folder name is [sourceId] — the same id the wapp
+  /// message dispatchers key on when a wapp publishes a hero item.
+  WappManifest? _wappForSource(String sourceId) {
+    for (final w in _wapps ?? const <WappManifest>[]) {
+      if (BackgroundWappManager.folderName(w.dirPath) == sourceId) return w;
+    }
+    return null;
   }
 
   WappManifest? _wappForIntent(String intent) {
@@ -416,7 +468,7 @@ class _LauncherPageState extends State<LauncherPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _NoveltiesCarousel(onOpenItem: _openNoveltyPost),
+              _HeroCarousel(onOpenItem: _openHeroItem),
               const SizedBox(height: 20),
               _ModuleBars(entries: entries),
             ],

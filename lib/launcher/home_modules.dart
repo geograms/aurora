@@ -32,6 +32,64 @@ List<_LauncherEntry> _resolveHomeSlot(
   return picked;
 }
 
+/// Resolve the DOCK, with an alert bubble-up: a wapp with unread activity floats
+/// to the front, and one that isn't docked at all gets pulled in.
+///
+/// The point is that the dock is where you look to see if anything happened. A
+/// badge is no use on a tile that is three swipes away inside the app sheet.
+///
+/// Ordering is a pure function of (preferred, unread), so it only moves when the
+/// unread set moves — the icons must not shuffle under the user's finger on
+/// every rebuild. Among alerting wapps, ones already in the dock keep their
+/// existing dock order; only then are off-dock alerters pulled in (most unread
+/// first, id as the final tiebreak so it is deterministic). An explicit pin is
+/// never displaced by an alert — it is displaced only by another alert that was
+/// already ahead of it.
+///
+/// The module BARS deliberately do not do this: they are the user's chosen
+/// shortcuts and must stay put.
+List<_LauncherEntry> _resolveDockSlot(
+  List<_LauncherEntry> entries,
+  List<String> preferred,
+  Map<String, int> unread,
+  int count,
+) {
+  final base = _resolveHomeSlot(entries, preferred, count);
+  int unreadOf(_LauncherEntry e) =>
+      e.wappId == null ? 0 : WappUnreadService.instance.totalFor(e.wappId!);
+
+  final alerting = [
+    for (final e in entries)
+      if (e.wappId != null && unreadOf(e) > 0) e,
+  ];
+  if (alerting.isEmpty) return base;
+
+  int dockIndex(_LauncherEntry e) =>
+      base.indexWhere((b) => b.wappId == e.wappId);
+
+  alerting.sort((a, b) {
+    // Already-docked alerters first, in their existing dock order — an alert
+    // should not make the dock rearrange itself more than it has to.
+    final ai = dockIndex(a), bi = dockIndex(b);
+    final aDocked = ai >= 0, bDocked = bi >= 0;
+    if (aDocked != bDocked) return aDocked ? -1 : 1;
+    if (aDocked && ai != bi) return ai - bi;
+    final an = unreadOf(a), bn = unreadOf(b);
+    if (an != bn) return bn - an;
+    return a.wappId!.compareTo(b.wappId!);
+  });
+
+  final picked = <_LauncherEntry>[];
+  final taken = <String>{};
+  for (final e in [...alerting, ...base]) {
+    final id = e.wappId;
+    if (id == null || !taken.add(id)) continue;
+    picked.add(e);
+    if (picked.length == count) break;
+  }
+  return picked;
+}
+
 /// Pin/unpin [entry] to the home module bars or the dock. Shown on long-press
 /// of a module bar; the grid tiles fold the same two actions into their own
 /// context menu. No-op for folder tiles (no `wappId`).

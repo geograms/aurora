@@ -16,6 +16,19 @@ final RegExp _noteHttpImageRe = RegExp(
 /// deliberately excluded — callers use this for still backgrounds.
 String? firstNoteImageUrl(String s) => _noteHttpImageRe.firstMatch(s)?.group(0);
 
+/// Every inline http(s) IMAGE url in a note, in order, deduped. Bounded: a note
+/// is free to carry twenty pictures, but we only ever mirror a handful of them.
+List<String> allNoteImageUrls(String s, {int max = 4}) {
+  final out = <String>[];
+  for (final m in _noteHttpImageRe.allMatches(s)) {
+    final url = m.group(0)!;
+    if (out.contains(url)) continue;
+    out.add(url);
+    if (out.length == max) break;
+  }
+  return out;
+}
+
 String stripNoteTokens(String s) => s
     .replaceAll(_noteFileRe, '')
     .replaceAll(_noteHttpMediaRe, '')

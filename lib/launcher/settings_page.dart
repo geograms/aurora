@@ -31,6 +31,7 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
       _dataDir = prefs.wappDataDir ?? defaultPath;
     });
     await _refreshWappData();
+    _refreshHostedUsage();
   }
 
   /// Prompt for a single text value (used for the Reticulum sharing-folder
@@ -527,6 +528,8 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                               }
                             : null,
                       ),
+                      const Divider(height: 1),
+                      _mediaQuotaTile(cs),
                     ],
                   ),
                 ),
@@ -772,6 +775,87 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
         }
       }
     }
+  }
+
+  /// How much room the media of the people we follow may take.
+  ///
+  /// The eviction planner is fed the hosted-BLOB inventory, so what this bounds
+  /// is pictures — a followed person's notes are kept whatever happens to their
+  /// media. Strangers' blobs are dropped first, then followed media largest
+  /// first, and only under pressure.
+  static const List<int> _quotaChoices = [1, 5, 10, 25, 50, 100];
+
+  Widget _mediaQuotaTile(ColorScheme cs) {
+    final gb = _prefs?.hostCeilingGb ?? 10;
+    final idx = _quotaChoices.indexOf(gb);
+    final usedGb = _hostedBytes / (1 << 30);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.sd_storage_outlined, size: 20),
+              const SizedBox(width: 12),
+              const Expanded(child: Text('Storage for media')),
+              Text('$gb GB',
+                  style: TextStyle(
+                      color: cs.primary, fontWeight: FontWeight.w700)),
+            ],
+          ),
+          Slider(
+            value: (idx < 0 ? 2 : idx).toDouble(),
+            min: 0,
+            max: (_quotaChoices.length - 1).toDouble(),
+            divisions: _quotaChoices.length - 1,
+            label: '${_quotaChoices[idx < 0 ? 2 : idx]} GB',
+            onChanged: (_prefs?.hostEnabled ?? true)
+                ? (v) => setState(
+                    () => _prefs?.hostCeilingGb = _quotaChoices[v.round()])
+                : null,
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${usedGb.toStringAsFixed(1)} GB used — pictures from the '
+                  'people you follow. Their notes are never deleted.',
+                  style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12),
+                ),
+              ),
+              TextButton(
+                onPressed: _hostedBytes == 0 ? null : _clearHostedMedia,
+                child: const Text('Clear'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  int _hostedBytes = 0;
+
+  void _refreshHostedUsage() {
+    final archive = sharedMediaArchive();
+    if (archive == null) return;
+    var total = 0;
+    for (final r in archive.hostedInventory()) {
+      total += r.bytes;
+    }
+    if (mounted && total != _hostedBytes) {
+      setState(() => _hostedBytes = total);
+    }
+  }
+
+  Future<void> _clearHostedMedia() async {
+    final archive = sharedMediaArchive();
+    if (archive == null) return;
+    for (final r in archive.hostedInventory()) {
+      archive.delete(r.sha);
+    }
+    _refreshHostedUsage();
   }
 }
 

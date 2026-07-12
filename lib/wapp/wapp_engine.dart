@@ -268,6 +268,9 @@ class WappEngine {
   // drained one JSON entry at a time by hal_relay_resolve_recv.
   final List<String> _relayResolveRx = [];
 
+  // Read cursor into RnsService.lxmfInbox for hal_lxmf_recv.
+  int _lxmfCursor = 0;
+
   // hal_socket_*_sync state — blocking sockets for synchronous test code
   // (the wasm test runner can't await async I/O). Keyed by handle.
   final Map<int, RawSynchronousSocket> _syncSockets = {};
@@ -2539,6 +2542,42 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
     // Pop the next fetched DM JSON {id, from(b64url), ts, text, mid}; 0 if none.
+    // ── LXMF ────────────────────────────────────────────────────────────────
+    // Inbound LXMF (NomadNet / Sideband / any Reticulum client) drained one
+    // message at a time, newest-last, via a cursor over the host inbox. A cursor
+    // rather than a queue because the host inbox is the durable record — a wapp
+    // that restarts re-reads from where it left off instead of losing whatever
+    // arrived while it was down.
+    final halLxmfRecv = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final inbox = RnsService.instance.lxmfInbox;
+        if (_lxmfCursor >= inbox.length) return 0;
+        final m = inbox[_lxmfCursor++];
+        final bytes = utf8.encode(jsonEncode(m));
+        if (bytes.length > outCap) return 0; // oversized: skip, cursor advanced
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    // Send an LXMF message to a delivery dest (32 hex) — how we answer a
+    // NomadNet user. Fire-and-forget; 1 if queued.
+    final halLxmfSend = WasmFunction(
+      (int dPtr, int dLen, int tPtr, int tLen, int cPtr, int cLen) {
+        final dest = _readStr(dPtr, dLen);
+        if (dest.isEmpty) return -1;
+        // ignore: discarded_futures
+        RnsService.instance.sendLxmf(
+          destHex: dest,
+          title: _readStr(tPtr, tLen),
+          content: _readStr(cPtr, cLen),
+        );
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32,
+        ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     final halRelayDmRecv = WasmFunction(
       (int outPtr, int outCap) {
         if (_relayDmRx.isEmpty || outCap <= 0) return 0;
@@ -3181,6 +3220,8 @@ class WappEngine {
       WasmImport('hal', 'relay_dm_fetch', halRelayDmFetch),
       WasmImport('hal', 'relay_for', halRelayFor),
       WasmImport('hal', 'relay_dm_recv', halRelayDmRecv),
+      WasmImport('hal', 'lxmf_recv', halLxmfRecv),
+      WasmImport('hal', 'lxmf_send', halLxmfSend),
       WasmImport('hal', 'relay_dm_drop', halRelayDmDrop),
       WasmImport('hal', 'relay_identity_publish', halRelayIdentityPublish),
       WasmImport('hal', 'relay_resolve', halRelayResolve),

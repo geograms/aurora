@@ -34,6 +34,7 @@ import 'geoui/conversation_store.dart';
 import 'shared_media_fetch.dart';
 import '../services/log_service.dart';
 import '../services/notification_service.dart';
+import '../services/reticulum/rns_service.dart';
 import '../services/wapp_unread_service.dart';
 import '../services/preferences_service.dart';
 import 'android_foreground_service.dart';
@@ -422,6 +423,22 @@ class _WappBackgroundService extends BackgroundService {
             store.clear(data['id']?.toString());
         }
         _scheduleConvoSave(field);
+      } else if (type == 'social.note') {
+        // A wapp posting one of OUR messages as a signed NOSTR note (a Chat
+        // group post). The page handled this and headless did not, so a group
+        // message sent with the wapp's page CLOSED — which is most of them, the
+        // wapp runs in the background — was never published as a note at all.
+        // Same store, same protocol: headless must honour it too.
+        final text = (data['text'] ?? '').toString();
+        final topic = (data['topic'] ?? '').toString();
+        final parent = (data['parent'] ?? '').toString();
+        if (text.isNotEmpty) {
+          unawaited(RnsService.instance.publishNote(
+            text,
+            topic: topic.isEmpty ? null : topic,
+            parent: parent.isEmpty ? null : parent,
+          ));
+        }
       } else if (type == 'ui.activity.react') {
         // Tally like votes received while headless so they show on next open.
         final mid = (data['mid'] ?? '').toString();

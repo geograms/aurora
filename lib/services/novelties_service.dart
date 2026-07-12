@@ -378,10 +378,13 @@ class NoveltiesRefresher {
   EventSubscription<AppStartedEvent>? _appStarted;
 
   void start() {
-    _safeRefresh();
-    // The hub buffers events between drains, so a short period keeps the
-    // carousel current without ever blocking on the network.
-    _timer = Timer.periodic(const Duration(seconds: 20), (_) => _safeRefresh());
+    _safeRefresh(); // fill the hero NOW — the user is looking at it
+    // Then drain slowly. This never touches the network (the hub buffers events
+    // between drains), but it is not free either: every drain re-ranks the
+    // buffer and can spawn a `compute` isolate. Draining every 20s to display
+    // posts the relays are now only polled for every 10 minutes was churn for
+    // nothing. Opening the app refreshes it anyway (AppStartedEvent).
+    _timer = Timer.periodic(const Duration(minutes: 1), (_) => _safeRefresh());
     _appStarted = EventBus().on<AppStartedEvent>((_) => _safeRefresh());
   }
 

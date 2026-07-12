@@ -217,6 +217,58 @@ Rules:
    pool reuses them, so a name does not identify an isolate), `mali-*` is the GPU
    driver.
 
+### 4.1 Measure a CLEAN process, or measure nothing
+
+Every one of these produced a wrong number that I believed for a while.
+
+6. **`force-stop` before you measure. Stopping the wapps is not enough.** Background
+   services keep running, and worse, the debug API leaves wreckage behind:
+   after a few `POST /api/wapp/stop` + `/start` cycles, a `DartWorker` sat at
+   **~105% of a core and stayed there with every wapp stopped**. Only a full
+   `am force-stop` cleared it. So a measurement taken after A/B-ing wapps through
+   the API is measuring the leak, not the app.
+   ```sh
+   adb shell am force-stop com.geogram.aurora
+   adb shell pidof com.geogram.aurora        # must print nothing
+   adb shell am start -n com.geogram.aurora/.MainActivity
+   ```
+7. **Never quote CPU from a `--profile` build.** It has the VM service, an
+   unoptimised-ish AOT, and observatory overhead. A profile build read **106%**
+   where the release build on the same code, same phone, same window read **5.8%**.
+   Profile builds are for *finding* a hot isolate, never for *quantifying* one.
+8. **Let it settle.** Boot is a storm — announce flood, NOSTR history replay,
+   sqlite backfill, wapp seeding. Give it **5 minutes after launch** before the
+   measurement window starts, or the number is the startup cost, not the idle cost.
+9. **A wapp's tick time is NOT its cost.** The task monitor reports
+   `wapp.bg.messages=103ms(0.2%)` — that is only what the tick burned on the main
+   isolate. The work a wapp *provokes* through the HAL (a relay fetch, a profile
+   subscription, a sqlite write) lands in **other isolates** and is invisible in
+   that line. A wapp can read 0.2% and still be the reason a `DartWorker` is
+   pegged. Attribute by bisecting with `force-stop`, not by reading the tick.
+10. **A pegged isolate with ZERO Dart frames is inside native code.** `getStack`
+    across every isolate returning nothing, while a `DartWorker` burns a core, is
+    the fingerprint of **FFI — usually sqlite**. The Dart profiler cannot see it.
+    Do not conclude "the profiler shows nothing, so nothing is wrong".
+
+### 4.2 The battery-drain patterns to look for
+
+The two real drains found so far were both **a cheap call in a hot loop**, not an
+expensive algorithm:
+
+- **A HAL call that does more than it says.** `hal_nostr_profile` reads a cache
+  *and subscribes to the peer's kind-0*. Calling it every tick for every peer
+  whose name was missing asked the host to re-fetch a profile that was never
+  coming, ~40×/minute, forever — all of it landing in the NOSTR engine isolate.
+  Fixed by throttling to once a minute. **A cosmetic value never deserves a hot
+  loop.**
+- **Polling on a timer nobody chose.** Feed/relay polls default to seconds because
+  that is what feels responsive while developing. On a phone in a pocket, the
+  screen is off and nobody is reading the feed: a poll interval is a battery
+  setting, not a freshness setting. See §6.5.
+
+Rule of thumb before adding any periodic work: *what does this cost per hour with
+the screen off, and who is awake to see the result?*
+
 ---
 
 ## 5. Build & device traps (each of these cost real time)
@@ -418,6 +470,39 @@ still on the LAN keeps its fast path despite interleaved hub announces.
   `ProfileService`, `BleService`. Several HAL calls are *synchronously* answered
   from main state (`hal_rns_available`, `nostr_subscribe`, `event_recv`) and have
   no cheap port equivalent. **Don't revive this without new data.**
+
+---
+
+### 6.5 Poll intervals are battery settings, not freshness settings
+
+Every poll interval in this app was originally chosen by how it *felt at a
+desk with the app open*. That is the wrong question. The phone spends its life in
+a pocket with the screen off and nobody reading the feed, and a poll that runs
+"just in case" runs ~8,640 times a day.
+
+What was actually there:
+
+| Poll | Was | Now |
+|---|---|---|
+| NOSTR discovery-feed fetch (`nostr_relay_hub`) | **every 3 s** | 10 min |
+| Reticulum NOSTR relay re-query (`nostr_rns_client`) | every 30 s | 10 min |
+| Hero/novelties drain (local buffer, no network) | every 20 s | 1 min |
+
+`kNostrPollInterval` (reticulum-dart, `nostr_relay_hub.dart`) is the one knob.
+
+Two things make the slow interval free of any UX cost, and both are the point:
+
+1. **The `wss` relays PUSH.** A live subscription delivers a post the moment a
+   connected relay has it. The polls above are only for the transports that
+   *cannot* push (a Reticulum relay is request/response) and for the discovery
+   query. Slowing them delays nothing that a relay would have pushed anyway.
+2. **Every poll fires once immediately, then settles into the interval.** A cold
+   start fills the feed at once; the interval only governs how often we go *back*.
+   Get this wrong (timer-only, no immediate call) and a 10-minute interval means
+   a blank hero for 10 minutes on first launch.
+
+The general rule, before adding any periodic work: **what does this cost per hour
+with the screen off, and who is awake to see the result?**
 
 ---
 

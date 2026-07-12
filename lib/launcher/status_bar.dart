@@ -92,7 +92,9 @@ class _StatusBarState extends State<_StatusBar> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final s = _stats;
-    const accent = _heroGreen;
+    // Blue, not green: green reads as "healthy", and this bar is a readout, not
+    // a verdict — it says the same thing whether the number is 0 or 40.
+    const accent = _heroBlue;
     final live = s.up && (s.devices > 0 || s.hubs > 0 || s.bleNeighbours > 0);
 
     return Material(

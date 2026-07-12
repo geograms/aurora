@@ -271,6 +271,13 @@ class WappEngine {
   // Read cursor into RnsService.lxmfInbox for hal_lxmf_recv.
   int _lxmfCursor = 0;
 
+  // Every NOSTR subscription this engine opened, so dispose() can close them.
+  // An engine is disposed and recreated whenever its page opens or closes; a
+  // subscription it leaves behind stays live in the hub FOREVER, re-querying the
+  // relays and paying a Schnorr verify on every event it pulls. One wapp page
+  // open/close was enough to peg a core (see docs/performance.md 4.1.1).
+  final Set<String> _nostrSubs = {};
+
   // hal_socket_*_sync state — blocking sockets for synchronous test code
   // (the wasm test runner can't await async I/O). Keyed by handle.
   final Map<int, RawSynchronousSocket> _syncSockets = {};
@@ -2683,6 +2690,7 @@ class WappEngine {
         final sub = RnsService.instance
             .nostrSubscribe(_readStr(filterPtr, filterLen));
         if (sub == null) return 0;
+        _nostrSubs.add(sub);
         final bytes = utf8.encode(sub);
         if (bytes.length > outCap) return 0;
         return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
@@ -2706,7 +2714,9 @@ class WappEngine {
     );
     final halNostrUnsubscribe = WasmFunction(
       (int subPtr, int subLen) {
-        RnsService.instance.nostrUnsubscribe(_readStr(subPtr, subLen));
+        final sub = _readStr(subPtr, subLen);
+        RnsService.instance.nostrUnsubscribe(sub);
+        _nostrSubs.remove(sub);
         return 1;
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
@@ -3334,6 +3344,14 @@ class WappEngine {
 
   void dispose() {
     if (_loaded) { destroy(); _loaded = false; }
+    // Close every NOSTR subscription this engine opened. Without this a wapp's
+    // subscriptions outlive its engine, and since the engine is recreated on
+    // every page open/close they accumulate — each one re-querying relays and
+    // paying a signature verify per event, forever.
+    for (final sub in _nostrSubs) {
+      try { RnsService.instance.nostrUnsubscribe(sub); } catch (_) {}
+    }
+    _nostrSubs.clear();
     // Tear down any subprocesses the wapp left running. Best-effort —
     // dispose is cleanup, so swallow failures.
     for (final s in _procs.values) {

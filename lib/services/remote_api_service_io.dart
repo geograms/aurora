@@ -1094,6 +1094,12 @@ class RemoteApiService {
           'name': (m['name'] ?? e.name).toString(),
           'title': (m['title'] ?? m['name'] ?? e.name).toString(),
           'kind': (m['kind'] ?? 'app').toString(),
+          // Which wapp is ACTUALLY installed, and whether the bundled-wapp
+          // upgrade is allowed to replace it. Without these, "the app ships a
+          // newer wapp but the device still runs the old one" is undiagnosable
+          // from the outside — which is exactly where an hour went.
+          'version': (m['version'] ?? '').toString(),
+          'user_modified': (m['user_modified'] == true).toString(),
           'dir': pkg.basePath,
         });
       } catch (_) {}

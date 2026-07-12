@@ -76,6 +76,9 @@ dependencies:
   events_emitter2: ^1.0.4
   reticulum:
     path: ../reticulum-dart
+  encrypted_archive:
+    path: packages/encrypted_archive       # per-profile encrypted .ear archive (AES-256-GCM)
+  unorm_dart: ^0.3.0                       # NFC normalization for emoji-capable profile passwords
 
 dev_dependencies:
   flutter_test:

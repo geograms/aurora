@@ -1,0 +1,27 @@
+name: encrypted_archive
+description: >
+  A high-performance encrypted archive format using SQLite for storage.
+  Supports streaming, incremental updates, and terabyte-scale archives
+  with per-chunk encryption and optional deduplication.
+version: 0.1.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  sqlite3: ^2.4.0
+  cryptography: ^2.7.0
+  crypto: ^3.0.3
+  archive: ^3.4.0
+  meta: ^1.9.0
+  path: ^1.8.0
+  pointycastle: ^3.9.1   # sync AES-GCM for the sync read/write API (WASM HAL callbacks)
+
+# Note: sqlite3_flutter_libs is required for Flutter apps but not listed here
+# because it's a Flutter plugin. Instead, the main app's pubspec.yaml must include
+# sqlite3_flutter_libs as a dependency for Flutter builds. For CLI/pure Dart builds,
+# the native SQLite library must be available on the system or bundled in libs/.
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^3.0.0

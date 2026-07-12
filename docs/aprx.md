@@ -554,12 +554,13 @@ word‑splitter never breaks words, so even a worst‑case token travels intact
 
 | Kind    | Extensions                                                          |
 |---------|---------------------------------------------------------------------|
-| `image` | `png` `jpg` `jpeg` `webp` `bmp` `svg` `avif` `heic` `tif` `tiff` `ico` |
-| `video` | `gif` `webm` `mpeg` `mpg` `mp4` `mov` `avi` `mkv` `ogv`              |
+| `image` | `png` `jpg` `jpeg` `gif` `webp` `bmp` `svg` `avif` `heic` `tif` `tiff` `ico` |
+| `video` | `webm` `mpeg` `mpg` `mp4` `mov` `avi` `mkv` `ogv`                    |
 | `audio` | `mp3` `ogg` `aac` `flac` `wav` `opus`                                |
 | `file`  | anything else (attachment; offer to save / open externally)          |
 
-`gif` is classified as video — it is presented as a looping clip. Unknown
+`gif` is classified as image — renderers animate it natively, so it still
+presents as a looping clip without needing a video decoder. Unknown
 extensions degrade gracefully to a generic file attachment.
 
 ### 15.4 Local media archive

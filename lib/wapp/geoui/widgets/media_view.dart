@@ -32,6 +32,7 @@ import '../../../services/reticulum/rns_service.dart';
 import '../../../util/media_archive.dart';
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart' show resolveSharedMedia;
+import '../../native/inline_video_player.dart';
 import '../../native/wasm_video_player.dart';
 
 /// The device's shared media archive (devices/&lt;id&gt;/data/media.sqlite3),
@@ -602,7 +603,7 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
           child: SizedBox(
             width: _w,
             height: isAudio ? 72 : _h, // audio: a compact control bar
-            child: WasmVideoPlayer(
+            child: inlineVideoPlayer(
               mediaBytes: bytes,
               ext: ref.ext,
               fit: BoxFit.contain,
@@ -835,7 +836,7 @@ class _MediaViewerPageState extends State<MediaViewerPage> {
           child: SizedBox(
             width: double.infinity,
             height: isAudio ? 96 : double.infinity,
-            child: WasmVideoPlayer(
+            child: inlineVideoPlayer(
                 mediaBytes: data,
                 ext: _ref.ext,
                 fit: BoxFit.contain,

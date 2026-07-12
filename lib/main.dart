@@ -11,6 +11,7 @@ import 'connections/builtin_connections.dart';
 import 'editor/editor_install.dart';
 import 'wapp/host_event_bridge.dart';
 import 'wapp/native/media_capability.dart';
+import 'wapp/native/wasm_video_player.dart' show warmVideoDecoderModule;
 import 'wapp/native/wasm_video_session.dart';
 import 'services/power_governor.dart';
 import 'services/i2p/i2p_background_service.dart';
@@ -275,6 +276,14 @@ Future<void> main() async {
   await BootOrchestrator.instance.runAll();
 
   runApp(IwiApp(messengerKey: rootMessengerKey));
+
+  // Warm the video decoder wasm module off the critical path: the first tap
+  // on an inline video then skips the multi-second wasmtime compile
+  // (wasm_run has no module serialization, so this is per-session). Delayed
+  // so it never competes with first paint; the compile itself runs on
+  // wasmtime's native threads.
+  unawaited(
+      Future<void>.delayed(const Duration(seconds: 3), warmVideoDecoderModule));
 
   // Remote-control API: start after runApp so the root navigator is live
   // (it backs /api/launch). Gated by a setting (default on); see Settings.

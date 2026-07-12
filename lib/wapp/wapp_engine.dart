@@ -543,7 +543,14 @@ class WappEngine {
     // Compiling a large module (the media player wapp is ~2.7 MB) takes
     // seconds on phones — callers that replay the same wapp repeatedly
     // (inline video, poster generation) pass a cached [precompiled] module.
-    final module = precompiled ?? await compileWasmModule(wasmBytes);
+    final module = precompiled ??
+        await compileWasmModule(
+          wasmBytes,
+          config: const ModuleConfig(
+            wasmtime: ModuleConfigWasmtime(
+                wasmSimd: true, parallelCompilation: true),
+          ),
+        );
     final builder = module.builder();
 
     // ── System HAL ──

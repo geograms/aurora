@@ -32,8 +32,13 @@ import 'media_capability.dart';
 /// only lights up when a wapp advertising `media.video` is installed.
 class WasmVideoBackend implements MediaVideoBackend {
   @override
-  List<String> get supportedPlatforms =>
-      const ['linux', 'windows', 'macos', 'android', 'ios'];
+  List<String> get supportedPlatforms => const [
+    'linux',
+    'windows',
+    'macos',
+    'android',
+    'ios',
+  ];
 
   @override
   MediaSession createSession() => WasmVideoSession();
@@ -66,6 +71,15 @@ class WasmVideoSession implements MediaSession {
   bool _decoding = false; // a decodeImageFromPixels is in flight
   bool _disposed = false;
 
+  /// Presentation position (pts of the frame on screen) and clip duration,
+  /// for the shared time-bar overlay. [durationMs] is set by the player
+  /// when its backend learns it (probe/meta); 0 = unknown. After a seek the
+  /// decoder restarts with pts back at 0 — [ptsOffsetMs] holds the seek
+  /// target so the displayed position stays absolute.
+  final ValueNotifier<int> positionMs = ValueNotifier<int>(0);
+  int durationMs = 0;
+  int ptsOffsetMs = 0;
+
   WasmVideoSession() {
     // ~120Hz pump: cheap, and keeps presentation latency low without
     // coupling to the decode rate.
@@ -93,7 +107,12 @@ class WasmVideoSession implements MediaSession {
 
   /// hal_audio_pcm — accepted but dropped in the MVP (see file header).
   void pushAudio(
-      Uint8List pcm, int sampleRate, int channels, int sampfmt, int ptsMs) {}
+    Uint8List pcm,
+    int sampleRate,
+    int channels,
+    int sampfmt,
+    int ptsMs,
+  ) {}
 
   /// hal_video_end — decoder reached the last frame.
   void markEnded() {
@@ -142,6 +161,7 @@ class WasmVideoSession implements MediaSession {
         final old = _frame.value;
         _frame.value = img;
         old?.dispose();
+        positionMs.value = f.ptsMs + ptsOffsetMs;
       },
     );
   }
@@ -243,6 +263,7 @@ class WasmVideoSession implements MediaSession {
     _frame.value = null;
     old?.dispose();
     _frame.dispose();
+    positionMs.dispose();
   }
 }
 

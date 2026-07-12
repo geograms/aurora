@@ -22,12 +22,17 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:wasm_run/wasm_run.dart' show WasmModule, compileWasmModule;
+import 'package:wasm_run/wasm_run.dart'
+    show ModuleConfig, ModuleConfigWasmtime, WasmModule, compileWasmModule;
 
 import '../../profile/storage_paths.dart';
 import '../../services/log_service.dart';
 import '../wapp_engine.dart';
 import '../wapp_file_associations.dart';
+import 'hw_video_player.dart' show HwVideoController;
+import 'native_process_video_player.dart' show nativeDecoderPathFor;
+import 'video_keys.dart';
+import 'video_time_bar.dart';
 import 'wasm_audio_output.dart';
 import 'wasm_video_session.dart';
 
@@ -37,11 +42,11 @@ import 'wasm_video_session.dart';
 /// (e.g. the Movies wapp via the media.video functionality) matches the
 /// extension but can never feed this player a frame — filter those out so an
 /// installed Movies wapp can't shadow the Player wapp here.
-List<WappAssociation> framePushPlayersFor(String ext) =>
-    WappFileAssociations.instance
-        .lookupForFile('x.$ext', mode: 'view')
-        .where((a) => a.manifest.requiredHal.contains('video'))
-        .toList();
+List<WappAssociation> framePushPlayersFor(String ext) => WappFileAssociations
+    .instance
+    .lookupForFile('x.$ext', mode: 'view')
+    .where((a) => a.manifest.requiredHal.contains('video'))
+    .toList();
 
 void _wvpLog(String line) => LogService.instance.add('[wvp] $line');
 
@@ -70,10 +75,37 @@ class WappModuleCache {
     if (_cache.length > 4) _cache.clear(); // only the player in practice
     return _cache.putIfAbsent(k, () async {
       final sw = Stopwatch()..start();
-      final m = await compileWasmModule(wasmBytes);
-      _wvpLog('compiled $key (${wasmBytes.length} B) in ${sw.elapsedMilliseconds} ms');
+      final m = await compileWasmModule(
+        wasmBytes,
+        config: const ModuleConfig(
+          wasmtime: ModuleConfigWasmtime(
+            wasmSimd: true,
+            parallelCompilation: true,
+          ),
+        ),
+      );
+      _wvpLog(
+        'compiled $key (${wasmBytes.length} B) in ${sw.elapsedMilliseconds} ms',
+      );
       return m;
     });
+  }
+}
+
+/// Pre-compile the player wapp's decoder module so the first inline playback
+/// skips the multi-second wasmtime compile (wasm_run has no module
+/// serialization — the cache is per-session). No-op when no frame-push
+/// player wapp is installed. Called shortly after startup from main.dart.
+Future<void> warmVideoDecoderModule() async {
+  try {
+    final matches = framePushPlayersFor('mp4');
+    if (matches.isEmpty) return;
+    final dirPath = matches.first.manifest.dirPath;
+    final wasm = await wappPackageStorage(dirPath).readBytes('app.wasm');
+    if (wasm == null) return;
+    await WappModuleCache.compile(dirPath, wasm);
+  } catch (e) {
+    _wvpLog('warm compile failed: $e');
   }
 }
 
@@ -100,14 +132,73 @@ class WasmVideoThumbnailer {
   static Future<Uint8List?> _generate(Uint8List media, String ext) async {
     final matches = framePushPlayersFor(ext);
     if (matches.isEmpty) return null;
-    final dirPath = matches.first.manifest.dirPath;
-    final wasm = await wappPackageStorage(dirPath).readBytes('app.wasm');
-    if (wasm == null) return null;
-    final module = await WappModuleCache.compile(dirPath, wasm);
+    final manifest = matches.first.manifest;
+    final dirPath = manifest.dirPath;
 
     final dir = await Directory.systemTemp.createTemp('aurora_thumb_');
     final f = File('${dir.path}/v.$ext');
     await f.writeAsBytes(media, flush: true);
+
+    // Fast paths first — milliseconds instead of a multi-second wasm scan.
+    // Trade-off: a single "frame at ~1s" instead of the scored best-of-N;
+    // accepted for speed. The wasm scan below remains the fallback.
+    try {
+      Uint8List? png;
+      if (Platform.isAndroid) {
+        // OS hardware path (MediaMetadataRetriever).
+        png = await HwVideoController.thumbnail(f.path);
+        if (png != null && png.isNotEmpty) {
+          _wvpLog('poster via MediaMetadataRetriever');
+        }
+      } else {
+        // Wapp-bundled native decoder (static ffmpeg), when present.
+        final bin = nativeDecoderPathFor(manifest);
+        if (bin != null) {
+          if (Platform.isLinux || Platform.isMacOS) {
+            await Process.run('chmod', ['+x', bin]);
+          }
+          final r = await Process.run(bin, [
+            '-v',
+            'error',
+            '-ss',
+            '1',
+            '-i',
+            f.path,
+            '-frames:v',
+            '1',
+            '-vf',
+            "scale='min(480,iw)':-2",
+            '-f',
+            'image2',
+            '-c:v',
+            'png',
+            'pipe:1',
+          ], stdoutEncoding: null).timeout(const Duration(seconds: 15));
+          final out = r.stdout;
+          if (r.exitCode == 0 && out is List<int> && out.isNotEmpty) {
+            png = Uint8List.fromList(out);
+            _wvpLog('poster via native decoder');
+          }
+        }
+      }
+      if (png != null && png.isNotEmpty) {
+        try {
+          dir.deleteSync(recursive: true);
+        } catch (_) {}
+        return png;
+      }
+    } catch (e) {
+      _wvpLog('fast poster failed, wasm fallback: $e');
+    }
+
+    final wasm = await wappPackageStorage(dirPath).readBytes('app.wasm');
+    if (wasm == null) {
+      try {
+        dir.deleteSync(recursive: true);
+      } catch (_) {}
+      return null;
+    }
+    final module = await WappModuleCache.compile(dirPath, wasm);
 
     // Scan several frames from the start and keep the most visually
     // interesting one (well-lit, colorful, detailed) — the literal first
@@ -132,7 +223,8 @@ class WasmVideoThumbnailer {
       await engine.load(wasm, precompiled: module);
       engine.init();
       engine.sendMessage(
-          jsonEncode({'type': 'file.open', 'path': f.path, 'mode': 'view'}));
+        jsonEncode({'type': 'file.open', 'path': f.path, 'mode': 'view'}),
+      );
       engine.handleEvent();
       engine.drainOutbox();
       engine.sendMessage(jsonEncode({'type': 'video.scan'}));
@@ -204,8 +296,9 @@ class WasmVideoThumbnailer {
   static Future<Uint8List?> _encodePng(Uint8List rgba, int w, int h) async {
     final full = await _toImage(rgba, w, h);
     const maxDim = 360.0;
-    final scale =
-        (w >= h ? maxDim / w : maxDim / h).clamp(0.0001, 1.0).toDouble();
+    final scale = (w >= h ? maxDim / w : maxDim / h)
+        .clamp(0.0001, 1.0)
+        .toDouble();
     final tw = (w * scale).round().clamp(1, w);
     final th = (h * scale).round().clamp(1, h);
     final recorder = ui.PictureRecorder();
@@ -292,16 +385,22 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
         final anyHandler = WappFileAssociations.instance
             .lookupForFile('x.${widget.ext}', mode: 'view')
             .isNotEmpty;
-        _wvpLog('no frame-push player for .${widget.ext} '
-            '(other handlers: $anyHandler)');
-        _fail(anyHandler
-            ? 'No installed player can decode .${widget.ext} files.'
-            : 'No media player installed.\nInstall the Player wapp.');
+        _wvpLog(
+          'no frame-push player for .${widget.ext} '
+          '(other handlers: $anyHandler)',
+        );
+        _fail(
+          anyHandler
+              ? 'No installed player can decode .${widget.ext} files.'
+              : 'No media player installed.\nInstall the Player wapp.',
+        );
         return;
       }
       final dirPath = matches.first.manifest.dirPath;
-      _wvpLog('start .${widget.ext} ${widget.mediaBytes.length} B '
-          'player=${matches.first.manifest.id}');
+      _wvpLog(
+        'start .${widget.ext} ${widget.mediaBytes.length} B '
+        'player=${matches.first.manifest.id}',
+      );
       final pkg = wappPackageStorage(dirPath);
       final wasm = await pkg.readBytes('app.wasm');
       if (wasm == null) {
@@ -319,8 +418,8 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
       final audioOut = WasmAudioOutput();
       // Audio is the master clock when it's actually playing; otherwise the
       // session falls back to its own Stopwatch (video-only).
-      session.masterClock =
-          () => audioOut.active ? audioOut.playedPosition : null;
+      session.masterClock = () =>
+          audioOut.active ? audioOut.playedPosition : null;
       final engine = WappEngine()
         ..onVideoConfig = ((w, h, fmt) {
           _sawSignal = true;
@@ -341,12 +440,17 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
       if (mounted) setState(() => _stage = 'Opening…');
       // Hand the decoder the file; it pushes frames on its tick loop.
       engine.sendMessage(
-          jsonEncode({'type': 'file.open', 'path': f.path, 'mode': 'view'}));
+        jsonEncode({'type': 'file.open', 'path': f.path, 'mode': 'view'}),
+      );
       engine.handleEvent();
-      _consumeOutbox(engine.drainOutbox()); // catch media.meta + video.load echo
+      _consumeOutbox(
+        engine.drainOutbox(),
+      ); // catch media.meta + video.load echo
       _drainEngineLogs(engine);
-      _wvpLog('opened in ${t0.elapsedMilliseconds} ms '
-          '(meta=${_sawMeta ? "yes" : "no"})');
+      _wvpLog(
+        'opened in ${t0.elapsedMilliseconds} ms '
+        '(meta=${_sawMeta ? "yes" : "no"})',
+      );
 
       if (!mounted) {
         engine.dispose();
@@ -412,8 +516,10 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
       if (_sawSignal || !mounted) return;
       _wvpLog('decode timeout (meta=$_sawMeta) — no decoder output in 30 s');
       _ticker?.cancel();
-      _fail("Can't decode this ${widget.isAudio ? 'audio' : 'video'} "
-          '(unsupported codec).');
+      _fail(
+        "Can't decode this ${widget.isAudio ? 'audio' : 'video'} "
+        '(unsupported codec).',
+      );
     });
   }
 
@@ -440,7 +546,10 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
             if (mounted) setState(() {});
           }
           final d = (j['durationMs'] as num?)?.toInt() ?? 0;
-          if (d > 0 && d != _durationMs) _durationMs = d;
+          if (d > 0 && d != _durationMs) {
+            _durationMs = d;
+            _session?.durationMs = d;
+          }
         }
       } catch (_) {}
     }
@@ -466,10 +575,13 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
   void _openFullscreen() {
     final s = _session;
     if (s == null) return;
-    Navigator.of(context).push(PageRouteBuilder(
-      opaque: true,
-      pageBuilder: (_, __, ___) => _FullscreenVideo(session: s),
-    ));
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        opaque: true,
+        pageBuilder: (_, __, ___) =>
+            _FullscreenVideo(session: s, onTogglePlay: _togglePlay),
+      ),
+    );
   }
 
   @override
@@ -493,9 +605,11 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(10),
-            child: Text(_err,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            child: Text(
+              _err,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
           ),
         ),
       );
@@ -516,23 +630,36 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white70)),
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white70,
+                    ),
+                  ),
                   const SizedBox(height: 10),
-                  Text(_stage,
-                      style: const TextStyle(
-                          color: Colors.white70, fontSize: 12)),
+                  Text(
+                    _stage,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
                 ],
+              ),
+            ),
+          if (s != null && _sawSignal)
+            Positioned(
+              left: 6,
+              right: widget.allowFullscreen ? 42 : 6,
+              bottom: 6,
+              child: VideoTimeBar(
+                positionMs: s.positionMs,
+                durationMs: _durationMs,
               ),
             ),
           if (widget.allowFullscreen && s != null)
             Positioned(
               right: 4,
               bottom: 4,
-              child: _RoundBtn(
-                  icon: Icons.fullscreen, onTap: _openFullscreen),
+              child: _RoundBtn(icon: Icons.fullscreen, onTap: _openFullscreen),
             ),
         ],
       ),
@@ -542,8 +669,7 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
   Widget _buildAudioUi() {
     final posMs = _audioOut?.playedPosition.inMilliseconds ?? 0;
     final dur = _durationMs;
-    final frac =
-        (dur > 0) ? (posMs / dur).clamp(0.0, 1.0).toDouble() : 0.0;
+    final frac = (dur > 0) ? (posMs / dur).clamp(0.0, 1.0).toDouble() : 0.0;
     final title = (widget.title != null && widget.title!.trim().isNotEmpty)
         ? widget.title!.trim()
         : 'Audio';
@@ -564,15 +690,22 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.audiotrack,
-                        color: Colors.white60, size: 14),
+                    const Icon(
+                      Icons.audiotrack,
+                      color: Colors.white60,
+                      size: 14,
+                    ),
                     const SizedBox(width: 5),
                     Expanded(
-                      child: Text(title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 13)),
+                      child: Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -583,17 +716,13 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
                     value: dur > 0 ? frac : null,
                     minHeight: 4,
                     backgroundColor: Colors.white24,
-                    valueColor:
-                        const AlwaysStoppedAnimation(Color(0xFF8AB4F8)),
+                    valueColor: const AlwaysStoppedAnimation(Color(0xFF8AB4F8)),
                   ),
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  dur > 0
-                      ? '${_fmt(posMs)} / ${_fmt(dur)}'
-                      : _fmt(posMs),
-                  style:
-                      const TextStyle(color: Colors.white54, fontSize: 11),
+                  dur > 0 ? '${_fmt(posMs)} / ${_fmt(dur)}' : _fmt(posMs),
+                  style: const TextStyle(color: Colors.white54, fontSize: 11),
                 ),
               ],
             ),
@@ -614,24 +743,38 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
 /// Fullscreen view of an already-running session (same decoder, no restart).
 class _FullscreenVideo extends StatelessWidget {
   final WasmVideoSession session;
-  const _FullscreenVideo({required this.session});
+  final VoidCallback? onTogglePlay;
+  const _FullscreenVideo({required this.session, this.onTogglePlay});
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Stack(
-          children: [
-            Center(child: session.buildSurface(BoxFit.contain)),
-            Positioned(
-              left: 6,
-              top: 6,
-              child: _RoundBtn(
+      body: VideoKeyScope(
+        onTogglePlay: onTogglePlay,
+        child: SafeArea(
+          child: Stack(
+            children: [
+              Center(child: session.buildSurface(BoxFit.contain)),
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 12,
+                child: VideoTimeBar(
+                  positionMs: session.positionMs,
+                  durationMs: session.durationMs,
+                ),
+              ),
+              Positioned(
+                left: 6,
+                top: 6,
+                child: _RoundBtn(
                   icon: Icons.close,
-                  onTap: () => Navigator.of(context).pop()),
-            ),
-          ],
+                  onTap: () => Navigator.of(context).pop(),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -78,6 +78,14 @@ class WappManifest {
   /// intel/arm/esp32/N/A/… Empty = unspecified (any).
   final List<String> supportedHardware;
 
+  /// Native per-platform binaries shipped INSIDE the wapp package, from
+  /// `provides.native_binaries` — a map of `<platform>-<arch>` (e.g.
+  /// "linux-x86_64", "windows-x86_64") to a wapp-relative path (e.g.
+  /// "bin/ffmpeg-linux-x86_64"). Lets a wapp escape wasm's limits (no SIMD
+  /// asm, no threads) with real binaries while the HOST stays codec-free;
+  /// executing them is the same trust boundary as `hal_process_exec`.
+  final Map<String, String> nativeBinaries;
+
   /// True when the user authored/edited this wapp via the App Creator
   /// (`manifest.user_modified`). The launcher badges these as customized.
   final bool userModified;
@@ -103,6 +111,7 @@ class WappManifest {
     this.providedIntents = const [],
     this.supportedPlatforms = const [],
     this.supportedHardware = const [],
+    this.nativeBinaries = const {},
     this.userModified = false,
   });
 
@@ -230,6 +239,17 @@ class WappManifest {
       providedIntents: providedIntents,
       supportedPlatforms: topList('platforms'),
       supportedHardware: topList('hardware'),
+      nativeBinaries: () {
+        final raw = provides is Map<String, dynamic>
+            ? provides['native_binaries']
+            : null;
+        if (raw is! Map) return const <String, String>{};
+        return {
+          for (final e in raw.entries)
+            if (e.value is String && (e.value as String).isNotEmpty)
+              e.key.toString().toLowerCase(): e.value as String,
+        };
+      }(),
       userModified: json['user_modified'] == true,
     );
   }

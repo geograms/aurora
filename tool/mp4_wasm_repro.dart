@@ -25,7 +25,9 @@ void main(List<String> args) async {
   var frames = 0;
   var audioBytes = 0, audioRate = 0, audioCh = 0, audioFmt = -1, audioChunks = 0;
 
+  final swCompile = Stopwatch()..start();
   final module = await compileWasmModule(wasmBytes);
+  print('compile: ${swCompile.elapsedMilliseconds} ms');
   final builder = module.builder();
 
   WasmFunction vfn(Function f, List<ValueTy> p) =>
@@ -159,9 +161,21 @@ void main(List<String> args) async {
   print('--- handle_event (file.open) ---');
   call('module_handle_event');
   print('--- ticking ---');
-  for (var i = 0; i < 2000 && frames < 80; i++) {
+  // Decode-throughput measurement: wall-clock from first frame to the frame
+  // target (the fake clock advances 16 ms/tick so pacing never throttles).
+  final swDecode = Stopwatch();
+  const target = 80;
+  for (var i = 0; i < 2000 && frames < target; i++) {
     clock += 16;
+    if (frames >= 1 && !swDecode.isRunning) swDecode.start();
     call('module_tick');
+  }
+  if (swDecode.isRunning && frames > 1) {
+    final f = frames - 1; // measured from frame 1
+    final ms = swDecode.elapsedMilliseconds;
+    final fps = ms > 0 ? (f * 1000 / ms) : 0;
+    print('decode: $f frames in $ms ms → ${fps.toStringAsFixed(1)} fps '
+        '(${(ms / f).toStringAsFixed(1)} ms/frame)');
   }
   final audioFrames = (audioCh > 0 && audioFmt == 0)
       ? audioBytes ~/ (2 * audioCh)

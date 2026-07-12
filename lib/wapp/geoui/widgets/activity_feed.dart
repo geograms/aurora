@@ -17,6 +17,7 @@ import 'dart:ui' as ui;
 
 import '../../../services/media_disk_cache.dart';
 import '../../../services/reticulum/rns_service.dart';
+import '../../native/inline_video_player.dart';
 import '../../native/wasm_video_player.dart';
 import 'package:http/http.dart' as http;
 
@@ -367,9 +368,22 @@ class _ActivityFeedState extends State<ActivityFeed> {
                         padding: EdgeInsets.zero,
                         physics: const AlwaysScrollableScrollPhysics(),
                         itemCount: posts.length,
+                        // Keep each card's Element (and so the state of any
+                        // playing video inside it) attached to its POST, not
+                        // its list slot — without this, a new post arriving
+                        // above shifts every index and Flutter rebuilds the
+                        // subtree from scratch, killing playback mid-video.
+                        findChildIndexCallback: (key) {
+                          final v = (key as ValueKey<String>).value;
+                          for (var i = 0; i < posts.length; i++) {
+                            if (_postKey(posts[i], i) == v) return i * 2;
+                          }
+                          return null;
+                        },
                         separatorBuilder: (_, __) => Divider(
                             height: 1, color: cs.outlineVariant.withAlpha(45)),
                         itemBuilder: (_, i) => ActivityPostCard(
+                          key: ValueKey(_postKey(posts[i], i)),
                           post: posts[i],
                           profileFor: widget.profileFor,
                           npubFor: widget.npubFor,
@@ -394,6 +408,14 @@ class _ActivityFeedState extends State<ActivityFeed> {
         ),
       ),
     );
+  }
+
+  /// Stable per-post identity for list keys: the message id when present,
+  /// else sender+body (mirrors the body ValueKey fallback in the card).
+  static String _postKey(Map<String, dynamic> p, int i) {
+    final mid = (p['mid'] ?? '').toString();
+    if (mid.isNotEmpty) return 'post-$mid';
+    return 'post-${'${p['from']}${p['body']}'.hashCode}-$i';
   }
 
   /// A tappable "N new posts" pill under the composer. Tapping pulls the fresh
@@ -1535,8 +1557,15 @@ class _RemoteMedia extends StatefulWidget {
   State<_RemoteMedia> createState() => _RemoteMediaState();
 }
 
-class _RemoteMediaState extends State<_RemoteMedia> {
+class _RemoteMediaState extends State<_RemoteMedia>
+    with AutomaticKeepAliveClientMixin {
   static const int _cap = 10 * 1024 * 1024;
+
+  /// While a video is playing, pin this list item alive so viewport
+  /// recycling (posts piling up above push the card toward the cache edge)
+  /// doesn't dispose the player mid-playback.
+  @override
+  bool get wantKeepAlive => _playing;
   static const int _vidCap = 500 * 1024 * 1024;
   late final bool _isVid = _isVideoUrl(widget.url);
   _RmState _s = _RmState.checking;
@@ -1615,13 +1644,15 @@ class _RemoteMediaState extends State<_RemoteMedia> {
   }
 
   /// Tap-to-play a video: stream its bytes with a live progress bar, then hand
-  /// them to the shared WasmVideoPlayer (same player the Chat wapp uses).
+  /// them to the shared inline player (hw / native / wasm via the dispatcher).
   Future<void> _playVideo() async {
+    debugPrint('[rm] play tap ${widget.url}');
     setState(() {
       _playing = true;
       _dlReceived = 0;
       _s = _RmState.checking;
     });
+    updateKeepAlive();
     final bytes = await MediaDiskCache.instance.fetchStreamed(
       widget.url,
       maxBytes: _vidCap,
@@ -1724,6 +1755,7 @@ class _RemoteMediaState extends State<_RemoteMedia> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin
     final cs = Theme.of(context).colorScheme;
     switch (_s) {
       case _RmState.checking:
@@ -1860,7 +1892,8 @@ class _RemoteMediaState extends State<_RemoteMedia> {
           final dim = widget.imeta?['dim']?.split('x');
           final dw = double.tryParse(dim?.first ?? '');
           final dh = double.tryParse((dim?.length ?? 0) > 1 ? dim![1] : '');
-          final player = WasmVideoPlayer(mediaBytes: v, ext: _extOf(widget.url));
+          final player =
+              inlineVideoPlayer(mediaBytes: v, ext: _extOf(widget.url));
           return ClipRRect(
             borderRadius: BorderRadius.circular(10),
             child: (dw != null && dh != null && dw > 0 && dh > 0)

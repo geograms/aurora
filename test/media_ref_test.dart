@@ -53,13 +53,13 @@ void main() {
   });
 
   group('MediaRef.classify', () {
-    test('images', () {
-      for (final e in ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'svg']) {
+    test('images (incl. gif per APRX §16.3 — animated natively)', () {
+      for (final e in ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']) {
         expect(MediaRef.classify(e), MediaKind.image, reason: e);
       }
     });
-    test('video (incl. gif per APRX §16.3)', () {
-      for (final e in ['gif', 'webm', 'mpeg', 'mpg', 'mp4', 'mov']) {
+    test('video', () {
+      for (final e in ['webm', 'mpeg', 'mpg', 'mp4', 'mov']) {
         expect(MediaRef.classify(e), MediaKind.video, reason: e);
       }
     });

@@ -3779,7 +3779,10 @@ class _WappPageState extends State<WappPage>
           value: 'edit',
           child: ListTile(
             leading: Icon(Icons.edit),
-            title: Text('Edit'),
+            // "Edit" alone reads as "edit something in this wapp" — the note,
+            // the message, whatever is on screen. It opens the wapp's SOURCE in
+            // the editor, which is a very different thing to click by accident.
+            title: Text('Edit wapp'),
             contentPadding: EdgeInsets.zero,
             dense: true,
           ),

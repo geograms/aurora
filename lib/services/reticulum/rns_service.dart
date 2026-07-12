@@ -4965,7 +4965,19 @@ class RnsService {
     final pub = selfPubHex;
     final priv = _profilePrivHex();
     final hub = _nostrHub;
-    if (pub == null || priv == null || hub == null) return;
+    // A like that silently does nothing is worse than one that fails loudly:
+    // the heart simply never fills and there is no way to tell why.
+    if (pub == null || priv == null || hub == null) {
+      LogService.instance.add('NOSTR: react DROPPED — pub=${pub != null} '
+          'priv=${priv != null} hub=${hub != null}');
+      return;
+    }
+    if (eventId.isEmpty) {
+      LogService.instance.add('NOSTR: react DROPPED — empty event id');
+      return;
+    }
+    LogService.instance.add('NOSTR: react + on '
+        '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}');
     final ev = NostrEvent(
       pubkey: pub,
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,

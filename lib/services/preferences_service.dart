@@ -134,6 +134,16 @@ class PreferencesService {
   bool get hostCapacityGated => _prefs.getBool('host.capacityGated') ?? true;
   set hostCapacityGated(bool v) => _prefs.setBool('host.capacityGated', v);
 
+  // Accounts whose data this device deliberately KEEPS: their posts are mirrored
+  // into the store we serve to the mesh, and their media is pinned in the Blossom
+  // archive so the eviction sweep never touches it. Every device is its own NOSTR
+  // relay and Blossom server, so this is how a user chooses what their device is
+  // a home for. Hex pubkeys.
+  List<String> get keepDataPubkeys =>
+      _prefs.getStringList('social.keepData') ?? const [];
+  set keepDataPubkeys(List<String> v) =>
+      _prefs.setStringList('social.keepData', v);
+
   // When the user last looked at the social feed. Everything a followed account
   // posted after this is "new" on the launcher's status bar — the only honest
   // definition of new, and the reason the number goes down when you read it.

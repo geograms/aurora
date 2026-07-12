@@ -1544,6 +1544,7 @@ class _RemoteMediaState extends State<_RemoteMedia> {
   bool _playing = false; // video: user tapped play
   int _dlTotal = 0; // video size in bytes (0 = unknown)
   int _dlReceived = 0; // bytes downloaded so far
+  bool _gone = false; // the host purged the file (HEAD said 4xx/5xx)
 
   // Poster (thumbnail) for the video play card: imeta `image` url, a locally
   // generated first-frame (cached after the first playback), with the imeta
@@ -1557,8 +1558,12 @@ class _RemoteMediaState extends State<_RemoteMedia> {
     if (_isVid) {
       _s = _RmState.show; // show a play card; fetch the (big) video on tap only
       // Probe the size so the card can show "▶ 12.3 MB" before downloading.
+      // -1 = the host purged the file (media hosts expire uploads) — say so
+      // instead of offering a play button that can only fail.
       MediaDiskCache.instance.probeSize(widget.url).then((s) {
-        if (mounted && s > 0) setState(() => _dlTotal = s);
+        if (!mounted) return;
+        if (s > 0) setState(() => _dlTotal = s);
+        if (s < 0) setState(() => _gone = true);
       });
       _loadPoster();
     } else {
@@ -1757,19 +1762,39 @@ class _RemoteMediaState extends State<_RemoteMedia> {
         return _box(
             cs,
             Center(
-                child: Icon(Icons.broken_image_outlined,
-                    color: cs.onSurfaceVariant.withAlpha(120), size: 30)));
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                      _isVid
+                          ? Icons.videocam_off_outlined
+                          : Icons.broken_image_outlined,
+                      color: cs.onSurfaceVariant.withAlpha(120),
+                      size: 30),
+                  if (_isVid)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text('Video unavailable (removed from the host)',
+                          style: TextStyle(
+                              color: cs.onSurfaceVariant.withAlpha(160),
+                              fontSize: 12)),
+                    ),
+                ],
+              ),
+            ));
       case _RmState.show:
         // Video: a play card until tapped, then the shared WasmVideoPlayer.
         if (_isVid) {
           if (!_playing) {
             final dur = _durLabel(widget.imeta?['dur']);
-            final chip = [
-              if (dur != null) dur,
-              if (_dlTotal > 0) '${_fmtBytes(_dlTotal)} video',
-            ].join(' · ');
+            final chip = _gone
+                ? 'video expired on the host'
+                : [
+                    if (dur != null) dur,
+                    if (_dlTotal > 0) '${_fmtBytes(_dlTotal)} video',
+                  ].join(' · ');
             return InkWell(
-              onTap: _playVideo,
+              onTap: _gone ? null : _playVideo,
               child: _box(
                 cs,
                 Container(
@@ -1794,9 +1819,13 @@ class _RemoteMediaState extends State<_RemoteMedia> {
                       // Dim so the play affordance reads on bright posters.
                       if (_poster != null || _blur != null)
                         Container(color: Colors.black26),
-                      const Center(
-                        child: Icon(Icons.play_circle_fill,
-                            size: 64, color: Colors.white70),
+                      Center(
+                        child: Icon(
+                            _gone
+                                ? Icons.videocam_off_outlined
+                                : Icons.play_circle_fill,
+                            size: 64,
+                            color: Colors.white70),
                       ),
                       // "0:38 · 12.3 MB video", once known.
                       if (chip.isNotEmpty)
@@ -1823,9 +1852,25 @@ class _RemoteMediaState extends State<_RemoteMedia> {
           }
           final v = _bytes;
           if (v == null) return _box(cs, const SizedBox.shrink());
+          // The player fills whatever box it is given (Stack.expand) — in the
+          // unbounded feed column it MUST get a finite height or layout dies
+          // ("BoxConstraints forces an infinite height", the long-standing
+          // reason tapped videos showed a dead black card). imeta dim gives
+          // the true aspect; otherwise keep the card's fixed height.
+          final dim = widget.imeta?['dim']?.split('x');
+          final dw = double.tryParse(dim?.first ?? '');
+          final dh = double.tryParse((dim?.length ?? 0) > 1 ? dim![1] : '');
+          final player = WasmVideoPlayer(mediaBytes: v, ext: _extOf(widget.url));
           return ClipRRect(
             borderRadius: BorderRadius.circular(10),
-            child: WasmVideoPlayer(mediaBytes: v, ext: _extOf(widget.url)),
+            child: (dw != null && dh != null && dw > 0 && dh > 0)
+                ? AspectRatio(
+                    aspectRatio: (dw / dh).clamp(0.5, 2.2), child: player)
+                : SizedBox(
+                    height: _mediaHeight,
+                    width: double.infinity,
+                    child: player,
+                  ),
           );
         }
         // Image: tap to open full-screen (pinch-zoom).

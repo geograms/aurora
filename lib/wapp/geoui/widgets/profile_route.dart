@@ -30,6 +30,13 @@ class ProfileRoute extends StatefulWidget {
   final void Function(bool block)? onSetBlock;
   final void Function(bool mute)? onSetMute;
 
+  /// "Keep data": host this account's posts + media on THIS device (mirrored
+  /// into the store we serve, media pinned against eviction). Passed through
+  /// from the wapp page, which owns the host services — this widget stays
+  /// app-agnostic.
+  final bool keepData;
+  final void Function(bool keep)? onSetKeep;
+
   /// Per-post social actions (Like / Reply / Retweet), forwarded to ProfileView.
   final ({int count, bool mine}) Function(String mid)? likeInfo;
   final void Function(String mid, bool like)? onLike;
@@ -83,6 +90,8 @@ class ProfileRoute extends StatefulWidget {
     this.following = false,
     this.blocked = false,
     this.muted = false,
+    this.keepData = false,
+    this.onSetKeep,
     this.onPostTap,
     this.onMessage,
     this.onSetFollow,
@@ -223,6 +232,8 @@ class _ProfileRouteState extends State<ProfileRoute> {
       onSetBlock: widget.onSetBlock,
       onSetMute: widget.onSetMute,
       muted: widget.muted,
+      keepData: widget.keepData,
+      onSetKeep: widget.onSetKeep,
       likeInfo: widget.likeInfo,
       onLike: widget.onLike,
       replyCount: widget.replyCount,

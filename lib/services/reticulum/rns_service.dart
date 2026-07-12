@@ -1967,7 +1967,7 @@ class RnsService {
             final tier = tierOf(
               pubHex,
               selfPubHex: selfPubHex,
-              followsHex: _follows.asSet,
+              followsHex: _mirroredAuthors,
             );
             final totals = src.archive.hostedTotals();
             final u = _relayStore?.hostUsage();
@@ -2109,7 +2109,7 @@ class RnsService {
             tierOfPub: (pub) => tierOf(
               pub,
               selfPubHex: selfPubHex,
-              followsHex: _follows.asSet,
+              followsHex: _mirroredAuthors,
             ).index,
             // Per-tier admission: self always; strangers refused past their
             // monthly note / storage caps. Text notes only here (isMedia false).
@@ -3796,7 +3796,7 @@ class RnsService {
     final tier = tierOf(
       ev.pubkey,
       selfPubHex: selfPubHex,
-      followsHex: _follows.asSet,
+      followsHex: _mirroredAuthors,
     );
     final stored = store.put(ev, tier: tier.index);
     // Replicate to EVERY known indexer (freshest first, capped), not just the
@@ -4053,7 +4053,7 @@ class RnsService {
             tier: tierOf(
               ev.pubkey,
               selfPubHex: selfPubHex,
-              followsHex: _follows.asSet,
+              followsHex: _mirroredAuthors,
             ).index,
           );
           return parse(ev);
@@ -4067,7 +4067,7 @@ class RnsService {
         final tier = tierOf(
           ev.pubkey,
           selfPubHex: selfPubHex,
-          followsHex: _follows.asSet,
+          followsHex: _mirroredAuthors,
         );
         _relayStore?.put(ev, tier: tier.index); // cache for next time
         return parse(ev);
@@ -4383,7 +4383,7 @@ class RnsService {
             tier: tierOf(
               ev.pubkey,
               selfPubHex: selfPubHex,
-              followsHex: _follows.asSet,
+              followsHex: _mirroredAuthors,
             ).index,
           );
           _obProfileFetchedAt[pubHex] = DateTime.now().millisecondsSinceEpoch;
@@ -4429,7 +4429,7 @@ class RnsService {
             tier: tierOf(
               ev.pubkey,
               selfPubHex: selfPubHex,
-              followsHex: _follows.asSet,
+              followsHex: _mirroredAuthors,
             ).index,
           );
           content = _parseProfileContent(ev.content);
@@ -4901,6 +4901,54 @@ class RnsService {
     pushTrustedAuthors();
   }
 
+  // ── Keep data (this device is a home for these accounts) ───────────────────
+  //
+  // Every device is its own NOSTR relay and Blossom server. "Keep data" is how a
+  // user says THIS account's things live here: their posts are mirrored into the
+  // store we serve to other peers, and their media is PINNED in the archive, so
+  // the storage sweep can never evict it however tight the quota gets.
+  //
+  // It is deliberately separate from following. You follow someone to read them;
+  // you keep their data to host it. Usually the same people — but a user who
+  // wants to be the archive for an account they don't follow can, and someone
+  // who follows two hundred accounts is not signing up to store all of them.
+  final Set<String> _keepData = {};
+  bool _keepDataLoaded = false;
+
+  Set<String> get keepDataPubkeys {
+    if (!_keepDataLoaded) {
+      _keepDataLoaded = true;
+      final p = PreferencesService.instanceSync;
+      if (p != null) _keepData.addAll(p.keepDataPubkeys);
+    }
+    return _keepData;
+  }
+
+  bool isKeepData(String pubHex) =>
+      keepDataPubkeys.contains(pubHex.toLowerCase());
+
+  void setKeepData(String pubHex, bool keep) {
+    final k = pubHex.toLowerCase();
+    if (k.length != 64) return;
+    keepDataPubkeys; // ensure loaded
+    if (keep) {
+      if (!_keepData.add(k)) return;
+    } else {
+      if (!_keepData.remove(k)) return;
+    }
+    PreferencesService.instanceSync?.keepDataPubkeys = _keepData.toList();
+    // Their posts must start (or stop) being mirrored into the store we serve,
+    // and the spam gate must stop vetting someone we are deliberately hosting.
+    startFollowsMirror();
+    pushTrustedAuthors();
+    LogService.instance
+        .add('social: keep-data ${keep ? 'on' : 'off'} for ${k.substring(0, 12)}');
+  }
+
+  /// Everyone whose posts we mirror and serve: people we follow, plus the
+  /// accounts the user explicitly keeps.
+  Set<String> get _mirroredAuthors => {..._follows.asSet, ...keepDataPubkeys};
+
   // ── The follows mirror ─────────────────────────────────────────────────────
   //
   // Keep what the people we follow post, and SERVE it to other peers.
@@ -4925,7 +4973,7 @@ class RnsService {
   void startFollowsMirror() {
     final hub = _nostrHub;
     if (hub == null || _relayStore == null) return;
-    final follows = _follows.asSet.toList()..sort();
+    final follows = _mirroredAuthors.toList()..sort();
     final key = follows.join(',');
     if (key == _mirrorKey && (_mirrorSub != null || follows.isEmpty)) return;
     _mirrorKey = key;
@@ -4977,7 +5025,7 @@ class RnsService {
         final tier = tierOf(
           ev.pubkey,
           selfPubHex: selfPubHex,
-          followsHex: _follows.asSet,
+          followsHex: _mirroredAuthors,
         );
         // The subscription is by author, but a relay can send us anything.
         if (tier == Tier.stranger) {
@@ -5128,7 +5176,7 @@ class RnsService {
     final me = selfPubHex;
     _nostrHub?.setTrustedAuthors({
       if (me != null) me,
-      ..._follows.asSet,
+      ..._mirroredAuthors,
     });
   }
 

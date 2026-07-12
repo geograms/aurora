@@ -59,6 +59,12 @@ class ProfileView extends StatefulWidget {
   final bool muted;
   final void Function(bool mute)? onSetMute;
 
+  /// "Keep data": host this account's posts and media ON THIS DEVICE — mirrored
+  /// into the store we serve to the mesh, and pinned so the storage sweep never
+  /// evicts them. Null hides the switch.
+  final bool keepData;
+  final void Function(bool keep)? onSetKeep;
+
   /// This is OUR own profile: show an Edit button instead of Follow/Block.
   final bool isSelf;
   final VoidCallback? onEdit;
@@ -103,6 +109,8 @@ class ProfileView extends StatefulWidget {
     this.website,
     this.lud16,
     this.muted = false,
+    this.keepData = false,
+    this.onSetKeep,
     this.onSetMute,
     this.isSelf = false,
     this.onEdit,
@@ -119,6 +127,7 @@ class _ProfileViewState extends State<ProfileView> {
   late bool _following = widget.following;
   late bool _blocked = widget.blocked;
   late bool _muted = widget.muted;
+  late bool _keep = widget.keepData;
 
   String get callsign => widget.callsign;
   String? get npub => widget.npub;
@@ -147,6 +156,19 @@ class _ProfileViewState extends State<ProfileView> {
     widget.onSetMute?.call(_muted);
   }
 
+  void _toggleKeep() {
+    setState(() => _keep = !_keep);
+    widget.onSetKeep?.call(_keep);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_keep
+            ? 'Keeping $_name’s posts and media on this device'
+            : 'No longer keeping $_name’s data'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -160,13 +182,46 @@ class _ProfileViewState extends State<ProfileView> {
         ),
         actions: [
           if (!widget.isSelf &&
-              (widget.onSetBlock != null || widget.onSetMute != null))
+              (widget.onSetBlock != null ||
+                  widget.onSetMute != null ||
+                  widget.onSetKeep != null))
             PopupMenuButton<String>(
               onSelected: (v) {
                 if (v == 'block') _toggleBlock();
                 if (v == 'mute') _toggleMute();
+                if (v == 'keep') _toggleKeep();
               },
               itemBuilder: (_) => [
+                // "Keep data": this device is its own NOSTR relay and Blossom
+                // server, so hosting an account's posts and pictures here is a
+                // real thing a user can choose. On = mirror their notes into the
+                // store we serve, and PIN their media so the storage sweep can
+                // never evict it.
+                if (widget.onSetKeep != null)
+                  PopupMenuItem(
+                    value: 'keep',
+                    child: Row(
+                      children: [
+                        Icon(
+                          _keep ? Icons.download_done : Icons.save_alt,
+                          size: 18,
+                          color: _keep ? Colors.green : null,
+                        ),
+                        const SizedBox(width: 8),
+                        const Expanded(child: Text('Keep data')),
+                        const SizedBox(width: 8),
+                        // A switch, not a verb: this is a state the user is
+                        // reading as much as an action they are taking.
+                        Switch.adaptive(
+                          value: _keep,
+                          onChanged: (_) {
+                            Navigator.of(context).pop();
+                            _toggleKeep();
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
                 if (widget.onSetMute != null)
                   PopupMenuItem(
                     value: 'mute',
@@ -179,7 +234,11 @@ class _ProfileViewState extends State<ProfileView> {
                           size: 18,
                         ),
                         const SizedBox(width: 8),
-                        Text(_muted ? 'Unmute $callsign' : 'Mute $callsign'),
+                        // Just the verb. The menu is opened FROM the person's
+                        // profile, with their name in the app bar — repeating it
+                        // in every item (let alone as a raw pubkey, which is what
+                        // this used to do) says nothing the screen has not said.
+                        Text(_muted ? 'Unmute' : 'Mute'),
                       ],
                     ),
                   ),
@@ -195,7 +254,7 @@ class _ProfileViewState extends State<ProfileView> {
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          _blocked ? 'Unblock $callsign' : 'Block $callsign',
+                          _blocked ? 'Unblock' : 'Block',
                           style: TextStyle(color: _blocked ? null : Colors.red),
                         ),
                       ],
@@ -419,34 +478,18 @@ class _ProfileViewState extends State<ProfileView> {
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    // Callsign as secondary line when a nickname is shown.
-                    if (_name != callsign)
+                    // The raw pubkey is NOT shown here. It used to be — as a
+                    // 12-hex "callsign" that wrapped onto two lines under a
+                    // person's name and told the reader nothing they could use.
+                    // The npub below is the identity that matters, and it gets a
+                    // row of its own rather than being crushed between the name
+                    // and the buttons.
+                    if (_name != callsign && !_looksLikeHexId(callsign))
                       Text(
                         callsign,
                         style: TextStyle(
                           color: Colors.white.withAlpha(140),
                           fontSize: 13,
-                        ),
-                      ),
-                    if (npub != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: InkWell(
-                          onTap: () {
-                            Clipboard.setData(ClipboardData(text: npub!));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('npub copied'),
-                                duration: Duration(seconds: 1),
-                              ),
-                            );
-                          },
-                          child: Text(
-                            npub!.length > 22
-                                ? '${npub!.substring(0, 12)}…${npub!.substring(npub!.length - 6)}'
-                                : npub!,
-                            style: TextStyle(color: cs.primary, fontSize: 12.5),
-                          ),
                         ),
                       ),
                   ],
@@ -475,6 +518,17 @@ class _ProfileViewState extends State<ProfileView> {
               ),
             ],
           ),
+          // The npub, on a line of its own and in one piece.
+          //
+          // It used to sit in the narrow column between the avatar and the
+          // Follow/Message buttons, where a 63-character identifier had about
+          // four centimetres to live in — so it wrapped mid-string and read as
+          // broken. It is the account's real name on this network: give it the
+          // width, keep it to one line, and make the copy affordance obvious.
+          if (npub != null) ...[
+            const SizedBox(height: 10),
+            _npubRow(context, cs),
+          ],
           if (_about.isNotEmpty) ...[
             const SizedBox(height: 10),
             Text(
@@ -649,9 +703,96 @@ class _ProfileViewState extends State<ProfileView> {
     return '${d.day} ${months[d.month - 1]} ${d.year}';
   }
 
+  /// A pubkey the UI is showing as if it were a name — 12 hex characters, no
+  /// meaning to a reader. NOSTR accounts have no callsign, so the host fills the
+  /// field with a short pubkey; on a profile that already shows the person's
+  /// name, printing it is noise.
+  static bool _looksLikeHexId(String s) =>
+      s.length >= 8 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(s);
+
+  Widget _npubRow(BuildContext context, ColorScheme cs) {
+    final value = npub!;
+    return Material(
+      color: Colors.white.withAlpha(12),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () {
+          Clipboard.setData(ClipboardData(text: value));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('npub copied'),
+              duration: Duration(seconds: 1),
+            ),
+          );
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Row(
+            children: [
+              Icon(Icons.key_outlined, size: 15, color: cs.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  value,
+                  maxLines: 1,
+                  // Ellipsize in the MIDDLE: the ends of an npub are what a
+                  // person compares when they check they have the right one.
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: TextStyle(
+                    color: cs.primary,
+                    fontSize: 12.5,
+                    fontFamily: 'RobotoMono',
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(Icons.copy_rounded,
+                  size: 14, color: Colors.white.withAlpha(120)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// When a post was written — with the DATE, not just a clock.
+  ///
+  /// The profile used to print "18:40" and nothing else, so a stream of posts
+  /// spanning weeks looked like a single evening: every row said a time, none of
+  /// them said which day. Today and yesterday are named (a date there is noise);
+  /// anything older carries its date, and a post from another year carries the
+  /// year too.
+  String _postStamp(Map<String, dynamic> p) {
+    final t = (p['t'] as num?)?.toInt() ?? 0;
+    final clock = (p['time'] ?? '').toString();
+    if (t <= 0) return clock; // no epoch — the wapp's clock string is all we have
+
+    final dt = DateTime.fromMillisecondsSinceEpoch(t);
+    final now = DateTime.now();
+    final hhmm = '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+
+    final day = DateTime(dt.year, dt.month, dt.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final days = today.difference(day).inDays;
+    if (days == 0) return hhmm;
+    if (days == 1) return 'Yesterday $hhmm';
+
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    final date = '${dt.day} ${months[dt.month - 1]}'
+        '${dt.year == now.year ? '' : ' ${dt.year}'}';
+    return '$date · $hhmm';
+  }
+
   Widget _postRow(ColorScheme cs, Map<String, dynamic> p) {
     final raw = (p['text'] ?? '').toString();
-    final time = (p['time'] ?? '').toString();
+    final time = _postStamp(p);
     final via = (p['via'] ?? '').toString();
     final convo = (p['convo'] ?? '').toString();
     final mid = (p['mid'] ?? '').toString();

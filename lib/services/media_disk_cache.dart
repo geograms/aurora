@@ -146,13 +146,17 @@ class MediaDiskCache {
     _remember(h, bytes);
   }
 
-  /// Probe a media URL's size (Content-Length) without downloading it. 0 if the
-  /// server doesn't report it. Used to show "▶ 12.3 MB" before a video download.
+  /// Probe a media URL's size (Content-Length) without downloading it. 0 if
+  /// the server doesn't report it. Used to show "▶ 12.3 MB" before a video
+  /// download. -1 when the URL is dead (4xx/5xx) — media hosts purge files
+  /// (blossom servers 404 with a tiny text body whose content-length would
+  /// otherwise read as "9 B video").
   Future<int> probeSize(String url) async {
     try {
       final head = await http
           .head(Uri.parse(url))
           .timeout(const Duration(seconds: 8));
+      if (head.statusCode >= 400) return -1;
       return int.tryParse(head.headers['content-length'] ?? '') ?? 0;
     } catch (_) {
       return 0;

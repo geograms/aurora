@@ -46,6 +46,11 @@ class FollowedMediaCache {
 
   final Set<String> _done = {};
   final Set<String> _inFlight = {};
+
+  /// url -> the author who posted it. Needed because a blob from an account the
+  /// user asked this device to KEEP is pinned in the archive (never evicted),
+  /// while an ordinary followed author's picture is merely hosted.
+  final Map<String, String> _authorOf = {};
   String? _path;
 
   void bind(String path) {
@@ -67,6 +72,8 @@ class FollowedMediaCache {
       if (_done.contains(url) || _inFlight.contains(url)) continue;
       final missedAt = _misses[url];
       if (missedAt != null && now.difference(missedAt) < _retryAfter) continue;
+      final author = i.authorPubkey;
+      if (author != null) _authorOf[url] = author;
       wanted.add(url);
       if (wanted.length >= _maxPerCycle) break;
     }
@@ -96,16 +103,24 @@ class FollowedMediaCache {
       }
       final archive = sharedMediaArchive();
       if (archive == null) return;
+      final author = _authorOf[url] ?? '';
+      // An account the user explicitly keeps gets its media PINNED: hosted,
+      // served, and exempt from the eviction sweep. That is the whole promise of
+      // "keep data" — a device that quietly deleted it under pressure would be
+      // worse than one that never offered.
+      final pin = author.isNotEmpty && RnsService.instance.isKeepData(author);
       final token = archive.putHosted(
         bytes,
         _extOf(url),
-        originPubHex: '',
+        originPubHex: author,
         tier: 1, // Tier.followed
+        pin: pin,
       );
       _done.add(url);
+      _authorOf.remove(url);
       _save();
-      LogService.instance
-          .add('hero: cached followed media ${bytes.length}B -> $token');
+      LogService.instance.add(
+          'hero: cached ${pin ? 'PINNED ' : ''}media ${bytes.length}B -> $token');
     } catch (e) {
       _miss(url);
     } finally {

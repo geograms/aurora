@@ -3293,6 +3293,19 @@ class _WappPageState extends State<WappPage>
 
   /// A tab label, with an unread-count badge on the map screen's tab when
   /// geo-chat messages have arrived while the chat box was closed.
+  /// Hex pubkey behind an npub. "Keep data" is stored against the hex key
+  /// because the mirror, the retention tiers and the relay store all speak hex;
+  /// null for a contact we only know by callsign.
+  static String? _keepHexOf(String? npub) {
+    if (npub == null || npub.isEmpty) return null;
+    try {
+      final hex = NostrCrypto.decodeNpub(npub);
+      return hex.length == 64 ? hex.toLowerCase() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_tabController == null) {
@@ -4537,6 +4550,15 @@ class _WappPageState extends State<WappPage>
                 _sendCommand('activity_block');
                 setState(() {});
               },
+              // "Keep data": host their posts + media on this device.
+              keepData: _keepHexOf(npub) != null &&
+                  RnsService.instance.isKeepData(_keepHexOf(npub)!),
+              onSetKeep: _keepHexOf(npub) == null
+                  ? null
+                  : (keep) {
+                      RnsService.instance.setKeepData(_keepHexOf(npub)!, keep);
+                      if (mounted) setState(() {});
+                    },
               onSetMute: (mute) {
                 _fieldValues['activity_call'] = from;
                 _sendCommand('activity_mute');
@@ -5205,6 +5227,16 @@ class _WappPageState extends State<WappPage>
           callsign: c,
           npub: resolvedNpub,
           isSelf: isSelf,
+          // Hosting your OWN posts is not a choice — they already live here.
+          keepData: !isSelf &&
+              _keepHexOf(resolvedNpub) != null &&
+              RnsService.instance.isKeepData(_keepHexOf(resolvedNpub)!),
+          onSetKeep: isSelf || _keepHexOf(resolvedNpub) == null
+              ? null
+              : (keep) {
+                  RnsService.instance.setKeepData(_keepHexOf(resolvedNpub)!, keep);
+                  if (mounted) setState(() {});
+                },
           firstSeenMs: arch?.firstSeenMs(c),
           postCount: arch?.postCount(c) ?? 0,
           posts: arch?.byAuthor(c) ?? const [],
@@ -5318,6 +5350,18 @@ class _WappPageState extends State<WappPage>
             RnsService.instance.setMutedCallsign(c, mute);
             if (mounted) setState(() {}); // re-filter the graph lists
           },
+          // "Keep data": this device becomes a home for their posts and media.
+          // Keyed by hex pubkey — what the mirror, the retention tiers and the
+          // relay store all speak — so it is only offered for accounts we can
+          // resolve an npub for.
+          keepData: _keepHexOf(resolvedNpub) != null &&
+              RnsService.instance.isKeepData(_keepHexOf(resolvedNpub)!),
+          onSetKeep: _keepHexOf(resolvedNpub) == null
+              ? null
+              : (keep) {
+                  RnsService.instance.setKeepData(_keepHexOf(resolvedNpub)!, keep);
+                  if (mounted) setState(() {});
+                },
           fetchMetadata: resolvedNpub == null
               ? null
               : () => RnsService.instance.fetchProfileMetadata(resolvedNpub),

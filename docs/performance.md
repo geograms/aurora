@@ -250,33 +250,46 @@ Every one of these produced a wrong number that I believed for a while.
     the fingerprint of **FFI — usually sqlite**. The Dart profiler cannot see it.
     Do not conclude "the profiler shows nothing, so nothing is wrong".
 
-### 4.1.1 OPEN BUG — opening any wapp page pegs a core (found 2026-07-12)
+### 4.1.1 The wapp-page CPU leak — mostly fixed, not fully (2026-07-12)
 
-The largest battery drain currently in the app, and every user who opens a wapp
-hits it. Not yet fixed; recorded here so the next person starts from the evidence
-instead of the beginning.
+Opening and closing ONE wapp page took an idle phone from 8% of a core to 50%,
+permanently, screen off. Every user who opens a wapp hit it.
 
-```
-release build, C61, screen off, 3-minute windows
-  clean cold start, no page opened .......  5.6% of one core
-  after opening + closing ONE wapp page ... 62-80% of one core, forever
-```
+**Cause: a wapp's NOSTR subscriptions outlived its engine.** The engine is
+disposed and recreated on every page open/close (the page takes the engine over,
+then hands it back). `WappEngine.dispose()` reclaimed subprocesses and file
+handles but not subscriptions, so each cycle left one live in the hub forever —
+still re-querying relays, still paying a **secp256k1 Schnorr verify per event**.
+Chat made it acute by subscribing to bare group names as tags (`t:NEWS`), i.e.
+the public relays' `#news` firehose.
 
-- Reproduced with the **bluetooth** wapp, so it is not specific to chat/messages
-  and it is **pre-existing** (not from the 2026-07 messaging work).
-- Only `am force-stop` clears it. Stopping every wapp does NOT.
-- One `DartWorker` at ~104% of a core; main thread 2.9%; wapp ticks 0.4% of main.
-- **No new isolate is created** (5 before, 5 after) — an *existing* isolate starts
-  spinning. And there are already TWO `rns-crypto` isolates at boot, which is
-  itself suspect.
-- `getStack` returns **no Dart frames** → it is inside native/FFI. Per rule 10
-  above, that means sqlite, which points at the `nostr-engine` isolate.
+**How it was found** — the method matters more than the bug:
 
-Trigger path to investigate: page open → `BackgroundWappManager.suspend()` (stops
-the background engine) → page engine runs → page close → `resume()` (starts a NEW
-background engine). Something in that suspend/dispose/resume cycle leaves an
-existing isolate in a busy loop — suspect an un-cancelled subscription/stream, or
-a store handle re-opened per engine.
+1. Process at 109%, one `DartWorker` at ~104%, `getStack` empty on every isolate.
+   The empty-stack fingerprint says *native/FFI*, which pointed at sqlite. **That
+   was a red herring.**
+2. **Pause each isolate in turn and watch the process CPU.** Pausing
+   `nostr-engine` dropped it 109% → 6%. Nothing else mattered. This is the single
+   most useful trick in this file: it names the culprit in one minute, without a
+   profiler.
+   ```python
+   rpc('pause', {'isolateId': iso['id']}); measure(); rpc('resume', …)
+   ```
+3. `getCpuSamples` on *that* isolate (profile build, `setFlag profiler=true`):
+   all of it in `_BigIntImpl._binaryGcd` / `modPow` — signature verification, not
+   sqlite.
+
+Measured on C61, release, screen off (verified), 7-minute windows:
+
+| | idle | after one page open/close |
+|---|---|---|
+| before | 8.1% | **50.1%** (persistent) |
+| after `dispose()` closes the subs | 6.0% | 25.3%, decaying to 17.6% |
+
+**Still open.** The subscription leak was the main mechanism but not the whole of
+it: a page cycle still leaves CPU elevated. Remaining suspects: other per-engine
+host resources `dispose()` does not reclaim, and the re-query burst each resumed
+subscription pays on start.
 
 ### 4.2 The battery-drain patterns to look for
 

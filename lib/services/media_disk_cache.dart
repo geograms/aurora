@@ -111,6 +111,41 @@ class MediaDiskCache {
     }
   }
 
+  /// Cache-only lookup (no network). For locally generated derivatives — e.g.
+  /// a video's poster frame stored under the synthetic key "<url>#poster".
+  Future<Uint8List?> peek(String key) async {
+    await _ensure();
+    final h = _hash(key);
+    final hot = _mem[h];
+    if (hot != null) return hot;
+    final dir = _dir;
+    if (dir == null) return null;
+    final f = File('${dir.path}/$h');
+    if (!f.existsSync()) return null;
+    try {
+      final bytes = await f.readAsBytes();
+      _remember(h, bytes);
+      return bytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Store locally produced bytes under [key] (same LRU/eviction as fetched
+  /// media). Pairs with [peek].
+  Future<void> putLocal(String key, Uint8List bytes) async {
+    await _ensure();
+    final h = _hash(key);
+    final dir = _dir;
+    if (dir != null) {
+      try {
+        await File('${dir.path}/$h').writeAsBytes(bytes, flush: false);
+        unawaited(_evictIfNeeded());
+      } catch (_) {}
+    }
+    _remember(h, bytes);
+  }
+
   /// Probe a media URL's size (Content-Length) without downloading it. 0 if the
   /// server doesn't report it. Used to show "▶ 12.3 MB" before a video download.
   Future<int> probeSize(String url) async {

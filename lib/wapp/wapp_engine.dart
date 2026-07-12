@@ -536,9 +536,12 @@ class WappEngine {
 
   // ── Load ─────────────────────────────────────────────────────────────
 
-  Future<void> load(Uint8List wasmBytes) async {
+  Future<void> load(Uint8List wasmBytes, {WasmModule? precompiled}) async {
     _stopwatch.start();
-    final module = await compileWasmModule(wasmBytes);
+    // Compiling a large module (the media player wapp is ~2.7 MB) takes
+    // seconds on phones — callers that replay the same wapp repeatedly
+    // (inline video, poster generation) pass a cached [precompiled] module.
+    final module = precompiled ?? await compileWasmModule(wasmBytes);
     final builder = module.builder();
 
     // ── System HAL ──

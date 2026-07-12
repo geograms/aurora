@@ -218,6 +218,13 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
     final wappId = BackgroundWappManager.folderName(manifest.dirPath);
     WappUnreadService.instance.clearAll(wappId);
     await LaunchCountStore.instance.increment(wappId);
+    // Opening the feed IS looking at it: the status bar's "N new posts" counts
+    // what followed accounts posted since this moment, so it drops to nothing
+    // once you have read them — which is what makes the number worth a glance.
+    if (wappId == 'social') {
+      PreferencesService.instanceSync?.socialLastSeenMs =
+          DateTime.now().millisecondsSinceEpoch;
+    }
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(

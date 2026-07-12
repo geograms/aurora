@@ -274,8 +274,13 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   }
 
   void _onData() {
-    final d = widget.data.value;
-    if (d == null) return;
+    // Seed from the host directly when the wapp has not pushed a frame yet.
+    //
+    // The wasm module ticks every 2s and a periodic timer fires FIRST at
+    // +interval, so opening this page used to show zeros for ~5 seconds while
+    // the data it needed was already sitting in memory, one synchronous call
+    // away. Reading it here means the graph is populated on the first frame.
+    final d = widget.data.value ?? RnsService.instance.graphSnapshot();
     final nodes = (d['nodes'] as List?) ?? const [];
     final parsed = [
       for (final m in nodes) RnsGraphNode((m as Map).cast<String, dynamic>())
@@ -829,12 +834,15 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     //  • devices  — other Reticulum peers (NomadNet/Sideband/generic), NOT
     //               geogram and NOT hubs;
     //  • hubs     — connected bootstrap hubs.
-    final base = _allNodes.where((n) => n.kind != 'self').toList();
-    final geo = _dedupPeers(base.where((n) => n.geogram).toList()).length;
-    // "devices" = ALL other Reticulum peers heard on the hubs (the full observed
-    // set, not just the graph's re-announced nodes).
-    final online = _dedupPeers(_otherDevices).length;
-    final hubs = _hubList.where((h) => h['connected'] == true).length;
+    // ONE source of truth, shared with the launcher's status bar
+    // (RnsService.reachability). These counts used to be derived here, from the
+    // graph's own node lists, and disagreed with the launcher badly enough to
+    // look like a bug in both: "8 devices" on the home screen against "209
+    // devices" here — the same word for two different populations.
+    final reach = RnsService.instance.reachability();
+    final geo = reach.geogram;
+    final online = reach.others;
+    final hubs = reach.hubs;
     return Positioned(
       top: 54,
       right: 10,
@@ -871,7 +879,11 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
                               fontSize: 15,
                               fontWeight: FontWeight.w700)),
                       const SizedBox(width: 4),
-                      Text(online == 1 ? 'device' : 'devices',
+                      // NOT "devices": these are other people's Reticulum peers
+                      // (Sideband, NomadNet, plain LXMF), not geogram devices.
+                      // Calling both "devices" is what made this badge and the
+                      // launcher look like they were contradicting each other.
+                      Text(online == 1 ? 'peer' : 'peers',
                           style: const TextStyle(color: _gMuted, fontSize: 12)),
                     ]),
                   ),

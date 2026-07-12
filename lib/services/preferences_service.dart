@@ -134,6 +134,12 @@ class PreferencesService {
   bool get hostCapacityGated => _prefs.getBool('host.capacityGated') ?? true;
   set hostCapacityGated(bool v) => _prefs.setBool('host.capacityGated', v);
 
+  // When the user last looked at the social feed. Everything a followed account
+  // posted after this is "new" on the launcher's status bar — the only honest
+  // definition of new, and the reason the number goes down when you read it.
+  int get socialLastSeenMs => _prefs.getInt('social.lastSeenMs') ?? 0;
+  set socialLastSeenMs(int v) => _prefs.setInt('social.lastSeenMs', v);
+
   // Whole-node hosting ceiling (everything we store for others), in GB.
   // Bounds MEDIA in practice: the eviction planner is fed the hosted-blob
   // inventory, so text notes are never candidates. At the old 100 GB default it

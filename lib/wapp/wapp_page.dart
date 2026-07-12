@@ -45,6 +45,7 @@ import 'geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../profile/profile_edit_page.dart';
 import '../util/media_ref.dart';
 import '../util/nostr_crypto.dart';
+import '../util/nostr_imeta.dart';
 import 'geoui/conversation_store.dart';
 import 'geoui/geo_chat_archive.dart';
 import 'geoui/activity_archive.dart';
@@ -1478,6 +1479,26 @@ class _WappPageState extends State<WappPage>
                 _fieldValues[fieldName] = buf;
               }
               final row = msg.map((k, v) => MapEntry(k.toString(), v));
+              // Recover NIP-92 imeta (video poster / blurhash / dimensions)
+              // for feed posts: the wapp forwards only the text, but the full
+              // event (tags included) sits in the local relay store under the
+              // post's mid. Local sqlite lookup — no network.
+              if (fieldName == 'activity' || fieldName == 'search_results') {
+                final mid = (row['mid'] ?? '').toString();
+                final hasMeta = (row['meta'] ?? '').toString().isNotEmpty;
+                final text = (row['text'] ?? '').toString();
+                if (!hasMeta && mid.length == 64 && text.contains('http')) {
+                  final tags =
+                      RnsService.instance.relayLocalEvent(mid)?['tags'];
+                  if (tags is List) {
+                    final m = imetaMetaJson(tags);
+                    if (m.isNotEmpty) {
+                      row['meta'] = m;
+                      msg['meta'] = m; // the archive persists [msg]
+                    }
+                  }
+                }
+              }
               // Search results arrive from many relays → dedupe: same post id
               // (mid), or same author (from) for profile cards which have no mid.
               var dup = false;
@@ -5019,6 +5040,8 @@ class _WappPageState extends State<WappPage>
         'mid': mid,
         'parent': (n['parent'] ?? '').toString(),
         't': ts * 1000,
+        // NIP-92 imeta (video poster/blurhash/dim) recovered from the event.
+        'meta': (n['meta'] ?? '').toString(),
       });
       // Backfilled posts can reference large media. Do NOT auto-download it during
       // backfill — the Activity card shows the size + a one-click download button

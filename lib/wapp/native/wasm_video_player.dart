@@ -22,8 +22,10 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:wasm_run/wasm_run.dart' show WasmModule, compileWasmModule;
 
 import '../../profile/storage_paths.dart';
+import '../../services/log_service.dart';
 import '../wapp_engine.dart';
 import '../wapp_file_associations.dart';
 import 'wasm_audio_output.dart';
@@ -40,6 +42,40 @@ List<WappAssociation> framePushPlayersFor(String ext) =>
         .lookupForFile('x.$ext', mode: 'view')
         .where((a) => a.manifest.requiredHal.contains('video'))
         .toList();
+
+void _wvpLog(String line) => LogService.instance.add('[wvp] $line');
+
+/// Forward the wapp's own hal_log lines (accumulated inside the private
+/// engine) to the app log — on release phones this is the ONLY way to see
+/// "[mp4player] hevc track…" / "not a valid mp4" style diagnostics.
+void _drainEngineLogs(WappEngine engine) {
+  if (engine.logs.isEmpty) return;
+  for (final e in engine.logs) {
+    LogService.instance.add('[wvp:wapp] ${e.message}');
+  }
+  engine.logs.clear();
+}
+
+/// Compile-once cache for the player wapp's wasm module. Wasmtime compiles
+/// ~1 MB/s on mid-range phones — recompiling the ~2.7 MB decoder on every
+/// inline playback and every poster generation made the first frame take
+/// tens of seconds (and tripped the "unsupported codec" timeout). Keyed by
+/// wapp dir + byte length so a wapp update naturally misses the cache.
+class WappModuleCache {
+  WappModuleCache._();
+  static final Map<String, Future<WasmModule>> _cache = {};
+
+  static Future<WasmModule> compile(String key, Uint8List wasmBytes) {
+    final k = '$key#${wasmBytes.length}';
+    if (_cache.length > 4) _cache.clear(); // only the player in practice
+    return _cache.putIfAbsent(k, () async {
+      final sw = Stopwatch()..start();
+      final m = await compileWasmModule(wasmBytes);
+      _wvpLog('compiled $key (${wasmBytes.length} B) in ${sw.elapsedMilliseconds} ms');
+      return m;
+    });
+  }
+}
 
 /// Generates a still poster (the first decoded frame) for a video by running
 /// the player wapp's wasm decoder headlessly. Used to show a thumbnail in the
@@ -64,9 +100,10 @@ class WasmVideoThumbnailer {
   static Future<Uint8List?> _generate(Uint8List media, String ext) async {
     final matches = framePushPlayersFor(ext);
     if (matches.isEmpty) return null;
-    final wasm = await wappPackageStorage(matches.first.manifest.dirPath)
-        .readBytes('app.wasm');
+    final dirPath = matches.first.manifest.dirPath;
+    final wasm = await wappPackageStorage(dirPath).readBytes('app.wasm');
     if (wasm == null) return null;
+    final module = await WappModuleCache.compile(dirPath, wasm);
 
     final dir = await Directory.systemTemp.createTemp('aurora_thumb_');
     final f = File('${dir.path}/v.$ext');
@@ -92,7 +129,7 @@ class WasmVideoThumbnailer {
       }
       ..onVideoEnd = () => ended = true;
     try {
-      await engine.load(wasm);
+      await engine.load(wasm, precompiled: module);
       engine.init();
       engine.sendMessage(
           jsonEncode({'type': 'file.open', 'path': f.path, 'mode': 'view'}));
@@ -106,9 +143,10 @@ class WasmVideoThumbnailer {
         engine.tick();
         engine.drainOutbox();
       }
-    } catch (_) {
-      // fall through — best may still hold a usable frame
+    } catch (e) {
+      _wvpLog('thumbnailer trapped: $e'); // best may still hold a frame
     } finally {
+      _drainEngineLogs(engine);
       engine.dispose();
       try {
         dir.deleteSync(recursive: true);
@@ -233,6 +271,8 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
   // stays silent past the timeout, the codec is unsupported — say so instead
   // of leaving a black box.
   bool _sawSignal = false;
+  bool _sawMeta = false; // media.meta arrived (demux + decoder init OK)
+  String _stage = 'Preparing decoder…'; // shown until the first frame
   Timer? _decodeTimeout;
   bool _playing = true; // play/pause state (audio UI)
   int _durationMs = 0; // from media.meta (audio UI progress)
@@ -245,23 +285,32 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
   }
 
   Future<void> _start() async {
+    final t0 = Stopwatch()..start();
     try {
       final matches = framePushPlayersFor(widget.ext);
       if (matches.isEmpty) {
         final anyHandler = WappFileAssociations.instance
             .lookupForFile('x.${widget.ext}', mode: 'view')
             .isNotEmpty;
+        _wvpLog('no frame-push player for .${widget.ext} '
+            '(other handlers: $anyHandler)');
         _fail(anyHandler
             ? 'No installed player can decode .${widget.ext} files.'
             : 'No media player installed.\nInstall the Player wapp.');
         return;
       }
-      final pkg = wappPackageStorage(matches.first.manifest.dirPath);
+      final dirPath = matches.first.manifest.dirPath;
+      _wvpLog('start .${widget.ext} ${widget.mediaBytes.length} B '
+          'player=${matches.first.manifest.id}');
+      final pkg = wappPackageStorage(dirPath);
       final wasm = await pkg.readBytes('app.wasm');
       if (wasm == null) {
         _fail('Player package is missing app.wasm.');
         return;
       }
+      // Compile (or reuse) the decoder module BEFORE anything else — on
+      // phones this is the dominant cost the first time (seconds).
+      final module = await WappModuleCache.compile(dirPath, wasm);
       final dir = await Directory.systemTemp.createTemp('aurora_vid_');
       final f = File('${dir.path}/v.${widget.ext}');
       await f.writeAsBytes(widget.mediaBytes, flush: true);
@@ -286,14 +335,18 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
           audioOut.pushPcm(pcm, rate, ch, fmt, pts);
         })
         ..onVideoEnd = session.markEnded;
-      await engine.load(wasm);
+      await engine.load(wasm, precompiled: module);
       engine.init();
       session.open(f.path, autoplay: true);
+      if (mounted) setState(() => _stage = 'Opening…');
       // Hand the decoder the file; it pushes frames on its tick loop.
       engine.sendMessage(
           jsonEncode({'type': 'file.open', 'path': f.path, 'mode': 'view'}));
       engine.handleEvent();
       _consumeOutbox(engine.drainOutbox()); // catch media.meta + video.load echo
+      _drainEngineLogs(engine);
+      _wvpLog('opened in ${t0.elapsedMilliseconds} ms '
+          '(meta=${_sawMeta ? "yes" : "no"})');
 
       if (!mounted) {
         engine.dispose();
@@ -311,24 +364,32 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
         _tempDir = dir;
         _status = 'playing';
       });
-      // If the decoder never produces config/frames/pcm, the codec inside the
-      // container isn't supported (e.g. HEVC before the player wapp gained
-      // it) — fail visibly instead of leaving a silent black box.
-      _decodeTimeout = Timer(const Duration(seconds: 8), () {
-        if (_sawSignal || !mounted) return;
-        _ticker?.cancel();
-        _fail("Can't decode this ${widget.isAudio ? 'audio' : 'video'} "
-            '(unsupported codec).');
-      });
+      // If the decoder never produces config/frames/pcm, the codec inside
+      // the container isn't supported — fail visibly instead of leaving a
+      // silent black box. Generous window (slow phones legitimately take a
+      // while for the first frame), restarted when media.meta arrives (that
+      // proves demux + decoder init succeeded, so give decode its own 30 s).
+      _armDecodeTimeout();
+      var ticked = false;
       _ticker = Timer.periodic(const Duration(milliseconds: 16), (_) {
         final e = _engine;
         if (e == null) return;
         try {
           e.tick();
           _consumeOutbox(e.drainOutbox());
+          _drainEngineLogs(e);
+          if (!ticked && _sawSignal) {
+            ticked = true;
+            _wvpLog('first decoder output at ${t0.elapsedMilliseconds} ms');
+            if (mounted && !widget.isAudio) setState(() {}); // drop stage text
+          }
         } catch (err) {
-          debugPrint('WVP: tick trapped: $err');
+          _wvpLog('tick trapped: $err');
+          _drainEngineLogs(e);
           _ticker?.cancel(); // a decoder trap — stop pumping
+          if (!_sawSignal) {
+            _fail('Video decoder crashed.');
+          }
         }
         // Refresh the audio UI progress a few times a second.
         if (widget.isAudio && mounted) {
@@ -340,8 +401,20 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
         }
       });
     } catch (e) {
+      _wvpLog('start failed: $e');
       _fail('$e');
     }
+  }
+
+  void _armDecodeTimeout() {
+    _decodeTimeout?.cancel();
+    _decodeTimeout = Timer(const Duration(seconds: 30), () {
+      if (_sawSignal || !mounted) return;
+      _wvpLog('decode timeout (meta=$_sawMeta) — no decoder output in 30 s');
+      _ticker?.cancel();
+      _fail("Can't decode this ${widget.isAudio ? 'audio' : 'video'} "
+          '(unsupported codec).');
+    });
   }
 
   void _fail(String m) {
@@ -359,6 +432,13 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
       try {
         final j = jsonDecode(m) as Map<String, dynamic>;
         if (j['type'] == 'media.meta') {
+          if (!_sawMeta) {
+            _sawMeta = true;
+            _stage = 'Decoding…';
+            // Demux + decoder init succeeded — grant decode a fresh window.
+            if (!_sawSignal) _armDecodeTimeout();
+            if (mounted) setState(() {});
+          }
           final d = (j['durationMs'] as num?)?.toInt() ?? 0;
           if (d > 0 && d != _durationMs) _durationMs = d;
         }
@@ -427,14 +507,25 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (s != null)
-            s.buildSurface(widget.fit)
-          else
-            const Center(
-              child: SizedBox(
-                  width: 28,
-                  height: 28,
-                  child: CircularProgressIndicator(strokeWidth: 2)),
+          if (s != null) s.buildSurface(widget.fit),
+          // Until the first frame lands, say what the decoder is doing —
+          // slow first frames on phones must not look like a dead player.
+          if (!_sawSignal)
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white70)),
+                  const SizedBox(height: 10),
+                  Text(_stage,
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 12)),
+                ],
+              ),
             ),
           if (widget.allowFullscreen && s != null)
             Positioned(

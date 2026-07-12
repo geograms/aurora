@@ -59,19 +59,31 @@ class _StatusBarState extends State<_StatusBar> {
   void _sample() {
     final rns = RnsService.instance;
     final follows = rns.follows.asSet.toList();
-    final total = rns.nostrPostCount();
-    final followed =
-        follows.isEmpty ? 0 : rns.nostrPostCount(authors: follows);
+    final reach = rns.reachability();
+    final prefs = PreferencesService.instanceSync;
+
+    // "New" = posted by someone you follow since the last time you opened the
+    // feed. A raw total ("871 of 17.4k") is a number nobody can act on; this one
+    // tells you whether it is worth opening Social right now, and it goes down
+    // when you read it.
+    var since = prefs?.socialLastSeenMs ?? 0;
+    if (since == 0 && prefs != null) {
+      // First run: start counting from now. Without this the first reading would
+      // be "17.4k new posts", which is true and useless.
+      since = DateTime.now().millisecondsSinceEpoch;
+      prefs.socialLastSeenMs = since;
+    }
+    final newPosts =
+        follows.isEmpty ? 0 : rns.nostrNewPostCount(follows, since);
 
     final next = _NetStats(
       up: rns.isUp,
-      devices: rns.reachableDevices,
-      hubs: rns.connectedHubs.length,
+      devices: reach.geogram,
+      others: reach.others,
+      hubs: reach.hubs,
       bleNeighbours: MeshService.instance.table?.neighbors.length ?? 0,
-      paths: rns.pathCount,
       follows: follows.length,
-      followedPosts: followed,
-      totalPosts: total,
+      newPosts: newPosts,
     );
     if (mounted && next != _stats) setState(() => _stats = next);
   }
@@ -162,77 +174,81 @@ class _StatusBarState extends State<_StatusBar> {
 
 }
 
-/// A snapshot of "is the network alive", cheap to compare so an unchanged tick
-/// never rebuilds the bar.
+/// Only numbers a person can act on.
+///
+/// Gone from here: the Reticulum path-table size. It is four figures, it moves
+/// constantly, and there is nothing anyone can DO with it — engine telemetry
+/// wearing a status bar's clothes. Gone too: "871/17.4k followed", which asked
+/// the reader to work out what the ratio even meant.
 class _NetStats {
   final bool up;
-  final int devices; // geogram devices reachable right now (any transport)
+  final int devices; // GEOGRAM devices — the ones you can actually talk to
+  final int others; // other Reticulum peers (Sideband/NomadNet) — context only
   final int hubs; // internet uplinks we hold
   final int bleNeighbours; // BLE mesh neighbours heard
-  final int paths; // Reticulum path table size — the mesh we can see
   final int follows;
-  final int followedPosts;
-  final int totalPosts;
+  final int newPosts; // from people you follow, since you last looked
 
   const _NetStats({
     this.up = false,
     this.devices = 0,
+    this.others = 0,
     this.hubs = 0,
     this.bleNeighbours = 0,
-    this.paths = 0,
     this.follows = 0,
-    this.followedPosts = 0,
-    this.totalPosts = 0,
+    this.newPosts = 0,
   });
 
-  /// Who we can reach, and how. The transports are named because on a mesh they
-  /// are not interchangeable: an internet hub and a Bluetooth neighbour mean
-  /// very different things about where you are.
+  /// Who we can reach. It says "geogram devices" explicitly, because the number
+  /// people compare this against — the Reticulum wapp's badge — counts a
+  /// different population (every LXMF peer heard on the hubs). The two looked
+  /// like they contradicted each other while both just said "devices".
   String get headline {
     if (!up) return 'Reticulum is off';
     final parts = <String>[];
     if (devices > 0) {
-      parts.add('$devices ${devices == 1 ? 'device' : 'devices'} reachable');
+      parts.add('$devices geogram ${devices == 1 ? 'device' : 'devices'}');
     }
     if (bleNeighbours > 0) parts.add('$bleNeighbours over Bluetooth');
     if (parts.isEmpty) {
-      return hubs > 0 ? 'On the network, nobody around yet' : 'Looking for a way out';
+      return hubs > 0
+          ? 'On the network, no geogram devices yet'
+          : 'Looking for a way out';
     }
     return parts.join(' · ');
   }
 
-  /// What the network is carrying. Posts from people you follow are called out
-  /// separately from the total, because the difference between "the feed is
-  /// busy" and "the people I chose are busy" is the whole point of following.
-  /// Kept SHORT on purpose: this is one line on a phone, and a sentence that
-  /// ellipsizes tells the user less than three numbers that fit.
+  /// One line on a phone: the things worth knowing, in the order they matter.
   String get detail {
     final bits = <String>[];
-    if (hubs > 0) bits.add('$hubs ${hubs == 1 ? 'hub' : 'hubs'}');
-    if (paths > 0) bits.add('$paths ${paths == 1 ? 'path' : 'paths'}');
-    if (totalPosts > 0) {
-      bits.add(follows > 0
-          ? '${_n(followedPosts)}/${_n(totalPosts)} followed'
-          : '${_n(totalPosts)} posts');
+    if (newPosts > 0) {
+      bits.add('${_n(newPosts)} new ${newPosts == 1 ? 'post' : 'posts'}');
     }
-    return bits.isEmpty ? 'No traffic yet' : bits.join(' · ');
+    if (hubs > 0) bits.add('$hubs ${hubs == 1 ? 'hub' : 'hubs'}');
+    if (others > 0) bits.add('${_n(others)} other peers');
+    if (bits.isEmpty) {
+      return follows == 0
+          ? 'Follow someone to see their posts here'
+          : 'All quiet';
+    }
+    return bits.join(' · ');
   }
 
-  static String _n(int v) => v >= 1000 ? '${(v / 1000).toStringAsFixed(1)}k' : '$v';
+  static String _n(int v) =>
+      v >= 1000 ? '${(v / 1000).toStringAsFixed(1)}k' : '$v';
 
   @override
   bool operator ==(Object other) =>
       other is _NetStats &&
       other.up == up &&
       other.devices == devices &&
+      other.others == others &&
       other.hubs == hubs &&
       other.bleNeighbours == bleNeighbours &&
-      other.paths == paths &&
       other.follows == follows &&
-      other.followedPosts == followedPosts &&
-      other.totalPosts == totalPosts;
+      other.newPosts == newPosts;
 
   @override
-  int get hashCode => Object.hash(
-      up, devices, hubs, bleNeighbours, paths, follows, followedPosts, totalPosts);
+  int get hashCode =>
+      Object.hash(up, devices, others, hubs, bleNeighbours, follows, newPosts);
 }

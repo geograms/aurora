@@ -4,6 +4,7 @@
 // opens its conversation; tapping a name opens the profile. App-agnostic — it
 // just renders the post maps it's given and reports compose/attach/taps back.
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -12,11 +13,16 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'dart:ui' as ui;
+
 import '../../../services/media_disk_cache.dart';
+import '../../../services/reticulum/rns_service.dart';
 import '../../native/wasm_video_player.dart';
 import 'package:http/http.dart' as http;
 
+import '../../../util/blurhash.dart';
 import '../../../util/media_ref.dart';
+import '../../../util/nostr_imeta.dart';
 import '../../../util/time_ago.dart';
 import '../../shared_media_fetch.dart' show mediaSizeHint;
 import 'chat_palette.dart';
@@ -855,6 +861,10 @@ class ActivityPostCard extends StatelessWidget {
     // Media links shown inline below are stripped from the visible text (no
     // point repeating a long blossom.band/… URL under its own image).
     final mediaUrls = activityMediaUrls(body);
+    // NIP-92 imeta (video poster / blurhash / dimensions) — carried on the
+    // post, or recovered once from the local relay store for older rows.
+    var imeta = imetaFromMeta((p['meta'] ?? '').toString());
+    if (imeta.isEmpty && mediaUrls.isNotEmpty) imeta = _imetaByMid(mid);
     final textBody = mediaUrls.isEmpty ? body : _stripMediaUrls(body, mediaUrls);
     final refs = MediaRef.findAll(raw);
     final prof = from.isEmpty ? null : profileFor?.call(from);
@@ -961,7 +971,8 @@ class ActivityPostCard extends StatelessWidget {
                   for (final url in mediaUrls)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
-                      child: _RemoteMedia(url, key: ValueKey('rm-$url')),
+                      child: _RemoteMedia(url,
+                          imeta: imeta[url], key: ValueKey('rm-$url')),
                     ),
                   if (mid.isNotEmpty) _actionRow(cs, mid),
                 ],
@@ -1495,9 +1506,31 @@ String _fmtBytes(int b) {
 /// Fetches + renders a media URL inline. Auto-loads when ≤10 MB (or unknown);
 /// larger files show a tap-to-download card so a big image can't auto-pull on
 /// cellular. Videos are always a tap-to-open card (no inline player).
+// Memoized mid → imeta recovered from the local relay store. The feed
+// rebuilds every tick, so cache hits AND misses (empty maps).
+final Map<String, Map<String, Map<String, String>>> _imetaMidCache = {};
+
+Map<String, Map<String, String>> _imetaByMid(String mid) {
+  if (mid.length != 64) return const {}; // only real NOSTR event ids
+  final hit = _imetaMidCache[mid];
+  if (hit != null) return hit;
+  var out = const <String, Map<String, String>>{};
+  try {
+    final tags = RnsService.instance.relayLocalEvent(mid)?['tags'];
+    if (tags is List) out = imetaFromTags(tags);
+  } catch (_) {}
+  if (_imetaMidCache.length > 800) _imetaMidCache.clear();
+  _imetaMidCache[mid] = out;
+  return out;
+}
+
 class _RemoteMedia extends StatefulWidget {
   final String url;
-  const _RemoteMedia(this.url, {super.key});
+
+  /// NIP-92 imeta for this url (`image` poster, `blurhash`, `dim`, `dur`) —
+  /// lets a video show a real thumbnail before anything big is downloaded.
+  final Map<String, String>? imeta;
+  const _RemoteMedia(this.url, {this.imeta, super.key});
   @override
   State<_RemoteMedia> createState() => _RemoteMediaState();
 }
@@ -1512,6 +1545,12 @@ class _RemoteMediaState extends State<_RemoteMedia> {
   int _dlTotal = 0; // video size in bytes (0 = unknown)
   int _dlReceived = 0; // bytes downloaded so far
 
+  // Poster (thumbnail) for the video play card: imeta `image` url, a locally
+  // generated first-frame (cached after the first playback), with the imeta
+  // blurhash painting instantly while a poster downloads.
+  Uint8List? _poster;
+  ui.Image? _blur;
+
   @override
   void initState() {
     super.initState();
@@ -1521,9 +1560,31 @@ class _RemoteMediaState extends State<_RemoteMedia> {
       MediaDiskCache.instance.probeSize(widget.url).then((s) {
         if (mounted && s > 0) setState(() => _dlTotal = s);
       });
+      _loadPoster();
     } else {
       _load(_cap);
     }
+  }
+
+  Future<void> _loadPoster() async {
+    final bh = widget.imeta?['blurhash'];
+    if (bh != null && bh.isNotEmpty) {
+      blurhashImage(bh).then((img) {
+        if (mounted && img != null && _poster == null) {
+          setState(() => _blur = img);
+        }
+      });
+    }
+    // Locally generated first-frame from an earlier playback wins (it's
+    // already on disk); else fetch the post's poster image (small).
+    var bytes = await MediaDiskCache.instance.peek('${widget.url}#poster');
+    if (bytes == null) {
+      final img = widget.imeta?['image'];
+      if (img != null && img.isNotEmpty) {
+        bytes = await MediaDiskCache.instance.fetch(img);
+      }
+    }
+    if (mounted && bytes != null) setState(() => _poster = bytes);
   }
 
   String _extOf(String url) {
@@ -1576,6 +1637,17 @@ class _RemoteMediaState extends State<_RemoteMedia> {
         _s = _RmState.error;
       }
     });
+    // First playback of a post with no poster: extract one from the now-local
+    // bytes and cache it, so this video shows a real thumbnail from now on.
+    if (bytes != null && _poster == null) {
+      unawaited(() async {
+        final png = await WasmVideoThumbnailer.generate(
+            bytes, _extOf(widget.url));
+        if (png == null) return;
+        await MediaDiskCache.instance.putLocal('${widget.url}#poster', png);
+        if (mounted && _poster == null) setState(() => _poster = png);
+      }());
+    }
   }
 
   /// Open the image full-screen with pinch-zoom (reuses the same viewer body as
@@ -1588,6 +1660,15 @@ class _RemoteMediaState extends State<_RemoteMedia> {
   }
 
   String get _sizeLabel => '';
+
+  /// "38.6" (imeta duration, seconds) → "0:38"; null when absent/garbage.
+  static String? _durLabel(String? dur) {
+    final s = double.tryParse(dur ?? '');
+    if (s == null || s <= 0) return null;
+    final total = s.round();
+    final m = total ~/ 60, sec = total % 60;
+    return '$m:${sec.toString().padLeft(2, '0')}';
+  }
 
   // A fixed media height so the row NEVER changes size as the image loads —
   // checking, loading and loaded all occupy exactly this box (no scroll jump).
@@ -1682,6 +1763,11 @@ class _RemoteMediaState extends State<_RemoteMedia> {
         // Video: a play card until tapped, then the shared WasmVideoPlayer.
         if (_isVid) {
           if (!_playing) {
+            final dur = _durLabel(widget.imeta?['dur']);
+            final chip = [
+              if (dur != null) dur,
+              if (_dlTotal > 0) '${_fmtBytes(_dlTotal)} video',
+            ].join(' · ');
             return InkWell(
               onTap: _playVideo,
               child: _box(
@@ -1690,11 +1776,30 @@ class _RemoteMediaState extends State<_RemoteMedia> {
                   color: Colors.black,
                   child: Stack(
                     alignment: Alignment.center,
+                    fit: StackFit.expand,
                     children: [
-                      const Icon(Icons.play_circle_fill,
-                          size: 64, color: Colors.white70),
-                      // Video size ("▶ 12.3 MB"), once probed.
-                      if (_dlTotal > 0)
+                      // Poster (imeta image / cached first-frame), with the
+                      // blurhash painting the box while it downloads.
+                      if (_poster != null)
+                        Image.memory(_poster!,
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                            errorBuilder: (_, __, ___) =>
+                                const SizedBox.shrink())
+                      else if (_blur != null)
+                        RawImage(
+                            image: _blur,
+                            fit: BoxFit.cover,
+                            filterQuality: FilterQuality.low),
+                      // Dim so the play affordance reads on bright posters.
+                      if (_poster != null || _blur != null)
+                        Container(color: Colors.black26),
+                      const Center(
+                        child: Icon(Icons.play_circle_fill,
+                            size: 64, color: Colors.white70),
+                      ),
+                      // "0:38 · 12.3 MB video", once known.
+                      if (chip.isNotEmpty)
                         Positioned(
                           bottom: 8,
                           right: 10,
@@ -1705,7 +1810,7 @@ class _RemoteMediaState extends State<_RemoteMedia> {
                               color: Colors.black54,
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: Text('${_fmtBytes(_dlTotal)} video',
+                            child: Text(chip,
                                 style: const TextStyle(
                                     color: Colors.white, fontSize: 11)),
                           ),

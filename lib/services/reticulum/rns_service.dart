@@ -61,6 +61,7 @@ import '../preferences_service.dart';
 import '../../util/nostr_crypto.dart';
 import '../../util/nostr_nip19.dart';
 import '../../util/nostr_event.dart';
+import '../../util/nostr_imeta.dart';
 import '../../util/npd.dart';
 import '../../util/aprx_sign.dart';
 import 'lxmf/lxmf.dart'
@@ -706,11 +707,91 @@ class RnsService {
     return n;
   }
 
-  /// Geogram devices we can reach right now — the launcher's status bar shows
-  /// this, and it is the same freshness gate the reticulum wapp's headline uses,
-  /// so the two never disagree.
-  int get reachableDevices =>
-      _reachableGeogramCount(DateTime.now().millisecondsSinceEpoch);
+  /// Who is out there, counted ONCE so every surface agrees.
+  ///
+  /// The launcher's status bar and the Reticulum wapp's badge used to disagree
+  /// wildly — "8 devices" against "209 devices" — because they were counting
+  /// different populations under the same word. They are not the same thing and
+  /// never were:
+  ///
+  ///   * [geogram] — devices running this app. The ones you can actually DO
+  ///     something with: message them, share a folder, sync a circle.
+  ///   * [others] — every other Reticulum peer heard through the hubs
+  ///     (Sideband, NomadNet, plain LXMF nodes). Real, but not ours.
+  ///
+  /// Both use the graph's freshness rule, including the re-announce gate that
+  /// keeps a hub's connect-flood from inventing hundreds of ghosts. Anything
+  /// that shows a device count must come through here.
+  ({int geogram, int others, int hubs}) reachability() {
+    sweepObserved();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    // A hub is an identity that relays for somebody we can hear — it is
+    // infrastructure, not a peer, and counting it as a "device" is a lie.
+    final hubIds = <String>{};
+    for (final n in _observed.values) {
+      if (!_isFreshNode(n, nowMs)) continue;
+      final r = n.relayerHex;
+      if (r != null && r.isNotEmpty) hubIds.add(r);
+      hubIds.addAll(n.relayers);
+    }
+
+    var geogram = 0;
+    var others = 0;
+    for (final n in _observed.values) {
+      if (!_isFreshNode(n, nowMs)) continue;
+      if (hubIds.contains(n.identityHex)) continue;
+      if (_isGeogramNode(n)) {
+        geogram++;
+      } else {
+        others++;
+      }
+    }
+    return (geogram: geogram, others: others, hubs: _connectedHubs.length);
+  }
+
+  /// Is this node reachable RIGHT NOW — one rule, used everywhere.
+  ///
+  /// The gate that matters: a node must have RE-announced (twice, spread over
+  /// time) before we call it reachable. When we link to a hub it dumps its whole
+  /// cached announce table at us, so we hear a single stale announce for every
+  /// device that was online *at any point recently* — and stamping lastSeen=now
+  /// on receipt makes all of them look live.
+  ///
+  /// Geogram devices used to be exempt from that gate, on the theory that our
+  /// own devices are never flood ghosts. They absolutely are: a hub replays a
+  /// cached announce from a geogram device that has been off for days exactly
+  /// like any other. That exemption is why the launcher claimed 23 geogram
+  /// devices on a network where four were running.
+  ///
+  /// Only the LAN keeps the fast path: a peer on our own subnet is heard
+  /// directly, not replayed by anyone, so a single announce IS proof of life.
+  bool _isFreshNode(_ObservedNode n, int nowMs) {
+    if (nowMs - n.lastSeenMs > _onlineWindowMs) return false;
+    if (n.via == 'lan') return true;
+    return n.heardCount >= 2 &&
+        n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
+  }
+
+  /// Geogram devices reachable right now — the number the launcher shows.
+  int get reachableDevices => reachability().geogram;
+
+  /// Posts from [authors] we have stored since [sinceMs]. What the launcher
+  /// means by "new posts": written by someone you follow, after the last time
+  /// you looked.
+  int nostrNewPostCount(List<String> authors, int sinceMs) {
+    final store = _relayStore;
+    if (store == null || authors.isEmpty) return 0;
+    try {
+      return store.count(NostrFilter(
+        kinds: const [1],
+        authors: authors,
+        since: sinceMs ~/ 1000,
+      ));
+    } catch (_) {
+      return 0;
+    }
+  }
 
   /// Kind-1 posts we are holding — all of them, or only those written by
   /// [authors]. An indexed COUNT, cheap enough for the launcher's status bar.
@@ -1474,15 +1555,10 @@ class RnsService {
     // geogram devices — as soon as they're heard, and keep the strict spread gate
     // only for generic remote nodes (to filter the flood).
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    bool isFresh(_ObservedNode n) {
-      if (nowMs - n.lastSeenMs > _onlineWindowMs) return false; // gone quiet
-      if (n.via == 'lan') return true; // our LAN — real, show immediately
-      if (isGeogram(n)) return true; // a geogram device — our network
-      // Generic remote node: require a genuine re-announce to prove it's not a
-      // one-shot connect-flood ghost.
-      return n.heardCount >= 2 &&
-          n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
-    }
+    // ONE rule (see _isFreshNode). This used to wave geogram devices through on
+    // a single announce, which meant every stale geogram announce a hub replayed
+    // from its cache counted as a live device.
+    bool isFresh(_ObservedNode n) => _isFreshNode(n, nowMs);
 
     // Hub set = every identity that is a relayer for some node reachable now.
     final hubIds = <String>{};
@@ -3894,6 +3970,9 @@ class RnsService {
         'text': e.content,
         'parent': parent,
         'ts': e.createdAt,
+        'id': e.id ?? '',
+        // NIP-92 media metadata (video poster/blurhash/dim) for the feed card.
+        'meta': imetaMetaJson(e.tags),
       });
     }
     out.sort((a, b) => (b['ts'] as int).compareTo(a['ts'] as int));
@@ -4408,6 +4487,15 @@ class RnsService {
     String? topic,
   }) async {
     return _relayRun(NostrFilter.fromJson(filterJson), topic: topic);
+  }
+
+  /// LOCAL-only store lookup of one event's full JSON (tags included) by id —
+  /// no network round-trip. Used to recover NIP-92 imeta for feed posts.
+  Map<String, dynamic>? relayLocalEvent(String id) {
+    if (id.isEmpty) return null;
+    final evs =
+        _relayStore?.query(NostrFilter(ids: [id], limit: 1)) ?? const [];
+    return evs.isEmpty ? null : evs.first.toJson();
   }
 
   Future<List<Map<String, dynamic>>> _relayRun(

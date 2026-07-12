@@ -5,7 +5,8 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   bluetooth_low_energy_linux
   file_selector_linux
-  sqlite3_flutter_libs
+  sqlcipher_flutter_libs
+  url_launcher_linux
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

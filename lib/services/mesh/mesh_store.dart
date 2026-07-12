@@ -23,6 +23,8 @@ import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
 
+import '../../profile/profile_db.dart';
+
 import 'mesh_beacon.dart';
 import 'mesh_bloom.dart';
 import 'mesh_session.dart';
@@ -54,7 +56,7 @@ class MeshStore {
     close();
     try {
       Directory(File(path).parent.path).createSync(recursive: true);
-      final db = sqlite3.open(path);
+      final db = openProfileDb(path);
       db.execute('PRAGMA journal_mode=WAL');
       db.execute('''
         CREATE TABLE IF NOT EXISTS mesh_store(

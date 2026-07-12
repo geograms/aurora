@@ -17,10 +17,13 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:reticulum/reticulum.dart' as reticulum;
+
 import 'iwi_profile.dart';
 import '../util/nostr_key_generator.dart';
 import '../services/preferences_service.dart';
 import 'identity_backup.dart';
+import 'profile_db.dart';
 import 'profile_storage.dart';
 import 'storage_paths.dart';
 
@@ -79,6 +82,12 @@ class ProfileService {
   /// lazy singleton from anywhere that needs profile state.
   Future<void> load() async {
     if (_loaded) return;
+    // Route every reticulum-package database open (media archive, disk
+    // index, serve stats, relay events, coin wallet) through the profile
+    // opener so encrypted profiles get their SQLCipher keys applied. Must
+    // happen before any store is constructed; this boot task runs before
+    // wapp/reticulum autostart on both UI and headless engines.
+    reticulum.dbOpener = openProfileDb;
     final root = geogramRootStorage();
     await root.createDirectory('');
     final existing = await root.readJson(_profilesFile);

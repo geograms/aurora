@@ -13,6 +13,8 @@ import 'dart:io';
 
 import 'package:sqlite3/sqlite3.dart';
 
+import '../../profile/profile_db.dart';
+
 import '../log_service.dart';
 
 class ObservedStore {
@@ -29,7 +31,7 @@ class ObservedStore {
       // sqlite3.open creates the file but not parent dirs.
       final parent = File(path).parent;
       if (!parent.existsSync()) parent.createSync(recursive: true);
-      final db = sqlite3.open(path);
+      final db = openProfileDb(path);
       db.execute('PRAGMA journal_mode = WAL;');
       db.execute('PRAGMA synchronous = NORMAL;');
       db.execute('''

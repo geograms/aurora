@@ -36,6 +36,8 @@ import '../util/aprx_sign.dart';
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:hex/hex.dart';
 import 'package:sqlite3/sqlite3.dart';
+
+import '../profile/profile_db.dart';
 import 'package:pointycastle/export.dart' as pc;
 
 /// State for a single hal_process_exec subprocess. Lives in
@@ -2174,7 +2176,7 @@ class WappEngine {
           if (slash > 0) {
             Directory(p.substring(0, slash)).createSync(recursive: true);
           }
-          final db = sqlite3.open(p);
+          final db = openProfileDb(p);
           db.execute('PRAGMA journal_mode=WAL;');
           final h = _nextSqliteHandle++;
           _sqlite[h] = _WappSqliteState(db);

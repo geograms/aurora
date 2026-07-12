@@ -13,6 +13,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:sqlite3/sqlite3.dart';
 
+import '../../profile/profile_db.dart';
+
 import '../../profile/profile_storage.dart';
 
 class ActivityArchive {
@@ -57,7 +59,7 @@ class ActivityArchive {
     try {
       final parent = File(_dbPath).parent;
       if (!parent.existsSync()) parent.createSync(recursive: true);
-      final db = sqlite3.open(_dbPath);
+      final db = openProfileDb(_dbPath);
       // INCREMENTAL auto-vacuum (must precede table creation) so firehose
       // deletes actually shrink the file, keeping it under the byte ceiling.
       db.execute('PRAGMA auto_vacuum = INCREMENTAL;');

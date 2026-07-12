@@ -15,6 +15,8 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:sqlite3/sqlite3.dart';
 
+import '../profile/profile_db.dart';
+
 class WappSocialStore {
   WappSocialStore._();
   static final WappSocialStore instance = WappSocialStore._();
@@ -32,7 +34,7 @@ class WappSocialStore {
 
     try {
       final dbPath = '$wappDirPath/social.sqlite3';
-      final db = sqlite3.open(dbPath);
+      final db = openProfileDb(dbPath);
       _migrate(db);
       _dbs[wappDirPath] = db;
       return db;

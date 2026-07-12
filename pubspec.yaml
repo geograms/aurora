@@ -55,7 +55,7 @@ dependencies:
   archive: ^3.6.1                        # Pure-Dart zip extraction for .wapp bundles
   web: ^0.5.1                            # window.localStorage for web profile persistence
   sqlite3: ^2.4.0                        # SQLite for wapp social store (reactions, comments)
-  sqlite3_flutter_libs: ^0.5.24          # Native SQLite libs for Flutter builds
+  sqlcipher_flutter_libs: ^0.6.4         # Native SQLCipher libs (replaces sqlite3_flutter_libs; opens plain DBs too, encrypts profile DBs)
   # Video playback (media_kit / libmpv) is NOT bundled — it bloats the app
   # (tens of MB of native libs per ABI). The media.video capability is a
   # pluggable backend (see lib/wapp/native/media_capability.dart); a media

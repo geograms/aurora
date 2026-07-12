@@ -24,6 +24,8 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:sqlite3/sqlite3.dart';
 
+import '../../profile/profile_db.dart';
+
 import '../../profile/profile_storage.dart';
 
 class GeoChatArchive {
@@ -62,7 +64,7 @@ class GeoChatArchive {
       // sqlite3.open creates the file but not parent dirs.
       final parent = File(_dbPath).parent;
       if (!parent.existsSync()) parent.createSync(recursive: true);
-      final db = sqlite3.open(_dbPath);
+      final db = openProfileDb(_dbPath);
       db.execute('PRAGMA journal_mode = WAL;'); // crash-safe, concurrent reads
       db.execute('PRAGMA synchronous = NORMAL;');
       db.execute('''

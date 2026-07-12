@@ -394,6 +394,7 @@ class _WappBackgroundService extends BackgroundService {
           type == 'ui.convo.msg' ||
           type == 'ui.convo.remove' ||
           type == 'ui.convo.react' ||
+          type == 'ui.convo.clear' ||
           type == 'ui.convo.status') {
         // Keep the persisted conversation stores current while headless so the
         // Messages tab shows what arrived in the background.
@@ -413,6 +414,12 @@ class _WappBackgroundService extends BackgroundService {
             store.react(data);
           case 'ui.convo.status':
             store.setStatus(data);
+          case 'ui.convo.clear':
+            // The page handles this; headless did not, so a wapp that cleared
+            // its store on a migration was silently ignored and the stale
+            // conversations stayed on disk. Same store, same protocol — the
+            // headless engine must honour the same messages the page does.
+            store.clear(data['id']?.toString());
         }
         _scheduleConvoSave(field);
       } else if (type == 'ui.activity.react') {

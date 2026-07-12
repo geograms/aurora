@@ -283,18 +283,18 @@ class _ActivityFeedState extends State<ActivityFeed> {
         }).toList();
         break;
       case _ActivityFilter.all:
-        // A firehose of PUBLICATIONS worth reading: my own posts + any root post
-        // that has gathered at least 2 likes. Zero-like noise never shows here
-        // (unpopular posts from follows live under the Following tab instead).
-        posts = src.reversed.where((p) {
-          if (!_isStreamPost(p) || !_isRoot(p)) return false;
-          if ((p['dir'] ?? '') == 'out') return true; // my own posts always
-          // Popular = surfaced by the discovery feed (>=2 likes; the flag is
-          // stored so it survives restarts) OR its live like count is >=2.
-          if (p['pop'] == 1 || p['pop'] == '1') return true;
-          final mid = (p['mid'] ?? '').toString();
-          return (widget.likeInfo?.call(mid).count ?? 0) >= 2;
-        }).toList();
+        // Everything happening now: root posts, newest first, from anyone.
+        //
+        // This used to require `pop==1 || likes>=2` — i.e. "All" meant "roots
+        // that already collected two likes". A post cannot have likes the moment
+        // it is published, so no fresh post could EVER appear here, and the tab
+        // whose whole job is discovering people you don't follow yet showed you
+        // hour-old material. The like gate was standing in for spam filtering and
+        // doing it badly; the host's quality gate (feed_quality.dart) does that
+        // job properly now, upstream, before a post ever reaches this widget.
+        posts = src.reversed
+            .where((p) => _isStreamPost(p) && _isRoot(p))
+            .toList();
         break;
     }
     // Hide posts from blocked/muted callsigns (the wapp pushes the set).

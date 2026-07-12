@@ -82,6 +82,14 @@ class TaskMonitorService {
         final s = ev.entries.map((e) => '${e.key}=${e.value}').join(' ');
         LogService.instance.add('perf: nostr-engine $s');
       }
+      // What the "All" feed's quality gate kept, held and dropped — by reason.
+      // Without this, "the feed looks empty" can only be answered by guesswork,
+      // and a filter nobody can see is a filter nobody can trust.
+      final fh = RnsService.instance.nostrFirehoseStats;
+      if (fh.isNotEmpty && fh.values.any((v) => v > 0)) {
+        final s = fh.entries.map((e) => '${e.key}=${e.value}').join(' ');
+        LogService.instance.add('perf: nostr firehose $s');
+      }
       // Connectionless probes. `silent` is the number of inbound queries we
       // answered with NOTHING — each of which used to cost a full Curve25519
       // link handshake to say "I have nothing".

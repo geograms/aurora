@@ -4784,12 +4784,15 @@ class RnsService {
     // We just followed someone — pull their profile (if reachable) right away.
     refreshFollowedProfiles();
     startFollowsMirror();
+    // Someone we follow is never a stranger to be vetted by the spam gate.
+    pushTrustedAuthors();
   }
 
   /// Drop [key] from the follow set.
   void unfollowPubkey(String key) {
     _follows.remove(key);
     startFollowsMirror();
+    pushTrustedAuthors();
   }
 
   // ── The follows mirror ─────────────────────────────────────────────────────
@@ -4994,9 +4997,42 @@ class RnsService {
   List<Map<String, dynamic>> nostrDrain(String subId, {int max = 50}) =>
       _nostrHub?.drainEvents(subId, max: max) ?? const [];
 
-  /// Discovery feed for users who follow nobody: a subId that only yields kind-1
-  /// posts which have gathered >2 reactions (spam gets none). Drain like any sub.
+  /// Discovery feed: a subId that only yields kind-1 posts which have gathered
+  /// >2 reactions. This is a POPULAR feed, not a fresh one — by construction it
+  /// cannot surface a post until that post is old enough to have collected
+  /// likes. Rank with it (the launcher hero's cold start); never use it as an
+  /// "All" tab, which is what made All show hour-old posts.
   String? nostrDiscovery() => _nostrHub?.subscribeDiscovery(minLikes: 3);
+
+  /// The live firehose: kind-1 as the relays push it, sub-second, passed through
+  /// the quality gate (feed_quality.dart) so obvious spam never surfaces. This
+  /// is what a feed of strangers is *for* — finding people worth following.
+  ///
+  /// Also pushes the trust context the gate needs: our own key and everyone we
+  /// follow bypass it entirely.
+  String? nostrFirehose() {
+    final hub = _nostrHub;
+    if (hub == null) return null;
+    pushTrustedAuthors();
+    return hub.subscribeFirehose();
+  }
+
+  /// Self + follows: they bypass the firehose gate. Re-pushed on follow change.
+  void pushTrustedAuthors() {
+    final me = selfPubHex;
+    _nostrHub?.setTrustedAuthors({
+      if (me != null) me,
+      ..._follows.asSet,
+    });
+  }
+
+  /// Authors the user muted — the wapp owns the list and pushes it on change.
+  void nostrSetMuted(Iterable<String> pubkeys) =>
+      _nostrHub?.setMutedAuthors(pubkeys);
+
+  /// What the firehose gate kept, held and dropped, by reason.
+  Map<String, int> get nostrFirehoseStats =>
+      _nostrHub?.firehoseStats ?? const {};
 
   /// Track engagement (likes/replies) for the given post ids (event ids on
   /// screen). The feed calls this as posts scroll into view.

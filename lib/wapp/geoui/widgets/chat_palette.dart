@@ -1,8 +1,8 @@
 // ChatPalette — the shared colour palette for the GeoUI messaging widgets
 // (ChatViewField bubbles/background, ConversationsField list, and the wapp
-// page chrome). The values mirror the Telegram Desktop "Night" theme so the
-// chat surfaces read as Telegram. This is generic styling — no app (APRS,
-// Circles, …) knowledge lives here; every chat-based wapp shares it.
+// page chrome). The values are sampled from the X (Twitter) dark-theme DM
+// view, so the chat surfaces read as X. This is generic styling — no app
+// (APRS, Circles, …) knowledge lives here; every chat-based wapp shares it.
 
 import 'package:flutter/material.dart';
 
@@ -15,19 +15,19 @@ abstract final class ChatPalette {
   static const Color chatBg = Color(0xFF000000);
 
   /// Incoming (received) message bubble. Dark neutral grey.
-  static const Color inBubble = Color(0xFF1C1C1E);
+  static const Color inBubble = Color(0xFF141618);
 
   /// Outgoing (sent) message bubble + selected conversation row.
-  /// Telegram `msgOutBg` / active dialog.
-  static const Color outBubble = Color(0xFF2B5278);
+  /// X's blue.
+  static const Color outBubble = Color(0xFF1D9BF0);
 
   /// Primary text on bubbles and rows.
   static const Color text = Color(0xFFFFFFFF);
 
   /// Secondary text: timestamps, subtitles, unselected tabs.
-  static const Color secondary = Color(0xFF8A8A8E);
+  static const Color secondary = Color(0xFF71767B);
 
   /// Accent: links, sender names, tab indicator, unread badges, compose
-  /// icons. Telegram `windowActiveTextFg`.
-  static const Color accent = Color(0xFF50A8EB);
+  /// icons. X uses the same blue as the outgoing bubble.
+  static const Color accent = Color(0xFF1D9BF0);
 }

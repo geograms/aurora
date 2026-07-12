@@ -350,7 +350,10 @@ class FunctionalityRegistry {
           'Web-of-trust author set (follows + followers + follows-of-follows) JSON array',
           [], ReturnDef('uint32', 'Bytes written, negated required size if too small')),
       EndpointDef('hal_nostr_discovery',
-          'Start/return the discovery feed subId (only posts with >2 reactions; for users with no follows)',
+          'Start/return the POPULAR feed subId (only posts with >2 reactions — cannot show fresh posts, they have no likes yet)',
+          [], ReturnDef('uint32', 'subId bytes written, 0 if unavailable')),
+      EndpointDef('hal_nostr_firehose',
+          'Start/return the LIVE firehose subId: kind-1 as the relays push it, spam-filtered by the host (the feed of strangers, for discovering people to follow)',
           [], ReturnDef('uint32', 'subId bytes written, 0 if unavailable')),
       EndpointDef('hal_nostr_stats', 'Engagement JSON {likes,replies,mine} for a post id', [
         ParamDef('id', 'string', 'event id (hex)'),

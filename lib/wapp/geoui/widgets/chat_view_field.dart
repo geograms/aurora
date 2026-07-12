@@ -209,28 +209,41 @@ class _ChatViewFieldState extends State<ChatViewField> {
     widget.onSend(liked ? '$mid:unlike' : '$mid:like');
   }
 
+  static bool _isOut(Map<String, dynamic> m) =>
+      (m['dir']?.toString() ?? 'in') == 'out';
+
+  /// Secondary foreground *inside* a bubble (timestamps, badge labels, action
+  /// icons). The outgoing bubble is the solid accent blue, so the dim greys and
+  /// mid-tone accents that read fine on the dark incoming bubble wash out on
+  /// it — outgoing gets near-solid white instead.
+  static Color _onBubbleFg(bool outgoing, int incomingAlpha) =>
+      Colors.white.withAlpha(outgoing ? 235 : incomingAlpha);
+
   /// Signature verdict badge (APRX). verified=green, forged=red,
   /// unverified=grey (signed but sender key unknown). Nothing for unsigned.
+  /// On the blue outgoing bubble those hues are unreadable, so verified and
+  /// unverified go white and forged goes pale pink — still a warning, but legible.
   Widget _authBadge(Map<String, dynamic> m) {
     final a = (m['auth'] ?? '').toString();
     if (a.isEmpty) return const SizedBox.shrink();
+    final out = _isOut(m);
     final IconData icon;
     final Color color;
     final String label;
     switch (a) {
       case 'verified':
         icon = Icons.verified_user;
-        color = const Color(0xFF4CAF82);
+        color = out ? Colors.white : const Color(0xFF4CAF82);
         label = 'verified';
         break;
       case 'bad':
         icon = Icons.gpp_bad;
-        color = const Color(0xFFE0607A);
+        color = out ? const Color(0xFFFFC9D2) : const Color(0xFFE0607A);
         label = 'forged';
         break;
       default: // unverified
         icon = Icons.shield_outlined;
-        color = Colors.white.withAlpha(120);
+        color = _onBubbleFg(out, 120);
         label = 'unverified';
     }
     return Padding(
@@ -251,12 +264,13 @@ class _ChatViewFieldState extends State<ChatViewField> {
     // A private (Reticulum-only) message is labelled "private" by _privBadge —
     // don't also say "encrypted" (clearer, and avoids a redundant double badge).
     if (m['private'] == true) return const SizedBox.shrink();
-    const color = Color(0xFF63B0E8);
-    return const Padding(
-      padding: EdgeInsets.only(left: 8),
+    final color =
+        _isOut(m) ? Colors.white : const Color(0xFF63B0E8);
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Icon(Icons.lock, size: 12, color: color),
-        SizedBox(width: 2),
+        const SizedBox(width: 2),
         Text('encrypted',
             style: TextStyle(
                 color: color, fontSize: 9.5, fontWeight: FontWeight.w600)),
@@ -268,12 +282,12 @@ class _ChatViewFieldState extends State<ChatViewField> {
   /// tags it as distinct from public APRS traffic. The wapp sets `private`.
   Widget _privBadge(Map<String, dynamic> m) {
     if (m['private'] != true) return const SizedBox.shrink();
-    const color = ChatPalette.accent;
-    return const Padding(
-      padding: EdgeInsets.only(left: 8),
+    final color = _onBubbleAccent(_isOut(m));
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Icon(Icons.lock, size: 12, color: color),
-        SizedBox(width: 2),
+        const SizedBox(width: 2),
         Text('private',
             style: TextStyle(
                 color: color, fontSize: 9.5, fontWeight: FontWeight.w600)),
@@ -292,15 +306,17 @@ class _ChatViewFieldState extends State<ChatViewField> {
     switch (s) {
       case 'read':
         icon = Icons.done_all;
-        color = const Color(0xFF63B0E8); // blue = read
+        // The bubble under it is already the accent blue, so read is a solid
+        // white double-tick and delivered/sent are the dimmed one.
+        color = Colors.white;
         break;
       case 'delivered':
         icon = Icons.done_all;
-        color = Colors.white.withAlpha(140); // grey = delivered
+        color = Colors.white.withAlpha(190); // dimmed = delivered
         break;
       default: // sent
         icon = Icons.done;
-        color = Colors.white.withAlpha(140);
+        color = Colors.white.withAlpha(190);
     }
     return Padding(
       padding: const EdgeInsets.only(left: 6),
@@ -315,12 +331,12 @@ class _ChatViewFieldState extends State<ChatViewField> {
   Widget _likeButton(Map<String, dynamic> m, {bool big = false}) {
     final mid = (m['mid'] ?? '').toString();
     if (mid.isEmpty) return const SizedBox.shrink();
-    final outgoing = (m['dir']?.toString() ?? 'in') == 'out';
+    final outgoing = _isOut(m);
     final liked = m['liked'] == true;
     final count = (m['likes'] as num?)?.toInt() ?? 0;
     // Hide entirely on our own messages with no likes yet (nothing to show).
     if (outgoing && count == 0) return const SizedBox.shrink();
-    final color = liked ? _likeColor : Colors.white.withAlpha(140);
+    final color = liked ? _likeColor : _onBubbleFg(outgoing, 140);
     final child = Row(mainAxisSize: MainAxisSize.min, children: [
       Icon(liked ? Icons.favorite : Icons.favorite_border,
           size: big ? 16 : 13, color: color),
@@ -720,12 +736,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
       constraints: const BoxConstraints(maxWidth: 440),
       decoration: BoxDecoration(
         color: outgoing ? _outColor : _inColor,
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(14),
-          topRight: const Radius.circular(14),
-          bottomLeft: Radius.circular(outgoing ? 14 : 4),
-          bottomRight: Radius.circular(outgoing ? 4 : 14),
-        ),
+        borderRadius: BorderRadius.circular(16),
       ),
       child: _maybeIntrinsicWidth(
         tight,
@@ -737,7 +748,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
           // Nested replies (parent != root) keep their quote for context.
           if (parent.isNotEmpty &&
               !(inThread && parent == _threadRootMid))
-            _quotedParent(parent),
+            _quotedParent(parent, outgoing),
           if (!outgoing && (from.isNotEmpty || via.isNotEmpty))
             Padding(
               padding: const EdgeInsets.only(bottom: 2),
@@ -795,7 +806,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
             ),
           ],
           if ((m['meta']?.toString() ?? '').isNotEmpty)
-            _metaLine(m),
+            _metaLine(m, outgoing),
           Row(
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.end,
@@ -806,7 +817,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
                   child: Text(
                     time,
                     style: TextStyle(
-                        color: Colors.white.withAlpha(115), fontSize: 10),
+                        color: _onBubbleFg(outgoing, 115), fontSize: 10),
                   ),
                 ),
               _encBadge(m),
@@ -822,11 +833,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
                     padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
                       Icon(Icons.reply,
-                          size: 12, color: Colors.white.withAlpha(140)),
+                          size: 12, color: _onBubbleFg(outgoing, 140)),
                       const SizedBox(width: 2),
                       Text('Reply',
                           style: TextStyle(
-                              color: Colors.white.withAlpha(140), fontSize: 10)),
+                              color: _onBubbleFg(outgoing, 140), fontSize: 10)),
                     ]),
                   ),
                 ),
@@ -841,11 +852,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
                     padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
                       Icon(Icons.forum_outlined,
-                          size: 12, color: ChatPalette.accent),
+                          size: 12, color: _onBubbleAccent(outgoing)),
                       const SizedBox(width: 3),
                       Text('$replies ${replies == 1 ? 'reply' : 'replies'}',
-                          style: const TextStyle(
-                              color: ChatPalette.accent,
+                          style: TextStyle(
+                              color: _onBubbleAccent(outgoing),
                               fontSize: 10,
                               fontWeight: FontWeight.w600)),
                     ]),
@@ -866,7 +877,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
                   child: Icon(Icons.more_vert,
-                      size: 15, color: Colors.white.withAlpha(150)),
+                      size: 15, color: _onBubbleFg(outgoing, 150)),
                 ),
               ),
             ],
@@ -1071,23 +1082,23 @@ class _ChatViewFieldState extends State<ChatViewField> {
 
   /// Quoted snippet of the message this one replies to (threading). Shows the
   /// parent's author + text when it's loaded, else just the short reference id.
-  Widget _quotedParent(String parentMid) {
+  Widget _quotedParent(String parentMid, bool outgoing) {
     final p = _byMid[parentMid];
     final label = p != null ? _snippet(p) : '#$parentMid';
+    final accent = _onBubbleAccent(outgoing);
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
       padding: const EdgeInsets.fromLTRB(8, 3, 8, 3),
       decoration: BoxDecoration(
         color: Colors.white.withAlpha(18),
         borderRadius: BorderRadius.circular(6),
-        border: Border(
-            left: BorderSide(color: ChatPalette.accent, width: 2.5)),
+        border: Border(left: BorderSide(color: accent, width: 2.5)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.subdirectory_arrow_right,
-              size: 12, color: ChatPalette.accent.withAlpha(200)),
+              size: 12, color: accent.withAlpha(200)),
           const SizedBox(width: 4),
           Flexible(
             child: Text(
@@ -1105,14 +1116,20 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
+  /// Accent colour for links/actions drawn *inside* a bubble. The palette
+  /// accent is the same blue as the outgoing bubble, so on an outgoing bubble
+  /// it would be invisible — fall back to white there.
+  static Color _onBubbleAccent(bool outgoing) =>
+      outgoing ? Colors.white : ChatPalette.accent;
+
   /// The small meta/distance line under a bubble. When the message carries a
   /// location and a handler is set, it becomes a tappable link.
-  Widget _metaLine(Map<String, dynamic> m) {
+  Widget _metaLine(Map<String, dynamic> m, bool outgoing) {
     final tappable =
         widget.onLocate != null && m['lat'] != null && m['lon'] != null;
     final color = tappable
-        ? ChatPalette.accent
-        : Colors.white.withAlpha(165);
+        ? _onBubbleAccent(outgoing)
+        : _onBubbleFg(outgoing, 165);
     final row = Padding(
       padding: const EdgeInsets.only(top: 2),
       child: Row(

@@ -50,11 +50,62 @@ So `local` in the relay list is not a toy — it is a real, servable relay.
   status (reachable / connecting / error), an input + **Add relay** button, and
   tap-a-row-to-remove. Pre-populated with common public relays + `local`.
 
+## Three feeds, and why they are different
+
+The distinction matters, because conflating two of them is what made the "All"
+tab show hour-old posts:
+
+| Feed | What it is | Freshness |
+|---|---|---|
+| **Firehose** (`hal_nostr_firehose`) | A live `{kinds:[0,1]}` subscription. The relays PUSH; the host's quality gate filters. **This is the All tab** — the feed of strangers, for finding people to follow. | Sub-second |
+| **Popular** (`hal_nostr_discovery`) | Watches the kind-7 REACTION firehose, tallies distinct likers, and fetches a post by id once it crosses the threshold. | **Always behind** — a post cannot appear until it has *collected* likes |
+| **Follows** (`hal_nostr_subscribe` + WoT) | `{kinds:[1], authors:<follows>}`. Everything the people you follow do. | Sub-second |
+
+"Popular" is a ranking signal (the launcher hero's cold start uses it). It can
+never be a live feed, by construction. It used to be the All tab.
+
+## The quality gate (`feed_quality.dart`)
+
+A firehose of strangers is only usable if the obvious junk never reaches the
+screen — but the bias is deliberate: **a false positive is worse than a miss.**
+Hiding a real person's post is invisible to the user and unfixable by them;
+letting one advert through costs a moment's annoyance.
+
+Dropped: empty posts, hashtag walls, link-only adverts, emoji/symbol soup, the
+same text from a *different* author within 10 minutes (copy-paste rings), authors
+posting more than 4×/minute, muted authors, and — in strict mode — authors with
+no kind-0 profile at all. Kept: short replies, non-Latin scripts, emoji, ALL
+CAPS, and links that come with a sentence. **Your own posts and everyone you
+follow bypass the gate entirely.**
+
+A post whose author has no profile *yet* is **held**, not dropped (3-minute TTL,
+bounded buffer), and released the moment their kind-0 lands. Two traps here, both
+of which we fell into and fixed:
+
+- The profile has to be **asked for**. A live `{kinds:[0,1]}` subscription brings
+  whichever kind-0s happen to be published right now — almost never the authors
+  currently posting. Held authors are batched into one small `{kinds:[0]}` REQ on
+  a 10-second timer.
+- That batch must be **slow and bounded**. `trackProfile` re-issues a 500-author
+  REQ on every call; driven by a firehose (a new stranger every second) it became
+  a REQ storm, the relays dropped our subscriptions — *including the firehose* —
+  and the feed strangled itself while waiting for profiles nobody had asked for.
+
+Every drop is counted by reason: `perf: nostr firehose seen=… kept=… pending=…
+expired=… flooding=… linkOnly=…`. A filter nobody can see is a filter nobody can
+trust; "the feed looks empty" must be answerable from `/api/log`.
+
+There is also a **watchdog**: relays cap how many subscriptions one connection
+may hold and silently drop the excess (we hold many — profiles, stats, reactions,
+WoT, search). Sixty seconds of silence on the firehose re-opens its REQ. There is
+no error to catch; silence is the only signal.
+
 ## HAL surface (`hal.nostr`)
 
 `hal_nostr_relays` / `relay_add` / `relay_remove` (manage the list, see status),
 `hal_nostr_subscribe(filter)→subId` / `event_recv(subId)` / `unsubscribe`
-(inbox-pop streaming, like `hal_relay_*`), `hal_nostr_post(kind,content,tags)`
+(inbox-pop streaming, like `hal_relay_*`), `hal_nostr_firehose` (live, gated),
+`hal_nostr_discovery` (popular), `hal_nostr_post(kind,content,tags)`
 (sign-as-profile + publish), `hal_nostr_follows` / `follow` / `unfollow`.
 
 ## Compatibility

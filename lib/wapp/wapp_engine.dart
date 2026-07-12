@@ -2769,6 +2769,23 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // The live firehose: kind-1 as the relays push it, sub-second, passed
+    // through the host's quality gate so obvious spam never reaches the wapp.
+    // This is the feed of STRANGERS — how a user finds people worth following.
+    // (Discovery, above, can only show posts that already gathered likes, so it
+    // is a "popular" feed and can never be a fresh one.)
+    final halNostrFirehose = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final sub = RnsService.instance.nostrFirehose();
+        if (sub == null) return 0;
+        _nostrSubs.add(sub);
+        final bytes = utf8.encode(sub);
+        if (bytes.length > outCap) return 0;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     // Engagement counts for a post id: JSON {likes, replies, mine}.
     final halNostrStats = WasmFunction(
       (int idPtr, int idLen, int outPtr, int outCap) {
@@ -3246,6 +3263,7 @@ class WappEngine {
       WasmImport('hal', 'nostr_follows', halNostrFollows),
       WasmImport('hal', 'nostr_wot', halNostrWot),
       WasmImport('hal', 'nostr_discovery', halNostrDiscovery),
+      WasmImport('hal', 'nostr_firehose', halNostrFirehose),
       WasmImport('hal', 'nostr_stats', halNostrStats),
       WasmImport('hal', 'nostr_profile', halNostrProfile),
       WasmImport('hal', 'nostr_track', halNostrTrack),

@@ -250,6 +250,34 @@ Every one of these produced a wrong number that I believed for a while.
     the fingerprint of **FFI — usually sqlite**. The Dart profiler cannot see it.
     Do not conclude "the profiler shows nothing, so nothing is wrong".
 
+### 4.1.1 OPEN BUG — opening any wapp page pegs a core (found 2026-07-12)
+
+The largest battery drain currently in the app, and every user who opens a wapp
+hits it. Not yet fixed; recorded here so the next person starts from the evidence
+instead of the beginning.
+
+```
+release build, C61, screen off, 3-minute windows
+  clean cold start, no page opened .......  5.6% of one core
+  after opening + closing ONE wapp page ... 62-80% of one core, forever
+```
+
+- Reproduced with the **bluetooth** wapp, so it is not specific to chat/messages
+  and it is **pre-existing** (not from the 2026-07 messaging work).
+- Only `am force-stop` clears it. Stopping every wapp does NOT.
+- One `DartWorker` at ~104% of a core; main thread 2.9%; wapp ticks 0.4% of main.
+- **No new isolate is created** (5 before, 5 after) — an *existing* isolate starts
+  spinning. And there are already TWO `rns-crypto` isolates at boot, which is
+  itself suspect.
+- `getStack` returns **no Dart frames** → it is inside native/FFI. Per rule 10
+  above, that means sqlite, which points at the `nostr-engine` isolate.
+
+Trigger path to investigate: page open → `BackgroundWappManager.suspend()` (stops
+the background engine) → page engine runs → page close → `resume()` (starts a NEW
+background engine). Something in that suspend/dispose/resume cycle leaves an
+existing isolate in a busy loop — suspect an un-cancelled subscription/stream, or
+a store handle re-opened per engine.
+
 ### 4.2 The battery-drain patterns to look for
 
 The two real drains found so far were both **a cheap call in a hot loop**, not an

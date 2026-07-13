@@ -209,6 +209,12 @@ class PreferencesService {
   String get nodeRadios => _prefs.getString('node.radios') ?? '';
   set nodeRadios(String v) => _prefs.setString('node.radios', v);
 
+  // One cursor per indexer we sync pointers with: (epoch, seq). Eight bytes and
+  // a name, persisted — because the whole reason the cursor is a POSITION and
+  // not a time is that a node with no clock can still resume after a reboot.
+  String get pointerCursors => _prefs.getString('dht.pointerCursors') ?? '';
+  set pointerCursors(String v) => _prefs.setString('dht.pointerCursors', v);
+
   // Reticulum first, the internet second. A media fetch over HTTPS hands a
   // server your IP and exactly what you are reading; a mesh fetch hands it a
   // destination hash. The mesh is always tried first — this switch decides

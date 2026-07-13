@@ -28,8 +28,15 @@ import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
 import '../files/dht/holder_hint.dart';
+import '../files/dht/pointer_log.dart';
+import '../files/dht/pointer_sync.dart';
 import '../files/dht/provider_record.dart'
-    show kCapUnknown, kCapArchive, kCapHomeWifi, kCapCellular;
+    show
+        kCapUnknown,
+        kCapArchive,
+        kCapHomeWifi,
+        kCapCellular,
+        ProviderRecord;
 import '../files/composite_file_source.dart';
 import '../files/disk_index.dart';
 import '../files/file_node.dart';
@@ -50,6 +57,7 @@ import '../social/follow_set.dart';
 import '../social/keep_policy.dart' show Touch;
 import '../social/keep_service.dart';
 import '../social/node_profile_service.dart';
+import '../social/pointer_sync_service.dart';
 import '../social/nostr_relay.dart';
 import '../social/host_retention_policy.dart';
 import '../social/retention_tier.dart';
@@ -2162,6 +2170,14 @@ class RnsService {
                   onChanged: (_) => _announceRelayDest(),
                 )
               : null;
+          // The pointer log this device syncs with other indexers. Its epoch is
+          // derived from the identity, so a rebuilt log gets a new epoch and a
+          // peer's stale cursor is DETECTED rather than silently honoured.
+          _pointerLog = PointerLog(
+            epoch: 'e${_hex(_id!.hash).substring(0, 8)}'
+                '-${DateTime.now().millisecondsSinceEpoch ~/ 3600000}',
+          );
+          _relay!.pointerServer = PointerSyncServer(_pointerLog!);
           _storeForward = StoreForward(
             node: _relay!,
             router: _lxmf!,
@@ -2214,6 +2230,10 @@ class RnsService {
               // behind the Android background service — so a like made in a
               // tunnel is archived once there is a network again, app open or not.
               KeepService.instance.resume();
+              // Indexers spread the pointer map among themselves, so the phones
+              // never have to answer for it. This device only runs the loop when
+              // it IS an indexer, and only talks to peers that say they are too.
+              PointerSyncService.instance.start();
             }).catchError((Object e) {
               // A pipeline that never comes up must SAY so. This one used to
               // fail into silence and take the whole hero with it.
@@ -3167,6 +3187,49 @@ class RnsService {
     return _files?.resolveAndFetch(fileHash, timeout: timeout);
   }
 
+  // ── Indexer↔Indexer pointer sync (docs/NOSTR.md) ──────────────────────────
+  //
+  // The map of who-has-what is spread between INDEXERS, so the phones never have
+  // to answer for it. Everything below is addresses; no content moves.
+
+  PointerLog? _pointerLog;
+
+  /// This device's pointer log, or null until the node is up. The epoch is tied
+  /// to the identity, and it changes whenever the log is rebuilt — which is what
+  /// lets a peer detect a stale cursor instead of silently missing everything
+  /// that happened while it was away.
+  PointerLog? get pointerLog => _pointerLog;
+
+  RelayNode? get relayNode => _relay;
+  RelayDirectory get relayDirectory => _relayDir;
+
+  /// Are we an Indexer right now? Derived from the hardware (charger + a real
+  /// uplink), never from a wish — a phone on battery is a leaf, and leaves are
+  /// left alone.
+  bool get isIndexer => _isIndexerHost();
+
+  /// A pointer another Indexer told us about. It is already VERIFIED against the
+  /// provider that signed it (PointerSyncClient does that before we ever see it),
+  /// so a relaying Indexer cannot forge, retarget or resurrect one.
+  Future<bool> acceptSyncedPointer(ProviderRecord rec) async {
+    final files = _files;
+    if (files == null) return false;
+    final dht = files.dht;
+    if (dht == null) return false;
+    final stored = await dht.storeLocal(rec);
+    if (stored) _pointerLog?.add(rec);
+    return stored;
+  }
+
+  /// "This provider no longer holds that key." A removal travels like an
+  /// insertion — an Indexer that never propagated them would hand out dead
+  /// addresses for ever.
+  void dropSyncedPointer(Uint8List key, Uint8List providerPub) {
+    final dropped =
+        _files?.dht?.demoteProvider(key, providerPub) ?? false;
+    if (dropped) _pointerLog?.remove(key, providerPub);
+  }
+
   /// What we can honestly say about a holder when the DHT hands it out.
   ///
   /// The DHT knows freshness. Only WE know the hardware — the relay directory
@@ -3222,6 +3285,15 @@ class RnsService {
     if (!_authorRecords.add(pubHex.toLowerCase())) return; // already advertised
     try {
       final holders = await _files!.publishKey(key, capacity: selfCapacity);
+      // Into our own pointer log too, so the indexers that sync with us learn
+      // that this device is a home for that author — without anyone having to
+      // ask us.
+      final rec = await ProviderRecord.create(
+        providerIdentity: _id!,
+        sha256: key,
+        capacity: selfCapacity,
+      );
+      _pointerLog?.add(rec);
       LogService.instance.add(
           'social: advertising notes from ${pubHex.substring(0, 12)} '
           '($holders holder(s) took the pointer)');

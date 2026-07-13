@@ -4236,14 +4236,22 @@ class _WappPageState extends State<WappPage>
         final content = (e['content'] ?? '').toString();
 
         // What happened, in the user's words.
+        // A kind-1 that p-tags me is only a REPLY when it e-tags one of my
+        // posts. Without that it is a mention — and calling every mention a
+        // reply sent people looking for a conversation that does not exist.
+        final isReply = kind == 1 &&
+            (((e['tags'] as List?) ?? const []).any(
+                (t) => t is List && t.isNotEmpty && '${t[0]}' == 'e'));
         final (IconData icon, Color colour, String what) = switch (kind) {
-          7 => content.trim() == '-'
+          7 => content.trim() == '-' || content.trim() == '👎'
               ? (Icons.thumb_down, const Color(0xFFE05561), 'downvoted your post')
-              : content.trim() == '+'
+              : content.trim() == '+' || content.trim() == '👍'
                   ? (Icons.thumb_up, const Color(0xFF4CC38A), 'upvoted your post')
                   : (Icons.favorite, Colors.pink, 'liked your post'),
           6 => (Icons.repeat, const Color(0xFF00BA7C), 'reposted your post'),
-          _ => (Icons.chat_bubble, ChatPalette.accent, 'replied to you'),
+          _ => isReply
+              ? (Icons.chat_bubble, ChatPalette.accent, 'replied to you')
+              : (Icons.alternate_email, ChatPalette.accent, 'mentioned you'),
         };
 
         // The post it is about: a reply carries its text, a reaction does not.
@@ -4275,27 +4283,84 @@ class _WappPageState extends State<WappPage>
                     )
                   : null)
               : Text(body, maxLines: 2, overflow: TextOverflow.ellipsis),
-          onTap: () {
-            // Open the post the notification is about.
-            final tags = (e['tags'] as List?) ?? const [];
-            for (final t in tags) {
-              if (t is List && t.length >= 2 && t[0] == 'e') {
-                final id = '${t[1]}';
-                final posts = _activityArchive?.recent() ??
-                    const <Map<String, dynamic>>[];
-                for (final p in posts) {
-                  if ((p['mid'] ?? '').toString() == id) {
-                    _openActivityThread(p);
-                    return;
-                  }
-                }
-                return;
-              }
-            }
-          },
+          onTap: () => _openNotificationTarget(e),
         );
       },
     );
+  }
+
+  /// Open the post a notification is about.
+  ///
+  /// The post is usually in the local archive (it is normally MY post), but it
+  /// does not have to be — a reaction can arrive for something I wrote on
+  /// another device, and then the tap did nothing at all. So: archive first,
+  /// then the relay store, then ask the relays and open it when it lands.
+  void _openNotificationTarget(Map<String, dynamic> e) {
+    String rootId = '';
+    final tags = (e['tags'] as List?) ?? const [];
+    for (final t in tags) {
+      if (t is List && t.length >= 2 && '${t[0]}' == 'e') {
+        rootId = '${t[1]}';
+        break;
+      }
+    }
+
+    // A mention (a kind-1 that p-tags me but e-tags nothing of mine) IS the
+    // post — open it, not a root it does not have.
+    if (rootId.isEmpty) rootId = (e['id'] ?? '').toString();
+    if (rootId.isEmpty) return;
+
+    final local = _postFromArchive(rootId);
+    if (local != null) {
+      _openActivityThread(local);
+      return;
+    }
+
+    final ev = RnsService.instance.nostrEventById(rootId);
+    if (ev != null) {
+      _openActivityThread(_postFromEvent(ev));
+      return;
+    }
+    // Not here yet — it has just been requested from the relays. Say so, and
+    // open it as soon as it lands rather than leaving the tap looking broken.
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      const SnackBar(content: Text('Fetching the post…')),
+    );
+    var tries = 0;
+    Timer.periodic(const Duration(milliseconds: 400), (t) {
+      tries++;
+      final got = RnsService.instance.nostrEventById(rootId);
+      if (got != null) {
+        t.cancel();
+        if (mounted) _openActivityThread(_postFromEvent(got));
+      } else if (tries > 15 || !mounted) {
+        t.cancel();
+      }
+    });
+  }
+
+  Map<String, dynamic>? _postFromArchive(String mid) {
+    for (final p in _activityArchive?.recent() ??
+        const <Map<String, dynamic>>[]) {
+      if ((p['mid'] ?? '').toString() == mid) return p;
+    }
+    return null;
+  }
+
+  /// A raw NOSTR event as the feed's post shape.
+  Map<String, dynamic> _postFromEvent(Map<String, dynamic> ev) {
+    final pubkey = (ev['pubkey'] ?? '').toString();
+    final content = (ev['content'] ?? '').toString();
+    return {
+      'mid': (ev['id'] ?? '').toString(),
+      'from': pubkey.length >= 12 ? pubkey.substring(0, 12) : pubkey,
+      // The card reads `text` — `body` is only the list key. Setting the wrong
+      // one opened the post with an empty body.
+      'text': content,
+      'body': content,
+      'dir': 'in',
+      't': ((ev['created_at'] as num?)?.toInt() ?? 0) * 1000,
+    };
   }
 
   /// One line of filter chips for the search panel, built from the wapp's own
@@ -5464,6 +5529,15 @@ class _WappPageState extends State<WappPage>
                 _fieldValues['activity_mid'] = m;
                 _fieldValues['activity_unlike'] = !like;
                 _sendCommand('activity_like');
+              },
+              // The thread shows the SAME votes as the stream — without these
+              // an upvote cast in the feed vanished the moment you opened the
+              // post, which reads as a vote that was lost.
+              voteInfo: (m) => RnsService.instance.nostrVotes(m),
+              onVote: (m, vote) {
+                RnsService.instance.nostrVote(m, _activityAuthorHex(m), vote);
+                _activityRev.value++;
+                setState(() {});
               },
               isSaved: (m) => _activityArchive?.isSaved(m) ?? false,
               onSave: (p) {

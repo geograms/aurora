@@ -5392,6 +5392,12 @@ class RnsService {
     ));
   }
 
+  /// One event by id — from the store if we hold it, else asked of the relays
+  /// (null now, there on a later call). Used to open the post a notification is
+  /// about even when this device never saw it in its own feed.
+  Map<String, dynamic>? nostrEventById(String id) =>
+      _nostrHub?.eventById(id);
+
   /// How many notifications arrived since the panel was last opened.
   int nostrNotificationsUnread() {
     final all = nostrNotifications();

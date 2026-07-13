@@ -203,6 +203,9 @@ class _ActivityFeedState extends State<ActivityFeed> {
     _filter = _filterFromString(widget.initialFilter);
     _shown = widget.posts; // show cached posts immediately
     _scroll.addListener(_onScroll);
+    // The back gate below depends on whether the composer has focus, so a
+    // focus change has to rebuild it.
+    _composeFocus.addListener(_onComposeFocus);
   }
 
   @override
@@ -230,6 +233,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
   @override
   void dispose() {
     _input.dispose();
+    _composeFocus.removeListener(_onComposeFocus);
     _composeFocus.dispose();
     _scroll.dispose();
     super.dispose();
@@ -280,6 +284,10 @@ class _ActivityFeedState extends State<ActivityFeed> {
   /// the top-level stream.
   bool _isRoot(Map<String, dynamic> p) =>
       (p['parent'] ?? '').toString().trim().isEmpty;
+
+  void _onComposeFocus() {
+    if (mounted) setState(() {});
+  }
 
   /// Do we follow this author?
   ///
@@ -349,7 +357,18 @@ class _ActivityFeedState extends State<ActivityFeed> {
                 .contains((p['from'] ?? '').toString().toUpperCase()))
             .toList()
         : _filtered(_shown);
-    return Center(
+    // Back while the composer is open means "close the composer" — NOT "leave
+    // the app". Android's back gesture went straight past an expanded composer
+    // and popped the whole wapp, taking the half-written post with it.
+    final composing = _composing || _composeFocus.hasFocus;
+    return PopScope(
+      canPop: !composing,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _composeFocus.unfocus();
+        setState(() => _composing = false);
+      },
+      child: Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 640),
         child: Column(
@@ -439,6 +458,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
               _composer(cs),
             ],
           ],
+        ),
         ),
       ),
     );
@@ -1174,6 +1194,11 @@ class ActivityThreadPage extends StatefulWidget {
   final int Function(String mid)? replyCount;
   final ({int count, bool mine}) Function(String mid)? likeInfo;
   final void Function(String mid, bool like)? onLike;
+
+  /// Votes, same as in the stream — a thread that cannot show the upvote you
+  /// just cast in the feed reads as if the vote had been lost.
+  final void Function(String mid, int vote)? onVote;
+  final ({int up, int down, int mine}) Function(String mid)? voteInfo;
   final bool Function(String mid)? isSaved;
   final void Function(Map<String, dynamic> post)? onSave;
   final bool Function(String mid)? isReposted;
@@ -1204,6 +1229,8 @@ class ActivityThreadPage extends StatefulWidget {
     this.replyCount,
     this.likeInfo,
     this.onLike,
+    this.onVote,
+    this.voteInfo,
     this.isSaved,
     this.onSave,
     this.isReposted,
@@ -1332,6 +1359,8 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                       onSenderTap: widget.onSenderTap,
                       likeInfo: widget.likeInfo,
                       onLike: widget.onLike,
+                      onVote: widget.onVote,
+                      voteInfo: widget.voteInfo,
                       isSaved: widget.isSaved,
                       onSave: widget.onSave,
                       isReposted: widget.isReposted,

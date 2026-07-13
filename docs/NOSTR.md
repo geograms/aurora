@@ -582,49 +582,86 @@ The Archiver wapp's **Quota** screen owns the storage half of this; the same pan
 gains the bandwidth half, because to a user they are one question with two
 numbers: *how much of my disk, and how much of my line?*
 
-## What is NOT built (do not assume it)
+## Status: what is built, and what is not
 
-1. **Indexers answer *what*, not *where*.** Today an Indexer *is* a relay host:
-   it stores stranger events in its own `RelayEventStore` (under quota) and
-   serves them back. The pointer-only model is the target; the DHT already
-   implements exactly that primitive, but the two layers are joined only as
-   *anchors* so far — not as *the* answer to "where can I find `npub…`".
-2. **No author→provider records.** Nothing publishes *"I hold notes from npub
-   XYZ"* into the DHT. The mechanism exists (`publishKey(key32)` takes an
-   arbitrary 32-byte key, and an npub is exactly 32 bytes); it is not called for
-   authors.
-3. **Indexers do not sync with each other.**
-4. **There is no Archiver role.** No `RelayRole.archiver`, no quota UI, no
-   direct-link store-and-forward policy, no "mirror the small devices around me".
-   The parts (deposit opcode, `HostQuota`, `StoreForward`, provider publishing,
-   `_autoSyncTick` mirroring folders on an indexer host) exist and are unjoined.
+Updated as the road lands. Nothing here is aspirational — if it says BUILT, it
+is in `main` with tests, and the device-validated ones say so.
+
+### Landed since this document was written
+
+- **The touch rule** (`keep_policy.dart`, `keep_service.dart`) — BUILT, and
+  **validated on a phone against live internet relays**: an upvote pins the note
+  itself at tier 0 in the store this device serves, chases the thread above a
+  reply, asks for the author's kind-0, and pulls the pictures. A keep can only
+  ever *promote*, so a hostile re-send cannot push a kept note back into the
+  evictable slice. The queue is persisted, so a like made in a tunnel is
+  finished by the background service. **Proof: a note first seen on a public
+  relay was afterwards served back out of the phone's own `wss://` relay.**
+- **Author-provider records** — BUILT. Following, keeping, or touching an author
+  publishes a signed `ProviderRecord` under their 32-byte pubkey, so "where can I
+  find npub X" is a DHT resolve whose answer is a list of devices. The reverse
+  path (`fetchAuthorFromMesh`) resolves, asks the best providers over Reticulum,
+  verifies in the engine isolate, and stores.
+- **The hard tier partition** — BUILT (it was already structural; it is now
+  *asserted*). A flood of twenty stranger npubs evicts only stranger junk: never
+  my posts, never a followed person's words, never a photo I kept. An eviction
+  attack is not mitigated, it is pointless.
+- **Identity-aware serving** — BUILT. `ServeQuota` knows who is asking: my own
+  devices and the people I follow are unmetered; strangers share one daily
+  budget the owner sets, zero on cellular.
+- **Reticulum-first media** — BUILT. A Blossom URL carries its sha256, so the
+  mesh is tried first and the internet is a fallback that can be switched off
+  entirely; the log names the path that served the bytes.
+- **The physical profile + the resilience score** — BUILT (`node_profile.dart`,
+  `listening_schedule.dart`), announced in the relay app_data, editable in
+  **Settings → Hardware**, and device-validated. Facts only on the wire — there
+  is no "I am precious" field, and a test asserts it. `bestIndexer()` picks the
+  fibre box on a normal day and, from the *same* directory and the *same*
+  announces, the solar+Starlink+LoRa box when the internet path is gone.
+- **The listening schedule** — BUILT. `always` · `every 30m for 3m` ·
+  `06:00-18:00 weekdays` · `dawn-dusk` · `dawn+30m-dusk-30m`. Clock-free duty
+  terms are normative (an ESP32 after a reboot can honour them from `millis()`
+  alone), a node with no clock may advertise nothing else, and a duty cycle tells
+  a caller to retry across one full period rather than give up after one
+  unanswered call.
+- **Verification off the UI isolate** — BUILT. Events arriving over Reticulum are
+  verified in the `nostr-engine` isolate and stored with `putAllVerified`; main
+  never runs secp256k1.
+
+### Not built (do not assume it)
+
+1. **Indexers still answer *what*, not *where*.** An Indexer is still a relay
+   host that stores stranger events under quota and serves them back. The
+   pointer-only model is the target; the DHT implements the primitive and author
+   records now feed it, but the Indexer's *answer* is not yet the pointer map.
+2. **Indexers do not sync with each other.** No `SYNC_REQ`/`SYNC_RES`/
+   `SYNC_RESET`, no pointer log, no `(epoch, seq)` cursor. Designed above, not
+   written.
+3. **There is no Archiver role.** No `RelayRole.archiver`, no quota UI, no
+   direct-link (LAN/BLE/LoRa) store-and-forward policy, no "mirror the small
+   devices around me". The parts exist and are unjoined.
+4. **Resolve answers are still bare.** The DHT `VALUE` reply carries provider
+   pubkeys and a capacity class — not last-heard, provenance, power/uplink,
+   radios or schedule. The *directory* now scores on all of that, but the *DHT
+   reply* does not carry it, so a client resolving a file cannot yet prefer the
+   mains-powered box over somebody's phone on cellular.
 5. **`rns://` relay URIs are inert in the shipped app.** The relay hub runs on a
-   background isolate constructed with `rnsClientFactory: null`
-   (`nostr_engine.dart`), so an `rns://…` entry resolves to a null client. All
-   real Reticulum relay traffic goes through `RelayNode` on the main isolate.
-   `NostrRnsClient` is complete and unused.
+   background isolate constructed with `rnsClientFactory: null`, so an `rns://…`
+   entry resolves to a null client. Real Reticulum relay traffic goes through
+   `RelayNode` on the main isolate instead. `NostrRnsClient` is complete and
+   unused.
 6. **No long-lived subscriptions over RNS.** A `REQ` returns one `RESULT` and
    ends; mesh "subscriptions" poll. Correct for a mesh — just don't expect push.
-7. **No spam cost on DHT stores.** Only count caps. `coin/postage_gate.dart`
-   exists and is not wired in.
+7. **The remaining abuse gates.** The WoT-scored admission ladder, the
+   postage/PoW cost for the stranger tail (`coin/postage_gate.dart` exists and is
+   unwired), the **no-orphan-blobs** rule on deposits and uploads, and demotion
+   feeding back into an Indexer's ranking.
 8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
-9. **The abuse defences are partial.** Tiering, `HostQuota`, the DHT store caps,
-   `demoteProvider` and a BIP-340-authorised deposit all exist. The **hard tier
-   partition** (a stranger's bytes can only evict a stranger's bytes), the
-   WoT-scored admission ladder, the postage/PoW gate, the **no-orphan-blobs**
-   reference rule, and demotion feeding back into an Indexer's ranking do not.
-10. **Serving is not identity-aware.** `ServeQuota` has a daily byte budget and a
-    cellular switch, but it does not know *who* is asking — so "unmetered for the
-    people I follow, budgeted for strangers" is not expressible yet.
-11. **Resolve answers are bare.** The DHT `VALUE` reply carries provider pubkeys
-    and a capacity class, but not last-heard, provenance, power/uplink, radios or
-    schedule — so a client cannot yet prefer the mains-powered box over somebody's
-    phone on cellular.
-12. **Fetch order is not privacy-ordered.** Media resolution has an internet
-    Blossom tier and an RNS tier, but "Reticulum first, always, and the internet
-    only on a miss" is not enforced end-to-end, and nothing tells the user which
-    path served them.
+9. **The Indexer and Archiver wapps.** Planned below.
+10. **Notes are not yet privacy-ordered.** Media is (mesh first); a `REQ` for
+    *notes* still goes to whatever relay answers, and search terms still leave
+    the device before the mesh has been asked.
 
 ## Planned: the physical profile — what a node is made of
 
@@ -1121,13 +1158,13 @@ indexer-host folder mirroring (`_autoSyncTick`).
 
 Dependency order. Each step is small and independently useful.
 
-0. **The touch rule + the bridge** (above): a `KeepPolicy` between the wapp's
+0. ~~**The touch rule + the bridge**~~ — **DONE** (device-validated): a `KeepPolicy` between the wapp's
    like/reply/repost/bookmark and `store.put(tier:)`, so interacting with an
    internet note pins **the note**, its author's profile, its thread parents and
    its media — locally, at tier 0. Plus the publish path notifying the Reticulum
    Indexers, and an outbox so a publish survives either network being down. This
    is first because it is what makes everything below have something to point at.
-1. **Publish author-provider records.** When a device keeps an author (follow ⇒
+1. ~~**Publish author-provider records.**~~ — **DONE**. When a device keeps an author (follow ⇒
    tier 1 ⇒ it already stores their notes) or keeps a note by the touch rule,
    publish a `ProviderRecord` under `key = the author's 32-byte pubkey` (and the
    event id), exactly as folders already do. "Who has notes from `npub…`" becomes
@@ -1146,7 +1183,7 @@ Dependency order. Each step is small and independently useful.
    `SYNC_RESET` over the existing relay link. Any live Indexer then gives the
    same answer and a dead one costs nothing. A clockless node (ESP32 after a
    reboot) resumes on `seq` alone.
-5. **The physical profile** (above): power, uplink and autonomy on the announce,
+5. ~~**The physical profile**~~ — **DONE** (announce + Settings → Hardware, device-validated): power, uplink and autonomy on the announce,
    plus an opt-in coverage region (coarse, picked on the map) with **one entry per
    radio** — its range, its listening frequency, its mode and its duty. The
    governor extended to measure powered-fraction and throughput. **One full-size
@@ -1166,13 +1203,13 @@ Dependency order. Each step is small and independently useful.
    interest set. What is not: unsolicited floods (the store caps), records whose
    provider never answers a fetch (`demoteProvider` already prunes those), and
    eventually a postage/PoW cost per store for the abusive tail.
-8a. **The abuse defences** (above), and do the **hard tier partition first** — it
+8a. **The abuse defences** — the **hard tier partition is DONE and asserted**; the rest (WoT ladder, postage, no-orphan-blobs, demotion feedback) remains. It
     is the one that makes an eviction attack pointless rather than merely
     expensive, and it is a few lines in `pruneHosted()` plus a separate byte
     budget. Then the WoT admission ladder, the no-orphan-blobs rule on deposits
     and uploads, the postage gate for the tail, and demotion feeding back into
     Indexer ranking.
-8b. **Identity-aware serving** (above): the peer key is already on the link, so
+8b. ~~**Identity-aware serving**~~ — **DONE**: the peer key is already on the link, so
     `ServeQuota` learns *who* — unmetered for me/my devices/my follows, a
     stranger budget the owner sets in MB/day, per-stranger caps under it, nothing
     at all on cellular by default, and a graceful *"not me, try these"* refusal
@@ -1181,7 +1218,7 @@ Dependency order. Each step is small and independently useful.
     and how old the *information* is), power/uplink, radios and schedule per
     holder, so the client calls the mains-powered box and leaves the phone on
     cellular alone.
-8d. **Reticulum first, internet second** (above), end to end, with a visible badge
+8d. **Reticulum first, internet second** — **DONE for media** (the log names the path; the badge and the notes/search half remain), end to end, with a visible badge
     saying which path served the user and a switch to turn the internet fallback
     off entirely.
 9. **Media follows the author.** Following keeps their blobs too — Blossom is

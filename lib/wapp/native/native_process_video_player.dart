@@ -93,6 +93,7 @@ class _NativeProcessVideoPlayerState extends State<NativeProcessVideoPlayer> {
   Directory? _tempDir;
   StreamSubscription<List<int>>? _videoSub;
   StreamSubscription<List<int>>? _audioSub;
+  StreamSubscription<String>? _errSub;
   Timer? _firstFrameTimeout;
   bool _failed = false;
   bool _gotFrame = false;
@@ -260,11 +261,14 @@ class _NativeProcessVideoPlayerState extends State<NativeProcessVideoPlayer> {
       },
       onError: (_) {},
     );
-    // Surface decoder errors in the log (bounded).
-    proc.stderr.transform(const SystemEncoding().decoder).listen((s) {
+    // Surface decoder errors in the log (bounded). The subscription is
+    // cancelled BEFORE a deliberate kill (seek restart, dispose) so the
+    // dying process's "Broken pipe" complaints don't spam the log.
+    _errSub = proc.stderr.transform(const SystemEncoding().decoder).listen((s) {
       final t = s.trim();
-      if (t.isNotEmpty)
+      if (t.isNotEmpty) {
         _log('native ffmpeg: ${t.substring(0, t.length.clamp(0, 200))}');
+      }
     });
   }
 
@@ -286,6 +290,9 @@ class _NativeProcessVideoPlayerState extends State<NativeProcessVideoPlayer> {
         'pipe:1',
       ]);
       _audioProc = proc;
+      // Keep the audio process's stderr drained — an unread pipe fills its
+      // 64K buffer and blocks the decoder mid-stream on chatty files.
+      unawaited(proc.stderr.drain<void>());
       var samples = 0;
       _audioSub = proc.stdout.listen((chunk) {
         final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
@@ -326,6 +333,7 @@ class _NativeProcessVideoPlayerState extends State<NativeProcessVideoPlayer> {
     try {
       _videoSub?.cancel();
       _audioSub?.cancel();
+      _errSub?.cancel(); // expected broken-pipe noise stays out of the log
       try {
         _videoProc?.kill();
       } catch (_) {}
@@ -440,6 +448,7 @@ class _NativeProcessVideoPlayerState extends State<NativeProcessVideoPlayer> {
     _firstFrameTimeout?.cancel();
     _videoSub?.cancel();
     _audioSub?.cancel();
+    _errSub?.cancel();
     try {
       _videoProc?.kill();
     } catch (_) {}

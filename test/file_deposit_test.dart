@@ -60,7 +60,9 @@ void main() {
       identity: hostId,
       source: source,
       send: (raw) => toDep.add(raw),
-      onDepositOffer: (sha, size, ext, pubHex, sigHex) {
+      // linkIdHex: an Archiver treats the LINK as policy (docs/NOSTR.md); this
+      // test is about the auth + quota, so it ignores it.
+      onDepositOffer: (sha, size, ext, pubHex, sigHex, linkIdHex) {
         if (!NostrCrypto.schnorrVerify(
             depositAuthMessageHex(_hex(sha)), sigHex, pubHex)) {
           return const DepositVerdict.reject('bad auth');

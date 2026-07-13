@@ -56,6 +56,8 @@ import '../social/store_forward.dart';
 import '../social/follow_set.dart';
 import '../social/keep_policy.dart' show Touch;
 import '../social/keep_service.dart';
+import '../social/archiver_policy.dart';
+import '../social/archiver_service.dart';
 import '../social/node_profile_service.dart';
 import '../social/pointer_sync_service.dart';
 import '../social/nostr_relay.dart';
@@ -1969,9 +1971,10 @@ class RnsService {
             _serveStats?.record(hex, DateTime.now().millisecondsSinceEpoch);
           },
           // Store-and-forward Blossom hosting: a peer asks us to keep a blob.
-          onDepositOffer: (sha, size, ext, pubHex, sigHex) {
-            if (!hostingActive)
+          onDepositOffer: (sha, size, ext, pubHex, sigHex, linkIdHex) {
+            if (!hostingActive) {
               return const DepositVerdict.reject('not hosting');
+            }
             final src = fileServeSource;
             if (src is! MediaFileSource) {
               return const DepositVerdict.reject('no archive');
@@ -1999,6 +2002,37 @@ class RnsService {
               q: hostQuota(),
             );
             if (!d.ok) return DepositVerdict.reject(d.reason);
+
+            // The Archiver's own contract with its owner, on top of the host
+            // quota. The LINK matters here: a peer that reached us over the LAN,
+            // Bluetooth or LoRa has no route to anywhere else, and its data dies
+            // if we refuse it — so those links get in on the strength of the
+            // link alone, if the owner offered them. Everything else has to be
+            // something the owner actually volunteered for (docs/NOSTR.md).
+            final policy = ArchiverService.instance.policy;
+            if (policy.isArchiving) {
+              // HONEST GAP: the link id reaches us, but the transport runs on
+              // its own isolate and its proxy cannot yet answer "which interface
+              // did this link arrive on". Until it can, every deposit is judged
+              // as if it came off the internet — the CONSERVATIVE reading, since
+              // the direct-link exception is generous and must never be granted
+              // by accident. The LAN/BLE/LoRa switches are therefore stored and
+              // honoured by the policy, but nothing can currently trigger them.
+              final via = ArchiverService.arrivedOver(null);
+              final verdict = admitToArchive(
+                policy: policy,
+                tier: tier,
+                bytes: size,
+                usedBytes: totals.totalHostedBytes,
+                via: via,
+                authorFollowed: tier == Tier.followed,
+              );
+              if (!verdict.accept) {
+                // A refusal always says why: a node that goes silent when it is
+                // full teaches its neighbours nothing, and they keep trying.
+                return DepositVerdict.reject(verdict.reason);
+              }
+            }
             return DepositVerdict.accept(tier.index, pubHex, ext);
           },
           onDepositStore: (sha, bytes, originPubHex, tier, ext) {

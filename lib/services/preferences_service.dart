@@ -209,6 +209,42 @@ class PreferencesService {
   String get nodeRadios => _prefs.getString('node.radios') ?? '';
   set nodeRadios(String v) => _prefs.setString('node.radios', v);
 
+  // ── The Archiver (docs/NOSTR.md) ─────────────────────────────────────────
+  //
+  // An explicit, quota-bound offer to hold OTHER people's data. 0 GB = this
+  // device has not volunteered, and holds nothing for anybody: silence is not
+  // consent. The direct-link switches are the interesting half — a peer that
+  // reached us over the LAN, Bluetooth or LoRa has no route to anywhere else,
+  // and its data dies if we refuse it.
+  int get archiveQuotaGb => _prefs.getInt('archive.quotaGb') ?? 0;
+  set archiveQuotaGb(int v) => _prefs.setInt('archive.quotaGb', v);
+
+  bool get archiveFollowed => _prefs.getBool('archive.followed') ?? true;
+  set archiveFollowed(bool v) => _prefs.setBool('archive.followed', v);
+
+  List<String> get archiveTopics =>
+      _prefs.getStringList('archive.topics') ?? const [];
+  set archiveTopics(List<String> v) => _prefs.setStringList('archive.topics', v);
+
+  bool get archiveFromLan => _prefs.getBool('archive.fromLan') ?? true;
+  set archiveFromLan(bool v) => _prefs.setBool('archive.fromLan', v);
+
+  bool get archiveFromBluetooth =>
+      _prefs.getBool('archive.fromBluetooth') ?? true;
+  set archiveFromBluetooth(bool v) =>
+      _prefs.setBool('archive.fromBluetooth', v);
+
+  bool get archiveFromRadio => _prefs.getBool('archive.fromRadio') ?? true;
+  set archiveFromRadio(bool v) => _prefs.setBool('archive.fromRadio', v);
+
+  bool get archiveFromWifiDirect =>
+      _prefs.getBool('archive.fromWifiDirect') ?? true;
+  set archiveFromWifiDirect(bool v) =>
+      _prefs.setBool('archive.fromWifiDirect', v);
+
+  bool get archiveMirrorSmall => _prefs.getBool('archive.mirrorSmall') ?? true;
+  set archiveMirrorSmall(bool v) => _prefs.setBool('archive.mirrorSmall', v);
+
   // One cursor per indexer we sync pointers with: (epoch, seq). Eight bytes and
   // a name, persisted — because the whole reason the cursor is a POSITION and
   // not a time is that a node with no clock can still resume after a reboot.

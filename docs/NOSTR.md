@@ -1,10 +1,13 @@
-# NOSTR: every user a relay
+# NOSTR on geogram: every user a relay
 
 > Companion docs: [nostr-client.md](nostr-client.md) (the client, the relay hub
 > and the transports as they exist today), [dht.md in reticulum-dart](../../reticulum-dart/doc/dht.md)
 > (the who-has layer), [folders.md](folders.md), [mesh.md](mesh.md).
 > This file is the **vision and the architecture**; it marks clearly what is
 > built, what is half-built, and what is not built at all.
+>
+> *geogram* is the platform. "Aurora" is only the codename of one edition of it;
+> where code paths below say `aurora/`, read "the app repo".
 
 ## Why
 
@@ -29,231 +32,380 @@ That is not a slogan, it is a storage model with consequences:
 - **No relay is load-bearing.** Any of them can be taken offline, seized, or
   quietly co-opted, and nothing is lost, because none of them was the only copy.
 
-Aurora runs NOSTR over two networks at once: the plain internet (`wss://`
+geogram runs NOSTR over two networks at once: the plain internet (`wss://`
 relays, Blossom servers) **and** Reticulum (the mesh: LAN, BLE, LoRa, RNS hubs,
 public TCP hubs). Same account, same events, same signatures. You keep
 interacting with the internet NOSTR world you already use, and the same posts
 land on Reticulum relays — including your own device. When the major relays of
 today are gone, nothing about your account or your archive changes.
 
-## The scaling problem, and the answer
+## The ecosystem: three roles
+
+Everything below hangs off one separation, and it is the whole design:
+
+> **Finding data, hosting data, and owning data are three different jobs, done
+> by three different kinds of device, and no device is forced into more than
+> the one it volunteered for.**
+
+| Role | Answers | Stores | Typical hardware | Volunteered via |
+|---|---|---|---|---|
+| **Publisher** (leaf) | "here are *my* notes" | its own posts + the authors it follows (notes **and** media) | phone, laptop — anything | nothing to volunteer; this is every user |
+| **Indexer** | "*where* can I find notes from `npub…`" | **pointers only** — a who-has map. Never other people's content | old Android on a charger, home WiFi | the **Indexer wapp** |
+| **Archiver** | "I *hold* a copy of that" | other people's content, up to a quota the owner sets | NAS, home server, a phone with a big card, a LoRa/BLE gateway box | the **Archiver wapp** |
+
+A single device can be all three. Most are only a Publisher, and that is fine —
+a network of pure Publishers already works, it just gets slow to search and
+loses anything nobody happened to follow.
+
+### Publisher — the floor
+
+Every geogram device is a relay for itself. It answers queries about its own
+posts, it keeps the authors it follows (that is what *follow* means here: a
+storage decision, not a display filter), and it carries their media. It is
+battery-powered and mostly asleep, so the network must never make it the first
+thing anyone asks.
+
+### Indexer — the phone book
 
 If a thousand users each host their own relay, the naive design is a thousand
 devices asking a thousand devices "anything new?". Phones would cook their
 batteries doing nothing but answering. Fan-out is what killed every previous
 attempt at this.
 
-The answer is **self-nominated indexers**.
-
-An indexer is an ordinary device that has volunteered: plugged into power, on a
-home WiFi with a real uplink. An old Android phone in a drawer is perfectly
-good hardware for it. Its job is to answer one question:
+An **Indexer** is an ordinary device that volunteered: plugged into power, on a
+home WiFi with a real uplink. An old Android in a drawer is perfectly good
+hardware. It receives, from many users, statements of *what they are willing to
+share*, and it answers one question:
 
 > "Where can I find notes from `npub…`?"
 
-It receives, from many users, statements of *what they are willing to share*,
-and it answers *which devices have what you are asking for*. It is a phone book,
-not a library.
+**An Indexer is not a disk drive.** It gives out locations, not content. An
+Indexer that vanishes costs the network a directory, not an archive — which is
+exactly what stops the whole thing sliding back into "a few big servers that
+have everything", the world we are leaving.
 
-**An indexer is not a disk drive.** It gives out locations, not content. Users
-remain responsible for keeping their own data alive; an indexer that vanishes
-costs the network a directory, not an archive. That is what stops the whole
-thing sliding back into "a few big servers with everything on them", which is
-exactly the world we are trying to leave.
+Indexers **self-nominate**, and they **sync with each other**, because
+indexer-to-indexer traffic is fast and spares the small battery-powered devices.
+When one goes offline you pick another that is still alive with good uptime and
+ask there. No election, no registry, nothing to seize.
 
-Indexers **self-nominate** — anybody can volunteer their hardware — and they
-**sync with each other**, because indexer-to-indexer traffic is fast and spares
-the small battery-powered devices. When an indexer goes offline you pick another
-one that is still alive with good uptime and ask there. There is no election, no
-registry, and nothing to seize.
+### Archiver — the redundancy
 
-Indexers also carry **retention rules** (what is worth keeping a pointer to,
-what is spam) — the anti-abuse half of the design, sketched at the end of this
-doc.
+Pointers are worthless if every copy they point at is asleep or gone. Somebody
+has to be willing to hold **other people's** bytes. That is a separate,
+explicit, quota-bound offer — never an accident of having volunteered to index.
+
+An **Archiver**:
+
+- **Takes a quota from its owner** ("30 GB, no more") and never exceeds it.
+- **Chooses what it takes**: authors it follows, topics it cares about, or
+  *whatever comes over a direct link* (see below). Eviction is oldest-and-least-
+  wanted first, and never touches the owner's own data.
+- **Pulls from small devices.** A phone that holds the only copy of a
+  neighbourhood's photos is one drop away from losing them. An Archiver mirrors
+  what those devices offer to share, then **publishes itself as a provider** —
+  so the DHT starts pointing at the Archiver instead of waking the phone. The
+  phone's battery, and the data, both survive.
+- **Store-and-forwards on direct connections.** LAN, Bluetooth and LoRa peers
+  come and go and have no route to anywhere. An Archiver on those links accepts
+  what they hand it, holds it, and passes it on when the other side appears — the
+  bridge between an off-grid pocket of the mesh and the rest of the world. The
+  machinery for this exists (`RelayCap.storeForward`, `store_forward.dart`,
+  30-day TTL); the Archiver is what makes it a *role a user chooses* instead of
+  a side effect of being plugged in.
+
+An Archiver is not a backup service and makes no promise to any individual. It
+is redundancy: with a handful of them around an author, that author survives the
+loss of any one machine, including their own.
+
+### How the three fit together
+
+```
+   Publisher (phone)                      Publisher (laptop)
+     keeps: own posts                       keeps: own posts
+            + followed authors                     + followed authors
+        │  publishes ProviderRecord              │
+        │  "I hold npub X"                       │
+        ▼                                        ▼
+   ┌──────────────────── DHT (pointer-only) ────────────────────┐
+   │  key = author npub / file sha256 → [signed provider recs]  │
+   └────────▲───────────────────────────────────────▲───────────┘
+            │ anchored at                           │
+      ┌─────┴──────┐                          ┌─────┴──────┐
+      │  INDEXER   │◄──── sync ──────────────►│  INDEXER   │
+      │ who-has map│  (fast, wired, spares    │ who-has map│
+      │ no content │   the phones)            │ no content │
+      └─────┬──────┘                          └────────────┘
+            │ "npub X lives on: phone, laptop, archiver-7"
+            ▼
+      ┌────────────┐   mirrors small devices, publishes itself as a
+      │  ARCHIVER  │   provider, so the DHT points HERE not at a phone
+      │  quota-set │   ─ and store-and-forwards for LAN/BLE/LoRa peers
+      └────────────┘
+```
+
+A read goes: **local store → DHT resolve (asking an Indexer first) →
+connectionless probe of the returned providers → link only to one that answers
+`HAVE`.** Silence costs nothing, so a sleeping phone is never charged for a query
+it cannot answer. Archivers, being awake and fat, get picked over phones for the
+same content — that is the point of publishing a capacity class in the record.
 
 ## What is actually built today
 
 Verified against the code, July 2026. Paths are `reticulum-dart/lib/src/…`
 unless stated.
 
-### Roles and the directory — BUILT
+### Roles and the directory — BUILT (Indexer only)
 
 `services/social/relay_role.dart`:
 
-- `enum RelayRole { leaf, indexer }`.
+- `enum RelayRole { leaf, indexer }` — **there is no Archiver role yet**; see the
+  road below.
 - `RelayCap` bit-flags: `search`, `firehose`, `storeForward`, `archive`, `probe`.
 - **Role is derived from hardware, not from a setting**:
   `RelayAnnouncement.forCapacity()` — a device that is not `unlimited`
-  (charger + WiFi/Ethernet) is a **leaf** and advertises only `probe`. A device
-  that is unlimited becomes an **indexer** (`search | firehose | storeForward |
-  probe`), and one on the top capacity tier (pinned archive / home fibre) also
-  goes `wide` + `archive`. That *is* self-nomination: plug the old phone in, it
-  volunteers; unplug it, it stops. `CapacityGovernor` re-derives it live.
+  (charger + WiFi/Ethernet) is a **leaf** advertising only `probe`. An unlimited
+  device becomes an **indexer** (`search | firehose | storeForward | probe`), and
+  one on the top capacity tier (pinned archive / home fibre) also goes `wide` +
+  `archive`. `CapacityGovernor` re-derives it live.
 - `InterestSet` — the topics and author pubkeys a node aggregates. The network
   shards **by interest**, not by hash range. `wide` = holds everything it sees.
 - `RelayAnnouncement` is the advert itself: `{role, capacity, caps, wide,
   topics[], authorPrefixes[], pubkey, uptimeSeconds}`, msgpack, carried in the
-  **app_data of the `geogram/relay` RNS announce** (≤ ~350 B, so it fits one
-  announce). Authors are advertised as **4-byte prefixes** — enough to shard,
-  not enough to be a mailing list.
+  **app_data of the `geogram/relay` RNS announce** (≤ ~350 B, one announce).
+  Authors are advertised as **4-byte prefixes** — enough to shard, not enough to
+  be a mailing list.
 - `RelayDirectory` — every relay announce heard is observed with its hop count
   (TTL 1 h). `indexers()`, `identityForPubkey(npub) → RnsIdentity`, and
   **`bestIndexer({topic, author})`**, scored: explicit interest match +1000,
   wide/archive +400, capacity `(9-cap)*20`, `−hops*10`, freshness as tiebreak.
 
 So "find another indexer with good uptime and ask there" already works: uptime
-is announced, the directory is live, and selection is one call.
+is announced, the directory is live, selection is one call.
 
 ### Asking a peer without waking it — BUILT
 
 `RelayNode.answerProbe` (`services/social/relay_node.dart`) is a
-**connectionless NOSTR probe**: a query rides a datagram, and a peer that holds
+**connectionless NOSTR probe**: the query rides a datagram, and a peer holding
 nothing **answers with silence** — no link, no Curve25519 handshake, no radio
-burn. If the answer fits a datagram it comes back inline; if not, the peer says
-`HAVE n` and the querier opens a link. This is the mechanism that makes "a
-thousand relays" survivable for phones; it is advertised as `RelayCap.probe` so
-old nodes keep getting links exactly as before.
+burn. If the answer fits a datagram it comes back inline; if not the peer says
+`HAVE n` and the querier opens a link. Advertised as `RelayCap.probe`, so older
+nodes keep getting links exactly as before.
 
 ### The who-has layer — BUILT (for files and folders)
 
-`services/files/dht/` — a Kademlia DHT over RNS links. The important property,
-and the one that makes it the right substrate for indexers:
+`services/files/dht/` — Kademlia over RNS links. The property that makes it the
+right substrate for Indexers:
 
 > **Holders store pointers only.** The only value in the DHT is a signed
-> `ProviderRecord` = *"pubkey X provides sha256 Y, capacity class C, expires
-> in 45 min"* (~176 B, Ed25519-signed by the provider, so a relaying node
-> cannot forge one). No content, ever.
+> `ProviderRecord` = *"pubkey X provides sha256 Y, capacity class C, expires in
+> 45 min"* (~176 B, Ed25519-signed by the provider, so a relaying node cannot
+> forge one). No content, ever.
 
-- Key = first 16 bytes of the sha256 (`dhtFileKey`), or an arbitrary 32-byte key
-  — **folders publish under their NOSTR public key** (`FileTransferNode.publishKey`
-  / `resolveProviders`). Publishing under an *author's npub* is therefore already
-  possible with the code as it stands.
-- `DhtNode`: `k`, `alpha`, iterative FIND_NODE/FIND_VALUE, `store` with
-  anti-abuse caps (`maxStoredKeys`, `maxRecordsPerKey`, `storesRejected`), dead
-  holder pruning (`demoteProvider` after a failed fetch), lazy TTL expiry,
-  liveness eviction after 5 failed RPCs.
+- Key = first 16 bytes of a sha256 (`dhtFileKey`), or an arbitrary 32-byte key —
+  **folders already publish under their NOSTR public key**
+  (`FileTransferNode.publishKey` / `resolveProviders`). Publishing under an
+  *author's* npub is therefore possible with the code as it stands.
+- `DhtNode`: `k`, `alpha`, iterative FIND_NODE/FIND_VALUE, STORE with anti-abuse
+  caps (`maxStoredKeys`, `maxRecordsPerKey`, `storesRejected`), dead-holder
+  pruning (`demoteProvider` after a failed fetch), lazy TTL expiry, liveness
+  eviction after 5 failed RPCs.
 - **Persistence anchors**: `DhtNode(anchors:)` is a set of always-on nodes that
   every STORE also goes to and every resolve asks *first*, regardless of XOR
-  distance. Aurora feeds it **the relay indexers**
-  (`rns_service.dart` `stableAnchors:` = `_relayDir.indexers()` filtered to the
-  good capacity classes, capped to 6). That join — *indexers are the DHT's
-  anchors* — is the load-bearing piece of the whole design, and it is live.
-- Records are republished every 30 min against a 45-min TTL, so a provider that
-  goes away disappears from the directory by itself.
+  distance. The app feeds it **the relay indexers** (`rns_service.dart`
+  `stableAnchors:` = `_relayDir.indexers()` filtered to the good capacity
+  classes, capped to 6). That join — *Indexers are the DHT's anchors* — is the
+  load-bearing piece of the whole design, and it is live.
+- Records republish every 30 min against a 45-min TTL, so a provider that goes
+  away leaves the directory by itself.
 
-### Store-and-forward — BUILT
+### Store-and-forward — BUILT (as a side effect, not as a role)
 
 `services/social/store_forward.dart`: a message for an offline recipient is
-deposited at an indexer advertising `RelayCap.storeForward` (found via the
-directory), and flushed to the recipient when their LXMF destination announces.
-30-day TTL. This is the indexer earning its keep for messaging, not just feeds.
+deposited at a node advertising `RelayCap.storeForward` (found via the
+directory) and flushed when the recipient's LXMF destination announces. 30-day
+TTL. This is the Archiver's job, already implemented — it just has no owner-facing
+role, no quota UI, and no direct-link (LAN/BLE/LoRa) policy yet.
 
 ### The device as a relay — BUILT
 
-- **Over Reticulum**: `RelayNode` answers `REQ` / `COUNT` / `EVENT` /
-  `DEPOSIT` / `DROP` over RNS links (`relay_protocol.dart`), backed by
-  `RelayEventStore` (SQLite + FTS5, NIP-50 search). A **leaf still answers
-  queries about its own posts** — "ask the author directly" is a real path.
+- **Over Reticulum**: `RelayNode` answers `REQ` / `COUNT` / `EVENT` / `DEPOSIT`
+  / `DROP` over RNS links (`relay_protocol.dart`), backed by `RelayEventStore`
+  (SQLite + FTS5, NIP-50 search). A **leaf still answers queries about its own
+  posts** — "ask the author directly" is a real path.
 - **Over the LAN**: `NostrWsServer` — any stock NOSTR client on the LAN can use
   this device as a `wss://` relay, NIP-11 and all.
 - **Media**: `blossom_server.dart` serves content-addressed blobs over HTTP, and
   the same blobs are fetchable over Reticulum by sha256 through
-  `FileTransferNode` + `MediaFileSource`, with a Blossom-style **deposit**
-  opcode (`file_transfer.dart`, BIP-340-authorised) for asking a host to keep a
-  blob. Blossom-over-Reticulum as an HTTP-compatible service does **not** exist;
-  the RNS path is the files layer.
+  `FileTransferNode` + `MediaFileSource`, with a Blossom-style **deposit** opcode
+  (`file_transfer.dart`, BIP-340-authorised) for asking a host to keep a blob —
+  the primitive an Archiver accepts on. Blossom-over-Reticulum as an
+  HTTP-compatible service does **not** exist; the RNS path is the files layer.
 
 ### Retention: what a node keeps — BUILT
 
 `retention_tier.dart` + `host_retention_policy.dart`: every event is tiered
 **self (0) / followed (1) / stranger (2)**. Strangers get a byte slice, a
 notes-per-month cap and a retention window; eviction only ever deletes tier 2,
-never kinds 0/3. Anything that is *about you* — a reply, a repost, a reaction
-carrying your `p` tag — is stored at tier 0 the moment it arrives, which is why
-your notifications and the notes they point at are readable with the radio off.
+never kinds 0/3. Anything *about you* — a reply, a repost, a reaction carrying
+your `p` tag — is stored at tier 0 the moment it arrives, which is why your
+notifications and the notes they point at are readable with the radio off.
 
-**This is the "you keep what matters to you" model, implemented.** Following an
-author is already a storage decision, not just a display decision.
+**This is "you keep what matters to you", implemented.** It is also the skeleton
+of the Archiver quota: `HostQuota{ceilingBytes, strangerSliceBytes,
+strangerNotesPerMonth, strangerRetentionMs}` already exists and is enforced.
 
 ### Two networks, one store — BUILT
 
 The client (`nostr_relay_hub.dart`) is transport-abstract: a relay is a URI.
-`wss://` → the internet, `local` → this device's own store, `rns://<idhash>` →
-a relay on the mesh. Every event from every transport is signature-verified and
-merged into **one** store, so the feed is a single unified cache and a post you
-make goes out over both. The user-facing panel is **NOSTR on Internet** (relays
-+ Blossom servers, add / remove / enable-disable).
+`wss://` → the internet, `local` → this device's own store, `rns://<idhash>` → a
+relay on the mesh. Every event from every transport is signature-verified and
+merged into **one** store, so the feed is a single unified cache and a post goes
+out over both. The user-facing panel is **NOSTR on Internet** (relays + Blossom
+servers: add / remove / enable-disable).
 
 ## What is NOT built (do not assume it)
 
-Honest list, because a doc that overstates is worse than no doc:
-
-1. **Indexers do not yet answer "where", they answer "what".** Today an indexer
-   *is* a relay host: it stores stranger events in its own `RelayEventStore`
-   (under quota) and serves them back. The pointer-only model — an indexer that
-   holds a `who-has` map and no content — is the target, and the DHT already
-   implements exactly that primitive; the two layers are joined only as
-   *anchors* so far, not as *the* answer to "where can I find `npub…`".
-2. **No author→provider records.** Nothing publishes *"I hold notes from
-   npub XYZ"* into the DHT. The mechanism exists (`publishKey(key32)` takes an
+1. **Indexers answer *what*, not *where*.** Today an Indexer *is* a relay host:
+   it stores stranger events in its own `RelayEventStore` (under quota) and
+   serves them back. The pointer-only model is the target; the DHT already
+   implements exactly that primitive, but the two layers are joined only as
+   *anchors* so far — not as *the* answer to "where can I find `npub…`".
+2. **No author→provider records.** Nothing publishes *"I hold notes from npub
+   XYZ"* into the DHT. The mechanism exists (`publishKey(key32)` takes an
    arbitrary 32-byte key, and an npub is exactly 32 bytes); it is not called for
    authors.
-3. **Indexers do not sync with each other.** Each one observes announces and
-   serves what it happens to hold. There is no indexer↔indexer replication
-   channel.
-4. **`rns://` relay URIs are inert in the shipped app.** The relay hub runs on a
-   background isolate that is constructed with `rnsClientFactory: null`
-   (`nostr_engine.dart`), so an `rns://…` entry in the relay list resolves to a
-   null client. All real Reticulum relay traffic goes through `RelayNode` on the
-   main isolate instead. The `NostrRnsClient` class is complete and unused.
-5. **No long-lived subscriptions over RNS.** A `REQ` returns one `RESULT` and
-   ends; mesh "subscriptions" poll. (Correct for a mesh — just don't expect
-   push.)
-6. **No spam cost on DHT stores.** Only count caps. `coin/postage_gate.dart`
+3. **Indexers do not sync with each other.**
+4. **There is no Archiver role.** No `RelayRole.archiver`, no quota UI, no
+   direct-link store-and-forward policy, no "mirror the small devices around me".
+   The parts (deposit opcode, `HostQuota`, `StoreForward`, provider publishing,
+   `_autoSyncTick` mirroring folders on an indexer host) exist and are unjoined.
+5. **`rns://` relay URIs are inert in the shipped app.** The relay hub runs on a
+   background isolate constructed with `rnsClientFactory: null`
+   (`nostr_engine.dart`), so an `rns://…` entry resolves to a null client. All
+   real Reticulum relay traffic goes through `RelayNode` on the main isolate.
+   `NostrRnsClient` is complete and unused.
+6. **No long-lived subscriptions over RNS.** A `REQ` returns one `RESULT` and
+   ends; mesh "subscriptions" poll. Correct for a mesh — just don't expect push.
+7. **No spam cost on DHT stores.** Only count caps. `coin/postage_gate.dart`
    exists and is not wired in.
-7. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
+8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
+
+## Planned: the Indexer wapp
+
+**Purpose: let a person volunteer a device, see what it is doing for the network,
+and take the offer back.** Today the role is inferred from the charger and the
+WiFi, which is right as a *default* but wrong as the *only* way — a user with an
+old phone in a drawer has no way to say "yes, use this", and a user on a metered
+home line has no way to say "no, don't".
+
+Screens:
+
+- **Volunteer** — one switch: *Serve as an Indexer*. States: `off` /
+  `on when plugged in` (the current behaviour) / `always on`. Shows plainly what
+  it costs (uplink, no meaningful disk) and what it does **not** do: *an Indexer
+  stores no one else's posts. It remembers where they are. It is not a backup.*
+- **What I answer** — the interest set (`InterestSet`): topics and authors this
+  node indexes, or **wide** (index everything it hears). Prefilled from what the
+  owner already follows.
+- **Live** — the numbers, because a role nobody can inspect is a role nobody
+  trusts: queries answered/hour, pointers held, distinct authors covered,
+  providers demoted (dead pointers pruned), uptime as announced, peers who chose
+  us as their anchor.
+- **The network** — the `RelayDirectory` as a list: the other Indexers this
+  device knows, their capacity, uptime and hop distance, which one is currently
+  `bestIndexer` for a given author.
+
+Host work behind it: expose the role manager (`RelayRoleManager.applyCapacity` +
+an explicit override), the `InterestSet`, and the `DhtNode` counters
+(`storedKeys`, `replicasStored`, `providersDemoted`, `storesRejected`) through
+the HAL. Wire the road items 1–4 below so the numbers are about *pointers*, not
+about stored notes.
+
+## Planned: the Archiver wapp
+
+**Purpose: let a person donate storage on purpose, with a number they choose,
+and know exactly what is on their disk and why.**
+
+Screens:
+
+- **Quota** — a slider and a number: *hold up to N GB for other people*. This is
+  the whole contract. Current use, free space, what gets evicted next
+  (oldest-and-least-wanted; the owner's own data is never touched). Backed by
+  `HostQuota`, which already enforces a ceiling, a stranger slice, a monthly
+  note cap and a retention window.
+- **What I host** — checkboxes, and they are the interesting part:
+  - *Authors I follow* — the default; redundancy for the people this user
+    already cares about.
+  - *Topics* — the interest set again.
+  - *Whatever arrives over a direct link* — **LAN, Bluetooth, LoRa**. A peer
+    with no route to anywhere hands its data to this device, which holds it and
+    passes it on when the far side appears. This is store-and-forward as an
+    explicit, quota-bound *offer* rather than a side effect of being plugged in.
+    Per-transport switches, because a LoRa gateway wants a very different policy
+    (tiny, precious, slow) from a LAN box.
+  - *Mirror the small devices near me* — pull what battery-powered peers are
+    willing to share, then publish ourselves as a provider so the DHT stops
+    waking them.
+- **What's on my disk** — a real list: author, size, how many other providers
+  hold this (redundancy count, from the DHT), last time somebody actually fetched
+  it. With **Drop** on every row. A user who cannot see and delete what strangers
+  put on their machine has not consented to anything.
+- **Deposits** — inbound "please keep this blob" requests (the BIP-340-authorised
+  deposit opcode already exists): accept / reject policy, and a log.
+
+Host work behind it: a `RelayRole.archiver` (or a capability flag on the
+announce, which is cheaper on the wire — `RelayCap.archive` already exists and
+is currently derived, not chosen), the quota + policy plumbed to `HostQuota` and
+the deposit verdict hook, per-transport admission (the interface a peer arrived
+on is already known), and the mirror loop generalised from the existing
+indexer-host folder mirroring (`_autoSyncTick`).
 
 ## The road
 
-In dependency order. Each step is small and independently useful.
+Dependency order. Each step is small and independently useful.
 
-1. **Publish author-provider records.** When a device decides to keep an author
-   (follow ⇒ tier 1 ⇒ it already stores their notes), publish a `ProviderRecord`
-   under `key = the author's 32-byte pubkey`, exactly as folders already do. Now
-   "who has notes from `npub…`" is a DHT resolve, and the answer is a list of
+1. **Publish author-provider records.** When a device keeps an author (follow ⇒
+   tier 1 ⇒ it already stores their notes), publish a `ProviderRecord` under
+   `key = the author's 32-byte pubkey`, exactly as folders already do. "Who has
+   notes from `npub…`" becomes a DHT resolve, and the answer is a list of
    devices — not a server.
-2. **Resolve-then-ask in the client.** A feed fetch for an author it cannot see
-   goes: local store → DHT resolve (anchored at indexers) → probe the returned
-   providers connectionlessly → link only to one that says `HAVE`. Silence costs
-   nothing; this is what keeps a thousand-relay network from melting phones.
-3. **Make the indexer pointer-only.** An indexer answers `where`, and stores the
-   provider map, not the notes. It may keep a small hot cache of recent events
-   for its advertised interests (that is what `RelayCap.firehose` means), but its
-   promise to the network is the directory, not the archive. Users are told this
-   plainly: *an indexer is not your backup.*
-4. **Indexer↔indexer sync.** Anchored gossip of provider records between nodes
-   advertising `RelayCap.search`, so asking any live indexer gives the same
-   answer, and a dead one costs nothing. Uptime is already announced; prefer the
-   long-lived ones.
-5. **Retention rules on the indexer.** What is worth a pointer: a record signed
-   by a provider that is actually reachable, an author somebody follows, a topic
-   in the interest set. What is not: unsolicited floods (the store caps), records
-   whose provider never answers a fetch (`demoteProvider` already prunes those),
-   and eventually a postage/PoW cost per store for the abusive tail.
-6. **Media follows the same rule.** Following an author keeps their blobs too —
-   Blossom is part of the package. Your phone carries the photos and the videos
-   of the people you care about, fetchable over the internet by sha256 *or* over
-   Reticulum from another device that also kept them.
-7. **Merge the two worlds properly.** Wire `rnsClientFactory` so `rns://` relays
-   are first-class in the same relay list as `wss://` ones (item 4 above), and a
-   single post fans out to internet relays, mesh indexers, and the copy on your
-   own disk, in one operation, with one signature. That is the end state: you use
-   NOSTR exactly as you do today, and it keeps working after the relays you use
-   today are gone.
+2. **Resolve-then-probe-then-ask in the client.** Local store → DHT resolve
+   (anchored at Indexers) → connectionless probe of the providers → link only to
+   one that says `HAVE`. Silence costs nothing; this is what keeps a
+   thousand-relay network from melting phones.
+3. **Make the Indexer pointer-only.** It answers *where* and stores the provider
+   map, not the notes. It may keep a small hot cache of recent events for its
+   advertised interests (that is what `RelayCap.firehose` means), but its promise
+   to the network is the directory. Told to the user in those words: *an Indexer
+   is not your backup.*
+4. **Indexer↔Indexer sync.** Anchored gossip of provider records between nodes
+   advertising `RelayCap.search`, so any live Indexer gives the same answer and a
+   dead one costs nothing. Uptime is already announced; prefer the long-lived.
+5. **The Indexer wapp** (above) — the role becomes something a person grants,
+   inspects and revokes.
+6. **The Archiver role**, then the **Archiver wapp** (above): quota, policy,
+   direct-link store-and-forward, mirror-the-small-devices, and a visible,
+   deletable list of what is being held for others.
+7. **Retention rules on both.** What is worth a pointer: a record signed by a
+   provider that actually answers, an author somebody follows, a topic in the
+   interest set. What is not: unsolicited floods (the store caps), records whose
+   provider never answers a fetch (`demoteProvider` already prunes those), and
+   eventually a postage/PoW cost per store for the abusive tail.
+8. **Media follows the author.** Following keeps their blobs too — Blossom is
+   part of the package. Your phone carries the photos and videos of the people
+   you care about, fetchable over the internet by sha256 *or* over Reticulum from
+   another device that also kept them. Archivers hold the redundant copies.
+9. **Merge the two worlds properly.** Wire `rnsClientFactory` so `rns://` relays
+   are first-class in the same relay list as `wss://` ones, and a single post
+   fans out to internet relays, mesh Indexers, Archivers and the copy on your own
+   disk, in one operation, with one signature. That is the end state: NOSTR works
+   exactly as it does today, and it keeps working after the relays we use today
+   are gone.
 
 ## The one-sentence version
 
-Users keep what they value, indexers remember where it is, and the two networks
-— internet and Reticulum — carry the same signed events, so no relay is ever
-load-bearing again.
+Users keep what they value, Archivers hold the redundant copies, Indexers
+remember where everything is, and the two networks — internet and Reticulum —
+carry the same signed events, so no relay is ever load-bearing again.

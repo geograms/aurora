@@ -169,6 +169,46 @@ class PreferencesService {
   int get strangerServeMb => _prefs.getInt('files.strangerServeMb') ?? 512;
   set strangerServeMb(int v) => _prefs.setInt('files.strangerServeMb', v);
 
+  // ── The physical profile (docs/NOSTR.md) ─────────────────────────────────
+  //
+  // What this device is made of. Split by who can honestly know it: the powered
+  // ring and the throughput are MEASURED, and the rest only a human can state —
+  // no Android API reports a solar panel on the roof.
+  //
+  // Hourly powered samples, oldest first, '1' = had power. 7 days = 168 chars.
+  String get poweredRing => _prefs.getString('node.poweredRing') ?? '';
+  set poweredRing(String v) => _prefs.setString('node.poweredRing', v);
+
+  int get poweredRingHour => _prefs.getInt('node.poweredRingHour') ?? 0;
+  set poweredRingHour(int v) => _prefs.setInt('node.poweredRingHour', v);
+
+  int get observedBytesPerSec => _prefs.getInt('node.bps') ?? 0;
+  set observedBytesPerSec(int v) => _prefs.setInt('node.bps', v);
+
+  // Stated by the user (-1 = not stated; we then use what we can see, and we
+  // never guess "solar" for anybody).
+  int get nodePower => _prefs.getInt('node.power') ?? -1;
+  set nodePower(int v) => _prefs.setInt('node.power', v);
+
+  int get nodeUplink => _prefs.getInt('node.uplink') ?? -1;
+  set nodeUplink(int v) => _prefs.setInt('node.uplink', v);
+
+  int get nodeAutonomyHours => _prefs.getInt('node.autonomyHours') ?? 0;
+  set nodeAutonomyHours(int v) => _prefs.setInt('node.autonomyHours', v);
+
+  // A COARSE geohash of the region this device serves. Empty by default and it
+  // stays that way unless the owner opts in: a phone in a pocket has no business
+  // advertising where it sleeps. This is for infrastructure that WANTS to be
+  // found — the gateway on the hill, the box on the community centre roof.
+  String get nodeGeohash => _prefs.getString('node.geohash') ?? '';
+  set nodeGeohash(String v) => _prefs.setString('node.geohash', v);
+
+  // One entry per antenna: link, range in km, the frequency it LISTENS on, the
+  // mode, and when (the schedule grammar). A machine with a LoRa hat and a VHF
+  // rig has two very different footprints, and one number would lie about both.
+  String get nodeRadios => _prefs.getString('node.radios') ?? '';
+  set nodeRadios(String v) => _prefs.setString('node.radios', v);
+
   // Reticulum first, the internet second. A media fetch over HTTPS hands a
   // server your IP and exactly what you are reading; a mesh fetch hands it a
   // destination hash. The mesh is always tried first — this switch decides

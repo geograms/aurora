@@ -48,6 +48,7 @@ import '../social/store_forward.dart';
 import '../social/follow_set.dart';
 import '../social/keep_policy.dart' show Touch;
 import '../social/keep_service.dart';
+import '../social/node_profile_service.dart';
 import '../social/nostr_relay.dart';
 import '../social/host_retention_policy.dart';
 import '../social/retention_tier.dart';
@@ -2150,6 +2151,9 @@ class RnsService {
               ? RelayRoleManager(
                   selfPubkey: selfPubHex,
                   uptimeProvider: () => uptimeSeconds,
+                  // Power, uplink, radios, coverage — read fresh on every
+                  // announce (docs/NOSTR.md, the physical profile).
+                  nodeProfileProvider: NodeProfileService.instance.build,
                   onChanged: (_) => _announceRelayDest(),
                 )
               : null;
@@ -2308,6 +2312,11 @@ class RnsService {
                       1024 *
                       1024;
             }
+            // Keep the physical profile honest: one sample per hour of whether
+            // this device actually had power. poweredPct is then an observation,
+            // not a boast (docs/NOSTR.md — observed beats claimed).
+            NodeProfileService.instance
+                .sample(powered: p.unlimited || p.servingAllowed);
             _relayRole?.applyCapacity(p);
             // Keep the responder answering queries (so peers can fetch our published
             // profile/notes) regardless of capacity; only the heavy hosting role is
@@ -5329,6 +5338,10 @@ class RnsService {
       _relayRole = RelayRoleManager(
         selfPubkey: selfPubHex,
         uptimeProvider: () => uptimeSeconds,
+        // Read fresh on every re-announce, so a LoRa hat plugged in this
+        // afternoon (or a move onto Starlink) reaches the network without a
+        // restart.
+        nodeProfileProvider: NodeProfileService.instance.build,
         onChanged: (_) => _announceRelayDest(),
       );
       final prof = CapacityGovernor.instance.lastProfile;

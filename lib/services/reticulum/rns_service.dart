@@ -27,6 +27,7 @@ import '../../connections/bluetooth/ble5_radio.dart';
 import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
+import '../files/dht/holder_hint.dart';
 import '../files/dht/provider_record.dart'
     show kCapUnknown, kCapArchive, kCapHomeWifi, kCapCellular;
 import '../files/composite_file_source.dart';
@@ -2010,7 +2011,11 @@ class RnsService {
               '${originPubHex.substring(0, 8)}',
             );
           },
-        );
+        )
+          // When we answer "these devices have it", say what we know about each
+          // of them — so the caller wakes the box on mains rather than a phone
+          // on a metered plan (docs/NOSTR.md).
+          ..holderHint = _holderHintFor;
         _lxmf = LxmfRouter(
           identity: _id!,
           send: (raw) => _transport?.sendLinkAware(raw),
@@ -3160,6 +3165,36 @@ class RnsService {
   }) async {
     if (!_up) return null;
     return _files?.resolveAndFetch(fileHash, timeout: timeout);
+  }
+
+  /// What we can honestly say about a holder when the DHT hands it out.
+  ///
+  /// The DHT knows freshness. Only WE know the hardware — the relay directory
+  /// holds every peer's announce, which carries its power, uplink and radios —
+  /// so we fill that in, and a caller can then prefer the box on mains over
+  /// somebody's phone on a metered plan (docs/NOSTR.md).
+  ///
+  /// It is a hint, not a credential: it is what this node believes, and whether
+  /// the holder actually serves the bytes is the only real evidence.
+  HolderHint? _holderHintFor(Uint8List providerPub) {
+    try {
+      final id = RnsIdentity.fromPublicKey(providerPub);
+      final entry = _relayDir.byIdentity(id);
+      if (entry == null) return null;
+      final p = entry.announcement.profile;
+      final ageSec =
+          ((DateTime.now().millisecondsSinceEpoch - entry.lastSeenMs) ~/ 1000)
+              .clamp(0, 0xffff);
+      return HolderHint(
+        lastHeardSec: ageSec,
+        source: HintSource.direct, // we heard this announce ourselves
+        power: p.power.index,
+        uplink: p.uplink.index,
+        links: p.links,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   // ── "Who has notes from npub X?" — author provider records ────────────────

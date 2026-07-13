@@ -292,6 +292,103 @@ servers: add / remove / enable-disable).
 8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
 
+## Planned: the physical profile — what a node is made of
+
+Every role above is a promise about *software*. Whether a node can keep that
+promise on the worst day of the year is a question about **hardware, power and
+antennas**, and today the code asks only two-thirds of one of those questions
+(`CapacityProfile`: is it charging, and what kind of network — that's it).
+
+That is not enough. **A solar-powered Indexer on Starlink is worth more than a
+hundred fibre boxes when the grid goes down**, and the network has to be able to
+know that *before* it needs it. So every node — Publisher, Indexer, Archiver —
+carries a physical profile, and every node that has to choose a peer can read it.
+
+### What is announced
+
+Added to `RelayAnnouncement` (the `geogram/relay` announce app_data, msgpack,
+short keys, ~20–30 B on top of the existing ~350 B budget — it must never cost a
+second announce packet):
+
+| Field | Key | Values |
+|---|---|---|
+| **Power source** | `ps` | `grid` · `grid+ups` · `solar` · `solar+battery` · `wind/hydro` · `vehicle` · `battery-only` |
+| **Powered fraction** | `pw` | 0–100: **percent of the last 7 days this node actually had power**. Measured by the governor, not typed by the user |
+| **Uplink kind** | `up` | `fibre/wired` · `wifi` · `cellular` · `satellite` (Starlink et al.) · `none` — *offgrid*, mesh-only |
+| **Uplink speed** | `bw` | measured bytes/sec, log-bucketed (one byte: 2^n) — an *observed* number, not a sales figure |
+| **Other links** | `lk` | bitmask: `LoRa` · `Bluetooth` · `WiFi-Direct` · `packet radio / AX.25` · `serial` · `RNS TCP hub` |
+| **Autonomy** | `au` | hours this node expects to keep running with no grid and no sun (battery bank ÷ draw). 0 = unknown |
+
+Two rules keep this honest:
+
+1. **Announce facts, score locally.** A node never announces "I am precious".
+   It announces what it *is*; every asker computes its own score from that. There
+   is nothing to inflate that would be believed, because…
+2. **Claims are corroborated by observation.** A node claiming `pw: 100` that we
+   have heard from twice in a week is scored on the two times we heard it. The
+   `RelayDirectory` already tracks observed uptime, freshness and hop count, and
+   `bw` is checked against what the transfer actually did. **Observed beats
+   claimed, always.** Self-reported physical facts are a *hint that saves a
+   measurement*, never a credential.
+
+`pw`, `bw` and `au` are measured by the existing `CapacityGovernor` (extended: it
+already samples charging state and network kind on a timer — it starts keeping a
+7-day powered-fraction ring and a throughput estimate). `ps`, `up` and `lk` are
+the parts a human must state — nothing on Android can tell you the roof has a
+solar panel on it, and no API reports a LoRa antenna.
+
+### The score, and why it changes with the weather
+
+Every asker computes a **resilience score** locally, from the announced facts and
+its own observations. Two profiles, and the node switches between them by itself:
+
+**Normal times** — the internet is up, and what matters is speed and closeness:
+uplink speed, low hop count, high uptime. A fibre box wins. This is roughly what
+`bestIndexer()` scores today (interest match, capacity class, hops, freshness).
+
+**Degraded mode** — entered when the internet path is *gone*: no `wss://` relay
+reachable, no RNS TCP hub answering, for long enough that it is not a blip. Now
+the weights invert, and the scoring becomes a survivability question:
+
+| Signal | Why it is worth points when things are broken |
+|---|---|
+| **Grid-independent power** (`solar+battery`, `wind/hydro`, high `au`) | It is still running. Nothing else matters if it is dark. |
+| **Grid-independent uplink** (`satellite`) | Starlink survives the local ISP, the local exchange and the local flood. It is a path *out* that does not depend on any infrastructure between here and the horizon. |
+| **Off-grid links** (`LoRa`, `packet radio`, `Bluetooth`) | It can be *reached* without any internet at all — from a phone with no signal, over kilometres, on a battery. |
+| **High powered-fraction, observed** | It was there yesterday, and the day before. |
+| Uplink speed | Still counts, but far below all of the above. A slow node that exists beats a fast node that is a brick. |
+
+So **solar + Starlink + LoRa** is the top of the table in a disaster and
+unremarkable on a Tuesday — which is exactly right, and exactly what a fixed
+score cannot express. A node with that profile should also be *told* it is
+precious, and asked (in the wapp) to keep itself that way: pinned interests, a
+bigger quota, sync partners chosen for reach rather than speed.
+
+Nothing here is a new transport or a new protocol — it is six fields in an
+announce, a governor that already runs, and a scoring function that reads the
+room. That is deliberate: **the disaster case must not depend on code that only
+runs during a disaster.** The same announce, the same directory, the same probe;
+only the weights move.
+
+### Where it shows up
+
+- **`bestIndexer()` / provider selection** — the score replaces the current
+  capacity-class-only ordering, and the DHT's `ProviderRecord` capacity class
+  gains the same treatment (prefer an Archiver that is still powered over one
+  that is not).
+- **DHT anchors** — the persistence anchors an Indexer publishes to should skew
+  toward grid-independent nodes, because an anchor set that all shares one grid
+  is not an anchor set.
+- **Sync partners** — an Indexer in degraded mode syncs with whoever is *still
+  there*, not with whoever is fastest.
+- **Every role's wapp** — a **Hardware** screen where the user states the facts a
+  machine cannot know (power source, antennas, autonomy hours), sees what is
+  being measured for them (powered fraction, throughput), and sees the resulting
+  score in both modes: *"On a normal day this device is an ordinary Indexer. If
+  the grid goes down it becomes one of the most valuable nodes your network
+  has."* People who own such hardware should know it, because they are the ones
+  who will decide whether to keep it running.
+
 ## Planned: Indexer↔Indexer sync — "what changed?"
 
 Indexers exchange **addresses, never content**: the unit of sync is the signed
@@ -422,6 +519,10 @@ Screens:
 - **The network** — the `RelayDirectory` as a list: the other Indexers this
   device knows, their capacity, uptime and hop distance, which one is currently
   `bestIndexer` for a given author.
+- **Hardware** — the physical profile (above): the facts only a human knows
+  (power source, antennas, autonomy hours), what is being measured for them
+  (powered fraction over 7 days, real throughput), and the resulting resilience
+  score **in both modes** — ordinary today, precious when the grid goes down.
 - **Sync** — one row per peer we sync pointers with: its `epoch`, our cursor
   (`seq`, and the time if it has a clock), how far behind we are, records pulled
   and pushed, and when a `SYNC_RESET` last forced a restart. A stuck cursor is
@@ -465,6 +566,10 @@ Screens:
   put on their machine has not consented to anything.
 - **Deposits** — inbound "please keep this blob" requests (the BIP-340-authorised
   deposit opcode already exists): accept / reject policy, and a log.
+- **Hardware** — the same physical-profile screen as the Indexer wapp. It matters
+  more here, not less: an Archiver that dies with the grid is holding the only
+  copy of somebody's photos on a disk that just went dark. A solar Archiver with
+  a LoRa antenna is where the neighbourhood's data should live.
 
 Host work behind it: a `RelayRole.archiver` (or a capability flag on the
 announce, which is cheaper on the wire — `RelayCap.archive` already exists and
@@ -496,21 +601,26 @@ Dependency order. Each step is small and independently useful.
    `SYNC_RESET` over the existing relay link. Any live Indexer then gives the
    same answer and a dead one costs nothing. A clockless node (ESP32 after a
    reboot) resumes on `seq` alone.
-5. **The Indexer wapp** (above) — the role becomes something a person grants,
+5. **The physical profile** (above): six fields on the announce, the governor
+   extended to measure powered-fraction and throughput, a **Hardware** screen in
+   every role's wapp for the facts a machine cannot know, and a resilience score
+   that re-weights itself when the internet path disappears. Do this *before* the
+   wapps, so each wapp ships with its Hardware screen rather than growing one.
+6. **The Indexer wapp** (above) — the role becomes something a person grants,
    inspects and revokes.
-6. **The Archiver role**, then the **Archiver wapp** (above): quota, policy,
+7. **The Archiver role**, then the **Archiver wapp** (above): quota, policy,
    direct-link store-and-forward, mirror-the-small-devices, and a visible,
    deletable list of what is being held for others.
-7. **Retention rules on both.** What is worth a pointer: a record signed by a
+8. **Retention rules on both.** What is worth a pointer: a record signed by a
    provider that actually answers, an author somebody follows, a topic in the
    interest set. What is not: unsolicited floods (the store caps), records whose
    provider never answers a fetch (`demoteProvider` already prunes those), and
    eventually a postage/PoW cost per store for the abusive tail.
-8. **Media follows the author.** Following keeps their blobs too — Blossom is
+9. **Media follows the author.** Following keeps their blobs too — Blossom is
    part of the package. Your phone carries the photos and videos of the people
    you care about, fetchable over the internet by sha256 *or* over Reticulum from
    another device that also kept them. Archivers hold the redundant copies.
-9. **Merge the two worlds properly.** Wire `rnsClientFactory` so `rns://` relays
+10. **Merge the two worlds properly.** Wire `rnsClientFactory` so `rns://` relays
    are first-class in the same relay list as `wss://` ones, and a single post
    fans out to internet relays, mesh Indexers, Archivers and the copy on your own
    disk, in one operation, with one signature. That is the end state: NOSTR works

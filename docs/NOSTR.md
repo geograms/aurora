@@ -400,6 +400,188 @@ is the only honest way to spend it.
   and 10, plus a small `KeepPolicy` sitting between the wapp's "like" and the
   store's `put(tier:)`.
 
+## Abuse: what a hostile network does to us, and what stops it
+
+Everything above is a promise to hold other people's data. That is an open door,
+and it *will* be walked through. The attacks are not hypothetical — they are the
+cheapest things to do to any system like this:
+
+| Attack | What it looks like |
+|---|---|
+| **Sybil flood** | ten thousand generated npubs, each publishing junk, each publishing pointers claiming to hold it |
+| **Eviction attack** | fill an Archiver with bogus notes and blobs until the quota rolls over and **the real, old data is thrown out** — the payload is not the junk, it is the deletion |
+| **Blossom stuffing** | upload garbage blobs, or deposit them, until the disk is gone |
+| **Pointer poison** | publish `ProviderRecord`s for content you do not have, so every resolve wastes a fetch on you |
+| **Amplification** | make a phone serve 4 GB to strangers over cellular, on someone else's dime |
+
+### The first rule: a stranger can never evict
+
+This is the one that matters, and it is a **structural** answer, not a heuristic
+one. The store is already tiered — self (0), followed (1), stranger (2) — and
+`pruneHosted()` **only ever deletes tier 2**. Make that a hard partition with its
+own byte budget:
+
+> **Stranger data can only ever evict stranger data.** No amount of junk, from
+> any number of npubs, can push out a note you liked, an author you follow, or a
+> photo you kept. The junk competes with *itself* for a slice of disk you chose
+> the size of, and everything that matters lives outside that slice.
+
+An eviction attack then achieves nothing except deleting other junk. It is not
+mitigated, it is *pointless* — and that is the difference between a defence and
+a race.
+
+### Cost, identity and reference: three gates on the way in
+
+**1. Nothing anonymous gets stored for free.** Admission is scored, not binary,
+and the ladder is: *me → people I follow → people they follow (WoT, already
+computed for the feed) → a stranger who paid → everyone else.* The first three
+are effectively unlimited (they are the point of the machine). A stranger gets
+the stranger slice, per-pubkey caps within it, and a per-month note count — all
+of which `HostQuota` already enforces; what is missing is that a *new* npub with
+no history and no path to us in the web of trust starts at the bottom of the
+ladder, not in the middle.
+
+**2. A stranger who wants more than the slice pays.** Not money — *cost*. A
+proof-of-work stamp on the event, or the participation coin's postage
+(`coin/postage_gate.dart`, built and unwired). Ten thousand npubs are free to
+generate; ten thousand PoW stamps are not, and that is the entire asymmetry we
+need. The cost applies to **storage and to serving**, not to reading — nobody
+pays to be listened to.
+
+**3. A blob must be spoken for.** This is the Blossom answer, and it is simple:
+**no orphan blobs.** A blob is admitted only if some event *already in our store,
+at a tier we care about*, references its sha256. You cannot fill an Archiver with
+pictures by uploading pictures — you would first have to get a note referencing
+them accepted, which puts you back at gate 1. Uploads from unknown accounts are
+off by default (they already are); the deposit opcode is BIP-340-authorised
+(already is); and a deposit is now also *checked against the reference rule*
+before a byte is written.
+
+### Pointers cannot lie for long
+
+A `ProviderRecord` is signed by the provider, so nobody can forge one *for*
+somebody else, and the DHT already caps `maxRecordsPerKey` and `maxStoredKeys`
+and counts `storesRejected`. What remains is a provider that lies about *itself*
+— claims to hold a file, then does not serve it. `demoteProvider()` already
+exists: a fetch that fails drops the record locally. Make it social: an Indexer
+that hears a demotion for a provider it vouched for **lowers that provider's
+standing in its own answers**, and a provider whose records are demoted repeatedly
+stops being handed out. Lying costs you the only thing you have — being chosen.
+
+### Serving: a budget for strangers, and none for friends
+
+Point (4) of the brief, and it is its own section below: **Bandwidth belongs to
+the owner of the device.** See *Serving quota* further down.
+
+### What is honest to say
+
+None of this makes abuse impossible. It makes it **expensive, self-limiting, and
+incapable of destroying anything you chose to keep** — which is the achievable
+goal. A system that promised more would be lying.
+
+## Reticulum first, the internet second
+
+**Default search order: local store → Reticulum → the public internet.** Not for
+performance — for exposure.
+
+Fetching a file over the internet tells a server, and everyone on the path to it,
+**your IP address and exactly what you are reading**. Blossom is content-addressed
+HTTPS: the sha256 you request *is* the identity of the content, and the request
+carries your address on it. A Reticulum fetch carries neither — destinations are
+cryptographic hashes, the path is a mesh, and the device that answers you knows a
+destination, not a person at an address.
+
+So:
+
+- **Files and media: always try Reticulum first**, even when it is slower. A slow
+  private fetch beats a fast one that publishes your reading list. The internet
+  is the fallback, not the default, and if the blob is available from a peer it is
+  never fetched over HTTP at all.
+- **Notes: local, then the mesh, then the relays.** Same order, same reason. A
+  `REQ` to a public relay tells that relay who you follow, what you search for and
+  when you are awake; a query answered from the store or a mesh peer tells it
+  nothing.
+- **Search terms leave the device last of all.** A NIP-50 search against a public
+  relay is a search *log entry* on somebody else's disk. Search the local FTS5
+  index and the mesh Indexers first; go to the internet only when the user asked
+  for something we plainly do not have, and prefer relays the user chose.
+- **The user is told which path served them.** A small badge — *served over
+  Reticulum* / *fetched from the internet* — because a privacy property nobody can
+  observe is a privacy property nobody should believe. (The transport tag already
+  exists in the chat wapp; the same idea, one layer up.)
+
+The cost is honest: sometimes the mesh does not have it, and the fallback is a
+real fetch with a real IP. That is a *timeout and a fallback*, not a silent
+preference for whatever answers first — and the user can turn the fallback off
+entirely on a device that must never touch the internet.
+
+## What an Indexer actually answers
+
+An Indexer never says "here is the file". It says **"these N devices have it"** —
+and the redundancy is the *point*, not an accident. But a bare list of npubs is
+almost useless: the client still has to guess which one to call, and guessing
+wrong costs a wasted link, a wasted transmission, or a stranger's cellular data.
+
+So the answer to a resolve carries, **per holder**, what a caller needs to choose
+well:
+
+| Per holder | Why the client needs it |
+|---|---|
+| **Provider pubkey + destination** | who to call |
+| **Last heard** (seconds ago) | a holder last seen 3 weeks ago is a lottery ticket; one seen 40 seconds ago is a phone call |
+| **Provenance of that fact** | *"I heard this myself"* vs *"Indexer B told me, and B had heard it 20 minutes before that"*. After sync, freshness is **second-hand**, and the age of the *information* is not the age of the *device*. Both are reported: `heard 5m ago (direct)` vs `heard 30m ago (via B, synced 5m ago)` |
+| **Power + uplink** (from the physical profile) | this is the whole reason the profile exists: **prefer the box on mains and WiFi over the phone on battery and a metered data plan.** Same file, very different cost to the person holding it |
+| **Capacity class** | already in the `ProviderRecord` today |
+| **Radios + listening schedule** | if the only path to a holder is LoRa, the caller needs the frequency and the window before it tries |
+| **Coverage region** | is this holder even in a position to reach me when the internet is down |
+
+The client then picks by a rule the user would recognise as fair: **an awake
+machine on mains and WiFi first; a battery phone on cellular last, and only if
+nothing else has it.** A holder on a metered connection is a *last resort*, and
+the network should feel that way to the person carrying it — the reward for
+volunteering a good machine is that it, and not somebody's phone, is the one that
+gets called.
+
+Wire-wise this is a few extra bytes per holder in the `VALUE` reply (last-heard as
+a varint, a provenance byte, and the announce's capacity/power/uplink nibbles the
+Indexer already holds in its directory). It costs nothing to carry and it removes
+the guesswork entirely.
+
+## Serving quota: bandwidth belongs to the device's owner
+
+Holding data for others is generous. Being made to *pay* to hand it out is not —
+and the two are different taps. A hostile client cannot delete your data (the
+tier partition sees to that), but it can absolutely make your phone push
+gigabytes to strangers over a data plan you are paying for. That is the
+amplification attack, and the answer is a budget with the requester's identity in
+it.
+
+**Trusted requesters are unmetered. Strangers get a budget.**
+
+- **Me, my other devices, the people I follow, and (optionally) their follows** —
+  no restriction. The whole purpose of keeping their data is to hand it back to
+  them.
+- **Everyone else** — a bandwidth quota the owner sets, in the units a human
+  actually thinks in: *"up to 500 MB a day to people I don't know"*, and
+  separately *"…and nothing at all when I'm on cellular"*. `ServeQuota` already
+  has a daily byte budget and a `servingAllowed` flag driven by the capacity
+  governor; what it lacks is **who is asking**, which the link already tells us
+  (every relay/file link is authenticated by the peer's key).
+- **Per-stranger caps under the aggregate**, so one npub cannot eat the whole
+  stranger budget and starve the rest.
+- **Graceful refusal, not silence.** Over budget, a node does not go dark — it
+  answers *"not me, try one of these"* and hands back the other providers from the
+  DHT. The request still gets served, by the machine that volunteered for it. A
+  hostile client, meanwhile, learns nothing and gets nothing.
+- **The defaults are the important part.** A phone on cellular serves strangers
+  **nothing**, by default, today (`serveOnCellular`). That stays. An Archiver on
+  mains and fibre serves generously, by default — because it *volunteered*, and
+  that is what the role means.
+
+The Archiver wapp's **Quota** screen owns the storage half of this; the same panel
+gains the bandwidth half, because to a user they are one question with two
+numbers: *how much of my disk, and how much of my line?*
+
 ## What is NOT built (do not assume it)
 
 1. **Indexers answer *what*, not *where*.** Today an Indexer *is* a relay host:
@@ -427,6 +609,22 @@ is the only honest way to spend it.
    exists and is not wired in.
 8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
+9. **The abuse defences are partial.** Tiering, `HostQuota`, the DHT store caps,
+   `demoteProvider` and a BIP-340-authorised deposit all exist. The **hard tier
+   partition** (a stranger's bytes can only evict a stranger's bytes), the
+   WoT-scored admission ladder, the postage/PoW gate, the **no-orphan-blobs**
+   reference rule, and demotion feeding back into an Indexer's ranking do not.
+10. **Serving is not identity-aware.** `ServeQuota` has a daily byte budget and a
+    cellular switch, but it does not know *who* is asking — so "unmetered for the
+    people I follow, budgeted for strangers" is not expressible yet.
+11. **Resolve answers are bare.** The DHT `VALUE` reply carries provider pubkeys
+    and a capacity class, but not last-heard, provenance, power/uplink, radios or
+    schedule — so a client cannot yet prefer the mains-powered box over somebody's
+    phone on cellular.
+12. **Fetch order is not privacy-ordered.** Media resolution has an internet
+    Blossom tier and an RNS tier, but "Reticulum first, always, and the internet
+    only on a miss" is not enforced end-to-end, and nothing tells the user which
+    path served them.
 
 ## Planned: the physical profile — what a node is made of
 
@@ -968,6 +1166,24 @@ Dependency order. Each step is small and independently useful.
    interest set. What is not: unsolicited floods (the store caps), records whose
    provider never answers a fetch (`demoteProvider` already prunes those), and
    eventually a postage/PoW cost per store for the abusive tail.
+8a. **The abuse defences** (above), and do the **hard tier partition first** — it
+    is the one that makes an eviction attack pointless rather than merely
+    expensive, and it is a few lines in `pruneHosted()` plus a separate byte
+    budget. Then the WoT admission ladder, the no-orphan-blobs rule on deposits
+    and uploads, the postage gate for the tail, and demotion feeding back into
+    Indexer ranking.
+8b. **Identity-aware serving** (above): the peer key is already on the link, so
+    `ServeQuota` learns *who* — unmetered for me/my devices/my follows, a
+    stranger budget the owner sets in MB/day, per-stranger caps under it, nothing
+    at all on cellular by default, and a graceful *"not me, try these"* refusal
+    that hands back the other providers instead of going dark.
+8c. **Rich resolve answers** (above): last-heard + provenance (direct vs synced,
+    and how old the *information* is), power/uplink, radios and schedule per
+    holder, so the client calls the mains-powered box and leaves the phone on
+    cellular alone.
+8d. **Reticulum first, internet second** (above), end to end, with a visible badge
+    saying which path served the user and a switch to turn the internet fallback
+    off entirely.
 9. **Media follows the author.** Following keeps their blobs too — Blossom is
    part of the package. Your phone carries the photos and videos of the people
    you care about, fetchable over the internet by sha256 *or* over Reticulum from

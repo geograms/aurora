@@ -9,6 +9,7 @@ import 'hero_ranker.dart';
 import 'hero_source.dart';
 import 'launcher_visibility.dart';
 import 'nostr_hero_source.dart';
+import 'welcome_hero_source.dart';
 import '../reticulum/rns_service.dart';
 
 /// The launcher's hero carousel, as a feed anything can publish into.
@@ -25,6 +26,9 @@ class HeroFeedService {
       ValueNotifier<List<HeroItem>>(const []);
 
   final List<HeroSource> _sources = [NostrHeroSource(), WappHeroSource()];
+
+  /// Fallback-only source (see [refresh]): never mixed with real content.
+  final WelcomeHeroSource _welcome = WelcomeHeroSource();
 
   void register(HeroSource source) {
     if (_sources.any((s) => s.id == source.id)) return;
@@ -46,6 +50,18 @@ class HeroFeedService {
         gathered.addAll(await s.candidates());
       } catch (_) {
         // A broken source must not blank the hero.
+      }
+    }
+    // Fresh install: nothing has been relayed to us yet, and an empty carousel
+    // for the first minutes of a new app is what makes it look broken. The
+    // welcome cards fill it locally and step aside the moment a real item
+    // arrives — they are only asked for when every other source came back with
+    // nothing.
+    if (gathered.isEmpty) {
+      try {
+        gathered.addAll(await _welcome.candidates());
+      } catch (_) {
+        // keep the empty-state card
       }
     }
     if (serial != _serial) return; // a newer refresh already won

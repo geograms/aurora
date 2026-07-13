@@ -21,9 +21,11 @@ import 'package:reticulum/reticulum.dart' as reticulum;
 
 import 'iwi_profile.dart';
 import '../util/nostr_key_generator.dart';
+import '../services/log_service.dart';
 import '../services/preferences_service.dart';
 import 'identity_backup.dart';
 import 'profile_db.dart';
+import 'profile_encryption.dart';
 import 'profile_storage.dart';
 import 'profile_storage_encrypted.dart';
 import 'storage_paths.dart';
@@ -162,7 +164,15 @@ class ProfileService {
   /// Persist a new (or edited) profile to disk and mark it active.
   /// Safe to call with a profile whose id already exists — that
   /// replaces the previous entry in place.
-  Future<void> saveAndActivate(IwiProfile profile) async {
+  ///
+  /// A brand-new profile is ENCRYPTED straight away (device-key mode: the
+  /// secret lives in the OS keychain, unlock is fingerprint/face — see
+  /// ProfileEncryption.enableWithDeviceKey). Encryption is the default, not
+  /// a thing the user has to find in a settings page after their messages
+  /// have already been written to the disk in the clear.
+  Future<void> saveAndActivate(IwiProfile profile,
+      {bool encrypt = true}) async {
+    final isNew = _profiles.every((p) => p.id != profile.id);
     final without = _profiles.where((p) => p.id != profile.id).toList();
     without.add(profile);
     without.sort((a, b) => a.createdAt.compareTo(b.createdAt));
@@ -171,6 +181,17 @@ class ProfileService {
     await _persist();
     activeProfileNotifier.value = _activeId;
     revision.value++;
+
+    if (isNew && encrypt && profile.nsec.isNotEmpty) {
+      try {
+        await ProfileEncryption.enableWithDeviceKey(profile.id);
+      } catch (e) {
+        // A keychain that refuses to store the key must not cost the user
+        // their profile — they keep an unencrypted one and can turn
+        // encryption on by hand.
+        LogService.instance.add('encryption: default enable failed: $e');
+      }
+    }
   }
 
   /// Replace an existing profile in place (same [id]) without changing

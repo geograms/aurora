@@ -43,7 +43,15 @@ class LaunchCountStore {
     return prefs.topLaunchedWapps(n);
   }
 
-  /// Pinned module bars, or the most-used wapps when the user pinned none.
+  /// What the module bars show on a fresh install: the user has launched
+  /// nothing yet, so "most used" is empty and the bars would fall back to
+  /// whatever the app list happens to order first. These three are the ones
+  /// a new user is meant to open. Overridden the moment they pin or launch
+  /// anything.
+  static const List<String> kDefaultModuleWapps = ['social', 'chat', 'mp4player'];
+
+  /// Pinned module bars, or the most-used wapps when the user pinned none,
+  /// topped up with [kDefaultModuleWapps] on a fresh profile.
   Future<List<String>> preferredModules(int n) => _preferred(n, dock: false);
 
   /// Pinned dock icons, or the most-used wapps when the user pinned none.
@@ -53,6 +61,15 @@ class LaunchCountStore {
     final prefs = await PreferencesService.instance();
     final pinned = dock ? prefs.homeDock : prefs.homeModules;
     if (pinned.isNotEmpty) return pinned.take(n).toList(growable: false);
-    return prefs.topLaunchedWapps(n);
+    final top = prefs.topLaunchedWapps(n);
+    if (dock || top.length >= n) return top;
+    // Fresh profile (or barely used): fill the remaining bars with the
+    // defaults, keeping any real launch history first.
+    final out = List<String>.of(top);
+    for (final id in kDefaultModuleWapps) {
+      if (out.length >= n) break;
+      if (!out.contains(id)) out.add(id);
+    }
+    return out;
   }
 }

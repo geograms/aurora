@@ -28,7 +28,7 @@ void main() {
     final service = ProfileService.instance;
     await service.load();
     final preview = service.generatePreview(nickname: 'Locked One');
-    await service.saveAndActivate(preview);
+    await service.saveAndActivate(preview, encrypt: false);
     await ProfileEncryption.enable(preview.id, 'boot-test 🔒');
     if (remember) {
       // Leave a keep-unlocked device cache behind: a fresh process boots
@@ -36,7 +36,7 @@ void main() {
       // Android path). lockNow would clear it, so don't lock here.
       await ProfileEncryption.unlock(preview.id, 'boot-test 🔒',
           remember: true);
-      expect(ProfileEncryption.hasCachedKeys(preview.id), isTrue);
+      expect(await ProfileEncryption.hasCachedKeys(preview.id), isTrue);
     } else {
       await ProfileEncryption.lockNow(preview.id);
       expect(ProfileEncryption.isUnlocked(preview.id), isFalse);

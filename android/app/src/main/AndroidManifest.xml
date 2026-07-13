@@ -57,6 +57,11 @@
     <!-- In-app updater: install the downloaded APK. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
+    <!-- Unlocking an encrypted profile with fingerprint/face (local_auth →
+         BiometricPrompt). Not a runtime prompt of ours: the OS shows its own
+         sheet when we ask. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+
     <application
         android:label="Geogram"
         android:name=".AuroraApplication"

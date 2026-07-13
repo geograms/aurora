@@ -45,8 +45,8 @@ class PermissionGate {
     NotificationService.instance.show(GeogramNotification(
       level: NotificationLevel.warning,
       title: 'Aurora is locked',
-      body: 'Open Aurora and enter your profile password to receive '
-          'messages in the background.',
+      body: 'Open Aurora and unlock your profile to receive messages in '
+          'the background.',
       source: 'host:encryption',
       scope: NotificationScope.system,
     ));
@@ -77,7 +77,9 @@ class PermissionGate {
     if (active != null &&
         ProfileKeyring.instance.isEncryptedProfile(active.id) &&
         !ProfileKeyring.instance.isUnlocked(active.id)) {
-      if (!await ProfileEncryption.tryUnlockCached(active.id)) {
+      final silent = await ProfileEncryption.canUnlockSilently(active.id) &&
+          await ProfileEncryption.tryUnlockCached(active.id);
+      if (!silent) {
         LogService.instance.add(
             'permissions: profile ${active.id} locked — gated services wait');
         _notifyLockedOnce();

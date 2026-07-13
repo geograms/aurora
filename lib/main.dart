@@ -184,7 +184,9 @@ Future<void> main() async {
       // stays locked; the UnlockPage (UI) or PermissionGate's system
       // notification (headless) take it from there.
       final active = ProfileService.instance.activeProfile;
-      if (active != null && ProfileEncryption.isEncrypted(active.id)) {
+      if (active != null &&
+          ProfileEncryption.isEncrypted(active.id) &&
+          await ProfileEncryption.canUnlockSilently(active.id)) {
         await ProfileEncryption.tryUnlockCached(active.id);
       }
     },

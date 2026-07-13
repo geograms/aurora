@@ -11,14 +11,17 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
 import androidx.core.content.FileProvider
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
-class MainActivity : FlutterActivity() {
+// FlutterFragmentActivity, not FlutterActivity: BiometricPrompt (local_auth,
+// used to unlock an encrypted profile) needs an androidx FragmentActivity —
+// on a plain FlutterActivity it fails with 'no_fragment_activity'.
+class MainActivity : FlutterFragmentActivity() {
     companion object {
         // Held so the foreground service can ping Dart ('onTick') even while
         // the activity is backgrounded. Mirrors AuroraApplication.bgChannel.
@@ -31,6 +34,10 @@ class MainActivity : FlutterActivity() {
     // Dart via getInitialLink), and the channel used to push later links.
     private var linksChannel: MethodChannel? = null
     private var initialLink: String? = null
+
+    // Hardware inline-video playback (MediaPlayer → Flutter texture). UI
+    // engine only — textures need an attached FlutterView.
+    private var hwVideo: HwVideo? = null
 
     // Wi-Fi multicast lock: by default Android drops incoming broadcast/multicast
     // UDP to save power, which would stop the Reticulum LAN auto-peering
@@ -84,6 +91,8 @@ class MainActivity : FlutterActivity() {
         } catch (_: Exception) {
         }
         multicastLock = null
+        hwVideo?.dispose()
+        hwVideo = null
         super.onDestroy()
     }
 
@@ -96,6 +105,8 @@ class MainActivity : FlutterActivity() {
         return FlutterEngineCache.getInstance().get(AuroraApplication.ENGINE_ID)
     }
 
+    override fun shouldDestroyEngineWithHost(): Boolean = false
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         // For a pre-warmed (boot) engine, plugins were already registered when it
         // was created — calling super again double-registers and can spawn a 2nd
@@ -106,19 +117,15 @@ class MainActivity : FlutterActivity() {
             super.configureFlutterEngine(flutterEngine)
         }
 
-        // Bind the bg_service channel (idempotent) and mirror it for the service.
-        BgBridge.attach(this, flutterEngine)
+        // Bind process-wide native bridges once per engine. This includes the
+        // bg_service channel plus BLE/WiFi transports used by the background
+        // service; the Activity only attaches UI to this shared engine.
+        (application as? AuroraApplication)?.rememberFlutterEngine(flutterEngine)
         channel = AuroraApplication.bgChannel
 
         // Update Center channel: APK install + download foreground service.
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, UPDATE_CHANNEL)
             .setMethodCallHandler { call, result -> handleUpdate(call, result) }
-
-        // BLE 5 extended advertising/scanning for the Reticulum broadcast transport.
-        Ble5(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
-
-        // WiFi Direct group management for the mesh bulk data plane.
-        WifiDirect(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
 
         // Deep links (geogram.radio/circle/<key>): expose the launch URI and push
         // any later ones (onNewIntent) to Dart's DeepLinkService.
@@ -133,6 +140,12 @@ class MainActivity : FlutterActivity() {
             }
         // Capture the URI this activity was (re)started with.
         captureLink(intent)
+
+        // Hardware video decode into Flutter textures. flutterEngine.renderer
+        // implements TextureRegistry. Re-registering after an activity restart
+        // replaces the channel handler (old players were disposed above).
+        hwVideo?.dispose()
+        hwVideo = HwVideo(flutterEngine.renderer, flutterEngine.dartExecutor.binaryMessenger)
 
         // Allow receiving LAN broadcast/multicast (Reticulum LAN auto-peering).
         acquireMulticastLock()

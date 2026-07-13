@@ -79,6 +79,8 @@ dependencies:
   encrypted_archive:
     path: packages/encrypted_archive       # per-profile encrypted .ear archive (AES-256-GCM)
   unorm_dart: ^0.3.0                       # NFC normalization for emoji-capable profile passwords
+  flutter_secure_storage: ^10.3.1          # Android Keystore / OS-keychain storage for the profile device key
+  local_auth: ^3.0.2                       # Fingerprint / face unlock for the encrypted profile
 
 dev_dependencies:
   flutter_test:

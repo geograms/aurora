@@ -51,6 +51,7 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
     _nickname = TextEditingController(text: _p.nickname);
     _description = TextEditingController(text: _p.description);
     _refreshBackupStatus();
+    _refreshEncStatus();
   }
 
   Future<void> _refreshBackupStatus() async {
@@ -188,48 +189,143 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
   // ── profile encryption ────────────────────────────────────────────────
 
   bool _encBusy = false;
+  bool _usesDeviceKey = false;
+  bool _hasCachedKeys = false;
+
+  Future<void> _refreshEncStatus() async {
+    final device = await ProfileEncryption.usesDeviceKey(_p.id);
+    final cached = await ProfileEncryption.hasCachedKeys(_p.id);
+    if (!mounted) return;
+    setState(() {
+      _usesDeviceKey = device;
+      _hasCachedKeys = cached;
+    });
+  }
 
   void _snack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  /// Turn encryption on for a profile that predates the encrypt-by-default
+  /// behaviour (or one where it was removed). Device-key mode: no password
+  /// to invent, unlock is fingerprint/face.
   Future<void> _enableEncryption() async {
-    final result = await showDialog<String?>(
+    final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => const _PasswordSetupDialog(
-        title: 'Encrypt this profile',
-        warning:
-            'All existing data of this profile on this device will be '
-            'DELETED (messages, chat history, media). The profile starts '
-            'fresh, fully encrypted.\n\n'
-            'The password (emoji welcome) together with your secret key '
-            'unlocks the data. There is NO recovery if you forget it.',
-        confirmLabel: 'Delete data & encrypt',
+      builder: (ctx) => AlertDialog(
+        title: const Text('Encrypt this profile'),
+        content: const Text(
+          'All existing data of this profile on this device will be DELETED '
+          '(messages, chat history, media). The profile starts fresh, fully '
+          'encrypted.\n\n'
+          'It unlocks with your fingerprint (or the phone\'s screen lock). '
+          'You can add a password afterwards.',
+          style: TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete data & encrypt')),
+        ],
       ),
     );
-    if (result == null) return;
+    if (ok != true) return;
     setState(() => _encBusy = true);
     try {
-      await ProfileEncryption.enable(_p.id, result);
+      await ProfileEncryption.enableWithDeviceKey(_p.id);
       _snack('Profile encrypted. Restart Aurora to complete.');
     } catch (e) {
       _snack('Enable failed: $e');
     }
     if (mounted) setState(() => _encBusy = false);
+    await _refreshEncStatus();
   }
 
-  Future<void> _disableEncryption() async {
-    final pw = await _askPassword(
-      'Remove encryption',
-      'Enter the profile password. The encrypted data on this device will '
-      'be DELETED; the profile returns to unencrypted storage, fresh.',
-      confirmLabel: 'Delete data & decrypt',
+  /// Add a password to a device-key profile: from then on nobody can open
+  /// the data without it, not even with the unlocked phone in their hand.
+  Future<void> _addPassword() async {
+    final pw = await showDialog<String?>(
+      context: context,
+      builder: (ctx) => const _PasswordSetupDialog(
+        title: 'Add a password',
+        warning: 'Your data stays intact. From now on the profile needs this '
+            'password (emoji welcome) — the device key is dropped, and there '
+            'is NO recovery if you forget it.',
+        confirmLabel: 'Set password',
+      ),
     );
     if (pw == null) return;
     setState(() => _encBusy = true);
     try {
-      await ProfileEncryption.disable(_p.id, pw);
+      await ProfileEncryption.addPassword(_p.id, pw);
+      _snack('Password set');
+    } catch (e) {
+      _snack('Could not set password: $e');
+    }
+    if (mounted) setState(() => _encBusy = false);
+    await _refreshEncStatus();
+  }
+
+  /// Drop the password and go back to fingerprint-only unlocking.
+  Future<void> _removePassword() async {
+    final pw = await _askPassword('Remove password',
+        'Enter the current password. The profile stays encrypted, but it '
+        'will unlock with your fingerprint alone.',
+        confirmLabel: 'Remove password');
+    if (pw == null) return;
+    setState(() => _encBusy = true);
+    try {
+      await ProfileEncryption.removePassword(_p.id, pw);
+      _snack('Password removed — fingerprint unlock');
+    } on WrongProfilePassword {
+      _snack('Wrong password');
+    } catch (e) {
+      _snack('Could not remove password: $e');
+    }
+    if (mounted) setState(() => _encBusy = false);
+    await _refreshEncStatus();
+  }
+
+  Future<void> _disableEncryption() async {
+    String? pw;
+    if (_usesDeviceKey) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Remove encryption'),
+          content: const Text(
+            'The encrypted data on this device will be DELETED and the '
+            'profile returns to unencrypted storage, fresh. Anything written '
+            'from then on sits on the disk in the clear.',
+            style: TextStyle(fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Delete data & decrypt')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    } else {
+      pw = await _askPassword(
+        'Remove encryption',
+        'Enter the profile password. The encrypted data on this device will '
+        'be DELETED; the profile returns to unencrypted storage, fresh.',
+        confirmLabel: 'Delete data & decrypt',
+      );
+      if (pw == null) return;
+    }
+    setState(() => _encBusy = true);
+    try {
+      await ProfileEncryption.disable(_p.id, password: pw);
       _snack('Encryption removed. Restart Aurora to complete.');
     } on WrongProfilePassword {
       _snack('Wrong password');
@@ -237,6 +333,7 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
       _snack('Disable failed: $e');
     }
     if (mounted) setState(() => _encBusy = false);
+    await _refreshEncStatus();
   }
 
   Future<void> _changeEncryptionPassword() async {
@@ -503,9 +600,11 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                             style: TextStyle(fontWeight: FontWeight.w600)),
                       ),
                       Text(
-                        ProfileEncryption.isEncrypted(_p.id)
-                            ? 'Enabled'
-                            : 'Off',
+                        !ProfileEncryption.isEncrypted(_p.id)
+                            ? 'Off'
+                            : _usesDeviceKey
+                                ? 'Fingerprint'
+                                : 'Password',
                         style: TextStyle(
                             fontSize: 11, color: cs.onSurfaceVariant),
                       ),
@@ -513,13 +612,18 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    ProfileEncryption.isEncrypted(_p.id)
-                        ? 'Everything this profile stores on this device is '
-                            'encrypted. Unlocked with your password mixed '
-                            'with the secret key.'
-                        : 'Encrypt everything this profile stores on this '
+                    !ProfileEncryption.isEncrypted(_p.id)
+                        ? 'Encrypt everything this profile stores on this '
                             'device. Enabling deletes the profile\'s current '
-                            'data and starts fresh.',
+                            'data and starts fresh.'
+                        : _usesDeviceKey
+                            ? 'Everything this profile stores on this device '
+                                'is encrypted, and unlocks with your '
+                                'fingerprint. Add a password to protect it '
+                                'even from someone holding the unlocked phone.'
+                            : 'Everything this profile stores on this device '
+                                'is encrypted. Unlocked by your password '
+                                'mixed with the secret key.',
                     style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
                   ),
                   const SizedBox(height: 8),
@@ -548,16 +652,30 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                                 icon: const Icon(Icons.lock, size: 16),
                                 label: const Text('Lock now'),
                               ),
-                              OutlinedButton.icon(
-                                onPressed: _changeEncryptionPassword,
-                                icon: const Icon(Icons.password, size: 16),
-                                label: const Text('Change password'),
-                              ),
-                              if (ProfileEncryption.hasCachedKeys(_p.id))
+                              if (_usesDeviceKey)
                                 OutlinedButton.icon(
-                                  onPressed: () {
-                                    ProfileEncryption.clearCachedKeys(_p.id);
-                                    setState(() {});
+                                  onPressed: _addPassword,
+                                  icon: const Icon(Icons.password, size: 16),
+                                  label: const Text('Add password'),
+                                )
+                              else ...[
+                                OutlinedButton.icon(
+                                  onPressed: _changeEncryptionPassword,
+                                  icon: const Icon(Icons.password, size: 16),
+                                  label: const Text('Change password'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: _removePassword,
+                                  icon: const Icon(Icons.fingerprint, size: 16),
+                                  label: const Text('Use fingerprint only'),
+                                ),
+                              ],
+                              if (_hasCachedKeys && !_usesDeviceKey)
+                                OutlinedButton.icon(
+                                  onPressed: () async {
+                                    await ProfileEncryption
+                                        .clearCachedKeys(_p.id);
+                                    await _refreshEncStatus();
                                     _snack('Device key cache cleared');
                                   },
                                   icon: const Icon(Icons.key_off, size: 16),

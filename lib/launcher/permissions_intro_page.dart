@@ -142,6 +142,18 @@ class _PermissionsIntroPageState extends State<PermissionsIntroPage>
                       ?.copyWith(color: cs.onSurfaceVariant),
                 ),
                 const SizedBox(height: 16),
+                // Grant-all sits ABOVE the list: it is what almost everyone
+                // wants, and below a full-height list it was off-screen.
+                if (!_allGranted)
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: _busy ? null : _grantAll,
+                      icon: const Icon(Icons.done_all, size: 18),
+                      label: const Text('Grant all'),
+                    ),
+                  ),
+                if (!_allGranted) const SizedBox(height: 16),
                 for (final item in AndroidPermissionsService.items)
                   _permissionItem(theme, item),
                 const SizedBox(height: 8),
@@ -169,16 +181,6 @@ class _PermissionsIntroPageState extends State<PermissionsIntroPage>
                   ),
                 ),
                 const SizedBox(height: 24),
-                if (!_allGranted)
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _busy ? null : _grantAll,
-                      icon: const Icon(Icons.done_all, size: 18),
-                      label: const Text('Grant all'),
-                    ),
-                  ),
-                const SizedBox(height: 8),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton(

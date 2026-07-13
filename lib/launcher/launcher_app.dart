@@ -163,7 +163,12 @@ class _IwiAppState extends State<IwiApp> {
           !ProfileEncryption.isUnlocked(pid)) {
         return FutureBuilder<bool>(
           key: ValueKey('unlock-$pid'),
-          future: ProfileEncryption.tryUnlockCached(pid).then((ok) async {
+          // Device-key profiles are NEVER unlocked silently in the UI: the
+          // fingerprint prompt on UnlockPage is the lock. Only a password
+          // profile the user told to stay unlocked skips the page.
+          future: ProfileEncryption.canUnlockSilently(pid).then((silent) async {
+            if (!silent) return false;
+            final ok = await ProfileEncryption.tryUnlockCached(pid);
             if (ok) await PermissionGate.startGatedServices();
             return ok;
           }),

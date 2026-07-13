@@ -209,6 +209,13 @@ class PreferencesService {
   String get nodeRadios => _prefs.getString('node.radios') ?? '';
   set nodeRadios(String v) => _prefs.setString('node.radios', v);
 
+  // Does the owner volunteer this device as an Indexer? 'off' | 'auto' (serve
+  // when plugged in — the inferred default) | 'always'. Revoking must be as easy
+  // as granting, or it was never really granted.
+  String get indexerVolunteer =>
+      _prefs.getString('indexer.volunteer') ?? 'auto';
+  set indexerVolunteer(String v) => _prefs.setString('indexer.volunteer', v);
+
   // ── The Archiver (docs/NOSTR.md) ─────────────────────────────────────────
   //
   // An explicit, quota-bound offer to hold OTHER people's data. 0 GB = this

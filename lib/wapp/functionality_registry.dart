@@ -252,6 +252,36 @@ class FunctionalityRegistry {
         ParamDef('filter', 'string', 'JSON {service,geogramOnly,search} (empty = none)'),
       ], ReturnDef('int', 'Bytes written, negated required size if too small')),
     ]),
+    'hal.node': FunctionalityDef('hal.node',
+        'The Indexer role: what this device answers for, and at whose invitation', [
+      EndpointDef('hal_node_status',
+          'Node/Indexer status JSON (volunteer,serving,pointers,authors,syncPeers,hardware\u2026)', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_node_peers',
+          'Indexers and leaves this device knows, as people-widget sections', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_node_set_pref',
+          'Set a node tunable "key=value" (volunteer=off|auto|always)', [
+        ParamDef('kv', 'string', 'key=value'),
+      ], ReturnDef('int', '0 ok, -1 unknown key/bad value')),
+    ]),
+    'hal.archive': FunctionalityDef('hal.archive',
+        'The Archiver role: storage volunteered for other people, and what is on it', [
+      EndpointDef('hal_archive_status',
+          'Archiver status JSON (quotaGb,usedBytes,items,followed,topics,from*\u2026)', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_archive_items',
+          'What is held for others, as people-widget sections (size, tier, age)', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_archive_drop',
+          'Drop one blob held for somebody else (the user must be able to delete it)', [
+        ParamDef('sha', 'string', 'content hash of the blob'),
+      ], ReturnDef('int', '0 ok, -1 on error')),
+      EndpointDef('hal_archive_set_pref',
+          'Set an archiver tunable "key=value" (quotaGb, followed, topics, fromLan, fromBluetooth, fromRadio, fromWifiDirect, mirrorSmall)', [
+        ParamDef('kv', 'string', 'key=value'),
+      ], ReturnDef('int', '0 ok, -1 unknown key/bad value')),
+    ]),
     'hal.mesh': FunctionalityDef(
         'hal.mesh', 'BLE street-mesh registry (neighbors, routes, node status)', [
       EndpointDef('hal_mesh_status',

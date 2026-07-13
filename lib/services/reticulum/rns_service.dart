@@ -27,6 +27,7 @@ import '../../connections/bluetooth/ble5_radio.dart';
 import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
+import '../files/dht/dht_node.dart';
 import '../files/dht/holder_hint.dart';
 import '../files/dht/pointer_log.dart';
 import '../files/dht/pointer_sync.dart';
@@ -3236,6 +3237,11 @@ class RnsService {
 
   RelayNode? get relayNode => _relay;
   RelayDirectory get relayDirectory => _relayDir;
+  RelayRoleManager? get relayRole => _relayRole;
+
+  /// The DHT node, for the counters the Indexer wapp shows. A role nobody can
+  /// inspect is a role nobody trusts.
+  DhtNode? get dhtNode => _files?.dht;
 
   /// Are we an Indexer right now? Derived from the hardware (charger + a real
   /// uplink), never from a wish — a phone on battery is a leaf, and leaves are

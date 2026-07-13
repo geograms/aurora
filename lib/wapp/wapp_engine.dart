@@ -24,6 +24,7 @@ import '../services/blossom_server.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/log_service.dart';
+import '../services/social/node_role_api.dart';
 import '../services/mesh/mesh_bulk_spool.dart';
 import '../services/mesh/mesh_service.dart';
 import '../services/mesh/mesh_store.dart';
@@ -3024,6 +3025,60 @@ class WappEngine {
     );
 
     // ── Mesh HAL (BLE street mesh, docs/mesh.md) ─────────────────────────────
+    // ── hal.node: the Indexer role, as something a person grants and revokes ──
+    final halNodeStatus = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(NodeRoleApi.instance.statusJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halNodePeers = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(NodeRoleApi.instance.peersJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halNodeSetPref = WasmFunction(
+      (int kvPtr, int kvLen) =>
+          NodeRoleApi.instance.setPref(_readStr(kvPtr, kvLen)),
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+
+    // ── hal.archive: what this device holds for other people, and on whose say ─
+    final halArchiveStatus = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(NodeRoleApi.instance.archiveStatusJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halArchiveItems = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(NodeRoleApi.instance.archiveItemsJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halArchiveDrop = WasmFunction(
+      (int shaPtr, int shaLen) =>
+          NodeRoleApi.instance.archiveDrop(_readStr(shaPtr, shaLen)),
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halArchiveSetPref = WasmFunction(
+      (int kvPtr, int kvLen) =>
+          NodeRoleApi.instance.archiveSetPref(_readStr(kvPtr, kvLen)),
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     final halMeshStatus = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
@@ -3320,6 +3375,13 @@ class WappEngine {
       WasmImport('hal', 'nostr_dm_send', halNostrDmSend),
       WasmImport('hal', 'nostr_dm_decrypt', halNostrDmDecrypt),
       WasmImport('hal', 'rns_status', halRnsStatus),
+      WasmImport('hal', 'node_status', halNodeStatus),
+      WasmImport('hal', 'node_peers', halNodePeers),
+      WasmImport('hal', 'node_set_pref', halNodeSetPref),
+      WasmImport('hal', 'archive_status', halArchiveStatus),
+      WasmImport('hal', 'archive_items', halArchiveItems),
+      WasmImport('hal', 'archive_drop', halArchiveDrop),
+      WasmImport('hal', 'archive_set_pref', halArchiveSetPref),
       WasmImport('hal', 'mesh_status', halMeshStatus),
       WasmImport('hal', 'mesh_devices', halMeshDevices),
       WasmImport('hal', 'mesh_scf_status', halMeshScfStatus),

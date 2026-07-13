@@ -381,13 +381,42 @@ only the weights move.
   is not an anchor set.
 - **Sync partners** — an Indexer in degraded mode syncs with whoever is *still
   there*, not with whoever is fastest.
-- **Every role's wapp** — a **Hardware** screen where the user states the facts a
-  machine cannot know (power source, antennas, autonomy hours), sees what is
-  being measured for them (powered fraction, throughput), and sees the resulting
-  score in both modes: *"On a normal day this device is an ordinary Indexer. If
-  the grid goes down it becomes one of the most valuable nodes your network
-  has."* People who own such hardware should know it, because they are the ones
-  who will decide whether to keep it running.
+- **Settings → Hardware** (below) — stated once, for the device, and read by
+  every role.
+
+### Stated once: Settings → Hardware
+
+The physical profile describes **the device**, not a role. A user who volunteers
+the same box as an Indexer *and* an Archiver must not be asked twice what it is
+plugged into, and two answers that can disagree is a bug waiting to be filed.
+
+So it lives in **Settings, as its own full-size panel** — not a section squeezed
+into a list, because the point is to make the *combinations* easy to state:
+power source × uplink kind × which radios are actually attached. A full panel can
+lay those out as pickers and toggles that read like a description of the machine
+in front of you; a settings row cannot.
+
+The panel holds:
+
+- **What only a human knows** — power source (grid / grid+UPS / solar /
+  solar+battery / wind / vehicle / battery-only), uplink kind (wired / WiFi /
+  cellular / satellite / none), autonomy in hours without grid or sun, and which
+  extra links are physically attached (LoRa, Bluetooth, WiFi-Direct, packet
+  radio, serial). Sensible defaults, so a normal phone user never touches it.
+- **What the device measured for them** — powered fraction over the last 7 days,
+  real observed throughput. Read-only, and shown next to the claims so the two
+  can be compared honestly.
+- **What it means** — the resilience score in **both** modes, in plain words:
+  *"On a normal day this device is an ordinary node. If the grid goes down it
+  becomes one of the most valuable ones your network has."* People who own such
+  hardware should be told, because they are the ones who decide whether to keep
+  it running.
+
+Roles **read** this profile; they never restate it. The Indexer and Archiver
+wapps each show a one-line summary of it with a link straight into the panel
+(*"Solar · Starlink · LoRa · 96% powered — change in Settings"*), and everything
+else — the announce, the score, anchor choice, sync-partner choice — is derived
+from the single stored profile. One source of truth, one place to edit it.
 
 ## Planned: Indexer↔Indexer sync — "what changed?"
 
@@ -519,10 +548,6 @@ Screens:
 - **The network** — the `RelayDirectory` as a list: the other Indexers this
   device knows, their capacity, uptime and hop distance, which one is currently
   `bestIndexer` for a given author.
-- **Hardware** — the physical profile (above): the facts only a human knows
-  (power source, antennas, autonomy hours), what is being measured for them
-  (powered fraction over 7 days, real throughput), and the resulting resilience
-  score **in both modes** — ordinary today, precious when the grid goes down.
 - **Sync** — one row per peer we sync pointers with: its `epoch`, our cursor
   (`seq`, and the time if it has a clock), how far behind we are, records pulled
   and pushed, and when a `SYNC_RESET` last forced a restart. A stuck cursor is
@@ -566,10 +591,12 @@ Screens:
   put on their machine has not consented to anything.
 - **Deposits** — inbound "please keep this blob" requests (the BIP-340-authorised
   deposit opcode already exists): accept / reject policy, and a log.
-- **Hardware** — the same physical-profile screen as the Indexer wapp. It matters
-  more here, not less: an Archiver that dies with the grid is holding the only
-  copy of somebody's photos on a disk that just went dark. A solar Archiver with
-  a LoRa antenna is where the neighbourhood's data should live.
+The physical profile is **not** repeated here — it is the device's, stated once in
+Settings → Hardware. The wapp shows the one-line summary and links into it. It
+matters more to an Archiver than to anyone, though: an Archiver that dies with the
+grid is holding the only copy of somebody's photos on a disk that just went dark,
+and a solar Archiver with a LoRa antenna is where a neighbourhood's data should
+live — so the summary line is what the quota screen should be read against.
 
 Host work behind it: a `RelayRole.archiver` (or a capability flag on the
 announce, which is cheaper on the wire — `RelayCap.archive` already exists and
@@ -602,10 +629,11 @@ Dependency order. Each step is small and independently useful.
    same answer and a dead one costs nothing. A clockless node (ESP32 after a
    reboot) resumes on `seq` alone.
 5. **The physical profile** (above): six fields on the announce, the governor
-   extended to measure powered-fraction and throughput, a **Hardware** screen in
-   every role's wapp for the facts a machine cannot know, and a resilience score
+   extended to measure powered-fraction and throughput, **one full-size Hardware
+   panel in Settings** where the device is described once, and a resilience score
    that re-weights itself when the internet path disappears. Do this *before* the
-   wapps, so each wapp ships with its Hardware screen rather than growing one.
+   wapps, so both read a profile that already exists instead of each growing its
+   own copy of it.
 6. **The Indexer wapp** (above) — the role becomes something a person grants,
    inspects and revokes.
 7. **The Archiver role**, then the **Archiver wapp** (above): quota, policy,

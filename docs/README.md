@@ -19,7 +19,8 @@ file/line pointers into the code), not an idealised spec.
 | [mesh.md](mesh.md) | The BLE street mesh: gossip route beacons, distance‑vector routing, GATT custody transfer, store‑and‑forward, politeness backoff. |
 | [folders.md](folders.md) | Mutable shared folders over Reticulum: key‑addressed directories backed by a signed, append‑only op‑log. |
 | [sync.md](sync.md) | Collab (multi‑writer) folders and cross‑device sync built on top of mutable folders. |
-| [nostr.md](nostr.md) | The NOSTR client wapp and its transport‑abstract relay hub (wss + Reticulum + local store). |
+| [NOSTR.md](NOSTR.md) | **The vision**: every user a relay, self‑nominated indexers that answer *where* (not *what*), and one account living on the internet and on Reticulum at once. Marks what is built and what is not. |
+| [nostr-client.md](nostr-client.md) | The NOSTR client wapp and its transport‑abstract relay hub (wss + Reticulum + local store). |
 | [esp32.md](esp32.md) | The ESP32 dongle firmware map: project layout, which firmware is which, BLE protocol state, and the traps. |
 | [performance.md](performance.md) | Where CPU and memory actually go: the isolate layout, the built‑in `perf:` telemetry, the bugs we fixed (and how each was found), how to measure without fooling yourself, and what is deliberately **not** worth optimising. |
 

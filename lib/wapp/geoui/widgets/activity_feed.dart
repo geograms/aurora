@@ -331,14 +331,14 @@ class _ActivityFeedState extends State<ActivityFeed> {
         constraints: const BoxConstraints(maxWidth: 640),
         child: Column(
           children: [
-            // Filter sits right below the nav tabs (Activity/Messages/…), with
-            // the composer card underneath it (its own tinted box + margins set
-            // it apart from the stream — no extra dividers needed).
+            // The filter bar stays at the top (it says WHAT you are reading),
+            // but the composer belongs at the BOTTOM, on the thumb, where the
+            // Chat wapp puts it. Writing is the last thing you do on this
+            // screen, not the first — and a composer above the stream pushed
+            // the newest post down and out of sight.
             if (!widget.readOnly) ...[
               _filterBar(cs),
               Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
-              _composer(cs),
-              if (_newCount > 0) _newPostsPill(cs),
             ],
             Expanded(
               child: RefreshIndicator(
@@ -404,6 +404,13 @@ class _ActivityFeedState extends State<ActivityFeed> {
                       ),
               ),
             ),
+            // Composer last: it sits on the bottom edge, above the keyboard,
+            // exactly where Chat's is. The "N new posts" pill rides just above
+            // it so the two live together instead of straddling the stream.
+            if (!widget.readOnly) ...[
+              if (_newCount > 0) _newPostsPill(cs),
+              _composer(cs),
+            ],
           ],
         ),
       ),

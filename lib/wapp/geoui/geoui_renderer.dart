@@ -1,5 +1,7 @@
 /// GeoUI Flutter renderer — turns AST blocks into Material 3 widgets.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:qr_flutter/qr_flutter.dart';
@@ -729,6 +731,12 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
                 onSelectionChanged: (v) {
                   widget.bindings.setValue(name, v.first);
                   setState(() {});
+                  // Same contract as a bool's `apply`: choosing an option can
+                  // take effect at once (a search filter has no Apply button).
+                  final apply = field.getString('apply');
+                  if (apply != null && apply.isNotEmpty) {
+                    widget.onAction?.call(apply);
+                  }
                 },
               ),
             )
@@ -752,6 +760,10 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
                 if (v != null) {
                   widget.bindings.setValue(name, v);
                   setState(() {});
+                  final apply = field.getString('apply');
+                  if (apply != null && apply.isNotEmpty) {
+                    widget.onAction?.call(apply);
+                  }
                 }
               },
             ),
@@ -808,9 +820,23 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
           ? const TextStyle(fontFamily: 'monospace', fontSize: 13)
           : null,
       controller: _controllerFor(name, val),
-      onChanged: (v) => widget.bindings.setValue(name, v),
+      onChanged: (v) {
+        widget.bindings.setValue(name, v);
+        // `"live": true` — the wapp wants to react to every keystroke (search
+        // as you type). Debounced, so a fast typist does not fire a relay
+        // query per letter; the action is named "<field>_changed".
+        if (field.getBool('live') == true) {
+          _liveDebounce?.cancel();
+          _liveDebounce = Timer(
+            const Duration(milliseconds: 220),
+            () => widget.onAction?.call('${name}_changed'),
+          );
+        }
+      },
     );
   }
+
+  Timer? _liveDebounce;
 
   // ── Action ──────────────────────────────────────────────────────────
 

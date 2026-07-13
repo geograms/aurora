@@ -3530,6 +3530,11 @@ class _WappPageState extends State<WappPage>
               ? const [] // a graph panel owns the screen — no wapp options menu
               : [
                   ..._channelIndicators(),
+                  // A menu screen that asks for it ("appbar": true) also gets a
+                  // direct icon here, left of the ☰. Search is the case this is
+                  // for: burying it in a menu makes people not use it, and a
+                  // whole tab for something you reach for once an hour is worse.
+                  ..._appBarPanelButtons(),
                   // A single top-right options menu (☰). When a conversation thread is
                   // open its room actions (e.g. Recurring bulletin, Private) are folded
                   // in at the top — no separate gear icon.
@@ -3669,6 +3674,38 @@ class _WappPageState extends State<WappPage>
   /// Screen-level actions of the active tab when it is a people screen. People
   /// screens fill the body, so their actions have no inline home — they live in
   /// the top-right options menu instead of a separate in-panel dropdown.
+  /// The icon a menu screen shows (its declared `icon`, else the name mapper).
+  IconData _panelIcon(int i) {
+    final declared = _menuScreens[i].getString('icon');
+    return (declared != null && declared.isNotEmpty)
+        ? geoUiResolveIcon(declared)
+        : _iconForScreen(_menuNames[i]);
+  }
+
+  /// Icon buttons in the app bar for menu screens flagged `"appbar": true`.
+  /// They open exactly the same panel the options menu would.
+  List<Widget> _appBarPanelButtons() {
+    final out = <Widget>[];
+    for (var i = 0; i < _menuScreens.length; i++) {
+      if (_menuScreens[i].getBool('appbar') != true) continue;
+      final name = _menuNames[i];
+      // The screen's own `icon` first — the name mapper only knows a handful
+      // of well-known screens and falls back to a generic dashboard glyph,
+      // which is how a Search panel ended up with a grid icon.
+      out.add(
+        IconButton(
+          icon: Icon(_panelIcon(i)),
+          tooltip: _i18n.resolve(name),
+          onPressed: () => setState(() {
+            _panelScreen = _menuScreens[i];
+            _panelName = name;
+          }),
+        ),
+      );
+    }
+    return out;
+  }
+
   List<GeoUiBlock> _activeScreenMenuActions() {
     final tc = _tabController;
     if (tc == null || _tabScreens.isEmpty) return const [];
@@ -3803,7 +3840,10 @@ class _WappPageState extends State<WappPage>
           PopupMenuItem<String>(
             value: 'panel:$i',
             child: ListTile(
-              leading: Icon(_iconForScreen(_menuNames[i])),
+              // The screen's own icon when it declares one — the name mapper
+              // only knows a few well-known screens (Search and Relay servers
+              // both came out as a generic grid).
+              leading: Icon(_panelIcon(i)),
               title: Text(_menuNames[i]),
               contentPadding: EdgeInsets.zero,
               dense: true,
@@ -4004,7 +4044,7 @@ class _WappPageState extends State<WappPage>
               c.name == 'search_results',
         )
         .firstOrNull;
-    if (searchField != null) return _buildSearchScreen(searchField);
+    if (searchField != null) return _buildSearchScreen(screen, searchField);
 
     // Feed screen — a screen whose only content is a single `$type:"chat"`
     // field (e.g. the Activity tab) renders as a full-height feed + composer
@@ -4026,15 +4066,28 @@ class _WappPageState extends State<WappPage>
     return _buildSettingsScreen(screen);
   }
 
-  /// Search panel: a query box that hands the text to the wapp's `search_go`
-  /// command (which fans out to the local index + connected relays), over a
-  /// read-only results feed reusing the post cards + tap→thread/profile wiring.
-  Widget _buildSearchScreen(GeoUiBlock chatField) {
+  /// Search panel: a query box over a read-only results feed (the post cards +
+  /// tap→thread/profile wiring), and — when the wapp declares them — its own
+  /// filter fields between the two.
+  ///
+  /// Searching happens AS YOU TYPE (debounced): a Search button that has to be
+  /// pressed is one step nobody takes, and the wapp's query fans out to the
+  /// local index and every relay, internet and Reticulum alike.
+  Widget _buildSearchScreen(GeoUiBlock screen, GeoUiBlock chatField) {
     void run() {
       _fieldValues['search_input'] = _nostrSearchCtl.text.trim();
       _sendCommand('search_go');
-      FocusScope.of(context).unfocus();
     }
+
+    // Everything the wapp put on the panel other than the query box and the
+    // results feed: its filters. Rendered through the normal GeoUI renderer so
+    // a wapp can add a filter without the host learning about it.
+    final filters = screen.children
+        .where((c) =>
+            c.keyword == 'field' &&
+            c.name != 'search_results' &&
+            c.name != 'search_input')
+        .toList();
 
     return Column(
       children: [
@@ -4045,11 +4098,29 @@ class _WappPageState extends State<WappPage>
               Expanded(
                 child: TextField(
                   controller: _nostrSearchCtl,
+                  autofocus: true,
                   textInputAction: TextInputAction.search,
                   onSubmitted: (_) => run(),
+                  onChanged: (_) {
+                    setState(() {}); // the clear button
+                    _searchDebounce?.cancel();
+                    _searchDebounce =
+                        Timer(const Duration(milliseconds: 250), run);
+                  },
                   decoration: InputDecoration(
                     hintText: 'Search posts and people',
                     prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _nostrSearchCtl.text.isEmpty
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.close, size: 18),
+                            tooltip: 'Clear',
+                            onPressed: () {
+                              _nostrSearchCtl.clear();
+                              run();
+                              setState(() {});
+                            },
+                          ),
                     isDense: true,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(24),
@@ -4061,13 +4132,88 @@ class _WappPageState extends State<WappPage>
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              FilledButton(onPressed: run, child: const Text('Search')),
             ],
           ),
         ),
+        // The wapp's filters, as one compact line of chips.
+        //
+        // Rendering them through the ordinary form renderer gave a stack of
+        // full-width segmented buttons that wrapped their own labels ("Everyt
+        // hing", "An y tim e") and pushed the results off the screen. Filters
+        // are an adjustment, not a form: they belong on one scrollable line.
+        if (filters.isNotEmpty) _buildSearchFilterBar(filters),
+        Divider(
+          height: 1,
+          color: Theme.of(context).colorScheme.outlineVariant.withAlpha(60),
+        ),
         Expanded(child: _buildChatFeedScreen(chatField)),
       ],
+    );
+  }
+
+  /// One line of filter chips for the search panel, built from the wapp's own
+  /// filter fields: `enum` → a chip per option (single choice), `bool` → a
+  /// toggle chip. Each carries the field's `apply` command, so touching one
+  /// re-runs the search immediately.
+  Widget _buildSearchFilterBar(List<GeoUiBlock> filters) {
+    final cs = Theme.of(context).colorScheme;
+
+    void fire(GeoUiBlock f) {
+      final apply = f.getString('apply');
+      if (apply != null && apply.isNotEmpty) _sendCommand(apply);
+    }
+
+    final chips = <Widget>[];
+    for (final f in filters) {
+      final name = f.name ?? '';
+      if (name.isEmpty) continue;
+
+      if (f.type == 'enum') {
+        final options = f.childrenOf('option');
+        final current = _fieldValues[name]?.toString() ??
+            f.getString('default') ??
+            (options.isNotEmpty ? (options.first.name ?? '') : '');
+        for (final o in options) {
+          final value = o.name ?? '';
+          final label = _i18n.resolve(o.getString('label') ?? value);
+          chips.add(ChoiceChip(
+            label: Text(label),
+            selected: current == value,
+            visualDensity: VisualDensity.compact,
+            labelStyle: const TextStyle(fontSize: 12.5),
+            onSelected: (_) {
+              setState(() => _fieldValues[name] = value);
+              fire(f);
+            },
+          ));
+        }
+      } else if (f.type == 'bool') {
+        final on = _fieldValues[name] == true;
+        chips.add(FilterChip(
+          avatar: Icon(Icons.image_outlined,
+              size: 16, color: on ? cs.onSecondaryContainer : cs.onSurfaceVariant),
+          label: Text(_i18n.resolve(f.getString('label') ?? name)),
+          selected: on,
+          visualDensity: VisualDensity.compact,
+          labelStyle: const TextStyle(fontSize: 12.5),
+          onSelected: (v) {
+            setState(() => _fieldValues[name] = v);
+            fire(f);
+          },
+        ));
+      }
+    }
+    if (chips.isEmpty) return const SizedBox.shrink();
+
+    return SizedBox(
+      height: 44,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        itemCount: chips.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 6),
+        itemBuilder: (_, i) => Center(child: chips[i]),
+      ),
     );
   }
 

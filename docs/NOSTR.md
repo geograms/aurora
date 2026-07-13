@@ -264,6 +264,142 @@ merged into **one** store, so the feed is a single unified cache and a post goes
 out over both. The user-facing panel is **NOSTR on Internet** (relays + Blossom
 servers: add / remove / enable-disable).
 
+## The bridge: bring your account, keep what you touch
+
+**The common case is not a fresh start.** Somebody arrives with a NOSTR account
+they already have, following people who are perfectly happy on Damus and Primal
+and have never heard of Reticulum. Nothing about that should change. geogram is
+an ordinary NOSTR client to them: it reads the internet relays, it posts to the
+internet relays, the conversation carries on exactly as before.
+
+What changes is what happens *behind* that, and it costs the user nothing to
+notice: **while you are connected to both networks — and most of the time you
+are — every interaction quietly becomes a copy that survives the internet.**
+
+### The rule: to touch it is to keep it
+
+A like is not a fleeting gesture. It is a *statement that this thing mattered*,
+and it is the cheapest, truest signal we will ever get about what is worth
+preserving. So we take it literally:
+
+> **When you interact with an event, that event — not just your reaction to it —
+> is archived on your own relay, at tier 0, forever, and served from there to
+> Reticulum.**
+
+| You do this | What is kept |
+|---|---|
+| **Like / react** (kind 7) | your reaction **and the note you reacted to**, its author's profile (kind 0), and its media |
+| **Reply** (kind 1 with an `e` tag) | your reply, the note you replied to, and **the thread above it** (parents up to the root — a reply with no context is worthless in ten years) |
+| **Repost / quote** (kind 6 / 1 with a `q`) | the reposted note and its author's profile. You put your name on it; you keep it |
+| **Bookmark / save** | the note, its media, its author. This is the *explicit* form of the same act |
+| **Zap** | same as a like — you paid for it, you certainly meant it |
+| **Follow** (kind 3) | already true today: tier 1, their notes are kept as they arrive |
+
+Everything else you merely scrolled past stays a stranger (tier 2), lives under
+quota, and is evicted in time. **The archive grows along the shape of your
+attention** — which is the only ranking function nobody can buy.
+
+### Media comes too, while it still can
+
+A liked note whose photo lives on a Blossom server is half a memory. So the same
+act pulls the referenced blobs into the local `MediaArchive` (content-addressed by
+sha256, already built), from the internet, **now, while the internet is there** —
+the whole point being that later, it is not. That is a real cost, so it is a real
+setting: notes always; media by size cap, on WiFi, or never (Settings, and the
+Archiver wapp for the machines with disks). But the default for something you
+*liked* is: **take the picture too.**
+
+### And then it is on Reticulum
+
+Once it is in your store it is on the mesh, because your store *is* your relay
+(`RelayNode` serves it, `local` in the relay list is the same events). Nothing
+else has to happen for a peer over LoRa to be able to fetch a note that was
+published on Damus this morning and liked by you at lunch.
+
+Two further steps make it *findable* rather than merely present:
+
+- **Publish the pointer.** A `ProviderRecord` under the author's npub and under
+  the event id — *"I hold this"* — so an Indexer can answer "where can I find that
+  note" with your device. (Road item 1.)
+- **Push, don't just hold.** Events you author, and events you kept, are offered
+  to the Reticulum Indexers and Archivers you know, so the copy is not a single
+  point of failure sitting in your pocket.
+
+### When you write a note
+
+Publishing is one action with two destinations, and they carry different things
+on purpose:
+
+1. **To the public internet relays — the note itself.** Exactly as any other
+   NOSTR client: signed, `EVENT`, to every enabled `wss://` relay. Your friends
+   on Damus see it immediately; nothing about your existing social life changes.
+2. **To your own store — the note itself, tier 0.** It is yours. It is now
+   served over Reticulum by your own `RelayNode`, and it is readable on your
+   device with every radio off.
+3. **To the Reticulum Indexers — *information about* the note, not the note.**
+   An Indexer is a phone book, and a new post is a phone-book update: a signed
+   `ProviderRecord` saying *"npub X has new material; the copy lives here"*,
+   under the author key and the event id. Bytes stay with the author. That is
+   what keeps an Indexer from silently turning back into a server, and it is why
+   this scales to a thousand publishers on a hilltop LoRa link — a pointer is
+   ~176 bytes whatever the size of the note.
+
+**Archivers may then pull the content** — that is their role, and the pointer is
+how they find out there is something to pull. So the copy stops being a single
+point of failure sitting in your pocket, without any Indexer ever having been
+asked to hold it.
+
+The mesh side is a **queue, not a blocking step**. If Reticulum is unreachable
+right now (or the internet is), the outbound sits in an outbox and drains when a
+path appears. Publishing never waits on the worse of the two networks — and
+because an event id is a content hash, delivering it twice is free. Which is the
+next point.
+
+### The same signature on both sides — why the merge is trivially safe
+
+This only works because NOSTR made the right choice: **an event id is the sha256
+of its content, and the signature is over that id.** So:
+
+- The *same* event fetched from Damus and from a LoRa gateway is byte-identical
+  and has the same id. Merging is just a `put` — dedup is by id, and the store
+  already does it.
+- There is no "internet version" and "mesh version" of anything. No forks, no
+  reconciliation, no sync conflicts. One key, one signature, two pipes.
+- A post you make goes out to `wss://` relays **and** to `local` **and** to the
+  mesh in one operation, with one signature. Your friends on Damus see it; a
+  neighbour with no internet sees the same bytes.
+
+### The transition is a fade, not a flag day
+
+Nobody has to be told "the internet relays are gone now, switch". As the public
+relays get worse — dropping old events, going paid, disappearing, being leaned
+on — what you kept is already here, already served, already findable over
+Reticulum, and your reading and posting continue against a relay list that simply
+has fewer `wss://` entries in it than it used to. **The migration happened years
+ago, one like at a time.**
+
+An honest limit, said out loud: this preserves **what your community touched**,
+not "all of NOSTR". Nobody is archiving the firehose, and pretending otherwise
+would be the lie that sinks the whole idea. A note nobody ever liked, replied to,
+reposted or followed the author of will not survive the death of the relay it
+sat on — and that is the correct outcome, because storage is finite and attention
+is the only honest way to spend it.
+
+### Where this stands in the code
+
+- **Built**: the unified store (every transport merges into one `RelayEventStore`,
+  verified by signature, deduped by id); tier 0 pinning of everything that
+  `p`-tags you; `RelayNode` serving that store over RNS; `MediaArchive`,
+  content-addressed, fetchable over both HTTP/Blossom and RNS; posting fanned out
+  to the relay list.
+- **Not built**: the touch rule itself (a like does not currently pin its
+  *target* — it pins your reaction), thread-parent backfill, media prefetch on
+  interaction, the provider records that make a kept or newly-written note
+  findable, the notify-the-Indexers half of publishing, and the outbox that lets
+  a publish survive one of the two networks being down. That is road items 1, 2
+  and 10, plus a small `KeepPolicy` sitting between the wapp's "like" and the
+  store's `put(tier:)`.
+
 ## What is NOT built (do not assume it)
 
 1. **Indexers answer *what*, not *where*.** Today an Indexer *is* a relay host:
@@ -787,11 +923,17 @@ indexer-host folder mirroring (`_autoSyncTick`).
 
 Dependency order. Each step is small and independently useful.
 
+0. **The touch rule + the bridge** (above): a `KeepPolicy` between the wapp's
+   like/reply/repost/bookmark and `store.put(tier:)`, so interacting with an
+   internet note pins **the note**, its author's profile, its thread parents and
+   its media — locally, at tier 0. Plus the publish path notifying the Reticulum
+   Indexers, and an outbox so a publish survives either network being down. This
+   is first because it is what makes everything below have something to point at.
 1. **Publish author-provider records.** When a device keeps an author (follow ⇒
-   tier 1 ⇒ it already stores their notes), publish a `ProviderRecord` under
-   `key = the author's 32-byte pubkey`, exactly as folders already do. "Who has
-   notes from `npub…`" becomes a DHT resolve, and the answer is a list of
-   devices — not a server.
+   tier 1 ⇒ it already stores their notes) or keeps a note by the touch rule,
+   publish a `ProviderRecord` under `key = the author's 32-byte pubkey` (and the
+   event id), exactly as folders already do. "Who has notes from `npub…`" becomes
+   a DHT resolve, and the answer is a list of devices — not a server.
 2. **Resolve-then-probe-then-ask in the client.** Local store → DHT resolve
    (anchored at Indexers) → connectionless probe of the providers → link only to
    one that says `HAVE`. Silence costs nothing; this is what keeps a

@@ -648,16 +648,19 @@ is in `main` with tests, and the device-validated ones say so.
    `SYNC_REQ`/`SYNC_RES`/`SYNC_RESET` on the relay protocol. What is missing is
    the *scheduler*: nothing yet picks sync partners from the directory and runs
    the exchange on a timer.
-3. **The Archiver: policy BUILT, UI and direct-link admission NOT.**
-   `ArchiverPolicy` + `admitToArchive` are written and tested (silence is not
-   consent; a quota is a ceiling; a direct-link peer gets in on the strength of
-   the link; everything else must be something the owner volunteered for), and
-   every deposit now passes through them. **Missing**: the wapp (quota slider,
-   what's-on-my-disk with a Drop button), the mirror-the-small-devices loop, and
-   — the honest gap — the transport proxy cannot yet say which interface a link
-   arrived on, so the LAN/Bluetooth/LoRa switches are stored and honoured by the
-   policy but nothing can currently trigger them; every deposit is judged as if
-   it came off the internet.
+3. ~~The Archiver~~ — **BUILT and device-validated.** `ArchiverPolicy` +
+   `admitToArchive` (silence is not consent; a quota is a ceiling; a direct-link
+   peer gets in on the strength of the link; everything else must be something
+   the owner volunteered for), enforced on every deposit. The **direct-link
+   admission now fires**: the main isolate already ingests every packet with its
+   arrival interface, so it remembers it per link and a LAN/Bluetooth/LoRa peer
+   is recognised as one with no route to anywhere else. An unknown interface
+   reads as the internet — the safe default, asserted by test. The
+   **mirror-the-small-devices loop** runs: an Archiver pulls what the leaves
+   around it share, then publishes itself, so the DHT hands out the mains box
+   instead of somebody's phone. And the **Archiver wapp** ships: opens at 0 GB,
+   raises in 5 GB steps, and lists everything held for others with a drop on
+   every row.
 4. ~~Resolve answers are bare.~~ **BUILT.** The `VALUE` reply now carries a
    6-byte `HolderHint` per record: last-heard, whether that is first-hand or came
    from a sync (a rumour is discounted), and the holder's power, uplink and
@@ -677,7 +680,11 @@ is in `main` with tests, and the device-validated ones say so.
    feeding back into an Indexer's ranking.
 8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
-9. **The Indexer and Archiver wapps.** Planned below.
+9. ~~The Indexer and Archiver wapps~~ — **BUILT and device-validated.** The
+   Indexer wapp grants/inspects/revokes the role (volunteer off / when plugged
+   in / always) and shows what the device answers for; the Archiver wapp owns the
+   quota, the policy and the what's-on-my-disk list. New HAL families `hal.node`
+   and `hal.archive`.
 10. **Search is not yet privacy-ordered.** Media and single notes are (the mesh
     is resolved and asked first, and a kept note now has a pointer of its own so
     it can be found by id). A NIP-50 *search* still goes to the relays before the

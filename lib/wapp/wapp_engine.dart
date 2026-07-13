@@ -38,6 +38,7 @@ import 'package:hex/hex.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 import '../profile/profile_db.dart';
+import '../profile/profile_storage_encrypted.dart';
 import 'package:pointycastle/export.dart' as pc;
 
 /// State for a single hal_process_exec subprocess. Lives in
@@ -235,6 +236,36 @@ class WappEngine {
   // hal_file_* state. Same handle convention as _procs.
   final Map<int, _WappFileState> _files = {};
   int _nextFileHandle = 1;
+
+  /// Flush a write/append hal_file handle. Paths inside an encrypted
+  /// profile land in profile.ear (append = read + concat there — archive
+  /// entries have no append); everything else is plain dart:io.
+  void _flushWappFile(_WappFileState s) {
+    if (s.mode != 1 && s.mode != 2) return;
+    try {
+      final enc = EncryptedProfileStorage.routeAbsolutePath(s.path);
+      if (enc == null) {
+        File(s.path).writeAsBytesSync(
+          s.writeBuf,
+          mode: s.mode == 2 ? FileMode.append : FileMode.write,
+        );
+        return;
+      }
+      var bytes = Uint8List.fromList(s.writeBuf);
+      if (s.mode == 2) {
+        final existing = enc.storage.readBytesSync(enc.rel);
+        if (existing != null && existing.isNotEmpty) {
+          bytes = Uint8List(existing.length + s.writeBuf.length)
+            ..setRange(0, existing.length, existing)
+            ..setRange(existing.length, existing.length + s.writeBuf.length,
+                s.writeBuf);
+        }
+      }
+      enc.storage.writeBytesSync(enc.rel, bytes);
+    } catch (_) {
+      // best-effort flush, same contract as before
+    }
+  }
 
   // hal_socket_* state. Same handle convention as _procs.
   final Map<int, _WappSocketState> _sockets = {};
@@ -1744,13 +1775,19 @@ class WappEngine {
         final path = _readStr(pathPtr, pathLen);
         if (path.isEmpty || mode < 0 || mode > 2) return -1;
         final s = _WappFileState(path: path, mode: mode);
+        // Paths inside an encrypted profile are served from profile.ear
+        // instead of the raw filesystem (docs/plan-encrypted-storage.md).
+        final enc = EncryptedProfileStorage.routeAbsolutePath(path);
         if (mode == 0) {
           try {
-            s.readBuf = File(path).readAsBytesSync();
+            s.readBuf = enc != null
+                ? enc.storage.readBytesSync(enc.rel)
+                : File(path).readAsBytesSync();
+            if (s.readBuf == null) return -1;
           } catch (_) {
             return -1;
           }
-        } else {
+        } else if (enc == null) {
           try {
             final parent = File(path).parent;
             if (!parent.existsSync()) parent.createSync(recursive: true);
@@ -1802,13 +1839,7 @@ class WappEngine {
       (int h) {
         final s = _files.remove(h);
         if (s == null) return;
-        if (s.mode == 1) {
-          try { File(s.path).writeAsBytesSync(s.writeBuf); } catch (_) {}
-        } else if (s.mode == 2) {
-          try {
-            File(s.path).writeAsBytesSync(s.writeBuf, mode: FileMode.append);
-          } catch (_) {}
-        }
+        _flushWappFile(s);
       },
       params: [ValueTy.i32],
     );
@@ -3395,13 +3426,7 @@ class WappEngine {
     // Flush any open write/append files so a wapp that forgot to close
     // doesn't silently lose data. Reads can be dropped.
     for (final s in _files.values) {
-      if (s.mode == 1) {
-        try { File(s.path).writeAsBytesSync(s.writeBuf); } catch (_) {}
-      } else if (s.mode == 2) {
-        try {
-          File(s.path).writeAsBytesSync(s.writeBuf, mode: FileMode.append);
-        } catch (_) {}
-      }
+      _flushWappFile(s);
     }
     _files.clear();
     // Release any socket handles this engine left open — each is a view onto a

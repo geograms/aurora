@@ -25,6 +25,7 @@ import '../services/preferences_service.dart';
 import 'identity_backup.dart';
 import 'profile_db.dart';
 import 'profile_storage.dart';
+import 'profile_storage_encrypted.dart';
 import 'storage_paths.dart';
 
 class ProfileService {
@@ -190,8 +191,17 @@ class ProfileService {
 
   /// Per-profile storage root (`devices/<id>/`) for any profile id — used
   /// to read/write that profile's avatar image. (cf. [activeProfileStorage].)
-  ProfileStorage storageForProfile(String id) =>
-      ScopedProfileStorage(geogramRootStorage(), 'devices/$id');
+  ///
+  /// Encrypted profiles (keyslot.json present) get the routing backend that
+  /// keeps loose files inside profile.ear; plain profiles get the plain
+  /// filesystem scope, exactly as before.
+  ProfileStorage storageForProfile(String id) {
+    if (ProfileKeyring.instance.isEncryptedProfile(id)) {
+      return EncryptedProfileStorage(
+          id, geogramRootStorage().getAbsolutePath('devices/$id'));
+    }
+    return ScopedProfileStorage(geogramRootStorage(), 'devices/$id');
+  }
 
   /// Switch the active profile to [id]. Fires the notifier so the
   /// launcher rescans. Throws [StateError] if the id is unknown.
@@ -242,9 +252,6 @@ class ProfileService {
   ProfileStorage? activeProfileStorage() {
     final active = activeProfile;
     if (active == null) return null;
-    return ScopedProfileStorage(
-      geogramRootStorage(),
-      'devices/${active.id}',
-    );
+    return storageForProfile(active.id);
   }
 }

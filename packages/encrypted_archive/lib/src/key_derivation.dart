@@ -197,7 +197,7 @@ class KeyDerivation {
   ///
   /// Byte-compatible with [encrypt]: same key/nonce produce the same
   /// ciphertext and 16-byte auth tag.
-  EncryptedData encryptSync(
+  static EncryptedData encryptSync(
     Uint8List plaintext,
     Uint8List keyBytes,
     Uint8List nonce,
@@ -226,7 +226,7 @@ class KeyDerivation {
   /// Decrypt data using AES-256-GCM, synchronous (pointycastle).
   ///
   /// Throws [ArchiveCryptoException] on authentication failure.
-  Uint8List decryptSync(
+  static Uint8List decryptSync(
     Uint8List ciphertext,
     Uint8List authTag,
     Uint8List keyBytes,

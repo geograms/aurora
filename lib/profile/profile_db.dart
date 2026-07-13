@@ -16,6 +16,7 @@
  * io-only: do not import from web-shared code.
  */
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -31,7 +32,9 @@ import 'storage_paths.dart';
 @visibleForTesting
 String? profileDbRootOverride;
 
-String _storageRoot() =>
+/// Storage root used for profile-path mapping (override-aware; normally
+/// `geogramRootStorage().basePath`).
+String profileStorageRoot() =>
     profileDbRootOverride ?? geogramRootStorage().basePath;
 
 /// Thrown when a database inside an encrypted profile is opened before the
@@ -58,6 +61,15 @@ class ProfileKeyring {
 
   final Map<String, UnlockedProfileKeys> _unlocked = {};
 
+  /// Listeners fired (fire-and-forget) when a profile locks, so holders of
+  /// derived resources (open profile.ear archives) can close them.
+  final List<Future<void> Function(String profileId)> onLock = [];
+
+  /// Listeners fired (fire-and-forget) right after a profile unlocks. The
+  /// encrypted storage backend uses this to pre-open profile.ear so the
+  /// sync (WASM HAL) paths find it ready.
+  final List<Future<void> Function(String profileId)> onUnlock = [];
+
   bool isUnlocked(String profileId) => _unlocked.containsKey(profileId);
 
   UnlockedProfileKeys? keysFor(String profileId) => _unlocked[profileId];
@@ -65,19 +77,27 @@ class ProfileKeyring {
   void putKeys(String profileId, UnlockedProfileKeys keys) {
     _unlocked[profileId]?.dispose();
     _unlocked[profileId] = keys;
+    for (final listener in onUnlock) {
+      unawaited(listener(profileId));
+    }
   }
 
-  /// Drop a profile's keys (zeroing the master key). Callers must close
-  /// any open databases/archives of that profile first.
+  /// Drop a profile's keys (zeroing the master key). Fires [onLock] so the
+  /// encrypted storage backend closes its archive; database handles opened
+  /// via [openProfileDb] must be closed by their owners.
   void lock(String profileId) {
-    _unlocked.remove(profileId)?.dispose();
+    final keys = _unlocked.remove(profileId);
+    if (keys == null) return;
+    for (final listener in onLock) {
+      unawaited(listener(profileId));
+    }
+    keys.dispose();
   }
 
   void lockAll() {
-    for (final keys in _unlocked.values) {
-      keys.dispose();
+    for (final id in _unlocked.keys.toList()) {
+      lock(id);
     }
-    _unlocked.clear();
   }
 
   /// Whether the profile with [profileId] has encryption enabled on disk.
@@ -85,7 +105,7 @@ class ProfileKeyring {
       File(_keyslotPath(profileId)).existsSync();
 
   String _keyslotPath(String profileId) =>
-      '${_storageRoot()}/devices/$profileId/$keyslotFileName';
+      '${profileStorageRoot()}/devices/$profileId/$keyslotFileName';
 }
 
 bool _sqlcipherLoaded = false;
@@ -120,7 +140,7 @@ class ProfileDbLocation {
 /// dir somewhere else via preferences — those databases stay plain; the
 /// plan documents this limitation).
 ProfileDbLocation? locateProfileDb(String absPath) {
-  final root = _storageRoot().replaceAll('\\', '/');
+  final root = profileStorageRoot().replaceAll('\\', '/');
   final norm = absPath.replaceAll('\\', '/');
   final prefix = '$root/devices/';
   if (!norm.startsWith(prefix)) return null;

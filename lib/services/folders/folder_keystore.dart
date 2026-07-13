@@ -8,8 +8,8 @@
  * can use ':memory:'. Headless: dart:io + dart:convert + nostr_crypto only.
  */
 import 'dart:convert';
-import 'dart:io';
 
+import '../../profile/secure_file.dart';
 import '../../util/nostr_crypto.dart';
 
 class FolderKey {
@@ -50,9 +50,11 @@ class FolderKeystore {
   void _load() {
     if (_path == ':memory:') return;
     try {
-      final f = File(_path);
-      if (!f.existsSync()) return;
-      final list = jsonDecode(f.readAsStringSync());
+      // Folder master keys are write-authority secrets: encrypted at rest
+      // when the profile is encrypted, plain file otherwise.
+      final content = SecureProfileFile.readString(_path);
+      if (content == null) return;
+      final list = jsonDecode(content);
       if (list is List) {
         for (final e in list) {
           final k = FolderKey.fromJson(e);
@@ -65,10 +67,8 @@ class FolderKeystore {
   void _save() {
     if (_path == ':memory:') return;
     try {
-      final parent = File(_path).parent;
-      if (!parent.existsSync()) parent.createSync(recursive: true);
-      File(_path).writeAsStringSync(
-          jsonEncode([for (final k in _keys.values) k.toJson()]));
+      SecureProfileFile.writeString(
+          _path, jsonEncode([for (final k in _keys.values) k.toJson()]));
     } catch (_) {/* best-effort */}
   }
 

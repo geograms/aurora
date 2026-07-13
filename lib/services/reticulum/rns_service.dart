@@ -57,6 +57,7 @@ import '../folders/folder_service.dart';
 import '../folders/folder_state.dart';
 import '../folders/folder_subscriptions.dart';
 import '../../profile/profile_service.dart';
+import '../../profile/secure_file.dart';
 import '../preferences_service.dart';
 import '../../util/nostr_crypto.dart';
 import '../../util/nostr_nip19.dart';
@@ -2571,16 +2572,15 @@ class RnsService {
     final path = identityPath;
     if (path != null && path.isNotEmpty) {
       try {
-        final f = File(path);
-        if (f.existsSync()) {
-          final prv = f.readAsBytesSync();
-          if (prv.length == 64) {
-            final id = await RnsIdentity.fromPrivateKey(
-              Uint8List.fromList(prv),
-            );
-            LogService.instance.add('RNS: loaded identity ${id.hexHash}');
-            return id;
-          }
+        // SecureProfileFile: the 64-byte private key is encrypted at rest
+        // when the profile is encrypted, plain file otherwise.
+        final prv = SecureProfileFile.readBytes(path);
+        if (prv != null && prv.length == 64) {
+          final id = await RnsIdentity.fromPrivateKey(
+            Uint8List.fromList(prv),
+          );
+          LogService.instance.add('RNS: loaded identity ${id.hexHash}');
+          return id;
         }
       } catch (e) {
         LogService.instance.add(
@@ -2592,9 +2592,7 @@ class RnsService {
     final prv = id.getPrivateKey();
     if (path != null && path.isNotEmpty && prv != null) {
       try {
-        final f = File(path);
-        f.parent.createSync(recursive: true);
-        f.writeAsBytesSync(prv, flush: true);
+        SecureProfileFile.writeBytes(path, prv);
         LogService.instance.add('RNS: new identity ${id.hexHash} (saved)');
       } catch (e) {
         LogService.instance.add('RNS: identity save failed ($e)');

@@ -64,7 +64,7 @@ void main() {
       final plaintext = Uint8List.fromList(utf8.encode('hello sync world 🔒'));
 
       // sync encrypt == async encrypt (GCM is deterministic given key+nonce)
-      final syncEnc = kd.encryptSync(plaintext, keyBytes, nonce);
+      final syncEnc = KeyDerivation.encryptSync(plaintext, keyBytes, nonce);
       final asyncEnc = await kd.encrypt(plaintext, SecretKey(keyBytes), nonce);
       expect(syncEnc.ciphertext, equals(asyncEnc.ciphertext));
       expect(syncEnc.authTag, equals(asyncEnc.authTag));
@@ -79,7 +79,7 @@ void main() {
       expect(asyncDec, equals(plaintext));
 
       // sync decrypt of async ciphertext
-      final syncDec = kd.decryptSync(
+      final syncDec = KeyDerivation.decryptSync(
         asyncEnc.ciphertext,
         asyncEnc.authTag,
         keyBytes,
@@ -89,17 +89,16 @@ void main() {
     });
 
     test('decryptSync rejects tampered ciphertext', () {
-      final kd = KeyDerivation(const ArchiveOptions());
       final keyBytes = Uint8List.fromList(List.generate(32, (i) => i));
       final nonce = Uint8List.fromList(List.generate(12, (i) => i));
-      final enc = kd.encryptSync(
+      final enc = KeyDerivation.encryptSync(
         Uint8List.fromList(utf8.encode('payload')),
         keyBytes,
         nonce,
       );
       enc.ciphertext[0] ^= 0xFF;
       expect(
-        () => kd.decryptSync(enc.ciphertext, enc.authTag, keyBytes, nonce),
+        () => KeyDerivation.decryptSync(enc.ciphertext, enc.authTag, keyBytes, nonce),
         throwsA(isA<ArchiveCryptoException>()),
       );
     });

@@ -958,7 +958,7 @@ class EncryptedArchive {
       final authTag = chunk['auth_tag'] as Uint8List;
 
       final chunkNonce = _keyDerivation.createChunkNonce(fileNonce, sequence);
-      final decrypted = _keyDerivation.decryptSync(
+      final decrypted = KeyDerivation.decryptSync(
         ciphertext,
         authTag,
         fileKey,
@@ -1035,7 +1035,7 @@ class EncryptedArchive {
         );
 
         final chunkNonce = _keyDerivation.createChunkNonce(fileNonce, sequence);
-        final encrypted = _keyDerivation.encryptSync(compressed, fileKey, chunkNonce);
+        final encrypted = KeyDerivation.encryptSync(compressed, fileKey, chunkNonce);
         final chunkHash = KeyDerivation.sha256(chunk);
 
         _db.execute(

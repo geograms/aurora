@@ -213,6 +213,19 @@ class UnlockedProfileKeys {
   /// SQLCipher `PRAGMA key = "x'<hex>'"` value for [relPath].
   String dbKeyHex(String relPath) => HEX.encode(dbKey(relPath));
 
+  /// Raw 32-byte AES-GCM key for an individually-encrypted loose file at
+  /// profile-relative [relPath] (used for secrets like rns_identity.key
+  /// that must stay directly on the filesystem — see SecureProfileFile).
+  Uint8List fileKey(String relPath) {
+    _ensureLive();
+    return KeyDerivation.hkdfSha256(
+      _pmk,
+      Uint8List(0),
+      Uint8List.fromList(utf8.encode('aurora-file-v1:$relPath')),
+      32,
+    );
+  }
+
   /// Serialize for the app-private "keep unlocked on this device" cache.
   Map<String, dynamic> toCacheJson() {
     _ensureLive();

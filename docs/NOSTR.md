@@ -292,6 +292,112 @@ servers: add / remove / enable-disable).
 8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
 
+## Planned: Indexer↔Indexer sync — "what changed?"
+
+Indexers exchange **addresses, never content**: the unit of sync is the signed
+`ProviderRecord` (*"pubkey X provides key K, capacity C, expires at T"*, ~176 B),
+which is exactly what the DHT already stores. Because every record is signed by
+the provider itself, an Indexer can pass on a record it received from a third
+party and the receiver still verifies it end-to-end — a relaying Indexer cannot
+forge, retarget or resurrect a pointer. That is what makes gossip between them
+safe, and what lets a fresh Indexer fill its map from a peer instead of by
+waiting for a thousand phones to re-announce.
+
+Indexer-to-indexer traffic is fast and wired, so this is where the load should
+sit: the phones announce once, the Indexers spread it among themselves.
+
+### The pointer log
+
+Each Indexer keeps its pointer map as an **append-only log**, and every entry
+gets, at the moment it is accepted:
+
+- **`seq`** — a strictly increasing 64-bit counter, local to this Indexer, that
+  never repeats and never goes backwards. It is a *position in my log*, not a
+  measure of anything.
+- **`ts`** — the local wall-clock time, **when the node has a clock**. Optional.
+- **`epoch`** — a random 8-byte id for the *current* log. Regenerated whenever
+  the log is truncated, rebuilt, wiped, or restored from a snapshot.
+
+The log holds insertions *and* removals (a provider that was demoted, a record
+that expired), because "this address is dead" is as important to propagate as
+"this address is new" — otherwise every Indexer's map only ever grows.
+
+### Two cursors, because not every node has a clock
+
+A peer asks **"what changed since …"** and may express *since* in either of two
+ways. Both are answered; a node offers whichever it can honour.
+
+| Cursor | Asked by | Meaning |
+|---|---|---|
+| **`since_seq` + `epoch`** | anything, and the **only** option for a clockless node | "resume my read of *your* log at position `seq`" |
+| **`since_ts`** | a node with a working clock | "everything you accepted after this instant" |
+
+The sequence cursor is the primitive and the time cursor is the convenience.
+**An ESP32 that reboots has no idea what day it is** — it has no RTC, no NTP, and
+possibly no route to anything that does. It cannot say "since Tuesday". But it
+*can* persist eight bytes: the last `(epoch, seq)` it read from each peer it
+syncs with. That is a durable, restart-proof, clock-free cursor, and it is why
+`seq` — not time — is the normative one. A time cursor is also inherently
+untrustworthy across a fleet: two Indexers with skewed clocks will silently drop
+or duplicate records at the boundary. `seq` cannot skew, because it is not a
+measurement — it is a position in one node's log, interpreted only by that node.
+
+**`epoch` is what makes `seq` safe.** A cursor is only meaningful against the log
+it came from. If the peer's `epoch` no longer matches the one the cursor carries,
+the peer's log was rebuilt underneath us and the position is meaningless — the
+peer says so, and the asker restarts from zero (or from a snapshot, below)
+instead of silently missing everything that happened in between. This is the
+failure mode that quietly corrupts every naive "sync since N" design, and the
+epoch closes it for the price of eight bytes.
+
+### The exchange
+
+Three new opcodes on the existing relay protocol (msgpack over an RNS link,
+alongside `EVENT`/`REQ`/`COUNT`/`DEPOSIT`/`DROP` — see `relay_protocol.dart`):
+
+| op | payload | meaning |
+|---|---|---|
+| `SYNC_REQ` | `[op, epoch?, since_seq?, since_ts?, filter?, max]` | "what changed since…" — `filter` narrows to an interest set (topics / author prefixes), so a small Indexer syncs only its own shard |
+| `SYNC_RES` | `[op, epoch, records[], removals[], next_seq, more]` | a bounded batch, plus the cursor to resume from and whether there is more waiting |
+| `SYNC_RESET` | `[op, epoch, oldest_seq]` | "your cursor is not from this log (or is older than what I still hold) — start over" |
+
+Rules that make it survive real networks:
+
+- **Bounded batches, resumable.** `max` caps the batch to what fits a link; the
+  asker loops on `next_seq` while `more` is set. A LoRa-attached Indexer takes
+  the same log in tiny bites over hours; the cursor makes that free.
+- **Idempotent merge.** A record is keyed by `(key, providerPub)` and the newest
+  `timestampMs` wins. Replaying an overlapping range is harmless, so a cursor
+  that is *too old* costs bandwidth, never correctness. Nodes should always
+  re-ask from slightly before their cursor rather than risk a gap.
+- **Verify on arrival, always.** Every record's signature is checked against
+  `providerPub` before it enters the map; unsigned or expired records are
+  dropped, not relayed. An Indexer never has to trust the Indexer it is talking
+  to.
+- **Removals are TTL-bounded too.** A removal (`demoteProvider`, expiry) is kept
+  in the log long enough to propagate, then compacted away — otherwise the log is
+  immortal. Compaction bumps `oldest_seq`, and any peer whose cursor predates
+  that gets a `SYNC_RESET`.
+- **Snapshot for the cold or the reset.** A node with no cursor (or a rejected
+  one) asks for a filtered snapshot of the *live* map — expired records already
+  gone — and receives it as a normal batched stream ending at the peer's current
+  `next_seq`. A fresh Indexer is useful within one exchange instead of after a
+  full announce cycle.
+- **Anti-abuse is the same as everywhere else.** The store caps
+  (`maxStoredKeys`, `maxRecordsPerKey`) apply to synced records exactly as to
+  direct STOREs, so a hostile peer cannot inflate a neighbour's map, and a
+  provider that never answers a fetch is pruned locally (`demoteProvider`)
+  regardless of who vouched for it.
+
+### Who syncs with whom
+
+From the `RelayDirectory`: peers advertising `RelayCap.search`, preferring high
+uptime and low hop count (both already announced), a handful at a time, at an
+interval scaled to capacity — a home-fibre Indexer every few minutes, a LoRa one
+when the link is idle. **Battery-powered leaves are never sync partners**: they
+announce, they are indexed, they are left alone. That asymmetry is the whole
+reason the role exists.
+
 ## Planned: the Indexer wapp
 
 **Purpose: let a person volunteer a device, see what it is doing for the network,
@@ -316,6 +422,11 @@ Screens:
 - **The network** — the `RelayDirectory` as a list: the other Indexers this
   device knows, their capacity, uptime and hop distance, which one is currently
   `bestIndexer` for a given author.
+- **Sync** — one row per peer we sync pointers with: its `epoch`, our cursor
+  (`seq`, and the time if it has a clock), how far behind we are, records pulled
+  and pushed, and when a `SYNC_RESET` last forced a restart. A stuck cursor is
+  the first thing to look at when an Indexer starts giving stale answers, so it
+  has to be visible.
 
 Host work behind it: expose the role manager (`RelayRoleManager.applyCapacity` +
 an explicit override), the `InterestSet`, and the `DhtNode` counters
@@ -380,9 +491,11 @@ Dependency order. Each step is small and independently useful.
    advertised interests (that is what `RelayCap.firehose` means), but its promise
    to the network is the directory. Told to the user in those words: *an Indexer
    is not your backup.*
-4. **Indexer↔Indexer sync.** Anchored gossip of provider records between nodes
-   advertising `RelayCap.search`, so any live Indexer gives the same answer and a
-   dead one costs nothing. Uptime is already announced; prefer the long-lived.
+4. **Indexer↔Indexer sync** (designed above). An append-only pointer log with a
+   `(epoch, seq)` cursor and an optional time cursor, `SYNC_REQ` / `SYNC_RES` /
+   `SYNC_RESET` over the existing relay link. Any live Indexer then gives the
+   same answer and a dead one costs nothing. A clockless node (ESP32 after a
+   reboot) resumes on `seq` alone.
 5. **The Indexer wapp** (above) — the role becomes something a person grants,
    inspects and revokes.
 6. **The Archiver role**, then the **Archiver wapp** (above): quota, policy,

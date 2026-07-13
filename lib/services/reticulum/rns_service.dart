@@ -28,7 +28,7 @@ import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
 import '../files/dht/provider_record.dart'
-    show kCapUnknown, kCapArchive, kCapHomeWifi;
+    show kCapUnknown, kCapArchive, kCapHomeWifi, kCapCellular;
 import '../files/composite_file_source.dart';
 import '../files/disk_index.dart';
 import '../files/file_node.dart';
@@ -45,6 +45,8 @@ import '../social/relay_role.dart';
 import '../social/spam.dart';
 import '../social/store_forward.dart';
 import '../social/follow_set.dart';
+import '../social/keep_policy.dart' show Touch;
+import '../social/keep_service.dart';
 import '../social/nostr_relay.dart';
 import '../social/host_retention_policy.dart';
 import '../social/retention_tier.dart';
@@ -2197,6 +2199,11 @@ class RnsService {
                 ..onLog = (m) => LogService.instance.add('NOSTR: $m');
               // Start keeping (and serving) what the people we follow post.
               startFollowsMirror();
+              // …and finish any keeps the last run left unfinished. This runs in
+              // whichever isolate owns RnsService — including the headless engine
+              // behind the Android background service — so a like made in a
+              // tunnel is archived once there is a network again, app open or not.
+              KeepService.instance.resume();
             }).catchError((Object e) {
               // A pipeline that never comes up must SAY so. This one used to
               // fail into silence and take the whole hero with it.
@@ -2287,7 +2294,19 @@ class RnsService {
           apply: (p) {
             selfCapacity = p.capacity;
             final q = _files?.serveQuota;
-            if (q != null) p.applyTo(q);
+            if (q != null) {
+              p.applyTo(q);
+              // Bandwidth belongs to the owner of this device. The people they
+              // follow (and their own other devices) are unmetered — handing
+              // their data back to them is the whole reason we kept it. Everyone
+              // else shares one budget, and on cellular that budget is zero.
+              q.trustOf = _requesterTrust;
+              q.strangerDailyBudgetBytes = p.capacity == kCapCellular
+                  ? 0
+                  : (PreferencesService.instanceSync?.strangerServeMb ?? 512) *
+                      1024 *
+                      1024;
+            }
             _relayRole?.applyCapacity(p);
             // Keep the responder answering queries (so peers can fetch our published
             // profile/notes) regardless of capacity; only the heavy hosting role is
@@ -3135,6 +3154,23 @@ class RnsService {
 
   /// The serving budget / anti-abuse guard (null until the node has started).
   ServeQuota? get serveQuota => _files?.serveQuota;
+
+  /// Who is asking for bytes: someone we know, or a stranger?
+  ///
+  /// A requester is identified by the key on its link. We recognise our own
+  /// pubkey, the people we follow, and the accounts the user asked this device
+  /// to be a home for. Everything else is a stranger — including a peer whose
+  /// identity we simply cannot read, which is the safe reading of not knowing.
+  Requester _requesterTrust(String requester) {
+    final r = requester.toLowerCase();
+    if (r.isEmpty) return Requester.stranger;
+    final me = selfPubHex?.toLowerCase();
+    if (me != null && r == me) return Requester.trusted;
+    if (_follows.contains(r) || keepDataPubkeys.contains(r)) {
+      return Requester.trusted;
+    }
+    return Requester.stranger;
+  }
 
   /// Allow or forbid serving files (e.g. set false on metered/cellular). When
   /// off, we still fetch; we just decline to serve and let our records age out.
@@ -5101,6 +5137,15 @@ class RnsService {
     );
   }
 
+  /// The NOSTR engine proxy (relays + verification live on its own isolate).
+  /// Exposed for the keep queue, which must never verify a signature on main.
+  NostrClient? get nostrHub => _nostrHub;
+
+  /// On a connection somebody is paying for by the megabyte. Discretionary
+  /// prefetching (a kept note's pictures) waits for a network that is not.
+  bool get onMeteredNetwork =>
+      CapacityGovernor.instance.lastProfile?.capacity == kCapCellular;
+
   /// Whether this node should HOST for others right now: master switch on, and
   /// (if capacity-gated) only when the device is an unlimited provider (charging
   /// on Wi-Fi/Ethernet). Drives serve-mode + relay-role advertisement.
@@ -5329,10 +5374,22 @@ class RnsService {
 
   /// Reply to [parentId]: publish a kind-1 note tagged `e` = parent. Returns id.
   Future<String?> nostrReply(String parentId, String text) async {
-    return nostrPost(1, text, [
+    final id = await nostrPost(1, text, [
       ['e', parentId, '', 'reply'],
     ]);
+    // A reply with no conversation above it is worthless in ten years, so a
+    // reply keeps the parent AND the thread it hangs from.
+    KeepService.instance.keep(Touch.reply, parentId);
+    return id;
   }
+
+  /// Keep a note the user explicitly saved. The honest form of the same act as
+  /// a like — and the one a user reaches for when they mean "I want this later".
+  void nostrBookmark(String eventId, {String authorHex = ''}) =>
+      KeepService.instance.keep(Touch.bookmark, eventId, authorHex: authorHex);
+
+  /// How many touched notes are still being fetched/archived (UI + /api/status).
+  int get keepPending => KeepService.instance.pendingCount;
 
   /// Like a post: publish a kind-7 '+' reaction referencing [eventId] by
   /// [authorHex], signed with the profile key. SYNCHRONOUS so the optimistic
@@ -5506,6 +5563,10 @@ class RnsService {
     hub.recordVote(eventId, pub, vote); // optimistic, synchronous
     // ignore: discarded_futures
     hub.publish(ev);
+    // To touch it is to keep it: the note I voted on is now MINE to hold, and
+    // it is served from this device over Reticulum whether or not the relay it
+    // came from is still alive tomorrow (docs/NOSTR.md, the touch rule).
+    KeepService.instance.keep(Touch.react, eventId, authorHex: authorHex);
     LogService.instance.add('NOSTR: vote ${vote < 0 ? '-' : '+'} on '
         '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}');
   }
@@ -5535,6 +5596,8 @@ class RnsService {
     }
     // ignore: discarded_futures
     hub.publish(ev);
+    // You put your name on it; you keep it.
+    KeepService.instance.keep(Touch.repost, eventId, authorHex: authorHex);
   }
 
   void nostrUnsubscribe(String subId) => _nostrHub?.unsubscribe(subId);

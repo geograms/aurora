@@ -144,6 +144,31 @@ class PreferencesService {
   set keepDataPubkeys(List<String> v) =>
       _prefs.setStringList('social.keepData', v);
 
+  // The touch rule (docs/NOSTR.md): liking, replying to, reposting or bookmarking
+  // an event archives THE EVENT here, at tier 0, forever. The queue is persisted
+  // so a keep survives the app being killed mid-flight — the background service
+  // finishes what the UI started.
+  String get keepQueue => _prefs.getString('social.keepQueue') ?? '';
+  set keepQueue(String v) => _prefs.setString('social.keepQueue', v);
+
+  // A kept note's pictures come with it. Bytes are not free, so the user owns
+  // both numbers: 0 MB = notes only, and by default a picture waits for WiFi
+  // rather than spending a data plan nobody asked about. The NOTE is kept either
+  // way — it is small, and it is the thing that matters.
+  int get keepMediaMaxMb => _prefs.getInt('social.keepMediaMaxMb') ?? 8;
+  set keepMediaMaxMb(int v) => _prefs.setInt('social.keepMediaMaxMb', v);
+
+  bool get keepMediaOnCellular =>
+      _prefs.getBool('social.keepMediaOnCellular') ?? false;
+  set keepMediaOnCellular(bool v) =>
+      _prefs.setBool('social.keepMediaOnCellular', v);
+
+  // How many MB a day this device will serve to people it does NOT know. The
+  // people you follow are unmetered; strangers share this. On cellular it is
+  // zero regardless — a stranger's download is not worth somebody's data plan.
+  int get strangerServeMb => _prefs.getInt('files.strangerServeMb') ?? 512;
+  set strangerServeMb(int v) => _prefs.setInt('files.strangerServeMb', v);
+
   // When the user last looked at the social feed. Everything a followed account
   // posted after this is "new" on the launcher's status bar — the only honest
   // definition of new, and the reason the number goes down when you read it.

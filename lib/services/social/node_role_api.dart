@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:reticulum/src/services/social/archiver_policy.dart';
 import 'package:reticulum/src/services/social/node_profile.dart';
 import 'package:reticulum/src/services/social/relay_role.dart';
 
@@ -174,9 +173,10 @@ class NodeRoleApi {
       'fromRadio': p?.archiveFromRadio ?? true,
       'fromWifiDirect': p?.archiveFromWifiDirect ?? true,
       'mirrorSmall': p?.archiveMirrorSmall ?? true,
-      // Said plainly to the person, every time they look: the direct-link offer
-      // is stored and honoured by the policy, but nothing can trigger it yet.
-      'directLinksActive': false,
+      // The deposit gate now knows which interface a peer arrived on, so the
+      // direct-link offer actually fires: a peer that reached us over the LAN,
+      // Bluetooth or LoRa is recognised as one with no route to anywhere else.
+      'directLinksActive': true,
     });
   }
 

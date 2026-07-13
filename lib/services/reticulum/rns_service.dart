@@ -59,6 +59,7 @@ import '../social/keep_policy.dart' show Touch;
 import '../social/keep_service.dart';
 import '../social/archiver_policy.dart';
 import '../social/archiver_service.dart';
+import '../social/mirror_service.dart';
 import '../social/node_profile_service.dart';
 import '../social/pointer_sync_service.dart';
 import '../social/nostr_relay.dart';
@@ -2012,14 +2013,15 @@ class RnsService {
             // something the owner actually volunteered for (docs/NOSTR.md).
             final policy = ArchiverService.instance.policy;
             if (policy.isArchiving) {
-              // HONEST GAP: the link id reaches us, but the transport runs on
-              // its own isolate and its proxy cannot yet answer "which interface
-              // did this link arrive on". Until it can, every deposit is judged
-              // as if it came off the internet — the CONSERVATIVE reading, since
-              // the direct-link exception is generous and must never be granted
-              // by accident. The LAN/BLE/LoRa switches are therefore stored and
-              // honoured by the policy, but nothing can currently trigger them.
-              final via = ArchiverService.arrivedOver(null);
+              // The link IS the policy. We recorded the arrival interface when
+              // the packet came in (_noteLinkVia), so a peer that reached us
+              // over the LAN, Bluetooth or LoRa is recognised as what it is: a
+              // peer with no route to anywhere else, whose data dies if we
+              // refuse it. An unknown link is read as "the internet" — the
+              // conservative default, because the direct-link exception is
+              // generous and must never be granted by accident.
+              final via = ArchiverService.arrivedOver(
+                  linkIdHex.isEmpty ? null : interfaceOfLink(linkIdHex));
               final verdict = admitToArchive(
                 policy: policy,
                 tier: tier,
@@ -2269,6 +2271,9 @@ class RnsService {
               // never have to answer for it. This device only runs the loop when
               // it IS an indexer, and only talks to peers that say they are too.
               PointerSyncService.instance.start();
+              // An Archiver takes the weight off the phones around it: pull what
+              // they share, then publish ourselves so the DHT stops waking them.
+              MirrorService.instance.start();
             }).catchError((Object e) {
               // A pipeline that never comes up must SAY so. This one used to
               // fail into silence and take the whole hero with it.
@@ -2920,6 +2925,13 @@ class RnsService {
     // packets (resource parts, etc.) go ONLY there instead of every hub uplink.
     if (p.destType == RnsDestType.link) {
       _transport?.noteLinkIface(p.destHash, via);
+      // …and remember it HERE too. The transport engine lives on its own
+      // isolate, so asking it later would be an async round-trip — and the one
+      // caller that needs the answer (the Archiver's deposit gate) has to answer
+      // synchronously, in the middle of a link command. For an Archiver the link
+      // IS the policy: a peer that reached us over the LAN, Bluetooth or LoRa
+      // has no route to anywhere else, and its data dies if we refuse it.
+      _noteLinkVia(p.destHash, via);
     }
     // Connectionless NOSTR-encrypted probe (NPD). Handled FIRST and returned
     // immediately: the whole point is that a "do you have this?" query never
@@ -3269,6 +3281,25 @@ class RnsService {
         _files?.dht?.demoteProvider(key, providerPub) ?? false;
     if (dropped) _pointerLog?.remove(key, providerPub);
   }
+
+  // Which interface each live link arrived on. Bounded: a hostile peer opening
+  // links must not turn this into a leak.
+  final Map<String, String> _linkVia = {};
+  static const int _maxLinkVia = 256;
+
+  void _noteLinkVia(Uint8List linkId, String via) {
+    final k = _hex(linkId);
+    if (_linkVia.length >= _maxLinkVia && !_linkVia.containsKey(k)) {
+      _linkVia.remove(_linkVia.keys.first);
+    }
+    _linkVia[k] = via;
+  }
+
+  /// The interface a link arrived on ('lan', 'ble', a hub name…), or null when
+  /// we never saw it — which the Archiver reads as "the internet", the
+  /// conservative reading, because the direct-link exception is generous and
+  /// must never be granted by accident.
+  String? interfaceOfLink(String linkIdHex) => _linkVia[linkIdHex.toLowerCase()];
 
   /// What we can honestly say about a holder when the DHT hands it out.
   ///

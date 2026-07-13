@@ -56,6 +56,7 @@ import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
 import '../folders/folder_state.dart';
 import '../folders/folder_subscriptions.dart';
+import '../notification_service.dart';
 import '../../profile/profile_db.dart';
 import '../../profile/profile_service.dart';
 import '../../profile/secure_file.dart';
@@ -5314,7 +5315,10 @@ class RnsService {
         ['e', eventId],
         if (authorHex.isNotEmpty) ['p', authorHex],
       ],
-      content: '+',
+      // A heart, not "+". NIP-25 reads "+" as an upvote, and the post card now
+      // has a real upvote next to the like — publishing "+" for both lit the
+      // heart and the thumb for one single reaction.
+      content: '❤️',
     );
     try {
       ev.sign(priv);
@@ -5324,6 +5328,124 @@ class RnsService {
     hub.recordReaction(eventId, pub); // optimistic, synchronous
     // ignore: discarded_futures
     hub.publish(ev); // fire-and-forget to the engine
+  }
+
+  // ── Notifications: what other people did to MY posts ────────────────────
+  //
+  // NOSTR carries this for free: every reaction, reply and repost p-tags the
+  // author it is about. One subscription on `#p = me` is the whole inbox.
+
+  String? _notifSub;
+  final List<Map<String, dynamic>> _notifs = [];
+  int _notifSeenMs = 0;
+
+  /// Newest first. Opens the subscription on first call and drains whatever the
+  /// relays have delivered since.
+  List<Map<String, dynamic>> nostrNotifications() {
+    final hub = _nostrHub;
+    final me = selfPubHex;
+    if (hub == null || me == null) return const [];
+    _notifSub ??= hub.subscribe([
+      NostrFilter(kinds: const [1, 6, 7], tags: {'p': [me]}, limit: 100),
+    ]);
+    final sub = _notifSub;
+    if (sub == null) return List.unmodifiable(_notifs);
+
+    final fresh = hub.drainEvents(sub, max: 60);
+    for (final e in fresh) {
+      final id = (e['id'] ?? '').toString();
+      final pubkey = (e['pubkey'] ?? '').toString();
+      if (pubkey == me) continue; // my own event, not a notification
+      if (_notifs.any((n) => n['id'] == id)) continue;
+      _notifs.insert(0, e);
+      _announceNotification(e);
+    }
+    if (_notifs.length > 200) _notifs.removeRange(200, _notifs.length);
+    return List.unmodifiable(_notifs);
+  }
+
+  /// Also raise it on the launcher's bell — a reaction the user never learns
+  /// about might as well not have happened. Same event, two places: the wapp's
+  /// own panel and the host's notification list.
+  void _announceNotification(Map<String, dynamic> e) {
+    final kind = (e['kind'] as num?)?.toInt() ?? 0;
+    final content = (e['content'] ?? '').toString().trim();
+    final pubkey = (e['pubkey'] ?? '').toString();
+    final short = pubkey.length >= 12 ? pubkey.substring(0, 12) : pubkey;
+    final prof = nostrProfileByShort12(short);
+    final who = (prof['name'] ?? '').isNotEmpty ? prof['name']! : short;
+    final what = switch (kind) {
+      7 => content == '-'
+          ? 'downvoted your post'
+          : content == '+'
+              ? 'upvoted your post'
+              : 'liked your post',
+      6 => 'reposted your post',
+      _ => 'replied to you',
+    };
+    NotificationService.instance.show(GeogramNotification(
+      level: NotificationLevel.info,
+      title: '$who $what',
+      body: kind == 1 && content.isNotEmpty ? content : null,
+      source: 'wapp:social',
+      scope: NotificationScope.app,
+    ));
+  }
+
+  /// How many notifications arrived since the panel was last opened.
+  int nostrNotificationsUnread() {
+    final all = nostrNotifications();
+    var n = 0;
+    for (final e in all) {
+      final ts = ((e['created_at'] as num?)?.toInt() ?? 0) * 1000;
+      if (ts > _notifSeenMs) n++;
+    }
+    return n;
+  }
+
+  /// The user has looked at them.
+  void nostrNotificationsMarkRead() {
+    _notifSeenMs = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  /// (upvotes, downvotes, myVote ∈ {-1,0,1}) for a post.
+  ({int up, int down, int mine}) nostrVotes(String id) {
+    final v = _nostrHub?.votesOf(id) ?? (0, 0, 0);
+    return (up: v.$1, down: v.$2, mine: v.$3);
+  }
+
+  /// Up/down vote a note. NIP-25: the verdict is the reaction's CONTENT — "+"
+  /// is an upvote, "-" a downvote — so any NOSTR client reads it correctly and
+  /// a downvote is not a like.
+  void nostrVote(String eventId, String authorHex, int vote) {
+    final pub = selfPubHex;
+    final priv = _profilePrivHex();
+    final hub = _nostrHub;
+    if (pub == null || priv == null || hub == null || eventId.isEmpty) {
+      LogService.instance.add('NOSTR: vote DROPPED — pub=${pub != null} '
+          'priv=${priv != null} hub=${hub != null}');
+      return;
+    }
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: NostrEventKind.reaction,
+      tags: [
+        ['e', eventId],
+        if (authorHex.isNotEmpty) ['p', authorHex],
+      ],
+      content: vote < 0 ? '-' : '+',
+    );
+    try {
+      ev.sign(priv);
+    } catch (_) {
+      return;
+    }
+    hub.recordVote(eventId, pub, vote); // optimistic, synchronous
+    // ignore: discarded_futures
+    hub.publish(ev);
+    LogService.instance.add('NOSTR: vote ${vote < 0 ? '-' : '+'} on '
+        '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}');
   }
 
   /// Repost a note (NIP-18 kind-6 "retweet"): publish a signed kind-6 that

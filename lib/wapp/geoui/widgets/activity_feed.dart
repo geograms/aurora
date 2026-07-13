@@ -47,6 +47,13 @@ class ActivityFeed extends StatefulWidget {
   final ({int count, bool mine}) Function(String mid)? likeInfo;
   final bool Function(String mid)? isSaved;
   final void Function(String mid, bool like)? onLike;
+
+  /// Up/down vote: `vote` is 1, -1, or 0 to retract. NIP-25 puts the verdict in
+  /// the reaction's content, so this is a real vote any NOSTR client can read.
+  final void Function(String mid, int vote)? onVote;
+
+  /// (up, down, mine) for a post — mine is 1, -1 or 0.
+  final ({int up, int down, int mine}) Function(String mid)? voteInfo;
   final void Function(Map<String, dynamic> post)? onSave;
   final bool Function(String mid)? isReposted;
   final void Function(Map<String, dynamic> post)? onRepost;
@@ -80,6 +87,9 @@ class ActivityFeed extends StatefulWidget {
   final void Function(String from)? onBlock;
   final void Function(String from)? onMute;
 
+  /// Follow / unfollow an author from a post's ⋯ menu.
+  final void Function(String from, bool follow)? onFollow;
+
   /// Resolve a `npub1…` mention in a post body to a display name.
   final String? Function(String npub)? mentionResolver;
 
@@ -109,6 +119,8 @@ class ActivityFeed extends StatefulWidget {
     this.likeInfo,
     this.isSaved,
     this.onLike,
+    this.onVote,
+    this.voteInfo,
     this.onSave,
     this.isReposted,
     this.onRepost,
@@ -122,6 +134,7 @@ class ActivityFeed extends StatefulWidget {
     this.hiddenCalls = const {},
     this.onBlock,
     this.onMute,
+    this.onFollow,
     this.mentionResolver,
     this.onRefresh,
     this.initialFilter,
@@ -268,6 +281,16 @@ class _ActivityFeedState extends State<ActivityFeed> {
   bool _isRoot(Map<String, dynamic> p) =>
       (p['parent'] ?? '').toString().trim().isEmpty;
 
+  /// Do we follow this author?
+  ///
+  /// The feed keys an author by the first 12 hex chars of their pubkey, and the
+  /// two sides disagreed about case: posts carry it LOWER-case, the follow set
+  /// (host follows + my kind-3 contact list) holds it UPPER-case. So the test
+  /// never matched, and Following stayed empty however many people you followed.
+  bool _isFollowed(String from) =>
+      widget.followedCalls.contains(from.toUpperCase()) ||
+      widget.followedCalls.contains(from);
+
   /// Apply the current All/Following/Saved filter to a raw post list, newest
   /// first. Kept separate so the "N new posts" count can be measured against the
   /// same filtered view the user actually sees.
@@ -286,7 +309,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
           if (!_isStreamPost(p)) return false;
           final from = (p['from'] ?? '').toString().toUpperCase();
           final out = (p['dir'] ?? '') == 'out';
-          return out || widget.followedCalls.contains(from);
+          return out || _isFollowed(from);
         }).toList();
         break;
       case _ActivityFilter.all:
@@ -390,6 +413,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
                           onSenderTap: widget.onSenderTap,
                           likeInfo: widget.likeInfo,
                           onLike: widget.onLike,
+                          onVote: widget.onVote,
+                          voteInfo: widget.voteInfo,
                           isSaved: widget.isSaved,
                           onSave: widget.onSave,
                           isReposted: widget.isReposted,
@@ -397,6 +422,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
                           replyCount: widget.replyCount,
                           onBlock: widget.onBlock,
                           onMute: widget.onMute,
+                          onFollow: widget.onFollow,
+                          isFollowing: _isFollowed,
                           onTap: () => widget.onOpenThread?.call(posts[i]),
                           onReply: () => widget.onOpenThread?.call(posts[i]),
                           mentionResolver: widget.mentionResolver,
@@ -794,6 +821,10 @@ class ActivityPostCard extends StatelessWidget {
   final void Function(String from)? onSenderTap;
   final ({int count, bool mine}) Function(String mid)? likeInfo;
   final void Function(String mid, bool like)? onLike;
+
+  /// Up/down vote (NIP-25 content "+"/"-"), and the tallies to show on them.
+  final void Function(String mid, int vote)? onVote;
+  final ({int up, int down, int mine}) Function(String mid)? voteInfo;
   final bool Function(String mid)? isSaved;
   final void Function(Map<String, dynamic> post)? onSave;
   final int Function(String mid)? replyCount;
@@ -812,6 +843,10 @@ class ActivityPostCard extends StatelessWidget {
   final void Function(String from)? onBlock;
   final void Function(String from)? onMute;
 
+  /// Follow / unfollow the author from this post's ⋯ menu.
+  final void Function(String from, bool follow)? onFollow;
+  final bool Function(String from)? isFollowing;
+
   /// Left indent for a nested reply, and whether to draw a thread connector.
   final double indent;
   final bool connector;
@@ -827,6 +862,8 @@ class ActivityPostCard extends StatelessWidget {
     this.onSenderTap,
     this.likeInfo,
     this.onLike,
+    this.onVote,
+    this.voteInfo,
     this.isSaved,
     this.onSave,
     this.replyCount,
@@ -834,6 +871,8 @@ class ActivityPostCard extends StatelessWidget {
     this.onRepost,
     this.onBlock,
     this.onMute,
+    this.onFollow,
+    this.isFollowing,
     this.onTap,
     this.onReply,
     this.indent = 0,
@@ -849,8 +888,27 @@ class ActivityPostCard extends StatelessWidget {
         onSelected: (v) {
           if (v == 'mute') onMute?.call(from);
           if (v == 'block') onBlock?.call(from);
+          if (v == 'follow') {
+            onFollow?.call(from, !(isFollowing?.call(from) ?? false));
+          }
         },
         itemBuilder: (_) => [
+          if (onFollow != null)
+            PopupMenuItem(
+              value: 'follow',
+              child: Row(children: [
+                Icon(
+                  (isFollowing?.call(from) ?? false)
+                      ? Icons.person_remove_alt_1
+                      : Icons.person_add_alt_1,
+                  size: 18,
+                ),
+                const SizedBox(width: 10),
+                Text((isFollowing?.call(from) ?? false)
+                    ? 'Unfollow $from'
+                    : 'Follow $from'),
+              ]),
+            ),
           if (onMute != null)
             PopupMenuItem(
               value: 'mute',
@@ -1069,6 +1127,32 @@ class ActivityPostCard extends StatelessWidget {
             saved ? ChatPalette.accent : muted,
             onSave == null ? null : () => onSave!(post),
           ),
+          // Votes live on the RIGHT, away from the rest: a like is a reaction,
+          // a vote is a judgement, and the two should not sit shoulder to
+          // shoulder as if they were the same gesture.
+          const Spacer(),
+          ...(() {
+            final v = voteInfo?.call(mid) ?? (up: 0, down: 0, mine: 0);
+            return [
+              action(
+                v.mine > 0 ? Icons.thumb_up : Icons.thumb_up_outlined,
+                v.up > 0 ? '${v.up}' : null,
+                v.mine > 0 ? const Color(0xFF4CC38A) : muted,
+                onVote == null
+                    ? null
+                    : () => onVote!(mid, v.mine > 0 ? 0 : 1),
+              ),
+              const SizedBox(width: 6),
+              action(
+                v.mine < 0 ? Icons.thumb_down : Icons.thumb_down_outlined,
+                v.down > 0 ? '${v.down}' : null,
+                v.mine < 0 ? const Color(0xFFE05561) : muted,
+                onVote == null
+                    ? null
+                    : () => onVote!(mid, v.mine < 0 ? 0 : -1),
+              ),
+            ];
+          })(),
         ],
       ),
     );

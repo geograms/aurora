@@ -64,6 +64,7 @@ import '../services/notification_service.dart';
 import '../services/location_service.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
+import '../util/time_ago.dart';
 import '../services/wapp_unread_service.dart';
 import '../services/hero/hero_inbox.dart';
 import '../profile/profile_service.dart';
@@ -428,6 +429,27 @@ class _WappPageState extends State<WappPage>
   /// Posts we've reposted (kind-6 "retweet"), by mid — for the optimistic
   /// green Retweet state in the feed / thread / profile.
   final Set<String> _wappReposted = {};
+
+  /// The full hex pubkey of a post's author, from the 12-char prefix the feed
+  /// carries as `from`. A reaction must p-tag the author (NIP-25) or the
+  /// author never learns about it — and then their notification panel is
+  /// silent while people are voting on them.
+  String _activityAuthorHex(String mid) {
+    final posts = _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
+    for (final p in posts) {
+      if ((p['mid'] ?? '').toString() != mid) continue;
+      final short = (p['from'] ?? '').toString();
+      final prof = RnsService.instance.nostrProfileByShort12(short);
+      final npub = prof['npub'] ?? '';
+      if (npub.isNotEmpty) {
+        try {
+          return NostrCrypto.decodeNpub(npub);
+        } catch (_) {}
+      }
+      return '';
+    }
+    return '';
+  }
 
   /// Repost a publication (kind-6): tell the wapp + reflect it immediately.
   void _repostPost(Map<String, dynamic> post) {
@@ -3692,16 +3714,28 @@ class _WappPageState extends State<WappPage>
       // The screen's own `icon` first — the name mapper only knows a handful
       // of well-known screens and falls back to a generic dashboard glyph,
       // which is how a Search panel ended up with a grid icon.
-      out.add(
-        IconButton(
-          icon: Icon(_panelIcon(i)),
-          tooltip: _i18n.resolve(name),
-          onPressed: () => setState(() {
+      // A notifications panel carries its unread count on the icon — that badge
+      // IS the reason to look at it.
+      final isNotif = _menuScreens[i].children.any(
+          (c) => c.keyword == 'field' && c.name == 'notifications');
+      final unread =
+          isNotif ? RnsService.instance.nostrNotificationsUnread() : 0;
+
+      Widget button = IconButton(
+        icon: Icon(_panelIcon(i)),
+        tooltip: _i18n.resolve(name),
+        onPressed: () {
+          if (isNotif) RnsService.instance.nostrNotificationsMarkRead();
+          setState(() {
             _panelScreen = _menuScreens[i];
             _panelName = name;
-          }),
-        ),
+          });
+        },
       );
+      if (unread > 0) {
+        button = Badge.count(count: unread, child: button);
+      }
+      out.add(button);
     }
     return out;
   }
@@ -4034,6 +4068,14 @@ class _WappPageState extends State<WappPage>
         .firstOrNull;
     if (peopleField != null) return _buildPeopleScreen(screen, peopleField);
 
+    // Notifications panel — who reacted to, replied to or reposted MY posts.
+    // Host-built (the data is NOSTR, not the wapp's), opted into with a field
+    // named `notifications`.
+    final notifField = screen.children
+        .where((c) => c.keyword == 'field' && c.name == 'notifications')
+        .firstOrNull;
+    if (notifField != null) return _buildNotificationsScreen();
+
     // Search panel — a query box on top of a read-only results feed. Detected
     // by a `search_results` chat field (any wapp can opt in with that name).
     final searchField = screen.children
@@ -4148,6 +4190,111 @@ class _WappPageState extends State<WappPage>
         ),
         Expanded(child: _buildChatFeedScreen(chatField)),
       ],
+    );
+  }
+
+  /// Reactions, replies and reposts of MY posts — the Twitter "Notifications"
+  /// tab. Rows read as a sentence ("X liked your post"), with the post they are
+  /// about underneath, and tapping one opens the thread.
+  Widget _buildNotificationsScreen() {
+    final cs = Theme.of(context).colorScheme;
+    final events = RnsService.instance.nostrNotifications();
+    if (events.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.notifications_none,
+                size: 40, color: cs.onSurfaceVariant),
+            const SizedBox(height: 12),
+            Text('Nothing yet.',
+                style: TextStyle(color: cs.onSurfaceVariant)),
+            const SizedBox(height: 4),
+            Text('Likes, replies and reposts of your posts land here.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    fontSize: 12, color: cs.onSurfaceVariant)),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: events.length,
+      separatorBuilder: (_, _) =>
+          Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
+      itemBuilder: (_, i) {
+        final e = events[i];
+        final kind = (e['kind'] as num?)?.toInt() ?? 0;
+        final pubkey = (e['pubkey'] ?? '').toString();
+        final short = pubkey.length >= 12 ? pubkey.substring(0, 12) : pubkey;
+        final prof = RnsService.instance.nostrProfileByShort12(short);
+        final who = (prof['name'] ?? '').isNotEmpty
+            ? prof['name']!
+            : (short.isEmpty ? 'someone' : short);
+        final content = (e['content'] ?? '').toString();
+
+        // What happened, in the user's words.
+        final (IconData icon, Color colour, String what) = switch (kind) {
+          7 => content.trim() == '-'
+              ? (Icons.thumb_down, const Color(0xFFE05561), 'downvoted your post')
+              : content.trim() == '+'
+                  ? (Icons.thumb_up, const Color(0xFF4CC38A), 'upvoted your post')
+                  : (Icons.favorite, Colors.pink, 'liked your post'),
+          6 => (Icons.repeat, const Color(0xFF00BA7C), 'reposted your post'),
+          _ => (Icons.chat_bubble, ChatPalette.accent, 'replied to you'),
+        };
+
+        // The post it is about: a reply carries its text, a reaction does not.
+        final body = kind == 1 ? content : '';
+        final ts = ((e['created_at'] as num?)?.toInt() ?? 0) * 1000;
+
+        return ListTile(
+          leading: CircleAvatar(
+            radius: 18,
+            backgroundColor: colour.withValues(alpha: 0.15),
+            child: Icon(icon, size: 18, color: colour),
+          ),
+          title: Text.rich(
+            TextSpan(children: [
+              TextSpan(
+                  text: who,
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              TextSpan(text: ' $what'),
+            ]),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: body.isEmpty
+              ? (ts > 0
+                  ? Text(
+                      timeAgo(DateTime.fromMillisecondsSinceEpoch(ts)),
+                      style: TextStyle(
+                          fontSize: 11, color: cs.onSurfaceVariant),
+                    )
+                  : null)
+              : Text(body, maxLines: 2, overflow: TextOverflow.ellipsis),
+          onTap: () {
+            // Open the post the notification is about.
+            final tags = (e['tags'] as List?) ?? const [];
+            for (final t in tags) {
+              if (t is List && t.length >= 2 && t[0] == 'e') {
+                final id = '${t[1]}';
+                final posts = _activityArchive?.recent() ??
+                    const <Map<String, dynamic>>[];
+                for (final p in posts) {
+                  if ((p['mid'] ?? '').toString() == id) {
+                    _openActivityThread(p);
+                    return;
+                  }
+                }
+                return;
+              }
+            }
+          },
+        );
+      },
     );
   }
 
@@ -4879,7 +5026,31 @@ class _WappPageState extends State<WappPage>
           _fieldValues['activity_call'] = from;
           _sendCommand('activity_mute');
         },
+        // Follow straight from a post. The wapp does the NOSTR side (kind-3);
+        // the host reflects it at once so the ⋯ menu and the Following filter
+        // do not lie to the user while the relay round-trips.
+        onFollow: (from, follow) {
+          if (from.isEmpty) return;
+          final uc = from.toUpperCase();
+          setState(() {
+            if (follow) {
+              _followedCalls.add(uc);
+            } else {
+              _followedCalls.remove(uc);
+            }
+          });
+          _fieldValues['profile_target'] = from;
+          _sendCommand(follow ? 'profile_follow' : 'profile_unfollow');
+        },
         likeInfo: _likeInfoFor,
+        // Votes are host-side NOSTR (NIP-25 "+"/"-"): the wapp does not need to
+        // know, and every other NOSTR client reads them.
+        voteInfo: (mid) => RnsService.instance.nostrVotes(mid),
+        onVote: (mid, vote) {
+          final author = _activityAuthorHex(mid);
+          RnsService.instance.nostrVote(mid, author, vote);
+          setState(() {});
+        },
         isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
         savedPosts: () =>
             _activityArchive?.savedPosts() ?? const <Map<String, dynamic>>[],

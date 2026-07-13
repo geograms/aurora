@@ -1019,6 +1019,13 @@ IconData geoUiResolveIcon(String name) {
       return Icons.apps;
     case 'refresh':
       return Icons.refresh;
+    case 'bell':
+    case 'notifications':
+      return Icons.notifications_none;
+    case 'thumb_up':
+      return Icons.thumb_up_outlined;
+    case 'thumb_down':
+      return Icons.thumb_down_outlined;
     case 'search':
       return Icons.search;
     case 'share':

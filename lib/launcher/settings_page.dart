@@ -21,6 +21,45 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
     _load();
   }
 
+  /// One line that says what this box is, so the user does not have to open the
+  /// page to remember. The full picture — and the honest two-mode reading of it
+  /// — lives in HardwarePage.
+  String _hardwareSubtitle() {
+    final p = NodeProfileService.instance.build();
+    final bits = <String>[];
+    if (p.power != PowerSource.unknown) {
+      bits.add(switch (p.power) {
+        PowerSource.solarBattery => 'Solar + battery',
+        PowerSource.windHydro => 'Wind / hydro',
+        PowerSource.solar => 'Solar',
+        PowerSource.gridUps => 'Grid + UPS',
+        PowerSource.grid => 'Grid',
+        PowerSource.vehicle => 'Vehicle',
+        PowerSource.batteryOnly => 'Battery',
+        PowerSource.unknown => '',
+      });
+    }
+    if (p.uplink != UplinkKind.unknown) {
+      bits.add(switch (p.uplink) {
+        UplinkKind.satellite => 'Satellite',
+        UplinkKind.fibre => 'Wired',
+        UplinkKind.wifi => 'Wi-Fi',
+        UplinkKind.cellular => 'Cellular',
+        UplinkKind.none => 'Offgrid',
+        UplinkKind.unknown => '',
+      });
+    }
+    for (final r in p.radios) {
+      bits.add(r.link == LinkFlag.lora
+          ? 'LoRa ${r.rangeKm}km'
+          : r.link == LinkFlag.packetRadio
+              ? 'Packet ${r.rangeKm}km'
+              : 'Radio');
+    }
+    if (p.poweredPct > 0) bits.add('${p.poweredPct}% powered');
+    return bits.isEmpty ? 'Not described yet' : bits.join(' · ');
+  }
+
   Future<void> _load() async {
     final prefs = await PreferencesService.instance();
     final defaultPath = wappsDataStorage(prefs).basePath;
@@ -324,6 +363,49 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                     trailing: const Icon(Icons.chevron_right),
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute(builder: (_) => const UpdatePage()),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // ── Hardware ──
+                //
+                // Stated ONCE, for the device, and read by every role: a box
+                // volunteered as both an Indexer and an Archiver must not be
+                // asked twice what it is plugged into (docs/NOSTR.md).
+                Text('Hardware',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w600,
+                        )),
+                const SizedBox(height: 4),
+                Text(
+                  'Power, uplink, antennas and the region this device serves. '
+                  'Other nodes use it to decide who to ask for what — and when '
+                  'the grid goes down, a machine that is still running matters '
+                  'more than a fast one that is not.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: ListTile(
+                    leading: const Icon(Icons.memory),
+                    title: const Text('Hardware'),
+                    subtitle: Text(
+                      _hardwareSubtitle(),
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const HardwarePage()),
                     ),
                   ),
                 ),

@@ -86,9 +86,12 @@ class NodeProfileService {
     return PowerSource.unknown;
   }
 
+  /// The declared radios. Always GROWABLE: callers add to this list to add an
+  /// antenna, and a `const []` here would throw UnsupportedError on the very
+  /// first one — the failure looks exactly like "the button does nothing".
   List<RadioEntry> get radios {
     final raw = PreferencesService.instanceSync?.nodeRadios ?? '';
-    if (raw.isEmpty) return const [];
+    if (raw.isEmpty) return <RadioEntry>[];
     try {
       return [
         for (final j in (jsonDecode(raw) as List))
@@ -102,7 +105,7 @@ class NodeProfileService {
             )
       ];
     } catch (_) {
-      return const [];
+      return <RadioEntry>[];
     }
   }
 

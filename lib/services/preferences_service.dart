@@ -169,6 +169,16 @@ class PreferencesService {
   int get strangerServeMb => _prefs.getInt('files.strangerServeMb') ?? 512;
   set strangerServeMb(int v) => _prefs.setInt('files.strangerServeMb', v);
 
+  // Reticulum first, the internet second. A media fetch over HTTPS hands a
+  // server your IP and exactly what you are reading; a mesh fetch hands it a
+  // destination hash. The mesh is always tried first — this switch decides
+  // whether we are allowed to fall back at all when the mesh does not have it.
+  // A device that must never touch the internet turns it off.
+  bool get internetMediaFallback =>
+      _prefs.getBool('media.internetFallback') ?? true;
+  set internetMediaFallback(bool v) =>
+      _prefs.setBool('media.internetFallback', v);
+
   // When the user last looked at the social feed. Everything a followed account
   // posted after this is "new" on the launcher's status bar — the only honest
   // definition of new, and the reason the number goes down when you read it.

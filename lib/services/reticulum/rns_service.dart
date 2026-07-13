@@ -39,6 +39,7 @@ import '../files/partial_store.dart';
 import '../files/serve_quota.dart';
 import '../files/serve_stats.dart';
 import '../log_service.dart';
+import '../media_disk_cache.dart';
 import '../social/relay_event_store.dart';
 import '../social/relay_node.dart';
 import '../social/relay_role.dart';
@@ -3152,6 +3153,163 @@ class RnsService {
     return _files?.resolveAndFetch(fileHash, timeout: timeout);
   }
 
+  // ── "Who has notes from npub X?" — author provider records ────────────────
+  //
+  // The DHT stores POINTERS, never content: a signed ProviderRecord saying
+  // "this device holds material under key K". Folders already publish under
+  // their 32-byte folder key — and a NOSTR pubkey is exactly 32 bytes, so an
+  // author is the same kind of key. Publishing one turns "where can I find
+  // npub X" into a DHT resolve whose answer is a LIST OF DEVICES, not a server
+  // (docs/NOSTR.md, road item 1).
+  //
+  // We publish for an author when this device is genuinely a home for them:
+  // they are followed, kept, or the user touched one of their notes. Records
+  // carry a 45-minute TTL and are re-published by FileTransferNode.republishAll
+  // on the existing 30-minute timer, so a device that goes away simply stops
+  // being an answer.
+
+  final Set<String> _authorRecords = {}; // pubkeys we advertise (deduped)
+
+  /// Advertise "I hold notes from [pubHex]" in the DHT. Idempotent and cheap to
+  /// call repeatedly; the record itself is refreshed by the republish timer.
+  Future<void> publishAuthorProvider(String pubHex) async {
+    final key = _hexToBytes(pubHex.toLowerCase());
+    if (key == null || key.length != 32 || _files == null) return;
+    if (!_authorRecords.add(pubHex.toLowerCase())) return; // already advertised
+    try {
+      final holders = await _files!.publishKey(key, capacity: selfCapacity);
+      LogService.instance.add(
+          'social: advertising notes from ${pubHex.substring(0, 12)} '
+          '($holders holder(s) took the pointer)');
+    } catch (e) {
+      _authorRecords.remove(pubHex.toLowerCase());
+      LogService.instance.add('social: author record failed: $e');
+    }
+  }
+
+  /// Every author this device advertises itself as a home for.
+  Set<String> get advertisedAuthors => Set.unmodifiable(_authorRecords);
+
+  /// Ask the mesh: who holds [pubHex], and what do they have?
+  ///
+  /// Resolve the author key in the DHT → get devices → query the best few over
+  /// Reticulum → verify **in the engine isolate** → store. This is the
+  /// Reticulum-first path for notes: no relay, no internet, nobody's IP.
+  Future<int> fetchAuthorFromMesh(String pubHex, {int limit = 50}) async {
+    final files = _files;
+    final relay = _relay;
+    final store = _relayStore;
+    final hub = _nostrHub;
+    if (files == null || relay == null || store == null || hub == null) return 0;
+    final key = _hexToBytes(pubHex.toLowerCase());
+    if (key == null || key.length != 32) return 0;
+
+    final providers = await files.resolveProviders(key);
+    if (providers.isEmpty) return 0;
+
+    final raw = <Map<String, dynamic>>[];
+    // Three is plenty: the redundancy is there so we can pick a live one, not
+    // so we can ask everybody and pay for it N times.
+    for (final p in providers.take(3)) {
+      try {
+        final events = await relay.query(
+          p,
+          NostrFilter(authors: [pubHex.toLowerCase()], kinds: const [0, 1],
+              limit: limit),
+          timeout: const Duration(seconds: 12),
+        );
+        for (final e in events) {
+          raw.add(e.toJson());
+        }
+        if (raw.isNotEmpty) break; // one good answer is an answer
+      } catch (_) {
+        // A provider that does not answer is demoted by the fetch path itself.
+      }
+    }
+    if (raw.isEmpty) return 0;
+
+    // Signatures are checked on the nostr-engine isolate. RNS runs on main, and
+    // secp256k1 must never (docs/performance.md §3.1).
+    final verified = await hub.verifyEvents(raw);
+    if (verified.isEmpty) return 0;
+
+    final batch = <NostrEvent>[];
+    for (final j in verified) {
+      try {
+        batch.add(NostrEvent.fromJson(j));
+      } catch (_) {}
+    }
+    final tier = tierOf(pubHex.toLowerCase(),
+        selfPubHex: selfPubHex, followsHex: _mirroredAuthors);
+    final stored = store.putAllVerified(batch, tier: tier.index);
+    LogService.instance.add(
+        'social: mesh gave ${verified.length} note(s) from '
+        '${pubHex.substring(0, 12)} (stored $stored, no internet involved)');
+    return stored;
+  }
+
+  // ── Reticulum first, the internet second ──────────────────────────────────
+  //
+  // Not for speed — for exposure. A Blossom fetch is content-addressed HTTPS:
+  // the sha256 you ask for IS the identity of the content, and the request
+  // carries your IP address on it. So a server, and everyone on the path to it,
+  // learns exactly what you are reading. A Reticulum fetch carries neither: the
+  // destination is a cryptographic hash and the device that answers knows a
+  // destination, not a person at an address.
+  //
+  // A slow private fetch beats a fast one that publishes your reading list, so
+  // the mesh is tried FIRST even when it is slower, and the internet is a
+  // fallback the user can switch off entirely (docs/NOSTR.md, road item 8d).
+
+  /// A 64-hex sha256 embedded in a media URL (Blossom names a blob by its hash),
+  /// or null when the URL is not content-addressed and only the internet has it.
+  static String? shaFromMediaUrl(String url) {
+    final clean = url.split('?').first;
+    final name = clean.split('/').last;
+    final base = name.contains('.') ? name.split('.').first : name;
+    return RegExp(r'^[0-9a-f]{64}$').hasMatch(base.toLowerCase())
+        ? base.toLowerCase()
+        : null;
+  }
+
+  /// Fetch media, mesh first. Returns the bytes and **which network served
+  /// them**, because a privacy property nobody can observe is one nobody should
+  /// believe — the UI shows the user which path was taken.
+  Future<({Uint8List? bytes, String source})> fetchMediaPreferMesh(
+    String url, {
+    int maxBytes = 8 * 1024 * 1024,
+    Duration meshTimeout = const Duration(seconds: 25),
+  }) async {
+    final sha = shaFromMediaUrl(url);
+
+    // 1. The mesh. Only possible for content-addressed blobs — which is exactly
+    //    what Blossom URLs are, so this covers the common case.
+    if (sha != null && _up) {
+      final key = _hexToBytes(sha);
+      if (key != null && key.length == 32) {
+        try {
+          final bytes = await dhtResolveFetch(key, timeout: meshTimeout);
+          if (bytes != null && bytes.isNotEmpty) {
+            LogService.instance
+                .add('media: served over RETICULUM (${bytes.length}B, no IP)');
+            return (bytes: bytes, source: 'reticulum');
+          }
+        } catch (_) {
+          // Nobody on the mesh has it (yet). Fall through — deliberately.
+        }
+      }
+    }
+
+    // 2. The internet, if the user still allows it.
+    if (!(PreferencesService.instanceSync?.internetMediaFallback ?? true)) {
+      LogService.instance
+          .add('media: not on the mesh, and the internet fallback is OFF');
+      return (bytes: null, source: 'none');
+    }
+    final bytes = await MediaDiskCache.instance.fetch(url, maxBytes: maxBytes);
+    return (bytes: bytes, source: bytes == null ? 'none' : 'internet');
+  }
+
   /// The serving budget / anti-abuse guard (null until the node has started).
   ServeQuota? get serveQuota => _files?.serveQuota;
 
@@ -4947,6 +5105,11 @@ class RnsService {
     startFollowsMirror();
     // Someone we follow is never a stranger to be vetted by the spam gate.
     pushTrustedAuthors();
+    // Following is a storage decision here, so tell the mesh: this device is
+    // now a home for them, and an Indexer can send people looking for their
+    // notes to us. ignore: discarded_futures
+    final hex = key.toLowerCase();
+    if (hex.length == 64) unawaited(publishAuthorProvider(hex));
   }
 
   /// Drop [key] from the follow set.

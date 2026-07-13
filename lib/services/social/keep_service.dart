@@ -6,7 +6,6 @@ import 'package:reticulum/reticulum.dart';
 
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../log_service.dart';
-import '../media_disk_cache.dart';
 import '../preferences_service.dart';
 import '../reticulum/rns_service.dart';
 import 'keep_policy.dart';
@@ -169,6 +168,11 @@ class KeepService {
         // them is still there. That is the whole point of the exercise.
         _keepMedia(plan.fetchMedia, ev.pubkey);
 
+        // Present is not the same as findable. Tell the DHT that this device is
+        // a home for this author, so an Indexer asked "where can I find npub X"
+        // can answer with us — a pointer, ~176 bytes, no content leaves here.
+        unawaited(_rns.publishAuthorProvider(ev.pubkey));
+
         LogService.instance.add(
             'keep: ${k.touch.name} ${k.id.substring(0, 8)} pinned=$pinned '
             'parents=${plan.fetchIds.length} media=${plan.fetchMedia.length}');
@@ -206,7 +210,11 @@ class KeepService {
   Future<void> _fetchMedia(String url, String authorPub, int maxBytes) async {
     _mediaInFlight.add(url);
     try {
-      final bytes = await MediaDiskCache.instance.fetch(url, maxBytes: maxBytes);
+      // Reticulum first: if a peer already keeps this blob, we take it from
+      // them and no server on the internet learns what we are reading. The
+      // internet is the fallback, not the default (docs/NOSTR.md, 8d).
+      final got = await _rns.fetchMediaPreferMesh(url, maxBytes: maxBytes);
+      final bytes = got.bytes;
       if (bytes == null || bytes.isEmpty) return;
       final archive = sharedMediaArchive();
       if (archive == null) return;
@@ -218,8 +226,8 @@ class KeepService {
         pin: true,
       );
       _mediaDone.add(url);
-      LogService.instance
-          .add('keep: kept media ${bytes.length}B -> $token');
+      LogService.instance.add(
+          'keep: kept media ${bytes.length}B via ${got.source} -> $token');
     } catch (e) {
       LogService.instance.add('keep: media failed ($url): $e');
     } finally {

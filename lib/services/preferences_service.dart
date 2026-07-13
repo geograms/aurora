@@ -472,6 +472,16 @@ class PreferencesService {
     'rns.birdsnet.com.br:4242',
   ];
 
+  /// Blossom servers (media over the internet: images in the feed come FROM
+  /// these, anything shared goes TO them). Empty = the shipped defaults.
+  List<String> get blossomServers =>
+      _prefs.getStringList('nostr.blossomServers') ?? const [];
+
+  set blossomServers(List<String> v) {
+    // ignore: discarded_futures
+    _prefs.setStringList('nostr.blossomServers', v);
+  }
+
   List<String> get rnsBootstrapServers {
     final v = _prefs.getStringList('rns.bootstrapServers');
     if (v == null || v.isEmpty) return List<String>.from(_defaultRnsServers);

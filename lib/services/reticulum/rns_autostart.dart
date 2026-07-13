@@ -70,6 +70,7 @@ Future<void> ensureRnsAutostart() async {
     rns.subscriptionsPath = ws.getAbsolutePath('folder_subscriptions.json');
     rns.serveStatsPath = ws.getAbsolutePath('serve_stats.sqlite3');
     rns.identityPath = ws.getAbsolutePath('rns_identity.key');
+    rns.blossomLoad(); // the user's media servers, not just the shipped ones
     rns.followsPath = ws.getAbsolutePath('host_follows.json');
     rns.diskIndexPath = ws.getAbsolutePath('disk_index.sqlite3');
 

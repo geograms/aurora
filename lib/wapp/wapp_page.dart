@@ -4068,6 +4068,14 @@ class _WappPageState extends State<WappPage>
         .firstOrNull;
     if (peopleField != null) return _buildPeopleScreen(screen, peopleField);
 
+    // The internet side of NOSTR: relays (where posts come from) and Blossom
+    // servers (where their images come from). Host-built — the wapp owns
+    // neither list — and opted into with a field named `nostr_internet`.
+    final netField = screen.children
+        .where((c) => c.keyword == 'field' && c.name == 'nostr_internet')
+        .firstOrNull;
+    if (netField != null) return _buildNostrInternetScreen();
+
     // Notifications panel — who reacted to, replied to or reposted MY posts.
     // Host-built (the data is NOSTR, not the wapp's), opted into with a field
     // named `notifications`.
@@ -4192,6 +4200,163 @@ class _WappPageState extends State<WappPage>
       ],
     );
   }
+
+  /// Relays + Blossom servers, both editable.
+  ///
+  /// Before this the relay list was read-only (you could see them and nothing
+  /// else) and the Blossom servers — the machines every image in the feed is
+  /// fetched from, and every picture you share is uploaded TO — were a constant
+  /// buried in the transfer code. You could not see them, let alone choose them.
+  Widget _buildNostrInternetScreen() {
+    final cs = Theme.of(context).colorScheme;
+    final rns = RnsService.instance;
+    final relays = rns.nostrRelays();
+    final blossom = rns.blossomServers();
+
+    Color statusColour(String s) => switch (s) {
+          'connected' => const Color(0xFF4CC38A),
+          'connecting' => const Color(0xFFE0A93A),
+          _ => cs.onSurfaceVariant,
+        };
+
+    Widget sectionTitle(String text, String tip) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(text,
+                  style: TextStyle(
+                      color: cs.primary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13)),
+              const SizedBox(height: 2),
+              Text(tip,
+                  style: TextStyle(
+                      fontSize: 11, color: cs.onSurfaceVariant)),
+            ],
+          ),
+        );
+
+    Widget addRow({
+      required TextEditingController ctl,
+      required String hint,
+      required VoidCallback onAdd,
+    }) =>
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: ctl,
+                  onSubmitted: (_) => onAdd(),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: hint,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(onPressed: onAdd, child: const Text('Add')),
+            ],
+          ),
+        );
+
+    return ListView(
+      children: [
+        sectionTitle('Relays',
+            'Where posts come from and go to. wss:// over the internet, '
+            'rns:// over Reticulum, or this device.'),
+        for (final r in relays)
+          SwitchListTile(
+            value: r['enabled'] != false,
+            onChanged: (on) {
+              rns.nostrRelayEnable('${r['uri']}', on);
+              setState(() {});
+            },
+            title: Text('${r['uri']}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13)),
+            subtitle: Row(children: [
+              Icon(Icons.circle,
+                  size: 8, color: statusColour('${r['status']}')),
+              const SizedBox(width: 6),
+              Text('${r['status']} · ${r['scheme']}',
+                  style: TextStyle(
+                      fontSize: 11, color: cs.onSurfaceVariant)),
+            ]),
+            secondary: IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              tooltip: 'Remove',
+              onPressed: () {
+                rns.nostrRelayRemove('${r['uri']}');
+                setState(() {});
+              },
+            ),
+            dense: true,
+          ),
+        addRow(
+          ctl: _relayAddCtl,
+          hint: 'wss://relay.example.com  |  rns://<id>  |  local',
+          onAdd: () {
+            if (rns.nostrRelayAdd(_relayAddCtl.text.trim())) {
+              _relayAddCtl.clear();
+            }
+            setState(() {});
+          },
+        ),
+        const SizedBox(height: 8),
+        sectionTitle('Blossom media servers',
+            'Images in the feed are fetched from these by their sha256, and '
+            'anything you share is uploaded to them. Tried in order.'),
+        for (final b in blossom)
+          ListTile(
+            dense: true,
+            leading: Icon(Icons.image_outlined, color: cs.onSurfaceVariant),
+            title: Text(b,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13)),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              tooltip: 'Remove',
+              onPressed: () {
+                rns.blossomRemove(b);
+                setState(() {});
+              },
+            ),
+          ),
+        if (blossom.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              'None — shared media will not reach anyone over the internet, '
+              'and images posted by others will not load.',
+              style: TextStyle(fontSize: 11, color: cs.error),
+            ),
+          ),
+        addRow(
+          ctl: _blossomAddCtl,
+          hint: 'https://blossom.example.com',
+          onAdd: () {
+            if (rns.blossomAdd(_blossomAddCtl.text.trim())) {
+              _blossomAddCtl.clear();
+            }
+            setState(() {});
+          },
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  final _relayAddCtl = TextEditingController();
+  final _blossomAddCtl = TextEditingController();
 
   /// Reactions, replies and reposts of MY posts — the Twitter "Notifications"
   /// tab. Rows read as a sentence ("X liked your post"), with the post they are

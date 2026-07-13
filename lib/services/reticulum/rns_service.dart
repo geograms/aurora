@@ -56,6 +56,8 @@ import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
 import '../folders/folder_state.dart';
 import '../folders/folder_subscriptions.dart';
+import 'package:reticulum/reticulum.dart' show BlossomServer;
+
 import '../notification_service.dart';
 import '../../profile/profile_db.dart';
 import '../../profile/profile_service.dart';
@@ -5140,6 +5142,52 @@ class RnsService {
   bool nostrRelayAdd(String uri) => _nostrHub?.addRelay(uri) ?? false;
   bool nostrRelayRemove(String uri) => _nostrHub?.removeRelay(uri) ?? false;
 
+  /// Turn a relay off without forgetting it (and back on).
+  void nostrRelayEnable(String uri, bool on) =>
+      _nostrHub?.setRelayEnabled(uri, on);
+
+  // ── Blossom servers (the media tier of the internet side) ────────────────
+  //
+  // Images in the feed are fetched by sha256 from these; anything you share
+  // goes UP to them. It used to be a hard-coded list in the transfer code, so
+  // nobody could see which servers their media was going to, let alone choose.
+  List<String> blossomServers() => List.of(BlossomServer.publicServers);
+
+  void blossomSet(List<String> servers) {
+    BlossomServer.publicServers =
+        servers.where((s) => s.trim().isNotEmpty).toList();
+    PreferencesService.instanceSync?.blossomServers =
+        BlossomServer.publicServers;
+  }
+
+  /// Restore the user's Blossom list at boot (empty = the shipped defaults).
+  void blossomLoad() {
+    final saved = PreferencesService.instanceSync?.blossomServers ?? const [];
+    if (saved.isNotEmpty) BlossomServer.publicServers = List.of(saved);
+  }
+
+  bool blossomAdd(String uri) {
+    var u = uri.trim();
+    if (u.isEmpty) return false;
+    if (!u.startsWith('http://') && !u.startsWith('https://')) {
+      u = 'https://$u';
+    }
+    while (u.endsWith('/')) {
+      u = u.substring(0, u.length - 1);
+    }
+    if (BlossomServer.publicServers.contains(u)) return false;
+    blossomSet([...BlossomServer.publicServers, u]);
+    return true;
+  }
+
+  bool blossomRemove(String uri) {
+    final next =
+        BlossomServer.publicServers.where((s) => s != uri).toList();
+    if (next.length == BlossomServer.publicServers.length) return false;
+    blossomSet(next);
+    return true;
+  }
+
   /// Open a subscription from a NIP-01 filter (JSON object or array). Returns a
   /// subId the caller drains with [nostrDrain].
   String? nostrSubscribe(String filtersJson) {
@@ -5336,32 +5384,40 @@ class RnsService {
   // author it is about. One subscription on `#p = me` is the whole inbox.
 
   String? _notifSub;
-  final List<Map<String, dynamic>> _notifs = [];
+  bool _notifReady = false;
+  final Set<String> _notifAnnounced = {};
   int _notifSeenMs = 0;
 
-  /// Newest first. Opens the subscription on first call and drains whatever the
-  /// relays have delivered since.
+  /// Newest first, READ FROM THE LOCAL STORE.
+  ///
+  /// Everything anyone does to my posts is kept here at tier `self` (see the
+  /// hub), so this answers with the relays unreachable and after a restart —
+  /// which is the point of an off-grid app. The standing subscription only
+  /// keeps the store fed; it is not where the list comes from.
   List<Map<String, dynamic>> nostrNotifications() {
     final hub = _nostrHub;
     final me = selfPubHex;
     if (hub == null || me == null) return const [];
-    _notifSub ??= hub.subscribe([
-      NostrFilter(kinds: const [1, 6, 7], tags: {'p': [me]}, limit: 100),
-    ]);
-    final sub = _notifSub;
-    if (sub == null) return List.unmodifiable(_notifs);
-
-    final fresh = hub.drainEvents(sub, max: 60);
-    for (final e in fresh) {
-      final id = (e['id'] ?? '').toString();
-      final pubkey = (e['pubkey'] ?? '').toString();
-      if (pubkey == me) continue; // my own event, not a notification
-      if (_notifs.any((n) => n['id'] == id)) continue;
-      _notifs.insert(0, e);
-      _announceNotification(e);
+    if (!_notifReady) {
+      _notifReady = true;
+      hub.setSelfPubkey(me); // the store keeps MY corner of the network
+      _notifSub ??= hub.subscribe([
+        NostrFilter(kinds: const [1, 6, 7], tags: {'p': [me]}, limit: 100),
+      ]);
     }
-    if (_notifs.length > 200) _notifs.removeRange(200, _notifs.length);
-    return List.unmodifiable(_notifs);
+    // Drain the live sub only to raise the launcher's bell for what is new;
+    // the LIST itself is the store's, so nothing is lost when the app dies.
+    final sub = _notifSub;
+    if (sub != null) {
+      for (final e in hub.drainEvents(sub, max: 60)) {
+        final id = (e['id'] ?? '').toString();
+        if ((e['pubkey'] ?? '').toString() == me) continue;
+        if (!_notifAnnounced.add(id)) continue;
+        _announceNotification(e);
+      }
+      if (_notifAnnounced.length > 500) _notifAnnounced.clear();
+    }
+    return hub.notifications;
   }
 
   /// Also raise it on the launcher's bell — a reaction the user never learns

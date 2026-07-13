@@ -634,7 +634,13 @@ is in `main` with tests, and the device-validated ones say so.
    host that stores stranger events under quota and serves them back. The
    pointer-only model is the target; the DHT implements the primitive and author
    records now feed it, but the Indexer's *answer* is not yet the pointer map.
-2. **Indexer↔Indexer sync: the machinery is BUILT, the wiring is not.**
+2. ~~Indexer↔Indexer sync~~ — **BUILT end to end**: pointer log, `(epoch, seq)`
+   cursor (persisted, so an ESP32 resumes after a reboot),
+   `SYNC_REQ`/`SYNC_RES`/`SYNC_RESET` served by `RelayNode`, a merge that verifies
+   every record against the provider that signed it, and a scheduler that runs
+   only when this device IS an Indexer and only talks to peers that say they are
+   too — battery leaves are never sync partners. **Cross-device validation is
+   still pending** (needs a second always-on node). Superseded text:
    `PointerLog` (append-only, insertions *and* removals, bounded + compacted),
    the `(epoch, seq)` cursor a clockless node can persist, `PointerSyncServer` /
    `PointerSyncClient` (verify every record against the provider that signed it —
@@ -642,9 +648,16 @@ is in `main` with tests, and the device-validated ones say so.
    `SYNC_REQ`/`SYNC_RES`/`SYNC_RESET` on the relay protocol. What is missing is
    the *scheduler*: nothing yet picks sync partners from the directory and runs
    the exchange on a timer.
-3. **There is no Archiver role.** No `RelayRole.archiver`, no quota UI, no
-   direct-link (LAN/BLE/LoRa) store-and-forward policy, no "mirror the small
-   devices around me". The parts exist and are unjoined.
+3. **The Archiver: policy BUILT, UI and direct-link admission NOT.**
+   `ArchiverPolicy` + `admitToArchive` are written and tested (silence is not
+   consent; a quota is a ceiling; a direct-link peer gets in on the strength of
+   the link; everything else must be something the owner volunteered for), and
+   every deposit now passes through them. **Missing**: the wapp (quota slider,
+   what's-on-my-disk with a Drop button), the mirror-the-small-devices loop, and
+   — the honest gap — the transport proxy cannot yet say which interface a link
+   arrived on, so the LAN/Bluetooth/LoRa switches are stored and honoured by the
+   policy but nothing can currently trigger them; every deposit is judged as if
+   it came off the internet.
 4. ~~Resolve answers are bare.~~ **BUILT.** The `VALUE` reply now carries a
    6-byte `HolderHint` per record: last-heard, whether that is first-hand or came
    from a sync (a rumour is discounted), and the holder's power, uplink and
@@ -665,9 +678,10 @@ is in `main` with tests, and the device-validated ones say so.
 8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
 9. **The Indexer and Archiver wapps.** Planned below.
-10. **Notes are not yet privacy-ordered.** Media is (mesh first); a `REQ` for
-    *notes* still goes to whatever relay answers, and search terms still leave
-    the device before the mesh has been asked.
+10. **Search is not yet privacy-ordered.** Media and single notes are (the mesh
+    is resolved and asked first, and a kept note now has a pointer of its own so
+    it can be found by id). A NIP-50 *search* still goes to the relays before the
+    mesh Indexers are asked.
 
 ## Planned: the physical profile — what a node is made of
 

@@ -117,9 +117,18 @@ class KeepService {
       //    has it, and ASKS THE RELAYS when it does not — on its own isolate.
       final json = hub.eventById(k.id);
       if (json == null) {
+        // The mesh gets asked FIRST, in parallel with the relays already being
+        // asked above: a REQ to a public relay tells it who we are looking for
+        // and when we are awake, and a mesh fetch tells nobody anything
+        // (docs/NOSTR.md — Reticulum first, the internet second). Whichever
+        // lands first wins; the mesh is simply given its chance.
+        if (!k.meshTried) {
+          k.meshTried = true;
+          unawaited(_rns.fetchNoteFromMesh(k.id));
+        }
         if (k.attempts >= _maxAttempts) {
-          LogService.instance
-              .add('keep: gave up on ${k.id.substring(0, 8)} — no relay has it');
+          LogService.instance.add(
+              'keep: gave up on ${k.id.substring(0, 8)} — nobody has it');
           _pending.remove(k);
           _save();
         }
@@ -169,9 +178,11 @@ class KeepService {
         _keepMedia(plan.fetchMedia, ev.pubkey);
 
         // Present is not the same as findable. Tell the DHT that this device is
-        // a home for this author, so an Indexer asked "where can I find npub X"
-        // can answer with us — a pointer, ~176 bytes, no content leaves here.
+        // a home for this author AND for this note, so an Indexer asked "where
+        // can I find npub X" — or "who still has that note" — can answer with
+        // us. A pointer is ~176 bytes; no content leaves here.
         unawaited(_rns.publishAuthorProvider(ev.pubkey));
+        unawaited(_rns.publishNoteProvider(k.id));
 
         LogService.instance.add(
             'keep: ${k.touch.name} ${k.id.substring(0, 8)} pinned=$pinned '
@@ -282,5 +293,10 @@ class _Keep {
   final Touch touch;
   final String author;
   int attempts = 0;
+
+  /// The mesh is asked once per keep, not once per tick: a DHT resolve is not
+  /// free, and re-resolving every three seconds would be a self-inflicted flood.
+  bool meshTried = false;
+
   _Keep({required this.id, required this.touch, required this.author});
 }

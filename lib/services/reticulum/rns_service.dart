@@ -3306,6 +3306,76 @@ class RnsService {
   /// Every author this device advertises itself as a home for.
   Set<String> get advertisedAuthors => Set.unmodifiable(_authorRecords);
 
+  /// Advertise "I hold the note [eventIdHex]" in the DHT.
+  ///
+  /// An event id is a sha256 — exactly the 32-byte key the DHT already speaks —
+  /// so a note we chose to keep becomes findable by id, not merely present. That
+  /// is the difference between an archive and a shoebox.
+  Future<void> publishNoteProvider(String eventIdHex) async {
+    final key = _hexToBytes(eventIdHex.toLowerCase());
+    if (key == null || key.length != 32 || _files == null) return;
+    try {
+      await _files!.publishKey(key, capacity: selfCapacity);
+      final rec = await ProviderRecord.create(
+        providerIdentity: _id!,
+        sha256: key,
+        capacity: selfCapacity,
+      );
+      _pointerLog?.add(rec);
+    } catch (_) {
+      // A pointer we failed to publish costs discoverability, never the note.
+    }
+  }
+
+  /// Fetch one note BY ID over Reticulum — resolve who holds it, ask them,
+  /// verify off the UI isolate, store.
+  ///
+  /// This is the privacy-ordered path: a `REQ` to a public relay tells that
+  /// relay who you are looking for and when you are awake. A mesh fetch tells it
+  /// nothing, because there is no "it" — only a destination hash and a peer who
+  /// answers.
+  Future<Map<String, dynamic>?> fetchNoteFromMesh(String eventIdHex) async {
+    final files = _files;
+    final relay = _relay;
+    final store = _relayStore;
+    final hub = _nostrHub;
+    if (files == null || relay == null || store == null || hub == null) {
+      return null;
+    }
+    final key = _hexToBytes(eventIdHex.toLowerCase());
+    if (key == null || key.length != 32) return null;
+
+    final providers = await files.resolveProviders(key);
+    if (providers.isEmpty) return null;
+
+    for (final p in providers.take(3)) {
+      try {
+        final events = await relay.query(
+          p,
+          NostrFilter(ids: [eventIdHex.toLowerCase()], limit: 1),
+          timeout: const Duration(seconds: 12),
+        );
+        if (events.isEmpty) continue;
+        // Signatures are checked on the engine isolate: RNS runs on main, and
+        // secp256k1 must never (docs/performance.md §3.1).
+        final verified = await hub.verifyEvents([events.first.toJson()]);
+        if (verified.isEmpty) continue;
+        final ev = NostrEvent.fromJson(verified.first);
+        final tier = tierOf(ev.pubkey,
+            selfPubHex: selfPubHex, followsHex: _mirroredAuthors);
+        store.putAllVerified([ev], tier: tier.index);
+        LogService.instance.add(
+            'social: note ${eventIdHex.substring(0, 8)} came from the MESH '
+            '(no relay, no IP)');
+        return verified.first;
+      } catch (_) {
+        // That provider did not answer. The next one might; and the DHT demotes
+        // a holder that never does.
+      }
+    }
+    return null;
+  }
+
   /// Ask the mesh: who holds [pubHex], and what do they have?
   ///
   /// Resolve the author key in the DHT → get devices → query the best few over

@@ -634,17 +634,23 @@ is in `main` with tests, and the device-validated ones say so.
    host that stores stranger events under quota and serves them back. The
    pointer-only model is the target; the DHT implements the primitive and author
    records now feed it, but the Indexer's *answer* is not yet the pointer map.
-2. **Indexers do not sync with each other.** No `SYNC_REQ`/`SYNC_RES`/
-   `SYNC_RESET`, no pointer log, no `(epoch, seq)` cursor. Designed above, not
-   written.
+2. **Indexer↔Indexer sync: the machinery is BUILT, the wiring is not.**
+   `PointerLog` (append-only, insertions *and* removals, bounded + compacted),
+   the `(epoch, seq)` cursor a clockless node can persist, `PointerSyncServer` /
+   `PointerSyncClient` (verify every record against the provider that signed it —
+   a forged envelope and a rebuilt log are both covered by tests), and
+   `SYNC_REQ`/`SYNC_RES`/`SYNC_RESET` on the relay protocol. What is missing is
+   the *scheduler*: nothing yet picks sync partners from the directory and runs
+   the exchange on a timer.
 3. **There is no Archiver role.** No `RelayRole.archiver`, no quota UI, no
    direct-link (LAN/BLE/LoRa) store-and-forward policy, no "mirror the small
    devices around me". The parts exist and are unjoined.
-4. **Resolve answers are still bare.** The DHT `VALUE` reply carries provider
-   pubkeys and a capacity class — not last-heard, provenance, power/uplink,
-   radios or schedule. The *directory* now scores on all of that, but the *DHT
-   reply* does not carry it, so a client resolving a file cannot yet prefer the
-   mains-powered box over somebody's phone on cellular.
+4. ~~Resolve answers are bare.~~ **BUILT.** The `VALUE` reply now carries a
+   6-byte `HolderHint` per record: last-heard, whether that is first-hand or came
+   from a sync (a rumour is discounted), and the holder's power, uplink and
+   radios — filled in by the host from the relay directory. `scoreHolder` puts the
+   mains-and-WiFi box first and the battery phone on cellular last. Hints ride
+   *after* the records, so a node that predates them is none the wiser.
 5. **`rns://` relay URIs are inert in the shipped app.** The relay hub runs on a
    background isolate constructed with `rnsClientFactory: null`, so an `rns://…`
    entry resolves to a null client. Real Reticulum relay traffic goes through
@@ -1178,11 +1184,9 @@ Dependency order. Each step is small and independently useful.
    advertised interests (that is what `RelayCap.firehose` means), but its promise
    to the network is the directory. Told to the user in those words: *an Indexer
    is not your backup.*
-4. **Indexer↔Indexer sync** (designed above). An append-only pointer log with a
-   `(epoch, seq)` cursor and an optional time cursor, `SYNC_REQ` / `SYNC_RES` /
-   `SYNC_RESET` over the existing relay link. Any live Indexer then gives the
-   same answer and a dead one costs nothing. A clockless node (ESP32 after a
-   reboot) resumes on `seq` alone.
+4. ~~**Indexer↔Indexer sync**~~ — **BUILT** (log, cursor, protocol, verified
+   merge; 15 tests). Remaining: the scheduler that picks partners from the
+   directory and runs it on a timer.
 5. ~~**The physical profile**~~ — **DONE** (announce + Settings → Hardware, device-validated): power, uplink and autonomy on the announce,
    plus an opt-in coverage region (coarse, picked on the map) with **one entry per
    radio** — its range, its listening frequency, its mode and its duty. The

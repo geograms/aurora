@@ -365,7 +365,7 @@ useless. Each radio therefore gets its own entry:
 | `r` | **range in km** for *this* link, as the person who raised the antenna estimates it |
 | `f` | **the frequency it is listening on**, in kHz (868 200, 433 775, 144 800, 14 105 …). 0 = not applicable (Bluetooth) |
 | `m` | modulation / mode, short string: `LoRa-SF7BW125`, `FSK`, `AX.25-1200`, `JS8`, … — free-form, because the radio world will always invent another one |
-| `d` | listening duty: `always` · `windowed` (see below) — a solar node that wakes for 5 minutes an hour is *reachable*, but not by someone who calls once |
+| `d` | **when it is listening** — a schedule string (next section). Default `always` |
 
 **The frequency is the point.** A range says a station *could* hear you; a
 frequency says *where to call*. Without it, discovering "there is an 80 km packet
@@ -374,18 +374,84 @@ the band, and guessing is exactly what a mesh is supposed to spare you. With it,
 a phone with a LoRa dongle, or an operator with an HF rig, knows precisely what
 to tune to and in which mode.
 
-**Windowed listeners are first-class.** Solar and battery stations do not hear
-24/7 — they wake, listen, and sleep, and a node that is only reachable in a
-window is not broken, it is *thrifty*. So `d: windowed` carries the schedule
-(period + the minutes it is awake, referenced to UTC when the node has a clock,
-or to its own duty cycle when it does not — an ESP32 with no RTC says "1 minute
-in every 10", which is honest and enough). A caller then retries into the window
-instead of concluding the station is dead.
-
-Wire cost: 4–5 chars of geohash, plus ~8 bytes per radio entry. Two radios is
-about 22 bytes — inside the announce budget, and if a node really has five, the
+Wire cost: 4–5 chars of geohash, plus ~8–14 bytes per radio entry. Two radios is
+about 30 bytes — inside the announce budget, and if a node really has five, the
 list is capped and the longest-range ones win, because those are the ones nobody
 else can substitute.
+
+#### The listening schedule (`d`)
+
+Solar and battery stations do not hear 24/7 — they wake, listen and sleep. **A
+node that is only reachable in a window is not broken, it is thrifty**, and a
+caller who gives up after one unanswered call has thrown away a perfectly good
+station. So the schedule is part of the advert, and it is **one string that a
+person can read and a machine can parse** — no separate "display" and "wire"
+forms to drift apart, and nothing a user has to translate into cron.
+
+**Grammar** (case-insensitive, canonical form is lower-case):
+
+```
+schedule   := "always" | term ("," term)*        ; commas = union ("or")
+term       := duty | window
+duty       := "every" span "for" span            ; clock-free — a repeating cycle
+window     := range [ days ]                     ; needs a clock
+range      := point "-" point
+point      := HH:MM | "dawn" | "dusk" [ offset ]
+offset     := ("+"|"-") span
+days       := "mon".."sun" ( "," day | "-" day )* | "weekdays" | "weekends" | "daily"
+span       := INT ("m"|"h")                      ; minutes or hours
+```
+
+Times are **UTC** unless suffixed `local` — a mesh spans time zones, and a
+station that says `06:00-18:00` and means "my local morning" is a station nobody
+can call. `dawn`/`dusk` resolve against the node's own announced coverage region
+(that is the second thing the geohash is for): a solar node's real schedule *is*
+the sun, and writing it as `dawn-dusk` stays correct in December.
+
+**Examples — this is the whole feature:**
+
+| String | Reads as | Who says it |
+|---|---|---|
+| `always` | listening 24/7 | mains-powered gateway |
+| `every 30m for 3m` | wakes for 3 minutes, every 30 | battery LoRa node |
+| `every 10m for 1m` | 1 minute in every 10 | ESP32 with no clock |
+| `06:00-18:00` | daylight hours, UTC, every day | solar node, fixed window |
+| `06:00-18:00 local` | the same, in its own time zone | a person's home station |
+| `dawn-dusk` | as long as the sun is up, wherever it is | solar node, done right |
+| `dawn+30m-dusk-30m` | sun up, with a margin to charge | cautious solar node |
+| `08:00-20:00 weekdays, 10:00-14:00 sat` | an office box and its Saturday | a club station |
+| `every 15m for 2m, 18:00-22:00` | thrifty all day, wide open in the evening | the common real case |
+
+**Clockless is not a degraded mode, it is a first mode.** `every N for M` needs
+no calendar, no NTP, no RTC — it is a duty cycle, and an ESP32 that just rebooted
+can honour it from `millis()` alone. Anything the node cannot resolve, it must
+not claim: **a node with no clock advertises only `duty` terms.** Advertising
+`06:00-18:00` when you cannot tell the time is a lie that costs a caller a wasted
+transmission on a battery, which is exactly the resource this whole design exists
+to protect.
+
+**What the caller does with it.** Parse → *is it listening now?* → if yes, call.
+If no, `nextWindow()` gives the instant it wakes, and the call is queued for then
+rather than burned now. With a duty cycle and no shared clock, phase is unknown —
+so the caller **retries across one full period** (`every 30m for 3m` ⇒ keep trying
+for 30 minutes, and you are guaranteed to land inside a listening window) instead
+of concluding the station is dead after one try. A schedule that turns out to be
+wrong is corrected by observation, like every other claim: the directory already
+records when a peer actually answered.
+
+**On the wire** the string is short enough (`every 30m for 3m` is 17 bytes) that
+it can simply be sent as text, and the announce budget can take it for one or two
+radios. A node that is tight for space may send the **canonical packed form**
+instead — one byte of kind, then the parameters (`duty`: two varints; `window`:
+two 11-bit minute-of-day values, a day bitmask, and a flag for UTC/local/solar) —
+typically 3–5 bytes. **The text is normative and the packed form is an
+optimisation**: they must round-trip, and a receiver that does not understand a
+term ignores that term rather than the whole schedule (so a future `dawn` term
+never breaks an old node — it just makes it call at a time the station is asleep,
+which is the failure it already knows how to survive).
+
+The parser, the packer and `isListeningNow()` / `nextWindow()` are one small
+pure-Dart file with a table-driven test, testable with no radio in the room.
 
 Rules, and they are firm because this is the one field that can hurt somebody:
 
@@ -504,11 +570,17 @@ The panel holds:
 - **Radios** — a row per antenna, added by the user, because a machine with a
   LoRa hat *and* a VHF rig has two very different footprints and one number would
   lie about both. Each row: the link, the **range in km**, the **frequency it
-  listens on**, the mode, and whether it hears **always** or in a **window**
-  (*"1 minute in every 10"* — a solar station that sleeps is thrifty, not dead,
-  and a caller should retry into the window instead of giving up). Each row draws
-  its own circle on the same map, in its own colour, so the user *sees* the
-  difference between 6 km of LoRa and 80 km of packet — and so does the network.
+  listens on**, the mode, and **when it is listening**. Each row draws its own
+  circle on the same map, in its own colour, so the user *sees* the difference
+  between 6 km of LoRa and 80 km of packet — and so does the network.
+- **The schedule editor** is a picker, not a text box, but it *writes the string*
+  and shows it: pick `always`, or `every [30m] for [3m]`, or `[06:00]–[18:00]` on
+  chosen days, or `dawn–dusk`, and the panel prints back the canonical line
+  (`every 30m for 3m, 18:00-22:00`) plus a plain-language sentence and a 24-hour
+  strip showing the awake bands. Typing the string by hand is allowed and parses
+  to the same thing — the string is the format, the picker is a convenience.
+  A device with no clock is offered **only** the `every N for M` form, because it
+  cannot honestly promise a time of day.
 - **What the device measured for them** — powered fraction over the last 7 days,
   real observed throughput. Read-only, and shown next to the claims so the two
   can be compared honestly.

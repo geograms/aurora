@@ -83,7 +83,7 @@ class _HeroCarouselState extends State<_HeroCarousel> {
           mainAxisSize: MainAxisSize.min,
           children: [
             SizedBox(
-              height: 172,
+              height: 196,
               // A touch means the user is reading or swiping: hold the rotation
               // and give them a fresh interval once they let go.
               child: Listener(
@@ -166,7 +166,7 @@ class _HeroEmpty extends StatelessWidget {
               );
 
     return Container(
-      height: 172,
+      height: 196,
       margin: const EdgeInsets.fromLTRB(6, 18, 6, 0),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(22),
@@ -442,24 +442,28 @@ class _HeroCard extends StatelessWidget {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 10),
-                      // Whatever height is left after the chips — the text
-                      // shrinks into it (both Texts already ellipsize), so it
-                      // can never climb back over them.
+                      const SizedBox(height: 12),
+                      // The headline starts directly under the chips and takes
+                      // everything below them. Bottom-anchoring it (what this
+                      // used to do) left a dead band across the top of every
+                      // short post, and squeezed the title into a stub while
+                      // the summary took the room.
                       Expanded(
-                        child: Padding(
-                          // Room for the likes/replies pill in the corner.
-                          padding: const EdgeInsets.only(right: 78),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              // Bounded by the Expanded above, so the text
-                              // block can never grow past the card's edge.
-                              Flexible(
-                                child: _TextBlock(item: item, accent: _accent),
-                              ),
-                            ],
+                        child: Align(
+                          alignment: Alignment.topLeft,
+                          child: Padding(
+                            // Only the last lines can reach the likes pill, so
+                            // the inset is on the bottom of the block, not the
+                            // whole width of the headline.
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: _TextBlock(
+                              item: item,
+                              accent: _accent,
+                              // The likes/replies pill sits in the bottom-right
+                              // corner; the summary must not run under it.
+                              reserveCorner:
+                                  item.likes > 0 || item.replies > 0,
+                            ),
                           ),
                         ),
                       ),
@@ -592,7 +596,14 @@ class _TextBlock extends StatelessWidget {
   final HeroItem item;
   final Color accent;
 
-  const _TextBlock({required this.item, required this.accent});
+  /// Keep the bottom-right corner clear for the likes/replies pill.
+  final bool reserveCorner;
+
+  const _TextBlock({
+    required this.item,
+    required this.accent,
+    this.reserveCorner = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -604,44 +615,66 @@ class _TextBlock extends StatelessWidget {
       valueListenable: HeroBrightness.instance.revision,
       builder: (context, _, __) {
         final bright = HeroBrightness.instance.verdictFor(item) ?? false;
-        // Flexible, not fixed: the card is 172px tall and the chips take the
-        // top of it, so a two-line headline plus a two-line summary can be
-        // taller than what is left — and the summary then ran off the bottom
-        // edge, mid-word. Both lines shrink into whatever space there is and
-        // ellipsize; the title keeps its lines first, the summary yields.
-        final text = Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Flexible(
-              child: Text(
-                item.title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w800,
-                  height: 1.05,
-                  shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
-                ),
-              ),
-            ),
-            if (item.summary.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Flexible(
-                child: Text(
-                  item.summary,
-                  maxLines: 2,
+        // The headline is what the card is FOR, so it is served first: up to
+        // three lines of it, and the summary only gets what is left over —
+        // measured, not guessed. The old fixed 2+2 split cut a headline to a
+        // stub ("The no-l bake") while the summary below it ran on, and on a
+        // narrow phone that reads as a broken card.
+        final text = LayoutBuilder(
+          builder: (context, box) {
+            const titleStyle = TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+              height: 1.18,
+              shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
+            );
+            final summaryStyle = TextStyle(
+              color: Colors.white.withValues(alpha: 0.88),
+              fontSize: 13,
+              height: 1.3,
+            );
+
+            // How tall the headline actually is at this width, capped at three
+            // lines. Everything below it belongs to the summary — if two lines
+            // of it fit, it gets two; if one fits, one; if none, none.
+            final painter = TextPainter(
+              text: TextSpan(text: item.title, style: titleStyle),
+              maxLines: 3,
+              textDirection: Directionality.of(context),
+            )..layout(maxWidth: box.maxWidth);
+            final titleHeight = painter.height;
+
+            const gap = 6.0;
+            final summaryLine = summaryStyle.fontSize! * summaryStyle.height!;
+            final leftOver = box.maxHeight - titleHeight - gap;
+            final summaryLines = (leftOver / summaryLine).floor().clamp(0, 2);
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  item.title,
+                  maxLines: 3,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.90),
-                    fontSize: 13,
-                  ),
+                  style: titleStyle,
                 ),
-              ),
-            ],
-          ],
+                if (item.summary.isNotEmpty && summaryLines > 0) ...[
+                  const SizedBox(height: gap),
+                  Padding(
+                    padding: EdgeInsets.only(right: reserveCorner ? 86 : 0),
+                    child: Text(
+                      item.summary,
+                      maxLines: summaryLines,
+                      overflow: TextOverflow.ellipsis,
+                      style: summaryStyle,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
         );
 
         if (!bright) return text;

@@ -295,7 +295,8 @@ HeroItem parseHeroCore({
 }) {
   final body = stripNoteTokens(content);
   final lead = _leadSentence(body);
-  final title = _truncate(lead, 60);
+  // 60 chars cut headlines mid-thought; the card now has three lines for it.
+  final title = _truncate(lead, 110);
   // Summary = the rest of the note AFTER the full lead sentence — never a
   // substring of the (possibly truncated) title, which would cut mid-word.
   final rest = body.startsWith(lead) ? body.substring(lead.length) : '';

@@ -1,6 +1,6 @@
 # Encrypted Profile Storage
 
-Status: planned. This document specifies how Aurora encrypts each profile's user data at rest.
+Status: phases 1–4 implemented (crypto core, SQLCipher databases, profile.ear loose files, unlock UI + enable/disable). Phase 5 (headless remember-key on Android boot + locked notification) pending. This document specifies how Aurora encrypts each profile's user data at rest.
 
 ## Context
 

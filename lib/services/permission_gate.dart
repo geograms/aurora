@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import '../platform/platform.dart' as platform;
+import '../profile/profile_db.dart';
+import '../profile/profile_service.dart';
 import '../services/log_service.dart';
 import '../services/reticulum/rns_autostart.dart';
 import '../wapp/background_wapp_manager.dart';
@@ -42,6 +44,18 @@ class PermissionGate {
   /// comes first wins; the second call is a no-op.
   static Future<void> startGatedServices() async {
     if (_started) return;
+    // Encrypted profile that has not been unlocked yet: the gated services
+    // would immediately open profile databases and throw. Stay stopped; the
+    // unlock page (or the headless cached-key path) calls this again after
+    // the keyring has the profile keys.
+    final active = ProfileService.instance.activeProfile;
+    if (active != null &&
+        ProfileKeyring.instance.isEncryptedProfile(active.id) &&
+        !ProfileKeyring.instance.isUnlocked(active.id)) {
+      LogService.instance
+          .add('permissions: profile ${active.id} locked — gated services wait');
+      return;
+    }
     _started = true;
     LogService.instance.add('permissions: granted — starting gated services');
 

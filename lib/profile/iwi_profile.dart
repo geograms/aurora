@@ -34,7 +34,15 @@ class IwiProfile {
   /// Bech32-encoded Nostr private key (`nsec1...`). **Secret**. Kept
   /// only in the profile's own JSON entry so a profile export/backup
   /// is a single file copy.
+  ///
+  /// Encrypted profiles: empty while locked; hydrated in memory after
+  /// unlock. [toJson] never writes it when [nsecEnvelope] is set.
   final String nsec;
+
+  /// AES-GCM envelope holding the nsec at rest for encrypted profiles
+  /// (see ProfileCrypto/NsecEnvelope). Null for plain profiles. When set,
+  /// the plaintext [nsec] is never persisted.
+  final Map<String, dynamic>? nsecEnvelope;
 
   /// Free-text bio / status the user can edit. Optional.
   final String description;
@@ -61,6 +69,7 @@ class IwiProfile {
     this.description = '',
     this.color = '',
     this.avatar = '',
+    this.nsecEnvelope,
   });
 
   String get displayName => nickname.isNotEmpty ? nickname : callsign;
@@ -75,6 +84,8 @@ class IwiProfile {
     String? description,
     String? color,
     String? avatar,
+    Map<String, dynamic>? nsecEnvelope,
+    bool clearNsecEnvelope = false,
   }) {
     return IwiProfile(
       id: id ?? this.id,
@@ -86,6 +97,8 @@ class IwiProfile {
       description: description ?? this.description,
       color: color ?? this.color,
       avatar: avatar ?? this.avatar,
+      nsecEnvelope:
+          clearNsecEnvelope ? null : (nsecEnvelope ?? this.nsecEnvelope),
     );
   }
 
@@ -94,7 +107,10 @@ class IwiProfile {
         'nickname': nickname,
         'callsign': callsign,
         'npub': npub,
-        'nsec': nsec,
+        // Encrypted profile: persist the envelope, NEVER the plaintext key
+        // (the in-memory nsec is hydrated after unlock and must not leak
+        // back to disk through a routine profile save).
+        if (nsecEnvelope != null) 'nsec_enc': nsecEnvelope else 'nsec': nsec,
         'createdAt': createdAt,
         'description': description,
         'color': color,
@@ -102,17 +118,19 @@ class IwiProfile {
       };
 
   factory IwiProfile.fromJson(Map<String, dynamic> json) {
+    final envelope = json['nsec_enc'];
     return IwiProfile(
       id: json['id'] as String,
       nickname: (json['nickname'] as String?) ?? '',
       callsign: json['callsign'] as String,
       npub: json['npub'] as String,
-      nsec: json['nsec'] as String,
+      nsec: (json['nsec'] as String?) ?? '',
       createdAt: (json['createdAt'] as int?) ??
           DateTime.now().millisecondsSinceEpoch,
       description: (json['description'] as String?) ?? '',
       color: (json['color'] as String?) ?? '',
       avatar: (json['avatar'] as String?) ?? '',
+      nsecEnvelope: envelope is Map ? envelope.cast<String, dynamic>() : null,
     );
   }
 }

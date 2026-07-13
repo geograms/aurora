@@ -8,6 +8,8 @@
  * but adapted to Aurora's [IwiProfile] + [ProfileService].
  */
 
+import 'dart:io';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,6 +17,8 @@ import 'package:flutter/services.dart';
 import 'iwi_profile.dart';
 import 'identity_backup.dart';
 import 'profile_avatar.dart';
+import 'profile_crypto.dart';
+import 'profile_encryption.dart';
 import 'profile_service.dart';
 import '../services/android_permissions_service.dart';
 import '../services/preferences_service.dart';
@@ -181,6 +185,145 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
         .showSnackBar(SnackBar(content: Text('$label copied')));
   }
 
+  // ── profile encryption ────────────────────────────────────────────────
+
+  bool _encBusy = false;
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _enableEncryption() async {
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (ctx) => const _PasswordSetupDialog(
+        title: 'Encrypt this profile',
+        warning:
+            'All existing data of this profile on this device will be '
+            'DELETED (messages, chat history, media). The profile starts '
+            'fresh, fully encrypted.\n\n'
+            'The password (emoji welcome) together with your secret key '
+            'unlocks the data. There is NO recovery if you forget it.',
+        confirmLabel: 'Delete data & encrypt',
+      ),
+    );
+    if (result == null) return;
+    setState(() => _encBusy = true);
+    try {
+      await ProfileEncryption.enable(_p.id, result);
+      _snack('Profile encrypted. Restart Aurora to complete.');
+    } catch (e) {
+      _snack('Enable failed: $e');
+    }
+    if (mounted) setState(() => _encBusy = false);
+  }
+
+  Future<void> _disableEncryption() async {
+    final pw = await _askPassword(
+      'Remove encryption',
+      'Enter the profile password. The encrypted data on this device will '
+      'be DELETED; the profile returns to unencrypted storage, fresh.',
+      confirmLabel: 'Delete data & decrypt',
+    );
+    if (pw == null) return;
+    setState(() => _encBusy = true);
+    try {
+      await ProfileEncryption.disable(_p.id, pw);
+      _snack('Encryption removed. Restart Aurora to complete.');
+    } on WrongProfilePassword {
+      _snack('Wrong password');
+    } catch (e) {
+      _snack('Disable failed: $e');
+    }
+    if (mounted) setState(() => _encBusy = false);
+  }
+
+  Future<void> _changeEncryptionPassword() async {
+    final old = await _askPassword('Change password', 'Current password');
+    if (old == null) return;
+    if (!mounted) return;
+    final fresh = await showDialog<String?>(
+      context: context,
+      builder: (ctx) => const _PasswordSetupDialog(
+        title: 'New password',
+        warning: 'Your data stays intact — only the password changes. '
+            'No recovery if you forget it.',
+        confirmLabel: 'Change password',
+      ),
+    );
+    if (fresh == null) return;
+    setState(() => _encBusy = true);
+    try {
+      await ProfileEncryption.changePassword(_p.id, old, fresh);
+      _snack('Password changed');
+    } on WrongProfilePassword {
+      _snack('Wrong current password');
+    } catch (e) {
+      _snack('Change failed: $e');
+    }
+    if (mounted) setState(() => _encBusy = false);
+  }
+
+  Future<void> _lockNow() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Lock profile'),
+        content: const Text(
+            'Aurora will close to lock the profile. Background message '
+            'reception stops until you unlock it again.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Lock & close')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ProfileEncryption.lockNow(_p.id);
+    exit(0);
+  }
+
+  Future<String?> _askPassword(String title, String message,
+      {String confirmLabel = 'OK'}) {
+    final controller = TextEditingController();
+    return showDialog<String?>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(message, style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Password',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: Text(confirmLabel)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -337,6 +480,102 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
             ),
           ),
           const SizedBox(height: 8),
+          // Profile encryption: everything this profile stores on this
+          // device (messages, media, databases) encrypted at rest, unlocked
+          // by password + secret key. See docs/plan-encrypted-storage.md.
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        ProfileEncryption.isEncrypted(_p.id)
+                            ? Icons.lock
+                            : Icons.lock_open,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text('Profile encryption',
+                            style: TextStyle(fontWeight: FontWeight.w600)),
+                      ),
+                      Text(
+                        ProfileEncryption.isEncrypted(_p.id)
+                            ? 'Enabled'
+                            : 'Off',
+                        style: TextStyle(
+                            fontSize: 11, color: cs.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    ProfileEncryption.isEncrypted(_p.id)
+                        ? 'Everything this profile stores on this device is '
+                            'encrypted. Unlocked with your password mixed '
+                            'with the secret key.'
+                        : 'Encrypt everything this profile stores on this '
+                            'device. Enabling deletes the profile\'s current '
+                            'data and starts fresh.',
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: _encBusy
+                        ? const [
+                            SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2)),
+                          ]
+                        : [
+                            if (!ProfileEncryption.isEncrypted(_p.id))
+                              FilledButton.icon(
+                                onPressed: _enableEncryption,
+                                icon: const Icon(Icons.enhanced_encryption,
+                                    size: 16),
+                                label: const Text('Encrypt profile'),
+                              )
+                            else ...[
+                              OutlinedButton.icon(
+                                onPressed: _lockNow,
+                                icon: const Icon(Icons.lock, size: 16),
+                                label: const Text('Lock now'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: _changeEncryptionPassword,
+                                icon: const Icon(Icons.password, size: 16),
+                                label: const Text('Change password'),
+                              ),
+                              if (ProfileEncryption.hasCachedKeys(_p.id))
+                                OutlinedButton.icon(
+                                  onPressed: () {
+                                    ProfileEncryption.clearCachedKeys(_p.id);
+                                    setState(() {});
+                                    _snack('Device key cache cleared');
+                                  },
+                                  icon: const Icon(Icons.key_off, size: 16),
+                                  label: const Text('Forget device key'),
+                                ),
+                              TextButton.icon(
+                                onPressed: _disableEncryption,
+                                icon: const Icon(Icons.no_encryption, size: 16),
+                                label: const Text('Remove encryption'),
+                              ),
+                            ],
+                          ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
           // Survives-uninstall backup: keeps the nsec on phone storage so a
           // reinstall / data wipe can restore the identity.
           Card(
@@ -409,6 +648,90 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Password setup: two matching fields + a hard warning. Returns the
+/// password via Navigator.pop, or null on cancel.
+class _PasswordSetupDialog extends StatefulWidget {
+  final String title;
+  final String warning;
+  final String confirmLabel;
+  const _PasswordSetupDialog({
+    required this.title,
+    required this.warning,
+    required this.confirmLabel,
+  });
+
+  @override
+  State<_PasswordSetupDialog> createState() => _PasswordSetupDialogState();
+}
+
+class _PasswordSetupDialogState extends State<_PasswordSetupDialog> {
+  final _a = TextEditingController();
+  final _b = TextEditingController();
+  bool _obscure = true;
+
+  @override
+  void dispose() {
+    _a.dispose();
+    _b.dispose();
+    super.dispose();
+  }
+
+  bool get _valid => _a.text.isNotEmpty && _a.text == _b.text;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(widget.warning, style: const TextStyle(fontSize: 12)),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _a,
+            autofocus: true,
+            obscureText: _obscure,
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: 'Password',
+              helperText: 'Emoji welcome 🔑',
+              border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                icon:
+                    Icon(_obscure ? Icons.visibility : Icons.visibility_off),
+                onPressed: () => setState(() => _obscure = !_obscure),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _b,
+            obscureText: _obscure,
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: 'Repeat password',
+              errorText: _b.text.isNotEmpty && _a.text != _b.text
+                  ? 'Passwords differ'
+                  : null,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel')),
+        FilledButton(
+          onPressed: _valid ? () => Navigator.pop(context, _a.text) : null,
+          child: Text(widget.confirmLabel),
+        ),
+      ],
     );
   }
 }

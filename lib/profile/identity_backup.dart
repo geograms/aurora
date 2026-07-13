@@ -145,10 +145,19 @@ class IdentityBackup {
   Future<void> backupAll(List<IwiProfile> profiles,
       {String passphrase = ''}) async {
     try {
-      if (profiles.isEmpty) return;
+      // Locked encrypted profiles carry an empty in-memory nsec; never let
+      // them overwrite a good backup entry with an empty key — keep the
+      // previous backup entry for those instead.
+      final withKey = profiles.where((p) => p.nsec.isNotEmpty).toList();
+      final lockedNpubs = profiles
+          .where((p) => p.nsec.isEmpty)
+          .map((p) => p.npub)
+          .toSet();
+      if (withKey.isEmpty && lockedNpubs.isEmpty) return;
       final f = await _file(create: true);
       if (f == null) return;
-      final identities = profiles
+
+      final identities = withKey
           .map((p) => {
                 'callsign': p.callsign,
                 'npub': p.npub,
@@ -157,6 +166,26 @@ class IdentityBackup {
                 'createdAt': p.createdAt,
               })
           .toList();
+      if (lockedNpubs.isNotEmpty) {
+        try {
+          final existing = await readBackup(passphrase: passphrase);
+          final have = identities.map((m) => m['npub']).toSet();
+          for (final r in existing) {
+            if (lockedNpubs.contains(r.npub) && !have.contains(r.npub)) {
+              identities.add({
+                'callsign': r.callsign,
+                'npub': r.npub,
+                'nsec': r.nsec,
+                'nickname': r.nickname,
+                'createdAt': r.createdAt,
+              });
+            }
+          }
+        } catch (_) {
+          // unreadable old backup (different passphrase) — keep what we have
+        }
+      }
+      if (identities.isEmpty) return;
       Map<String, dynamic> payload;
       if (passphrase.isNotEmpty) {
         payload = await _encrypt(jsonEncode({'profiles': identities}), passphrase);

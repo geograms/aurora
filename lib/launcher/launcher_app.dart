@@ -154,13 +154,44 @@ class _IwiAppState extends State<IwiApp> {
       });
     }
     if (hasProfile) {
+      final active = ProfileService.instance.activeProfile!;
+      final pid = active.id;
+      // Encrypted profile gate: try the keep-unlocked cache silently, then
+      // fall to the password page. Everything that touches profile storage
+      // (seeding below, gated services) waits behind this.
+      if (ProfileEncryption.isEncrypted(pid) &&
+          !ProfileEncryption.isUnlocked(pid)) {
+        return FutureBuilder<bool>(
+          key: ValueKey('unlock-$pid'),
+          future: ProfileEncryption.tryUnlockCached(pid).then((ok) async {
+            if (ok) await PermissionGate.startGatedServices();
+            return ok;
+          }),
+          builder: (context, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return const Scaffold(
+                  body: Center(child: CircularProgressIndicator()));
+            }
+            if (snap.data == true) {
+              // Unlocked from cache — fall through on next build.
+              WidgetsBinding.instance
+                  .addPostFrameCallback((_) => setState(() {}));
+              return const Scaffold(
+                  body: Center(child: CircularProgressIndicator()));
+            }
+            return UnlockPage(
+              profile: active,
+              onUnlocked: () => setState(() {}),
+            );
+          },
+        );
+      }
       // Seed the active profile's default wapps before the grid renders. The
       // boot task only seeds whatever profile existed at startup; a profile
       // created via WelcomePage (first run) or added via the switcher needs
       // seeding here. ensureProfileSeeded is idempotent (per-profile
       // .seeded.json), so re-running for an already-seeded profile is instant.
       // Keyed by profile id so it re-runs when the active profile changes.
-      final pid = ProfileService.instance.activeProfile!.id;
       return FutureBuilder<void>(
         key: ValueKey('seed-$pid'),
         future: ensureProfileSeeded(),

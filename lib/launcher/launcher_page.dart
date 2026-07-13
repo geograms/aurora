@@ -799,6 +799,17 @@ class _ProfileSwitcherState extends State<_ProfileSwitcher> {
                     ],
                   ),
                 ),
+                if (ProfileEncryption.isEncrypted(p.id))
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: Icon(
+                      ProfileEncryption.isUnlocked(p.id)
+                          ? Icons.lock_open
+                          : Icons.lock,
+                      size: 14,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
                 if (p.id == active?.id)
                   Icon(Icons.check, size: 18, color: cs.primary),
               ],

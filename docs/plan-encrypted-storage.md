@@ -1,6 +1,6 @@
 # Encrypted Profile Storage
 
-Status: phases 1–4 implemented (crypto core, SQLCipher databases, profile.ear loose files, unlock UI + enable/disable). Phase 5 (headless remember-key on Android boot + locked notification) pending. This document specifies how Aurora encrypts each profile's user data at rest.
+Status: all five phases implemented (crypto core, SQLCipher databases, profile.ear loose files, unlock UI + enable/disable, headless remember-key + locked notification). Android on-device validation pending. This document specifies how Aurora encrypts each profile's user data at rest.
 
 ## Context
 

@@ -24,6 +24,7 @@ import 'services/blossom_server.dart';
 import 'services/log_service.dart';
 import 'services/remote_api_service.dart';
 import 'services/deep_link_service.dart';
+import 'profile/profile_encryption.dart';
 import 'profile/profile_service.dart';
 import 'profile/storage_paths.dart';
 import 'services/task_monitor_service.dart';
@@ -175,6 +176,17 @@ Future<void> main() async {
       // chooses. We do NOT silently mint a default 'aurora' identity. The
       // active profile is seeded with the default wapps once it exists (see
       // the seed gate in launcher_app).
+
+      // Encrypted profile with a "keep unlocked on this device" cache:
+      // unlock right here, before the migration/seed boot tasks and the
+      // gated services touch profile storage. This is what lets the
+      // headless Android boot receive messages without a UI. No cache →
+      // stays locked; the UnlockPage (UI) or PermissionGate's system
+      // notification (headless) take it from there.
+      final active = ProfileService.instance.activeProfile;
+      if (active != null && ProfileEncryption.isEncrypted(active.id)) {
+        await ProfileEncryption.tryUnlockCached(active.id);
+      }
     },
   );
   BootOrchestrator.instance.register(

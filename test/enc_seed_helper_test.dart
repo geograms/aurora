@@ -24,14 +24,24 @@ void main() {
   });
 
   test('seed locked encrypted profile', () async {
+    final remember = Platform.environment['AURORA_SEED_REMEMBER'] == '1';
     final service = ProfileService.instance;
     await service.load();
     final preview = service.generatePreview(nickname: 'Locked One');
     await service.saveAndActivate(preview);
     await ProfileEncryption.enable(preview.id, 'boot-test 🔒');
-    await ProfileEncryption.lockNow(preview.id);
-    expect(ProfileEncryption.isUnlocked(preview.id), isFalse);
+    if (remember) {
+      // Leave a keep-unlocked device cache behind: a fresh process boots
+      // with an empty keyring but can unlock from the cache (headless
+      // Android path). lockNow would clear it, so don't lock here.
+      await ProfileEncryption.unlock(preview.id, 'boot-test 🔒',
+          remember: true);
+      expect(ProfileEncryption.hasCachedKeys(preview.id), isTrue);
+    } else {
+      await ProfileEncryption.lockNow(preview.id);
+      expect(ProfileEncryption.isUnlocked(preview.id), isFalse);
+    }
     // ignore: avoid_print
-    print('seeded locked profile ${preview.id}');
+    print('seeded locked profile ${preview.id} (remember=$remember)');
   }, skip: isolated ? false : 'set AURORA_TEST_HOME=1 with an isolated HOME');
 }

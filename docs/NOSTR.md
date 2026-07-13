@@ -318,6 +318,7 @@ second announce packet):
 | **Uplink speed** | `bw` | measured bytes/sec, log-bucketed (one byte: 2^n) — an *observed* number, not a sales figure |
 | **Other links** | `lk` | bitmask: `LoRa` · `Bluetooth` · `WiFi-Direct` · `packet radio / AX.25` · `serial` · `RNS TCP hub` |
 | **Autonomy** | `au` | hours this node expects to keep running with no grid and no sun (battery bank ÷ draw). 0 = unknown |
+| **Coverage** | `gh` + `rk` | a **coarse** geohash of the region this node serves, plus a radio range in km (see below). Absent = says nothing about where it is |
 
 Two rules keep this honest:
 
@@ -337,6 +338,59 @@ already samples charging state and network kind on a timer — it starts keeping
 the parts a human must state — nothing on Android can tell you the roof has a
 solar panel on it, and no API reports a LoRa antenna.
 
+### Coverage: where a node is useful, and how far it reaches
+
+A radio has a footprint, and that footprint is the whole point of it. "There is a
+LoRa gateway with a 12 km range on the hill above the valley" is *actionable* —
+it tells a phone in that valley who to shout at, and it tells the network which
+nodes still connect two towns when everything between them is down. A LoRa node
+that never says where it is is a radio nobody can find.
+
+So the profile can carry:
+
+- **`gh`** — a **geohash of the region the node serves**. Deliberately coarse.
+- **`rk`** — **range in km** for its radio links (LoRa / packet radio): how far it
+  realistically reaches, stated by the person who put the antenna up. They know;
+  no API does.
+
+Rules, and they are firm because this is the one field that can hurt somebody:
+
+- **It is a region, never a position.** The user does not report GPS — they
+  **pick a place on the map** (reuse the existing `maps` wapp / the host's map
+  picker) and choose how coarse to be. The stored value is a truncated geohash;
+  the precision *is* the privacy control, and it is shown as what it means:
+  *5 characters ≈ a town (±2.4 km)*, *4 ≈ a district (±20 km)*, *3 ≈ a region
+  (±78 km)*. Default for a phone: **nothing at all**.
+- **Opt-in, per device, and it defaults to off.** A phone in someone's pocket has
+  no business advertising where it sleeps. This field exists for **infrastructure
+  that wants to be found**: the gateway on the hill, the solar box on the roof of
+  the community centre, the Archiver in the village hall. Those nodes gain
+  everything by being locatable and risk nothing — they are already a physical
+  antenna in a public place.
+- **Coarse by construction.** A truncated geohash cannot be sharpened, and range
+  is a single number in km. There is nothing here to triangulate with. If a user
+  picks town-level precision, town-level is all that exists on the wire — the
+  fine bits are never stored, so they cannot leak later.
+- **It is a claim like any other.** A node saying "12 km" is telling you what to
+  *try*, not what is true. Whether it answers is the only real evidence, and the
+  directory already keeps that.
+
+Wire cost: a 4–5 char geohash plus one byte of km — six bytes, well inside the
+announce budget.
+
+What it buys, all of it at the moment the internet is not there:
+
+- **"Who can reach me right now?"** — a phone with no signal filters the directory
+  to nodes whose geohash region is adjacent to its own and whose `rk` plausibly
+  covers the gap, and calls those first instead of spraying the whole mesh.
+- **A map of the mesh that a human can read.** The Reticulum wapp already draws a
+  graph; with coverage it can draw it *on the map*: who covers this valley, where
+  the hole is, which single node is bridging two towns (and therefore which one
+  to add redundancy next to). That is a picture a community can act on.
+- **Disaster routing.** When the score enters degraded mode (below), coverage is
+  how a node decides *which* solar-and-LoRa neighbour is worth waking: the one
+  whose footprint actually overlaps the people who need it.
+
 ### The score, and why it changes with the weather
 
 Every asker computes a **resilience score** locally, from the announced facts and
@@ -355,6 +409,7 @@ the weights invert, and the scoring becomes a survivability question:
 | **Grid-independent power** (`solar+battery`, `wind/hydro`, high `au`) | It is still running. Nothing else matters if it is dark. |
 | **Grid-independent uplink** (`satellite`) | Starlink survives the local ISP, the local exchange and the local flood. It is a path *out* that does not depend on any infrastructure between here and the horizon. |
 | **Off-grid links** (`LoRa`, `packet radio`, `Bluetooth`) | It can be *reached* without any internet at all — from a phone with no signal, over kilometres, on a battery. |
+| **Coverage that overlaps mine** (`gh` + `rk`) | A solar LoRa gateway 200 km away cannot help me. The one on the hill above this valley can, and its footprint says so. |
 | **High powered-fraction, observed** | It was there yesterday, and the day before. |
 | Uplink speed | Still counts, but far below all of the above. A slow node that exists beats a fast node that is a brick. |
 
@@ -403,6 +458,13 @@ The panel holds:
   cellular / satellite / none), autonomy in hours without grid or sun, and which
   extra links are physically attached (LoRa, Bluetooth, WiFi-Direct, packet
   radio, serial). Sensible defaults, so a normal phone user never touches it.
+- **Coverage** (off by default) — *"pick the area this device serves"* opens the
+  **map**, the user drops a pin and chooses the precision with a slider labelled
+  in plain words (town / district / region), then states the radio range in km if
+  it has an antenna. The panel shows the resulting circle on the map: **this is
+  what the network will be told, and nothing finer.** A phone leaves it off; the
+  gateway on the hill turns it on, because being found is the entire reason it
+  is up there.
 - **What the device measured for them** — powered fraction over the last 7 days,
   real observed throughput. Read-only, and shown next to the claims so the two
   can be compared honestly.
@@ -628,8 +690,10 @@ Dependency order. Each step is small and independently useful.
    `SYNC_RESET` over the existing relay link. Any live Indexer then gives the
    same answer and a dead one costs nothing. A clockless node (ESP32 after a
    reboot) resumes on `seq` alone.
-5. **The physical profile** (above): six fields on the announce, the governor
-   extended to measure powered-fraction and throughput, **one full-size Hardware
+5. **The physical profile** (above): seven fields on the announce (the last being
+   an opt-in, deliberately coarse coverage region + radio range, picked on the
+   map), the governor extended to measure powered-fraction and throughput,
+   **one full-size Hardware
    panel in Settings** where the device is described once, and a resilience score
    that re-weights itself when the internet path disappears. Do this *before* the
    wapps, so both read a profile that already exists instead of each growing its

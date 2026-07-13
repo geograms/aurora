@@ -124,6 +124,25 @@ void ensureSqlCipherLoaded() {
   _sqlcipherLoaded = true;
 }
 
+/// The native SQLite library a BACKGROUND ISOLATE must load before it opens
+/// a database, or null when the platform default is right.
+///
+/// package:sqlite3's loader override lives per-isolate: [ensureSqlCipherLoaded]
+/// only fixes the isolate it runs on. Any isolate that opens SQLite (the NOSTR
+/// engine) has to be told the same thing, or it looks for a plain libsqlite3.so
+/// that this app does not ship — and dies. Pass this into the spawn message.
+String? engineSqliteLibrary() => Platform.isAndroid ? 'libsqlcipher.so' : null;
+
+/// SQLCipher key (raw hex) for the database at [absPath], or null when it is
+/// not inside an encrypted profile. For isolates that cannot reach the
+/// keyring; on the main isolate, [openProfileDb] does this itself.
+String? profileDbKeyHex(String absPath) {
+  final loc = locateProfileDb(absPath);
+  if (loc == null) return null;
+  if (!ProfileKeyring.instance.isEncryptedProfile(loc.profileId)) return null;
+  return ProfileKeyring.instance.keysFor(loc.profileId)?.dbKeyHex(loc.relPath);
+}
+
 /// Result of mapping an absolute path into the profile layout.
 class ProfileDbLocation {
   final String profileId;

@@ -56,6 +56,7 @@ import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
 import '../folders/folder_state.dart';
 import '../folders/folder_subscriptions.dart';
+import '../../profile/profile_db.dart';
 import '../../profile/profile_service.dart';
 import '../../profile/secure_file.dart';
 import '../preferences_service.dart';
@@ -2171,15 +2172,32 @@ class RnsService {
               ? null
               : relayStorePath!.replaceAll(RegExp(r'[^/]*$'), '');
           if (base != null) {
+            final feedPath = '${base}nostr_feed.sqlite3';
             // ignore: discarded_futures
             NostrClient.spawn(
-              storePath: '${base}nostr_feed.sqlite3',
+              storePath: feedPath,
               persistPath: '${base}nostr_relays.json',
               selfPubHex: selfPubHex,
+              // The sqlite3 loader override is PER-ISOLATE. Aurora bundles
+              // SQLCipher (encrypted profiles), so without this the engine
+              // isolate looked for a libsqlite3.so the app does not ship,
+              // threw, and the entire NOSTR pipeline — internet relays
+              // included — never started. Silently.
+              sqliteLibrary: engineSqliteLibrary(),
+              // …and inside an encrypted profile the feed is real user
+              // content: key it like every other profile database.
+              dbKeyHex: profileDbKeyHex(feedPath),
             ).then((c) {
-              _nostrHub = c..onChanged = _notifyNostrListeners;
+              LogService.instance.add('NOSTR: engine up (feed $feedPath)');
+              _nostrHub = c
+                ..onChanged = _notifyNostrListeners
+                ..onLog = (m) => LogService.instance.add('NOSTR: $m');
               // Start keeping (and serving) what the people we follow post.
               startFollowsMirror();
+            }).catchError((Object e) {
+              // A pipeline that never comes up must SAY so. This one used to
+              // fail into silence and take the whole hero with it.
+              LogService.instance.add('NOSTR: engine spawn FAILED: $e');
             });
           }
         } catch (e) {

@@ -156,13 +156,25 @@ class HeroInbox {
       thumbnail: _thumb(j['thumb']),
       createdAt: created,
       expiresAt: expires,
-      authorName: _nonEmpty(j['author']) ?? '',
+      // A wapp must not be able to write the post's text into the author
+      // chip — that is what made the launcher show a headline where the
+      // person's name belongs.
+      authorName: _authorOf(
+          j, title, (j['summary'] ?? '').toString()),
       priority: ((j['priority'] as num?)?.toInt() ?? 0).clamp(0, 2),
       deepLink: _nonEmpty(j['view']),
       payload: j['payload'] is Map
           ? (j['payload'] as Map).cast<String, dynamic>()
           : null,
     );
+  }
+
+  /// The publishing wapp's `author`, unless it is really the post's own text.
+  static String _authorOf(
+      Map<String, dynamic> j, String title, String summary) {
+    final name = (_nonEmpty(j['author']) ?? '').trim();
+    if (name.isEmpty) return '';
+    return HeroItem.looksLikePostText(name, title, summary) ? '' : name;
   }
 
   static String? _nonEmpty(dynamic v) {
@@ -305,7 +317,8 @@ class HeroInbox {
       expiresAt: expiresMs == null
           ? null
           : DateTime.fromMillisecondsSinceEpoch(expiresMs),
-      authorName: (j['author'] ?? '').toString(),
+      authorName: _authorOf(
+          j, title, (j['summary'] ?? '').toString()),
       priority: ((j['priority'] as num?)?.toInt() ?? 0).clamp(0, 2),
       deepLink: _nonEmpty(j['view']),
       payload: j['payload'] is Map

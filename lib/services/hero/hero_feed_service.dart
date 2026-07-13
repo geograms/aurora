@@ -30,6 +30,16 @@ class HeroFeedService {
   /// Fallback-only source (see [refresh]): never mixed with real content.
   final WelcomeHeroSource _welcome = WelcomeHeroSource();
 
+  /// The carousel is showing nothing but the local welcome cards — i.e. no
+  /// post has arrived yet, from any relay or the mesh.
+  ///
+  /// The refresher polls fast until content lands and slowly afterwards, and
+  /// it must not mistake OUR OWN placeholder for content: doing so dropped it
+  /// straight to the 5-minute cadence on a fresh install, so the first real
+  /// post could sit unshown for minutes after the relays had already sent it.
+  bool get hasNoRealContent =>
+      items.value.every((i) => i.sourceId == kHeroSourceWelcome);
+
   void register(HeroSource source) {
     if (_sources.any((s) => s.id == source.id)) return;
     _sources.add(source);
@@ -157,7 +167,7 @@ class HeroRefresher {
   bool _fast = true;
 
   void _arm() {
-    _fast = HeroFeedService.instance.items.value.isEmpty;
+    _fast = HeroFeedService.instance.hasNoRealContent;
     _timer?.cancel();
     _timer = Timer.periodic(_fast ? _whileEmpty : _every, (_) => _safeRefresh());
   }
@@ -167,7 +177,7 @@ class HeroRefresher {
       // The moment the first post lands, drop back to the slow cadence — the
       // fast one exists only to get something on screen, not to keep polling.
       if (!LauncherVisibility.instance.visible.value) return;
-      if (_fast != HeroFeedService.instance.items.value.isEmpty) _arm();
+      if (_fast != HeroFeedService.instance.hasNoRealContent) _arm();
     }).catchError((_) {}));
   }
 }

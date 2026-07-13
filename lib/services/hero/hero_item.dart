@@ -74,6 +74,25 @@ class HeroItem {
 
   bool get hasImage => imageUrl != null || thumbnail != null;
 
+  /// An author label that IS the post — a wapp that put its headline in the
+  /// `author` field, or a kind-0 whose "name" is the note's own text. The chip
+  /// then reads as if the post were written by its own title, which is what
+  /// people actually saw on the launcher. Anything that overlaps the note's
+  /// own words is not a name.
+  static bool looksLikePostText(String name, String title, String summary) {
+    final n = name.trim();
+    if (n.isEmpty) return false;
+    // Names are short. A "name" the length of a sentence is a sentence.
+    if (n.length > 40) return true;
+    final t = title.trim();
+    final s = summary.trim();
+    if (t.isNotEmpty && (n == t || t.startsWith(n) || n.startsWith(t))) {
+      return true;
+    }
+    if (s.isNotEmpty && (n == s || s.startsWith(n))) return true;
+    return false;
+  }
+
   bool get isNostr => sourceId == kHeroSourceNostr;
 
   bool expired(DateTime now) =>

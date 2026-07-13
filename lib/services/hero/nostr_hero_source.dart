@@ -28,22 +28,21 @@ class NostrHeroSource implements HeroSource {
 
   static const int _bufferCap = 40;
 
-  /// How long to hold out for the like-ranked discovery feed before falling back
-  /// to whatever the mesh has relayed to us.
-  ///
-  /// Discovery has to watch reactions accumulate before it knows which posts are
-  /// worth fetching, so it cannot answer instantly. But an empty hero is the
-  /// first thing a new user sees, and making them stare at it is worse than
-  /// showing them an unranked post: 15 seconds, not 45.
-  static const int _firehoseGraceMs = 15 * 1000;
-  int? _firstLoadMs;
 
   // Newest-first buffers, keyed by event id so a redelivered event is one row.
   final Map<String, HeroItem> _followsBuf = {};
   final Map<String, HeroItem> _discoBuf = {};
 
+  /// Live kind-1 as the relays push it, through the quality gate. Discovery
+  /// only carries posts that have already collected reactions, so on a fresh
+  /// device with nobody followed it can take many minutes to say anything —
+  /// which is exactly the empty hero people saw. The firehose answers in
+  /// seconds; the ranker still decides what is worth a slot.
+  final Map<String, HeroItem> _fireBuf = {};
+
   String? _followsSub;
   String? _discoSub;
+  String? _fireSub;
   String _followsKey = '';
   String _rung = '';
 
@@ -71,6 +70,7 @@ class NostrHeroSource implements HeroSource {
       );
     }
     _discoSub ??= rns.nostrDiscovery();
+    _fireSub ??= rns.nostrFirehose();
   }
 
   /// Drain one subscription and fold the NEW events into [buf].
@@ -109,6 +109,7 @@ class NostrHeroSource implements HeroSource {
       _ensureSubscriptions(follows);
       await _drainInto(_followsSub, _followsBuf);
       await _drainInto(_discoSub, _discoBuf);
+      await _drainInto(_fireSub, _fireBuf);
 
       // Followed: the hero is theirs alone. The ranker enforces that too, but
       // there is no reason to hand it strangers' posts it will only discard.
@@ -124,36 +125,48 @@ class NostrHeroSource implements HeroSource {
         return _hydrate(items);
       }
 
-      // Nobody followed: the network's most-engaged posts. Discovery only
-      // carries kind-1 with >2 reactions, so spam filters itself out.
-      if (_discoBuf.isNotEmpty) {
-        _noteRung('discovery', _discoBuf.length);
-        return _hydrate(_discoBuf.values.toList());
+      // Nobody followed. Merge everything the device can see, from BOTH
+      // transports, and let the ranker choose:
+      //   discovery — the internet relays' most-engaged posts (slow to warm:
+      //               a post must collect reactions before it qualifies)
+      //   firehose  — live kind-1 off the same relays, quality-gated
+      //   mesh      — what Reticulum itself relayed to us
+      // Discovery alone is what left a new phone staring at an empty banner
+      // for minutes: on a fresh install nothing has any likes yet.
+      final merged = <String, HeroItem>{};
+      for (final i in _discoBuf.values) {
+        merged[i.id] = i;
       }
-
-      // Nothing from the relays yet. Discovery needs a few seconds to gather
-      // reactions and the unranked firehose is mostly spam, so hold the empty
-      // state until the grace window closes rather than flashing junk.
-      _firstLoadMs ??= DateTime.now().millisecondsSinceEpoch;
-      if (DateTime.now().millisecondsSinceEpoch - _firstLoadMs! <
-          _firehoseGraceMs) {
-        return const [];
+      for (final i in _fireBuf.values) {
+        merged.putIfAbsent(i.id, () => i);
       }
-
-      // Still nothing: this node has no relay reachability (mesh-only). Show
-      // whatever the Reticulum mesh itself relayed to us.
       final store = rns.relayStore;
-      if (store == null) return const [];
-      _noteRung('firehose', 10);
-      return _hydrate([
-        for (final e in store.firehose(limit: 10))
-          parseHeroCore(
+      if (store != null) {
+        for (final e in store.firehose(limit: 10)) {
+          final item = parseHeroCore(
             id: e.id ?? '',
             pubkey: e.pubkey,
             content: e.content,
             createdAtSec: e.createdAt,
-          ),
-      ]);
+          );
+          merged.putIfAbsent(item.id, () => item);
+        }
+      }
+      if (merged.isEmpty) {
+        // An empty hero is now SAID, with the numbers that explain it: which
+        // buffers were dry, and what the relays' firehose gate did with what
+        // it saw. Guessing at this cost a whole build cycle.
+        LogService.instance.add(
+          'hero: empty (disco=${_discoBuf.length} fire=${_fireBuf.length} '
+          'subs=[d:$_discoSub f:$_fireSub] gate=${rns.nostrFirehoseStats})',
+        );
+        return const [];
+      }
+      _noteRung(
+        'merged(disco=${_discoBuf.length} fire=${_fireBuf.length})',
+        merged.length,
+      );
+      return _hydrate(merged.values.toList());
     } catch (_) {
       return const [];
     }
@@ -215,8 +228,12 @@ class NostrHeroSource implements HeroSource {
     final profile = pk.isEmpty
         ? const <String, String>{}
         : rns.nostrProfile(pk);
-    final name = (profile['name'] ?? '').isNotEmpty
-        ? profile['name']!
+    final claimed = (profile['name'] ?? '').trim();
+    // A kind-0 "name" that is really the note's own text is not a name: keep
+    // the short npub instead (HeroItem.looksLikePostText).
+    final name = claimed.isNotEmpty &&
+            !HeroItem.looksLikePostText(claimed, i.title, i.summary)
+        ? claimed
         : i.authorName;
     final pic = (profile['pic'] ?? '').isNotEmpty ? profile['pic'] : i.authorPic;
     // Unchanged items keep their identity, so the carousel doesn't rebuild (and

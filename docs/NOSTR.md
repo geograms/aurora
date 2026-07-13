@@ -318,7 +318,7 @@ second announce packet):
 | **Uplink speed** | `bw` | measured bytes/sec, log-bucketed (one byte: 2^n) — an *observed* number, not a sales figure |
 | **Other links** | `lk` | bitmask: `LoRa` · `Bluetooth` · `WiFi-Direct` · `packet radio / AX.25` · `serial` · `RNS TCP hub` |
 | **Autonomy** | `au` | hours this node expects to keep running with no grid and no sun (battery bank ÷ draw). 0 = unknown |
-| **Coverage** | `gh` + `rk` | a **coarse** geohash of the region this node serves, plus a radio range in km (see below). Absent = says nothing about where it is |
+| **Coverage** | `gh` + `rx[]` | a **coarse** geohash of the region this node serves, plus **one entry per radio**: its range, its band, and the frequency it is listening on (see below). Absent = says nothing about where it is |
 
 Two rules keep this honest:
 
@@ -349,9 +349,43 @@ that never says where it is is a radio nobody can find.
 So the profile can carry:
 
 - **`gh`** — a **geohash of the region the node serves**. Deliberately coarse.
-- **`rk`** — **range in km** for its radio links (LoRa / packet radio): how far it
-  realistically reaches, stated by the person who put the antenna up. They know;
-  no API does.
+- **`rx[]`** — **one entry per radio this node listens on**, because one number
+  cannot describe a machine with two antennas.
+
+#### One range per link, because the antennas are not the same
+
+A node may have Bluetooth (tens of metres), a LoRa gateway (a few km), and an HF
+or VHF station that reaches 80 km. Collapsing that into a single "range" is a
+lie in both directions: it makes the Bluetooth look magical and the radio look
+useless. Each radio therefore gets its own entry:
+
+| Sub-field | Meaning |
+|---|---|
+| `l` | which link — LoRa · packet radio / AX.25 · Bluetooth · WiFi-Direct · other |
+| `r` | **range in km** for *this* link, as the person who raised the antenna estimates it |
+| `f` | **the frequency it is listening on**, in kHz (868 200, 433 775, 144 800, 14 105 …). 0 = not applicable (Bluetooth) |
+| `m` | modulation / mode, short string: `LoRa-SF7BW125`, `FSK`, `AX.25-1200`, `JS8`, … — free-form, because the radio world will always invent another one |
+| `d` | listening duty: `always` · `windowed` (see below) — a solar node that wakes for 5 minutes an hour is *reachable*, but not by someone who calls once |
+
+**The frequency is the point.** A range says a station *could* hear you; a
+frequency says *where to call*. Without it, discovering "there is an 80 km packet
+station over that ridge" is a fact you cannot act on — you would have to guess
+the band, and guessing is exactly what a mesh is supposed to spare you. With it,
+a phone with a LoRa dongle, or an operator with an HF rig, knows precisely what
+to tune to and in which mode.
+
+**Windowed listeners are first-class.** Solar and battery stations do not hear
+24/7 — they wake, listen, and sleep, and a node that is only reachable in a
+window is not broken, it is *thrifty*. So `d: windowed` carries the schedule
+(period + the minutes it is awake, referenced to UTC when the node has a clock,
+or to its own duty cycle when it does not — an ESP32 with no RTC says "1 minute
+in every 10", which is honest and enough). A caller then retries into the window
+instead of concluding the station is dead.
+
+Wire cost: 4–5 chars of geohash, plus ~8 bytes per radio entry. Two radios is
+about 22 bytes — inside the announce budget, and if a node really has five, the
+list is capped and the longest-range ones win, because those are the ones nobody
+else can substitute.
 
 Rules, and they are firm because this is the one field that can hurt somebody:
 
@@ -367,22 +401,25 @@ Rules, and they are firm because this is the one field that can hurt somebody:
   the community centre, the Archiver in the village hall. Those nodes gain
   everything by being locatable and risk nothing — they are already a physical
   antenna in a public place.
-- **Coarse by construction.** A truncated geohash cannot be sharpened, and range
-  is a single number in km. There is nothing here to triangulate with. If a user
+- **Coarse by construction.** A truncated geohash cannot be sharpened, and each
+  range is one number in km. There is nothing here to triangulate with. If a user
   picks town-level precision, town-level is all that exists on the wire — the
-  fine bits are never stored, so they cannot leak later.
-- **It is a claim like any other.** A node saying "12 km" is telling you what to
-  *try*, not what is true. Whether it answers is the only real evidence, and the
-  directory already keeps that.
-
-Wire cost: a 4–5 char geohash plus one byte of km — six bytes, well inside the
-announce budget.
+  fine bits are never stored, so they cannot leak later. (A licensed station is a
+  separate case: its callsign and its location are already public by law, and its
+  operator may well *want* the precise entry. That is their choice to make, not
+  our default.)
+- **It is a claim like any other.** A node saying "80 km on 144.800" is telling
+  you what to *try*, not what is true. Whether it answers is the only real
+  evidence, and the directory already keeps that.
 
 What it buys, all of it at the moment the internet is not there:
 
-- **"Who can reach me right now?"** — a phone with no signal filters the directory
-  to nodes whose geohash region is adjacent to its own and whose `rk` plausibly
-  covers the gap, and calls those first instead of spraying the whole mesh.
+- **"Who can reach me right now, and on what?"** — a phone with no signal filters
+  the directory to nodes whose region is adjacent to its own and whose radios
+  plausibly cover the gap, then calls them **on the link and the frequency they
+  said they were listening on** — instead of spraying the whole mesh. A node with
+  a LoRa dongle only cares about the LoRa entries; an operator with a VHF rig only
+  cares about the packet ones. Same announce, different reader.
 - **A map of the mesh that a human can read.** The Reticulum wapp already draws a
   graph; with coverage it can draw it *on the map*: who covers this valley, where
   the hole is, which single node is bridging two towns (and therefore which one
@@ -409,7 +446,7 @@ the weights invert, and the scoring becomes a survivability question:
 | **Grid-independent power** (`solar+battery`, `wind/hydro`, high `au`) | It is still running. Nothing else matters if it is dark. |
 | **Grid-independent uplink** (`satellite`) | Starlink survives the local ISP, the local exchange and the local flood. It is a path *out* that does not depend on any infrastructure between here and the horizon. |
 | **Off-grid links** (`LoRa`, `packet radio`, `Bluetooth`) | It can be *reached* without any internet at all — from a phone with no signal, over kilometres, on a battery. |
-| **Coverage that overlaps mine** (`gh` + `rk`) | A solar LoRa gateway 200 km away cannot help me. The one on the hill above this valley can, and its footprint says so. |
+| **Coverage that overlaps mine, on a radio I actually have** (`gh` + `rx[]`) | A solar LoRa gateway 200 km away cannot help me. The one on the hill above this valley can — and if all I own is LoRa, its 80 km HF entry is worth nothing to me while its 6 km LoRa entry is worth everything. Score per link, not per node. |
 | **High powered-fraction, observed** | It was there yesterday, and the day before. |
 | Uplink speed | Still counts, but far below all of the above. A slow node that exists beats a fast node that is a brick. |
 
@@ -459,12 +496,19 @@ The panel holds:
   extra links are physically attached (LoRa, Bluetooth, WiFi-Direct, packet
   radio, serial). Sensible defaults, so a normal phone user never touches it.
 - **Coverage** (off by default) — *"pick the area this device serves"* opens the
-  **map**, the user drops a pin and chooses the precision with a slider labelled
-  in plain words (town / district / region), then states the radio range in km if
-  it has an antenna. The panel shows the resulting circle on the map: **this is
-  what the network will be told, and nothing finer.** A phone leaves it off; the
-  gateway on the hill turns it on, because being found is the entire reason it
-  is up there.
+  **map**; the user drops a pin and chooses the precision with a slider labelled
+  in plain words (town / district / region). The panel draws the resulting circle:
+  **this is what the network will be told, and nothing finer.** A phone leaves it
+  off; the gateway on the hill turns it on, because being found is the entire
+  reason it is up there.
+- **Radios** — a row per antenna, added by the user, because a machine with a
+  LoRa hat *and* a VHF rig has two very different footprints and one number would
+  lie about both. Each row: the link, the **range in km**, the **frequency it
+  listens on**, the mode, and whether it hears **always** or in a **window**
+  (*"1 minute in every 10"* — a solar station that sleeps is thrifty, not dead,
+  and a caller should retry into the window instead of giving up). Each row draws
+  its own circle on the same map, in its own colour, so the user *sees* the
+  difference between 6 km of LoRa and 80 km of packet — and so does the network.
 - **What the device measured for them** — powered fraction over the last 7 days,
   real observed throughput. Read-only, and shown next to the claims so the two
   can be compared honestly.
@@ -690,12 +734,14 @@ Dependency order. Each step is small and independently useful.
    `SYNC_RESET` over the existing relay link. Any live Indexer then gives the
    same answer and a dead one costs nothing. A clockless node (ESP32 after a
    reboot) resumes on `seq` alone.
-5. **The physical profile** (above): seven fields on the announce (the last being
-   an opt-in, deliberately coarse coverage region + radio range, picked on the
-   map), the governor extended to measure powered-fraction and throughput,
-   **one full-size Hardware
-   panel in Settings** where the device is described once, and a resilience score
-   that re-weights itself when the internet path disappears. Do this *before* the
+5. **The physical profile** (above): power, uplink and autonomy on the announce,
+   plus an opt-in coverage region (coarse, picked on the map) with **one entry per
+   radio** — its range, its listening frequency, its mode and its duty. The
+   governor extended to measure powered-fraction and throughput. **One full-size
+   Hardware panel in Settings**, where the device is described once and each radio
+   draws its own circle on the map. And a resilience score that re-weights itself
+   when the internet path disappears, scoring **per link** — a neighbour's 80 km
+   HF entry is worthless to a caller who only owns LoRa. Do this *before* the
    wapps, so both read a profile that already exists instead of each growing its
    own copy of it.
 6. **The Indexer wapp** (above) — the role becomes something a person grants,

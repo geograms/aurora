@@ -387,12 +387,19 @@ class _HeroCard extends StatelessWidget {
               _backdrop(),
               _topScrim(),
               _scrim(),
-              Positioned(
-                left: 18,
-                right: 18,
-                top: 16,
-                child: Row(
-                  children: [
+              // Chips and text in ONE column, not two Positioned layers that
+              // both float free: the title is pinned to the bottom and grows
+              // UPWARD, so a two-line headline drew straight over the author
+              // chip and hid whose post it was. A column cannot overlap
+              // itself — the text gets the space the chips do not use.
+              Positioned.fill(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
                     Flexible(
                       child: _chip(
                         Text(
@@ -415,32 +422,50 @@ class _HeroCard extends StatelessWidget {
                     // old (a quiet timeline is backfilled from the local
                     // mirror), so "19 minutes ago" vs "yesterday" is the
                     // difference between news and history.
-                    _chip(
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.schedule,
-                              size: 11, color: Colors.white70),
-                          const SizedBox(width: 4),
-                          Text(
-                            timeAgo(item.createdAt),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
+                          _chip(
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.schedule,
+                                    size: 11, color: Colors.white70),
+                                const SizedBox(width: 4),
+                                Text(
+                                  timeAgo(item.createdAt),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 10),
+                      // Whatever height is left after the chips — the text
+                      // shrinks into it (both Texts already ellipsize), so it
+                      // can never climb back over them.
+                      Expanded(
+                        child: Padding(
+                          // Room for the likes/replies pill in the corner.
+                          padding: const EdgeInsets.only(right: 78),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              // Bounded by the Expanded above, so the text
+                              // block can never grow past the card's edge.
+                              Flexible(
+                                child: _TextBlock(item: item, accent: _accent),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              Positioned(
-                left: 18,
-                right: 96,
-                bottom: 18,
-                child: _TextBlock(item: item, accent: _accent),
               ),
               if (item.likes > 0 || item.replies > 0)
                 Positioned(
@@ -579,31 +604,40 @@ class _TextBlock extends StatelessWidget {
       valueListenable: HeroBrightness.instance.revision,
       builder: (context, _, __) {
         final bright = HeroBrightness.instance.verdictFor(item) ?? false;
+        // Flexible, not fixed: the card is 172px tall and the chips take the
+        // top of it, so a two-line headline plus a two-line summary can be
+        // taller than what is left — and the summary then ran off the bottom
+        // edge, mid-word. Both lines shrink into whatever space there is and
+        // ellipsize; the title keeps its lines first, the summary yields.
         final text = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              item.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 20,
-                fontWeight: FontWeight.w800,
-                height: 1.05,
-                shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
+            Flexible(
+              child: Text(
+                item.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  height: 1.05,
+                  shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
+                ),
               ),
             ),
             if (item.summary.isNotEmpty) ...[
               const SizedBox(height: 6),
-              Text(
-                item.summary,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.90),
-                  fontSize: 13,
+              Flexible(
+                child: Text(
+                  item.summary,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.90),
+                    fontSize: 13,
+                  ),
                 ),
               ),
             ],

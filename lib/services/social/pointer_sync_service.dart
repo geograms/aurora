@@ -36,10 +36,11 @@ class PointerSyncService {
   PointerSyncService._();
   static final PointerSyncService instance = PointerSyncService._();
 
-  /// A home-fibre indexer every few minutes; the interval is deliberately long
-  /// because pointers refresh on a 30-minute republish cycle anyway. Syncing
-  /// faster would buy nothing and cost everybody.
-  static const Duration _tick = Duration(minutes: 4);
+  /// Pointers refresh on a 30-minute republish cycle, so there is nothing to
+  /// gain from hammering this. A minute is short enough that a new indexer
+  /// becomes useful quickly, and long enough that the exchange is a rounding
+  /// error on anybody's uplink.
+  static const Duration _tick = Duration(minutes: 1);
 
   /// Per exchange. A LoRa-attached indexer takes the same log in tiny bites over
   /// hours; the cursor is what makes that free.
@@ -78,10 +79,20 @@ class PointerSyncService {
 
     // Only an Indexer syncs. A leaf has nothing to give and cannot afford to
     // give it.
-    if (!_rns.isIndexer) return;
+    if (!_rns.isIndexer) {
+      LogService.instance.add('sync: idle — this device is not an indexer');
+      return;
+    }
 
     final partners = _partners();
-    if (partners.isEmpty) return;
+    if (partners.isEmpty) {
+      // Say WHY nothing is happening. A sync loop that quietly does nothing is
+      // indistinguishable from a broken one.
+      final all = _rns.relayDirectory.indexers().length;
+      LogService.instance.add(
+          'sync: no partner (indexers seen=$all, searchable=0)');
+      return;
+    }
 
     final peer = partners[_round++ % partners.length];
     final idHex = _hex(peer.identity.hash);

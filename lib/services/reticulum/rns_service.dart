@@ -2207,6 +2207,9 @@ class RnsService {
                   onChanged: (_) => _announceRelayDest(),
                 )
               : null;
+          // The owner's decision beats the charger. Without this, picking
+          // "Always" set a preference and changed nothing on the wire.
+          _relayRole?.volunteer = p?.indexerVolunteer ?? 'auto';
           // The pointer log this device syncs with other indexers. Its epoch is
           // derived from the identity, so a rebuilt log gets a new epoch and a
           // peer's stale cursor is DETECTED rather than silently honoured.
@@ -3040,6 +3043,19 @@ class RnsService {
     );
     if (RnsCrypto.constantTimeEquals(ann.destHash, relayHash)) {
       final e = _relayDir.observe(ann.identity, ann.appData, hops: hops + 1);
+      // Being able to SEE the other indexers is the precondition for syncing
+      // with them, and it is invisible without this line. Logged once per peer
+      // per role change, not per announce — a hub flood must not become a log
+      // flood.
+      if (e != null) {
+        final id = _hex(ann.identity.hash).substring(0, 8);
+        final role = e.announcement.isIndexer ? 'indexer' : 'leaf';
+        if (_relaySeenRole[id] != role) {
+          _relaySeenRole[id] = role;
+          LogService.instance.add(
+              'relay: heard $role $id (${_relayDir.indexers().length} indexer(s) known)');
+        }
+      }
       // If this relay belongs to a followed author we couldn't reach before,
       // its npub→identity is now known — try fetching its profile.
       final pk = e?.announcement.pubkey;
@@ -3285,6 +3301,10 @@ class RnsService {
   // Which interface each live link arrived on. Bounded: a hostile peer opening
   // links must not turn this into a leak.
   final Map<String, String> _linkVia = {};
+
+  /// Peer id → the role we last logged for it, so hearing a hub flood does not
+  /// turn into a log flood.
+  final Map<String, String> _relaySeenRole = {};
   static const int _maxLinkVia = 256;
 
   void _noteLinkVia(Uint8List linkId, String via) {
@@ -5582,6 +5602,23 @@ class RnsService {
     if (_relay == null) return;
     final enabled = PreferencesService.instanceSync?.hostEnabled ?? true;
     _relay!.serve = enabled; // responder on unless hosting is fully disabled
+
+    // An existing role manager must learn the new decision too, and RE-ANNOUNCE
+    // it: a device that changed its mind and never told the network has not
+    // changed its mind as far as the network is concerned.
+    final role = _relayRole;
+    if (role != null) {
+      final want = PreferencesService.instanceSync?.indexerVolunteer ?? 'auto';
+      if (role.volunteer != want) {
+        role.volunteer = want;
+        final prof = CapacityGovernor.instance.lastProfile;
+        if (prof != null) role.applyCapacity(prof);
+        _announceRelayDest();
+        LogService.instance.add('relay: role re-announced (volunteer=$want, '
+            '${role.current.isIndexer ? 'indexer' : 'leaf'})');
+      }
+    }
+
     if (enabled && _relayRole == null) {
       _relayRole = RelayRoleManager(
         selfPubkey: selfPubHex,
@@ -5592,6 +5629,8 @@ class RnsService {
         nodeProfileProvider: NodeProfileService.instance.build,
         onChanged: (_) => _announceRelayDest(),
       );
+      _relayRole!.volunteer =
+          PreferencesService.instanceSync?.indexerVolunteer ?? 'auto';
       final prof = CapacityGovernor.instance.lastProfile;
       if (prof != null) _relayRole!.applyCapacity(prof);
       _announceRelayDest();

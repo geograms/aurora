@@ -62,6 +62,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         private const val COMPANY_ID = 0xFFFF
         private const val MARKER = 0x3E.toByte()
         private const val TAG = "Ble5"
+        private const val SCAN_EVENT_MIN_MS = 750L
+        private const val SCAN_EVENT_CACHE_MAX = 512
         // How long each active frame stays on air before the rotation advances.
         // Long enough for a peer's duty-cycled scan to catch it, short enough to
         // cycle a few frames within a message's TTL.
@@ -80,6 +82,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     private val main = Handler(Looper.getMainLooper())
+    @Volatile private var disposed = false
 
     // Scan watchdog: vendor power managers (and BT adapter restarts) silently
     // kill long-running BLE scans — the callback stays registered but no result
@@ -92,25 +95,29 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private var scanWatchdogOn = false
     private val scanWatchdog = object : Runnable {
         override fun run() {
+            if (disposed) return
             if (scanCallback != null) {
                 val now = System.currentTimeMillis()
                 val lastSeen = maxOf(lastScanResultMs, scanStartedMs)
                 if (now - lastSeen > 120_000) {
                     android.util.Log.w(TAG, "scan silent ${(now - lastSeen) / 1000}s — restarting")
-                    stopScan()
+                    stopScan(stopWatchdog = false)
                     startScan()
                 }
             }
             if (scanWatchdogOn) main.postDelayed(this, 60_000)
         }
     }
-    private var events: EventChannel.EventSink? = null
+    // Read from the BLE scan (binder) thread in onScanResult, written from main.
+    @Volatile private var events: EventChannel.EventSink? = null
 
     private var advertisingSet: AdvertisingSet? = null
     private var advertiseCallback: AdvertisingSetCallback? = null
     private var starting = false
     private var scanner: BluetoothLeScanner? = null
     private var scanCallback: ScanCallback? = null
+    private val recentScanEvents = LinkedHashMap<String, Long>()
+    private val scanDedupLock = Any()
 
     // Active broadcast frames keyed by an opaque caller key (insertion-ordered for
     // a stable round-robin). All access is on the main thread.
@@ -123,7 +130,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private var gatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
-    private var gattEvents: EventChannel.EventSink? = null
+    // Read from the legacy-scan (binder) thread as well as main.
+    @Volatile private var gattEvents: EventChannel.EventSink? = null
 
     // ── GATT server (native) ────────────────────────────────────────────────
     private var gattServer: BluetoothGattServer? = null
@@ -201,7 +209,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(args: Any?, sink: EventChannel.EventSink?) {
-                    events = sink
+                    if (!disposed) events = sink
                 }
                 override fun onCancel(args: Any?) { events = null }
             },
@@ -209,11 +217,25 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         EventChannel(messenger, GATT_EVENT_CHANNEL).setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(args: Any?, sink: EventChannel.EventSink?) {
-                    gattEvents = sink
+                    if (!disposed) gattEvents = sink
                 }
                 override fun onCancel(args: Any?) { gattEvents = null }
             },
         )
+    }
+
+    fun dispose() {
+        if (disposed) return
+        disposed = true
+        events = null
+        gattEvents = null
+        stopScan()
+        stopLegacyScan()
+        stopAdvertise()
+        stopServer()
+        gattDisconnect()
+        synchronized(scanDedupLock) { recentScanEvents.clear() }
+        main.removeCallbacksAndMessages(null)
     }
 
     private fun isSupported(): Boolean {
@@ -233,7 +255,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
      * elapses (callers refresh periodically to keep it alive).
      */
     private fun advertiseFrame(key: String, subtype: Int, payload: ByteArray, ttlMs: Long): Boolean {
-        if (!isSupported()) return false
+        if (disposed || !isSupported()) return false
         val mfg = ByteArray(payload.size + 2)
         mfg[0] = MARKER
         mfg[1] = subtype.toByte()
@@ -252,11 +274,13 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun removeFrame(key: String) {
+        if (disposed) return
         frames.remove(key)
         if (frames.isEmpty()) stopAdvertise()
     }
 
     private fun ensureRotating() {
+        if (disposed) return
         if (rotating) return
         rotating = true
         main.post(rotateRunnable)
@@ -264,6 +288,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private val rotateRunnable = object : Runnable {
         override fun run() {
+            if (disposed) return
             if (!rotating) return
             rotateTick()
             if (frames.isEmpty()) { rotating = false; return }
@@ -273,6 +298,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     /** Drop expired frames, then put the next active frame on air. */
     private fun rotateTick() {
+        if (disposed) return
         val now = System.currentTimeMillis()
         val it = frames.entries.iterator()
         while (it.hasNext()) {
@@ -291,6 +317,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     /** Put one manufacturer-data blob on the single advertising set. */
     private fun airData(mfg: ByteArray) {
+        if (disposed) return
         val advertiser = adapter?.bluetoothLeAdvertiser ?: return
         val data = AdvertiseData.Builder()
             .addManufacturerData(COMPANY_ID, mfg)
@@ -328,6 +355,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         val cb = object : AdvertisingSetCallback() {
             override fun onAdvertisingSetStarted(set: AdvertisingSet?, txPower: Int, status: Int) {
                 starting = false
+                if (disposed) {
+                    if (set != null) {
+                        try { advertiser.stopAdvertisingSet(this) } catch (_: Exception) {}
+                    }
+                    return
+                }
                 if (status == ADVERTISE_SUCCESS && set != null) {
                     advertisingSet = set
                 } else {
@@ -351,6 +384,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         rotating = false
         rotateIdx = 0
         lastHex = null
+        starting = false
         val advertiser = adapter?.bluetoothLeAdvertiser
         val cb = advertiseCallback
         if (advertiser != null && cb != null) {
@@ -363,6 +397,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     /** Scan for extended advertisements carrying our company id; deliver every
      *  0x3E-marker frame as [subtype, payload...] so Dart demuxes by subtype. */
     private fun startScan(): Boolean {
+        if (disposed) return false
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         val s = adapter?.bluetoothLeScanner ?: return false
         if (scanCallback != null) return true // already scanning
@@ -370,19 +405,26 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             .setManufacturerData(COMPANY_ID, byteArrayOf())
             .build()
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            // Balanced mode is deliberate for always-on/background operation:
+            // low-latency scans can flood the main looper on rugged devices and
+            // make the Flutter UI appear black/unresponsive.
+            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
             .setLegacy(false) // receive extended advertisements
             .setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
             .build()
         val cb = object : ScanCallback() {
             override fun onScanFailed(errorCode: Int) {
+                if (disposed) return
                 // e.g. APPLICATION_REGISTRATION_FAILED after a BT restart —
                 // drop the dead callback so the watchdog (or next startScan)
                 // can register a fresh one.
                 android.util.Log.e(TAG, "scan failed code=$errorCode — will re-register")
                 scanCallback = null
+                scanner = null
             }
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                if (disposed) return
+                val sink = events ?: return
                 val mfg = result?.scanRecord?.getManufacturerSpecificData(COMPANY_ID)
                     ?: return
                 if (mfg.size < 2 || mfg[0] != MARKER) return
@@ -390,16 +432,25 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 val payload = mfg.copyOfRange(2, mfg.size)
                 val addr = result.device?.address ?: ""
                 val rssi = result.rssi
-                lastScanResultMs = System.currentTimeMillis()
+                val now = System.currentTimeMillis()
+                lastScanResultMs = now
+                if (!shouldEmitScan("ext:$addr:$subtype:${payload.contentHashCode()}", now)) {
+                    return
+                }
                 main.post {
-                    events?.success(
-                        mapOf(
-                            "addr" to addr,
-                            "rssi" to rssi,
-                            "subtype" to subtype,
-                            "data" to payload,
-                        ),
-                    )
+                    if (disposed || events !== sink) return@post
+                    try {
+                        sink.success(
+                            mapOf(
+                                "addr" to addr,
+                                "rssi" to rssi,
+                                "subtype" to subtype,
+                                "data" to payload,
+                            ),
+                        )
+                    } catch (t: Throwable) {
+                        android.util.Log.w(TAG, "scan event dropped: ${t.message}")
+                    }
                 }
             }
         }
@@ -420,10 +471,33 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         }
     }
 
-    private fun stopScan() {
-        val cb = scanCallback ?: return
-        try { scanner?.stopScan(cb) } catch (_: Exception) {}
+    private fun shouldEmitScan(key: String, now: Long): Boolean {
+        synchronized(scanDedupLock) {
+            val last = recentScanEvents[key]
+            if (last != null && now - last < SCAN_EVENT_MIN_MS) return false
+            recentScanEvents[key] = now
+            if (recentScanEvents.size > SCAN_EVENT_CACHE_MAX) {
+                val it = recentScanEvents.entries.iterator()
+                while (recentScanEvents.size > SCAN_EVENT_CACHE_MAX / 2 && it.hasNext()) {
+                    it.next()
+                    it.remove()
+                }
+            }
+            return true
+        }
+    }
+
+    private fun stopScan(stopWatchdog: Boolean = true) {
+        val cb = scanCallback
+        if (cb != null) {
+            try { scanner?.stopScan(cb) } catch (_: Exception) {}
+        }
         scanCallback = null
+        scanner = null
+        if (stopWatchdog) {
+            scanWatchdogOn = false
+            main.removeCallbacks(scanWatchdog)
+        }
     }
 
     // ── GATT client ─────────────────────────────────────────────────────────
@@ -431,7 +505,17 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // scan), so the connectable extended advert above can serve BOTH broadcast
     // and connections — no legacy advert, no second advertiser.
 
-    private fun emitGatt(map: Map<String, Any?>) { main.post { gattEvents?.success(map) } }
+    private fun emitGatt(map: Map<String, Any?>) {
+        val sink = gattEvents ?: return
+        main.post {
+            if (disposed || gattEvents !== sink) return@post
+            try {
+                sink.success(map)
+            } catch (t: Throwable) {
+                android.util.Log.w(TAG, "GATT event dropped: ${t.message}")
+            }
+        }
+    }
 
     // Guards the connect-to-ready window: a fringe link can complete the LL
     // connection yet stall in the ATT handshake (MTU/discovery/CCCD) — the
@@ -453,6 +537,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun gattConnect(address: String, auto: Boolean = false) {
+        if (disposed) return
         if (gatt != null) return // one link at a time
         val dev: BluetoothDevice = try {
             adapter?.getRemoteDevice(address) ?: return
@@ -473,6 +558,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun gattWrite(data: ByteArray): Boolean {
+        if (disposed) return false
         if (gatt == null || writeChar == null) {
             android.util.Log.e(TAG, "gattWrite: not connected"); return false
         }
@@ -487,6 +573,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // PLAIN (unencrypted) FFF1 does NOT trigger pairing. A watchdog advances if
     // the stack fails to call back.
     private fun pumpWrites() {
+        if (disposed) return
         if (writeBusy) return
         val g = gatt ?: return
         val ch = writeChar ?: return
@@ -521,6 +608,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun gattDisconnect() {
+        val wasDisposed = disposed
         val g = gatt
         gatt = null
         writeChar = null
@@ -534,11 +622,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         // Always tell Dart: its link state can desync from the native handle
         // (seen live: clientLinkUp true for 23 min with gatt==null, so every
         // idle-drop call here silently no-opped and the mesh stayed wedged).
-        emitGatt(mapOf("event" to "disconnected"))
+        if (!wasDisposed) emitGatt(mapOf("event" to "disconnected"))
     }
 
     private val gattCb = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            if (disposed) return
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 armSetupWatchdog()
                 // Bulk-transfer throughput: shortest connection interval the
@@ -565,11 +654,13 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            if (disposed) return
             android.util.Log.i(TAG, "client MTU=$mtu status=$status")
             try { g.discoverServices() } catch (_: Exception) {}
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            if (disposed) return
             val svc = g.getService(SVC_UUID)
             val write = svc?.getCharacteristic(FFF1_UUID)
             val notify = svc?.getCharacteristic(FFF2_UUID)
@@ -613,6 +704,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         override fun onDescriptorWrite(
             g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int,
         ) {
+            if (disposed) return
             if (descriptor.uuid == CCCD_UUID) {
                 android.util.Log.i(TAG, "CCCD write status=$status — link ready")
                 linkReady = true
@@ -622,6 +714,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
         @Deprecated("compat for < TIRAMISU")
         override fun onCharacteristicChanged(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
+            if (disposed) return
             if (ch.uuid == FFF2_UUID) {
                 @Suppress("DEPRECATION")
                 emitGatt(mapOf("event" to "data", "data" to (ch.value ?: ByteArray(0))))
@@ -631,12 +724,14 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         override fun onCharacteristicChanged(
             g: BluetoothGatt, ch: BluetoothGattCharacteristic, value: ByteArray,
         ) {
+            if (disposed) return
             if (ch.uuid == FFF2_UUID) emitGatt(mapOf("event" to "data", "data" to value))
         }
 
         override fun onCharacteristicWrite(
             g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int,
         ) {
+            if (disposed) return
             if (status != BluetoothGatt.GATT_SUCCESS)
                 android.util.Log.w(TAG, "onCharacteristicWrite status=$status")
             // Previous write finished — release the lock and issue the next.
@@ -652,6 +747,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // characteristics mean no pairing dialog.
 
     private fun startServer(callsign: String): Boolean {
+        if (disposed) return false
         serverCallsign = if (callsign.isEmpty()) "AURORA" else callsign
         val mgr = appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
             ?: return false
@@ -693,6 +789,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private fun stopServer() {
         stopLegacyAdvert()
+        stopLegacyScan()
         try { gattServer?.close() } catch (_: Exception) {}
         gattServer = null
         serverNotifyChar = null
@@ -711,9 +808,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private var serverProbeGen = 0
 
     private fun armServerProbe(device: BluetoothDevice) {
+        if (disposed) return
         val gen = ++serverProbeGen
         val addr = device.address
         main.postDelayed({
+            if (disposed) return@postDelayed
             if (serverProbeGen == gen && serverCentral?.address == addr &&
                 !serverSawData) {
                 android.util.Log.w(TAG, "server: silent central $addr — dropping (blocked 10min)")
@@ -726,6 +825,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private val gattServerCb = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            if (disposed) return
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 val until = strangerBlock[device.address] ?: 0L
                 if (until > System.currentTimeMillis()) {
@@ -747,10 +847,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            if (disposed) return
             android.util.Log.i(TAG, "server MTU=$mtu (${device.address})")
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            if (disposed) return
             // Native pacing for server→central bulk: the next queued notify
             // goes out only after the stack confirms this one left the buffer
             // (notifications have no ATT-level flow control of their own).
@@ -761,6 +863,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             device: BluetoothDevice, requestId: Int, ch: BluetoothGattCharacteristic,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
+            if (disposed) return
             if (ch.uuid == FFF1_UUID) {
                 serverCentral = device
                 serverSawData = true
@@ -780,6 +883,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
+            if (disposed) return
             serverSawData = true // a CCCD subscribe is a real peer, not a probe
             // CCCD subscription from a central — just acknowledge (plain, no auth).
             if (responseNeeded) {
@@ -799,6 +903,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private var notifyGen = 0
 
     private fun serverNotify(data: ByteArray): Boolean {
+        if (disposed) return false
         if (gattServer == null || serverCentral == null) return false
         main.post {
             if (notifyQueue.size >= 256) {
@@ -814,6 +919,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun pumpNotifies() {
+        if (disposed) return
         if (notifyBusy) return
         val server = gattServer ?: return
         val ch = serverNotifyChar ?: return
@@ -854,6 +960,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // [0x3E, deviceId(1..15), callsign...] — the geogram presence format.
 
     private fun startLegacyAdvert() {
+        if (disposed) return
         val advertiser = adapter?.bluetoothLeAdvertiser ?: return
         stopLegacyAdvert()
         val cs = serverCallsign.take(6)
@@ -884,24 +991,30 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun stopLegacyAdvert() {
-        val a = legacyAdvertiser ?: return
-        val cb = legacyAdvCb ?: return
-        try { a.stopAdvertising(cb) } catch (_: Exception) {}
+        val a = legacyAdvertiser
+        val cb = legacyAdvCb
+        if (a != null && cb != null) {
+            try { a.stopAdvertising(cb) } catch (_: Exception) {}
+        }
         legacyAdvCb = null
+        legacyAdvertiser = null
     }
 
     /** Legacy scan for peers' connectable presence beacons → emit "discovered". */
     private fun startLegacyScan(): Boolean {
+        if (disposed) return false
         val s = adapter?.bluetoothLeScanner ?: return false
         if (legacyScanCb != null) return true
         val filter = ScanFilter.Builder()
             .setManufacturerData(COMPANY_ID, byteArrayOf())
             .build()
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
             .build()
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                if (disposed) return
+                val sink = gattEvents ?: return
                 val mfg = result?.scanRecord?.getManufacturerSpecificData(COMPANY_ID) ?: return
                 // Presence beacon: [0x3E, deviceId 1..15, callsign...].
                 if (mfg.size < 3 || mfg[0] != MARKER) return
@@ -909,9 +1022,21 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 if (id < 1 || id > 15) return
                 val callsign = String(mfg, 2, mfg.size - 2, Charsets.UTF_8).trim()
                 val addr = result.device?.address ?: return
+                val now = System.currentTimeMillis()
+                if (!shouldEmitScan("legacy:$addr:$callsign", now)) return
                 main.post {
-                    gattEvents?.success(mapOf(
-                        "event" to "discovered", "address" to addr, "callsign" to callsign))
+                    if (disposed || gattEvents !== sink) return@post
+                    try {
+                        sink.success(
+                            mapOf(
+                                "event" to "discovered",
+                                "address" to addr,
+                                "callsign" to callsign,
+                            ),
+                        )
+                    } catch (t: Throwable) {
+                        android.util.Log.w(TAG, "legacy scan event dropped: ${t.message}")
+                    }
                 }
             }
         }
@@ -925,9 +1050,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun stopLegacyScan() {
-        val cb = legacyScanCb ?: return
-        try { legacyScanner?.stopScan(cb) } catch (_: Exception) {}
+        val cb = legacyScanCb
+        if (cb != null) {
+            try { legacyScanner?.stopScan(cb) } catch (_: Exception) {}
+        }
         legacyScanCb = null
+        legacyScanner = null
     }
 
     // Small non-zero device id (1..15) from the callsign — matches the Dart

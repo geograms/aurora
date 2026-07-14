@@ -51,12 +51,13 @@ class WifiDirect(context: Context, messenger: BinaryMessenger) {
 
     private val appContext: Context = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
+    @Volatile private var disposed = false
 
     private val manager: WifiP2pManager? =
         appContext.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
     private var channel: WifiP2pManager.Channel? = null
 
-    private var events: EventChannel.EventSink? = null
+    @Volatile private var events: EventChannel.EventSink? = null
     private var p2pEnabled = false
     // Latest connection/group state (from broadcasts), for groupInfo().
     @Volatile private var lastInfo: WifiP2pInfo? = null
@@ -64,6 +65,7 @@ class WifiDirect(context: Context, messenger: BinaryMessenger) {
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
+            if (disposed) return
             when (intent?.action) {
                 WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                     val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
@@ -104,6 +106,10 @@ class WifiDirect(context: Context, messenger: BinaryMessenger) {
         channel = manager?.initialize(appContext, Looper.getMainLooper(), null)
 
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler { call, result ->
+            if (disposed) {
+                result.error("wfd", "bridge disposed", null)
+                return@setMethodCallHandler
+            }
             try {
                 when (call.method) {
                     "supported" -> result.success(supported())
@@ -125,7 +131,7 @@ class WifiDirect(context: Context, messenger: BinaryMessenger) {
         EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(args: Any?, sink: EventChannel.EventSink?) {
-                    events = sink
+                    if (!disposed) events = sink
                 }
                 override fun onCancel(args: Any?) { events = null }
             })
@@ -140,7 +146,28 @@ class WifiDirect(context: Context, messenger: BinaryMessenger) {
         appContext.registerReceiver(receiver, filter)
     }
 
-    private fun emit(m: Map<String, Any?>) = main.post { events?.success(m) }
+    fun dispose() {
+        if (disposed) return
+        disposed = true
+        events = null
+        try {
+            appContext.unregisterReceiver(receiver)
+        } catch (_: Exception) {
+        }
+        main.removeCallbacksAndMessages(null)
+    }
+
+    private fun emit(m: Map<String, Any?>) {
+        val sink = events ?: return
+        main.post {
+            if (disposed || events !== sink) return@post
+            try {
+                sink.success(m)
+            } catch (t: Throwable) {
+                Log.w(TAG, "event dropped: ${t.message}")
+            }
+        }
+    }
 
     private fun hasPermission(): Boolean {
         val perm = if (Build.VERSION.SDK_INT >= 33)

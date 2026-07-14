@@ -43,7 +43,9 @@ class AuroraApplication : Application() {
      */
     @Synchronized
     fun ensureFlutterEngine() {
-        if (FlutterEngineCache.getInstance().get(ENGINE_ID) != null) {
+        val cached = FlutterEngineCache.getInstance().get(ENGINE_ID)
+        if (cached != null) {
+            NativeBridgeRegistry.attach(this, cached)
             Log.d(TAG, "FlutterEngine already cached")
             return
         }
@@ -52,14 +54,30 @@ class AuroraApplication : Application() {
             // Default constructor auto-registers the generated plugins, which
             // main() needs immediately (path_provider, shared_preferences, …).
             val engine = FlutterEngine(this)
+            FlutterEngineCache.getInstance().put(ENGINE_ID, engine)
+            NativeBridgeRegistry.attach(this, engine)
             engine.dartExecutor.executeDartEntrypoint(
                 DartExecutor.DartEntrypoint.createDefault(),
             )
-            FlutterEngineCache.getInstance().put(ENGINE_ID, engine)
-            BgBridge.attach(this, engine)
             Log.d(TAG, "Headless FlutterEngine created and cached as $ENGINE_ID")
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to create headless FlutterEngine: ${t.message}", t)
         }
+    }
+
+    /**
+     * Remember an Activity-created engine as the process engine. This lets the
+     * foreground service keep the same Dart isolate/native bridges alive after
+     * the UI is detached instead of creating a competing headless engine.
+     */
+    @Synchronized
+    fun rememberFlutterEngine(engine: FlutterEngine) {
+        val cache = FlutterEngineCache.getInstance()
+        val cached = cache.get(ENGINE_ID)
+        if (cached == null) {
+            cache.put(ENGINE_ID, engine)
+            Log.d(TAG, "Activity FlutterEngine cached as $ENGINE_ID")
+        }
+        NativeBridgeRegistry.attach(this, cached ?: engine)
     }
 }

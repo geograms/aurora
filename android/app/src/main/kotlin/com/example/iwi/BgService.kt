@@ -49,11 +49,9 @@ class BgService : Service() {
         val text = intent?.getStringExtra("text") ?: "Running in background"
         startAsForeground(text)
 
-        // Boot start: there is no Activity, so spin up a headless Flutter engine
-        // that runs main() and brings the autostart wapps online.
-        if (intent?.action == ACTION_START_FROM_BOOT) {
-            AuroraApplication.instance?.ensureFlutterEngine()
-        }
+        // There may be no Activity (boot/system restart), so make sure a cached
+        // Flutter engine exists and has the native BLE/WiFi bridges attached.
+        AuroraApplication.instance?.ensureFlutterEngine()
         if (wakeLock == null) {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "aurora:bg")

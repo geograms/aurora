@@ -6,13 +6,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
-import '../../../util/media_ref.dart';
-import '../../../services/social/note_text.dart';
-import '../../shared_media_fetch.dart' show mediaSizeHint;
-import 'activity_feed.dart' show activityFormatMentions;
-import 'chat_view_field.dart' show viaTagColor;
+import 'activity_feed.dart' show ActivityPostCard, activityFormatMentions;
 import 'generated_avatar.dart';
-import 'media_view.dart';
 
 class ProfileView extends StatefulWidget {
   final String callsign;
@@ -33,6 +28,17 @@ class ProfileView extends StatefulWidget {
   final bool Function(String mid)? isReposted;
   final void Function(Map<String, dynamic> post)? onRepost;
   final String? Function(String npub)? mentionResolver;
+
+  /// The rest of what a post card needs. A profile shows the SAME publications
+  /// as the main stream, so it shows them with the SAME widget — these are its
+  /// remaining inputs, not a second set of behaviours.
+  final ({int up, int down, int mine}) Function(String mid)? voteInfo;
+  final void Function(String mid, int vote)? onVote;
+  final bool Function(String mid)? isSaved;
+  final void Function(Map<String, dynamic> post)? onSave;
+  final ({String? name, ImageProvider? avatar}) Function(String callsign)?
+      profileFor;
+  final String? Function(String callsign)? npubFor;
 
   /// Tapping an @mention in the bio or in a post opens that person.
   final void Function(String pubkeyHex)? onMentionTap;
@@ -100,6 +106,12 @@ class ProfileView extends StatefulWidget {
     this.isReposted,
     this.onRepost,
     this.mentionResolver,
+    this.voteInfo,
+    this.onVote,
+    this.isSaved,
+    this.onSave,
+    this.profileFor,
+    this.npubFor,
     this.onMentionTap,
     this.following = false,
     this.blocked = false,
@@ -302,8 +314,33 @@ class _ProfileViewState extends State<ProfileView> {
                   ),
                 )
               else
+                // The publications on a profile ARE the publications in the
+                // stream, so they are drawn by the stream's widget. The second
+                // implementation this replaces had drifted, as a copy always
+                // does: no pictures, and no up/down vote.
                 for (final p in newest) ...[
-                  _postRow(cs, p),
+                  ActivityPostCard(
+                    post: p,
+                    profileFor: widget.profileFor,
+                    npubFor: widget.npubFor,
+                    mentionResolver: widget.mentionResolver,
+                    onMentionTap: widget.onMentionTap,
+                    likeInfo: widget.likeInfo,
+                    onLike: widget.onLike,
+                    voteInfo: widget.voteInfo,
+                    onVote: widget.onVote,
+                    isSaved: widget.isSaved,
+                    onSave: widget.onSave,
+                    replyCount: widget.replyCount,
+                    onReply: widget.onReplyPost == null
+                        ? null
+                        : () => widget.onReplyPost!(p),
+                    isReposted: widget.isReposted,
+                    onRepost: widget.onRepost,
+                    onTap: widget.onPostTap == null
+                        ? null
+                        : () => widget.onPostTap!(p),
+                  ),
                   Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
                 ],
             ],
@@ -769,180 +806,6 @@ class _ProfileViewState extends State<ProfileView> {
   /// them said which day. Today and yesterday are named (a date there is noise);
   /// anything older carries its date, and a post from another year carries the
   /// year too.
-  String _postStamp(Map<String, dynamic> p) {
-    final t = (p['t'] as num?)?.toInt() ?? 0;
-    final clock = (p['time'] ?? '').toString();
-    if (t <= 0) return clock; // no epoch — the wapp's clock string is all we have
-
-    final dt = DateTime.fromMillisecondsSinceEpoch(t);
-    final now = DateTime.now();
-    final hhmm = '${dt.hour.toString().padLeft(2, '0')}:'
-        '${dt.minute.toString().padLeft(2, '0')}';
-
-    final day = DateTime(dt.year, dt.month, dt.day);
-    final today = DateTime(now.year, now.month, now.day);
-    final days = today.difference(day).inDays;
-    if (days == 0) return hhmm;
-    if (days == 1) return 'Yesterday $hhmm';
-
-    const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
-    final date = '${dt.day} ${months[dt.month - 1]}'
-        '${dt.year == now.year ? '' : ' ${dt.year}'}';
-    return '$date · $hhmm';
-  }
-
-  Widget _postRow(ColorScheme cs, Map<String, dynamic> p) {
-    final raw = (p['text'] ?? '').toString();
-    final time = _postStamp(p);
-    final via = (p['via'] ?? '').toString();
-    final convo = (p['convo'] ?? '').toString();
-    final mid = (p['mid'] ?? '').toString();
-    final body = activityFormatMentions(
-      _stripTokens(raw),
-      widget.mentionResolver,
-    );
-    final refs = MediaRef.findAll(raw);
-    final tappable =
-        widget.onPostTap != null && (convo.isNotEmpty || mid.isNotEmpty);
-    return InkWell(
-      onTap: tappable ? () => widget.onPostTap!(p) : null,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (time.isNotEmpty || via.isNotEmpty)
-              Row(
-                children: [
-                  if (time.isNotEmpty)
-                    Text(
-                      time,
-                      style: TextStyle(
-                        color: Colors.white.withAlpha(120),
-                        fontSize: 12,
-                      ),
-                    ),
-                  if (via.isNotEmpty) ...[
-                    const SizedBox(width: 6),
-                    _viaChip(via),
-                  ],
-                ],
-              ),
-            if (body.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 3),
-                child: Text(
-                  body,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    height: 1.3,
-                  ),
-                ),
-              ),
-            if (refs.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final r in refs)
-                      MediaThumbnail(
-                        ref: r,
-                        size: mediaSizeHint(raw),
-                        from: callsign,
-                      ),
-                  ],
-                ),
-              ),
-            if (mid.isNotEmpty) _postActions(cs, mid, p),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Like / Reply / Retweet under each publication (mirrors the feed).
-  Widget _postActions(ColorScheme cs, String mid, Map<String, dynamic> p) {
-    final like = widget.likeInfo?.call(mid) ?? (count: 0, mine: false);
-    final replies = widget.replyCount?.call(mid) ?? 0;
-    final reposted = widget.isReposted?.call(mid) ?? false;
-    const muted = Color(0xFF8899A6);
-
-    Widget act(
-      IconData icon,
-      String? label,
-      Color color,
-      VoidCallback? onTap,
-    ) => InkWell(
-      borderRadius: BorderRadius.circular(4),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 17, color: color),
-            if (label != null && label.isNotEmpty) ...[
-              const SizedBox(width: 4),
-              Text(label, style: TextStyle(color: color, fontSize: 12)),
-            ],
-          ],
-        ),
-      ),
-    );
-
-    return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: Row(
-        children: [
-          act(
-            Icons.chat_bubble_outline,
-            replies > 0 ? '$replies' : null,
-            muted,
-            widget.onReplyPost == null ? null : () => widget.onReplyPost!(p),
-          ),
-          const SizedBox(width: 18),
-          act(
-            Icons.repeat,
-            null,
-            reposted ? const Color(0xFF00BA7C) : muted,
-            widget.onRepost == null ? null : () => widget.onRepost!(p),
-          ),
-          const SizedBox(width: 18),
-          act(
-            like.mine ? Icons.favorite : Icons.favorite_border,
-            like.count > 0 ? '${like.count}' : null,
-            like.mine ? Colors.pink : muted,
-            widget.onLike == null
-                ? null
-                : () => widget.onLike!(mid, !like.mine),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _viaChip(String via) {
-    final c = viaTagColor(via);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-      decoration: BoxDecoration(
-        color: c.withAlpha(40),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: c.withAlpha(120), width: 0.6),
-      ),
-      child: Text(
-        via.toUpperCase(),
-        style: TextStyle(color: c, fontSize: 8.5, fontWeight: FontWeight.w700),
-      ),
-    );
-  }
-
   Widget _avatar(String call, double radius) {
     // A real avatar image (from the profile's kind-0 "picture") wins; otherwise
     // the same deterministic identicon used in the Messages list.
@@ -952,5 +815,4 @@ class _ProfileViewState extends State<ProfileView> {
     return GeneratedAvatar(seed: call, size: radius * 2);
   }
 
-  static String _stripTokens(String s) => stripNoteTokens(s);
 }

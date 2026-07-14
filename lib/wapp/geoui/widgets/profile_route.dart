@@ -50,6 +50,16 @@ class ProfileRoute extends StatefulWidget {
   /// person — the same screen this one is.
   final void Function(String pubkeyHex)? onMentionTap;
 
+  /// Straight through to the post card: a profile's publications are drawn by
+  /// the same widget as the stream's.
+  final ({int up, int down, int mine}) Function(String mid)? voteInfo;
+  final void Function(String mid, int vote)? onVote;
+  final bool Function(String mid)? isSaved;
+  final void Function(Map<String, dynamic> post)? onSave;
+  final ({String? name, ImageProvider? avatar}) Function(String callsign)?
+      profileFor;
+  final String? Function(String callsign)? npubFor;
+
   /// Profile metadata supplied DIRECTLY (e.g. a NOSTR kind-0 already cached by
   /// the wapp): {name, about, pic, banner, nip05, website, lud16}. When present
   /// it's applied synchronously and [fetchMetadata] is not called.
@@ -109,6 +119,12 @@ class ProfileRoute extends StatefulWidget {
     this.onRepost,
     this.mentionResolver,
     this.onMentionTap,
+    this.voteInfo,
+    this.onVote,
+    this.isSaved,
+    this.onSave,
+    this.profileFor,
+    this.npubFor,
     this.metadata,
     this.presetName,
     this.presetAvatar,
@@ -247,6 +263,12 @@ class _ProfileRouteState extends State<ProfileRoute> {
       onRepost: widget.onRepost,
       mentionResolver: widget.mentionResolver,
       onMentionTap: widget.onMentionTap,
+      voteInfo: widget.voteInfo,
+      onVote: widget.onVote,
+      isSaved: widget.isSaved,
+      onSave: widget.onSave,
+      profileFor: widget.profileFor,
+      npubFor: widget.npubFor,
       displayName: _name,
       about: _about,
       avatarImage: _avatar,

@@ -5128,6 +5128,23 @@ class _WappPageState extends State<WappPage>
         .push(
           MaterialPageRoute(
             builder: (_) => ProfileRoute(
+              // Same publications, same card, same wiring as the stream.
+              voteInfo: (mid) => RnsService.instance.nostrVotes(mid),
+              onVote: (mid, vote) {
+                final author = _activityAuthorHex(mid);
+                RnsService.instance.nostrVote(mid, author, vote);
+                setState(() {});
+              },
+              isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
+              onSave: (post) {
+                _activityArchive?.toggleSaved(post);
+                _keepPostMedia(post);
+                setState(() {});
+              },
+              profileFor: _feedProfileFor,
+              npubFor: (c) =>
+                  _wappProfiles[c]?['npub'] ??
+                  RnsService.instance.npubForCallsign(c),
               callsign: from,
               npub: npub,
               metadata: p.isEmpty ? null : p,
@@ -5913,6 +5930,23 @@ class _WappPageState extends State<WappPage>
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => ProfileRoute(
+              // Same publications, same card, same wiring as the stream.
+              voteInfo: (mid) => RnsService.instance.nostrVotes(mid),
+              onVote: (mid, vote) {
+                final author = _activityAuthorHex(mid);
+                RnsService.instance.nostrVote(mid, author, vote);
+                setState(() {});
+              },
+              isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
+              onSave: (post) {
+                _activityArchive?.toggleSaved(post);
+                _keepPostMedia(post);
+                setState(() {});
+              },
+              profileFor: _feedProfileFor,
+              npubFor: (c) =>
+                  _wappProfiles[c]?['npub'] ??
+                  RnsService.instance.npubForCallsign(c),
           callsign: c,
           npub: resolvedNpub,
           isSelf: isSelf,
@@ -5998,6 +6032,23 @@ class _WappPageState extends State<WappPage>
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => ProfileRoute(
+              // Same publications, same card, same wiring as the stream.
+              voteInfo: (mid) => RnsService.instance.nostrVotes(mid),
+              onVote: (mid, vote) {
+                final author = _activityAuthorHex(mid);
+                RnsService.instance.nostrVote(mid, author, vote);
+                setState(() {});
+              },
+              isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
+              onSave: (post) {
+                _activityArchive?.toggleSaved(post);
+                _keepPostMedia(post);
+                setState(() {});
+              },
+              profileFor: _feedProfileFor,
+              npubFor: (c) =>
+                  _wappProfiles[c]?['npub'] ??
+                  RnsService.instance.npubForCallsign(c),
           callsign: c,
           npub: resolvedNpub,
           firstSeenMs: firstSeenMs ?? arch?.firstSeenMs(c),

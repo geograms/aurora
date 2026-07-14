@@ -290,14 +290,33 @@ class NodeRoleApi {
     final p = PreferencesService.instanceSync;
     final policy = ArchiverService.instance.policy;
     final archive = sharedMediaArchive();
-    final totals = archive?.hostedTotals();
+    final st = archive?.hostedStats();
+
+    final quotaGb = p?.archiveQuotaGb ?? 0;
+    final quotaBytes = quotaGb * 1024 * 1024 * 1024;
+    final used = st?.totalBytes ?? 0;
 
     return jsonEncode({
-      'quotaGb': p?.archiveQuotaGb ?? 0,
+      'quotaGb': quotaGb,
       'archiving': policy.isArchiving,
-      'usedBytes': totals?.totalHostedBytes ?? 0,
-      'strangerBytes': totals?.strangerBytes ?? 0,
-      'items': archive?.hostedInventory().length ?? 0,
+      'usedBytes': used,
+      'strangerBytes': st?.strangerBytes ?? 0,
+      'items': st?.totalItems ?? 0,
+
+      // The dashboard's numbers: how full, how much of it anyone ever wanted,
+      // and how much could be reclaimed right now.
+      'usedText': _size(used),
+      'quotaText': quotaGb == 0 ? 'off' : '$quotaGb GB',
+      'fullFrac': quotaBytes == 0
+          ? 0.0
+          : double.parse((used / quotaBytes).clamp(0.0, 1.0).toStringAsFixed(3)),
+      'servedItems': st?.servedItems ?? 0,
+      'freeableBytes': archive
+              ?.previewSweep(const HostedSweep.strangers())
+              .bytes ??
+          0,
+      'freeableText': _size(
+          archive?.previewSweep(const HostedSweep.strangers()).bytes ?? 0),
       'followed': p?.archiveFollowed ?? true,
       'topics': p?.archiveTopics ?? const <String>[],
       'fromLan': p?.archiveFromLan ?? true,
@@ -305,6 +324,9 @@ class NodeRoleApi {
       'fromRadio': p?.archiveFromRadio ?? true,
       'fromWifiDirect': p?.archiveFromWifiDirect ?? true,
       'mirrorSmall': p?.archiveMirrorSmall ?? true,
+      'fromNearby': (p?.archiveFromLan ?? true) ||
+          (p?.archiveFromBluetooth ?? true) ||
+          (p?.archiveFromRadio ?? true),
       // The deposit gate now knows which interface a peer arrived on, so the
       // direct-link offer actually fires: a peer that reached us over the LAN,
       // Bluetooth or LoRa is recognised as one with no route to anywhere else.
@@ -497,6 +519,15 @@ class NodeRoleApi {
         return 0;
       case 'followed':
         p.archiveFollowed = on();
+        return 0;
+      case 'fromNearby':
+        // One switch for "peers with nowhere else to go" — LAN, Bluetooth,
+        // LoRa, Wi-Fi Direct. A person does not think in transports.
+        final v = on();
+        p.archiveFromLan = v;
+        p.archiveFromBluetooth = v;
+        p.archiveFromRadio = v;
+        p.archiveFromWifiDirect = v;
         return 0;
       case 'fromLan':
         p.archiveFromLan = on();

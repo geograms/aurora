@@ -680,10 +680,15 @@ is in `main` with tests, and the device-validated ones say so.
 8. **No Blossom over Reticulum** (HTTP only), and BUD-02 upload auth is not
    verified — uploads are gated by a toggle.
 9. ~~The Indexer and Archiver wapps~~ — **BUILT and device-validated.** The
-   Indexer wapp grants/inspects/revokes the role (volunteer off / when plugged
-   in / always) and shows what the device answers for; the Archiver wapp owns the
-   quota, the policy and the what's-on-my-disk list. New HAL families `hal.node`
-   and `hal.archive`.
+   Indexer is a statistics-first dashboard on a new native `$type:"stats"` GeoUI
+   widget (stat tiles + a 48-hour requests-per-hour sparkline backed by a
+   persisted hourly ring), with the volunteer control, editable indexing topics
+   (persisted, re-announced with a typing debounce), and previewed maintenance
+   sweeps whose removals propagate through the pointer log. **No per-entity
+   lists anywhere** — pointers, authors and peers could be millions, so the UI
+   shows counts and shapes, never rows. The Archiver owns the quota, the policy
+   and the statistics/cleanup Space screen. HAL families `hal.node` and
+   `hal.archive`.
 10. **Search is not yet privacy-ordered.** Media and single notes are (the mesh
     is resolved and asked first, and a kept note now has a pointer of its own so
     it can be found by id). A NIP-50 *search* still goes to the relays before the

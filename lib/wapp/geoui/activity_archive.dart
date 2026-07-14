@@ -13,6 +13,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:sqlite3/sqlite3.dart';
 
+import '../../services/log_service.dart';
 import '../../profile/profile_db.dart';
 
 import '../../profile/profile_storage.dart';
@@ -168,6 +169,23 @@ class ActivityArchive {
         }
       }
     }
+    // DIAGNOSTIC (duplicate posts in the feed). The mid is unique in this table,
+    // so a post shown twice can only be two rows: the same text under two
+    // different ids, or a post that arrived with no id at all and so missed the
+    // id dedup entirely. Say which, once, instead of guessing.
+    try {
+      final twin = db.select(
+        "SELECT mid FROM activity WHERE from_call = ? AND text = ? "
+        "AND IFNULL(mid,'') != ? LIMIT 1",
+        [from, text, mid],
+      );
+      if (twin.isNotEmpty) {
+        LogService.instance.add(
+            'activity: SAME TEXT, other id — new=${mid.isEmpty ? "(none)" : mid.substring(0, 12)} '
+            'have=${(twin.first['mid'] ?? '').toString().isEmpty ? "(none)" : (twin.first['mid'] as String).substring(0, 12)} from=$from');
+      }
+    } catch (_) {}
+
     try {
       db.execute(
         'INSERT OR IGNORE INTO activity(t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop) '

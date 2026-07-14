@@ -338,6 +338,13 @@ class _WappPageState extends State<WappPage>
   // Settings bindings
   final _fieldValues = <String, dynamic>{};
 
+  /// Post ids already shown in each chat/feed field. A note published to several
+  /// relays arrives on several subscriptions, and the feed must show it ONCE —
+  /// the event id is the post's identity, so this is the whole test. Seeded from
+  /// the persisted archive on restore, or the restored posts would each be
+  /// appended a second time when the wapp re-sent them live.
+  final _feedIds = <String, Set<String>>{};
+
   // ── Robot (AI chat) tab state ──────────────────────────────────────
   // Chat lives in a ChangeNotifier so the conversation streams without
   // rebuilding the whole editor. Created lazily the first time the Robot
@@ -500,6 +507,11 @@ class _WappPageState extends State<WappPage>
   /// The conversation open in the conversations widget (host-owned so the
   /// AppBar can show the thread title + the single back arrow in portrait).
   String? _convOpenId;
+
+  /// People-search open on the conversation list. Host-owned because the search
+  /// icon sits in the AppBar (next to the ☰) while the search field renders in
+  /// the list body.
+  bool _convSearching = false;
 
   /// In-wapp navigation state, driven by the wapp via `ui.nav` messages. When
   /// [_wappNavBack] is true the AppBar shows [_wappNavTitle] (e.g. the current
@@ -1532,25 +1544,35 @@ class _WappPageState extends State<WappPage>
                   }
                 }
               }
-              // Search results arrive from many relays → dedupe: same post id
-              // (mid), or same author (from) for profile cards which have no mid.
+              // The SAME post, twice. A note is published to several relays and
+              // comes back on several subscriptions — the firehose, discovery and
+              // the follows feed all pour into `activity`, each with its own
+              // seen-set — so one event id reaches this buffer more than once.
+              // The id (mid) is the post's identity: a feed must never show it
+              // twice, whatever route it took to get here.
+              //
+              // Profile cards carry no mid, so those fall back to the author.
               var dup = false;
-              if (fieldName == 'search_results') {
-                final mid = (row['mid'] ?? '').toString();
+              final mid = (row['mid'] ?? '').toString();
+              if (mid.isNotEmpty) {
+                dup = !_feedIds
+                    .putIfAbsent(fieldName, () => <String>{})
+                    .add(mid);
+              } else if (fieldName == 'search_results') {
                 final from = (row['from'] ?? '').toString();
-                dup = buf.any(
-                  (e) => mid.isNotEmpty
-                      ? (e['mid'] ?? '').toString() == mid
-                      : (e['mid'] ?? '').toString().isEmpty &&
-                            (e['from'] ?? '').toString() == from,
-                );
+                dup = buf.any((e) =>
+                    (e['mid'] ?? '').toString().isEmpty &&
+                    (e['from'] ?? '').toString() == from);
               }
-              if (!dup) buf.add(row);
-              // Persist the Activity feed so background-received posts survive
-              // into the foreground (and across restarts).
-              if (fieldName == 'activity') {
-                _activityArchive?.add(msg);
-                _activityRev.value++; // refresh any open thread page
+              if (!dup) {
+                buf.add(row);
+                // Persist the Activity feed so background-received posts survive
+                // into the foreground (and across restarts). A duplicate is not
+                // archived either — it would come back as a duplicate.
+                if (fieldName == 'activity') {
+                  _activityArchive?.add(msg);
+                  _activityRev.value++; // refresh any open thread page
+                }
               }
             }
             changed = true;
@@ -1618,6 +1640,7 @@ class _WappPageState extends State<WappPage>
               _activityRev.value++;
               changed = true;
             }
+            _feedIds.remove(fieldName); // cleared feed = nothing seen in it
           }
         } else if (type == 'ui.convo.upsert') {
           final field = data['field'] as String? ?? 'conversations';
@@ -2858,20 +2881,19 @@ class _WappPageState extends State<WappPage>
   Widget _buildConversationsScreen(GeoUiBlock screen, GeoUiBlock group) {
     final field = group.name ?? 'conversations';
     final store = _convStore(field);
-    final listActions = <ConvAction>[];
+    // Only room actions are rendered by the widget; slot:"list" actions go to
+    // the AppBar (_convListActions) so they cost no screen row.
     final roomActions = <ConvAction>[];
     for (final a in group.childrenOf('action')) {
-      final ca = ConvAction(
-        a.name ?? '',
-        a.getString('icon') ?? 'add',
-        a.getString('tip') ?? a.name ?? '',
-        label: a.getString('label') ?? '',
+      if ((a.getString('slot') ?? 'list') != 'room') continue;
+      roomActions.add(
+        ConvAction(
+          a.name ?? '',
+          a.getString('icon') ?? 'add',
+          a.getString('tip') ?? a.name ?? '',
+          label: a.getString('label') ?? '',
+        ),
       );
-      if ((a.getString('slot') ?? 'list') == 'room') {
-        roomActions.add(ca);
-      } else {
-        listActions.add(ca);
-      }
     }
     // Composer toggles: bool field children. State is held in _fieldValues so
     // it rides along with conversations_send like any other scalar field.
@@ -2897,14 +2919,20 @@ class _WappPageState extends State<WappPage>
     }
     return ConversationsField(
       store: store,
-      title: group.getString('label') ?? screen.name ?? 'Conversations',
-      listActions: listActions,
       roomActions: roomActions,
       toggles: toggles,
       // Host-controlled selection: in portrait the AppBar carries the open
       // thread's title + back arrow, so the widget skips its own header.
       openId: _convOpenId,
-      onOpenChanged: (id) => setState(() => _convOpenId = id),
+      onOpenChanged: (id) => setState(() {
+        _convOpenId = id;
+        // Opening a thread hands the AppBar to it — leave search behind.
+        if (id != null) _convSearching = false;
+      }),
+      // The search icon lives in the AppBar (_convListActions); the widget only
+      // renders the search field + results while this is on.
+      searchOpen: _convSearching,
+      onSearchClose: () => setState(() => _convSearching = false),
       showRoomHeader: false,
       // Sub-folder rail shown by default inside an open conversation; the wapp
       // pushes it (ui.rail.set field "conv_rail") when a conversation opens.
@@ -3557,6 +3585,10 @@ class _WappPageState extends State<WappPage>
                   onTap: (i) {
                     _mapAutoFit =
                         true; // manual nav → frame the coverage circle
+                    // Another tab's list is a different search context.
+                    if (_convSearching) {
+                      setState(() => _convSearching = false);
+                    }
                     _setGeoChatOpen(_isGeoChatScreen(_tabScreens[i]));
                   },
                   tabs: [
@@ -3581,6 +3613,10 @@ class _WappPageState extends State<WappPage>
                   // for: burying it in a menu makes people not use it, and a
                   // whole tab for something you reach for once an hour is worse.
                   ..._appBarPanelButtons(),
+                  // The conversation list's own actions (search + the wapp's
+                  // slot:"list" actions) — here rather than in a row of their own
+                  // above the list.
+                  ..._convListActions(convGroup, threadOpen: thread != null),
                   // A single top-right options menu (☰). When a conversation thread is
                   // open its room actions (e.g. Recurring bulletin, Private) are folded
                   // in at the top — no separate gear icon.
@@ -3763,6 +3799,46 @@ class _WappPageState extends State<WappPage>
       out.add(button);
     }
     return out;
+  }
+
+  /// The conversation list's actions, rendered in the AppBar left of the ☰:
+  /// people-search plus the wapp's `slot:"list"` actions (e.g. "New message",
+  /// "Join a group"). They used to be a blue icon row above the list, which cost
+  /// a whole screen row to carry two or three icons. Hidden while a thread is
+  /// open — that thread owns the AppBar, and its `slot:"room"` actions are in ☰.
+  List<Widget> _convListActions(GeoUiBlock? convGroup, {required bool threadOpen}) {
+    if (convGroup == null || threadOpen) return const [];
+    final field = convGroup.name ?? 'conversations';
+    // Compact hit boxes: a wapp can declare three of these (Circles: new, join,
+    // plus search) and at the default 48dp pitch they sprawl across the bar and
+    // squeeze the title. Grouped tight, they read as one cluster next to the ☰.
+    const dense = BoxConstraints.tightFor(width: 40, height: 40);
+    return [
+      IconButton(
+        tooltip: _convSearching ? 'Close search' : 'Find a user',
+        icon: Icon(_convSearching ? Icons.close : Icons.search),
+        padding: EdgeInsets.zero,
+        constraints: dense,
+        visualDensity: VisualDensity.compact,
+        onPressed: () => setState(() => _convSearching = !_convSearching),
+      ),
+      for (final a in convGroup.childrenOf('action'))
+        if ((a.getString('slot') ?? 'list') != 'room')
+          IconButton(
+            tooltip: _i18n.resolve(
+              a.getString('tip') ?? a.getString('label') ?? a.name ?? '',
+            ),
+            icon: Icon(convIcon(a.getString('icon') ?? 'add')),
+            padding: EdgeInsets.zero,
+            constraints: dense,
+            visualDensity: VisualDensity.compact,
+            onPressed: () {
+              _fieldValues['${field}_convo'] = _convOpenId ?? '';
+              _sendCommand(a.name ?? '');
+            },
+          ),
+      const SizedBox(width: 4),
+    ];
   }
 
   List<GeoUiBlock> _activeScreenMenuActions() {

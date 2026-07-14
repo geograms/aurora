@@ -5909,8 +5909,23 @@ class RnsService {
   }
 
   /// Pop buffered events for a subscription (JSON list, oldest first).
-  List<Map<String, dynamic>> nostrDrain(String subId, {int max = 50}) =>
-      _nostrHub?.drainEvents(subId, max: max) ?? const [];
+  int _drained = 0;
+  int _drainLogAt = 0;
+  final Map<String, int> _drainAsks = {};
+  List<Map<String, dynamic>> nostrDrain(String subId, {int max = 50}) {
+    final evs = _nostrHub?.drainEvents(subId, max: max) ?? const [];
+    _drained += evs.length;
+    _drainAsks[subId] = (_drainAsks[subId] ?? 0) + evs.length;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _drainLogAt > 30000) {
+      _drainLogAt = now;
+      LogService.instance.add('wapp drained: $_drained total; '
+          'by sub ${_drainAsks.entries.map((e) => '${e.key}:${e.value}').join(' ')}');
+      _drained = 0;
+      _drainAsks.clear();
+    }
+    return evs;
+  }
 
   /// Discovery feed: a subId that only yields kind-1 posts which have gathered
   /// >2 reactions. This is a POPULAR feed, not a fresh one — by construction it
@@ -5929,7 +5944,9 @@ class RnsService {
     final hub = _nostrHub;
     if (hub == null) return null;
     pushTrustedAuthors();
-    return hub.subscribeFirehose();
+    final id = hub.subscribeFirehose();
+    LogService.instance.add('firehose subscribe -> $id');
+    return id;
   }
 
   /// Self + follows: they bypass the firehose gate. Re-pushed on follow change.

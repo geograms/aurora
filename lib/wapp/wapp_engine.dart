@@ -2827,11 +2827,18 @@ class WappEngine {
     final halNostrEventRecv = WasmFunction(
       (int subPtr, int subLen, int outPtr, int outCap) {
         if (outCap <= 0) return 0;
-        final evs = RnsService.instance
-            .nostrDrain(_readStr(subPtr, subLen), max: 1);
+        final sub = _readStr(subPtr, subLen);
+        final evs = RnsService.instance.nostrDrain(sub, max: 1);
         if (evs.isEmpty) return 0;
         final bytes = utf8.encode(jsonEncode(evs.first));
-        if (bytes.length > outCap) return 0;
+        if (bytes.length > outCap) {
+          // The wapp's buffer is too small for this event, so it is DROPPED —
+          // silently, forever, because the queue has already popped it. A long
+          // post (they run to thousands of characters) would vanish here.
+          LogService.instance.add(
+              'wapp drain: event too big for wapp buffer (${bytes.length} > $outCap) — dropped');
+          return 0;
+        }
         return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
       },
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
@@ -2886,6 +2893,7 @@ class WappEngine {
     final halNostrDiscovery = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
+        if (headless) return 0; // see the firehose below: nobody is looking
         final sub = RnsService.instance.nostrDiscovery();
         if (sub == null) return 0;
         final bytes = utf8.encode(sub);
@@ -2902,6 +2910,17 @@ class WappEngine {
     final halNostrFirehose = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
+        // A FIREHOSE HAS NO REASON TO EXIST WHEN NOBODY IS LOOKING AT IT.
+        //
+        // The background (headless) social wapp was opening one of its own, so
+        // TWO firehoses ran in parallel: the page's drain returned nothing while
+        // the events went to the background instance's queue. With the screen off
+        // we want the people you follow, your replies and your messages — not the
+        // public firehose of strangers.
+        //
+        // Refused HERE, in the host, and not merely skipped in the wapp: a rule
+        // that matters is enforced where it cannot be got around.
+        if (headless) return 0;
         final sub = RnsService.instance.nostrFirehose();
         if (sub == null) return 0;
         _nostrSubs.add(sub);

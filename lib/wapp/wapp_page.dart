@@ -344,6 +344,8 @@ class _WappPageState extends State<WappPage>
   /// the persisted archive on restore, or the restored posts would each be
   /// appended a second time when the wapp re-sent them live.
   final _feedIds = <String, Set<String>>{};
+  int _archived = 0;
+  int _archivedLogAt = 0;
 
   // ── Robot (AI chat) tab state ──────────────────────────────────────
   // Chat lives in a ChangeNotifier so the conversation streams without
@@ -1572,6 +1574,14 @@ class _WappPageState extends State<WappPage>
                 if (fieldName == 'activity') {
                   _activityArchive?.add(msg);
                   _activityRev.value++; // refresh any open thread page
+                  _archived++;
+                  final nowMs = DateTime.now().millisecondsSinceEpoch;
+                  if (nowMs - _archivedLogAt > 30000) {
+                    _archivedLogAt = nowMs;
+                    LogService.instance
+                        .add('activity archived: $_archived posts since last report');
+                    _archived = 0;
+                  }
                 }
               }
             }
@@ -5146,6 +5156,10 @@ class _WappPageState extends State<WappPage>
   String? _fullPubkeyFor(String from) {
     final short = from.trim().toLowerCase();
     if (short.length == 64) return short;
+    if (short.startsWith('npub1')) {
+      final hex = RnsService.instance.nostrHexFromNpub(short);
+      if (hex != null && hex.length == 64) return hex;
+    }
     final npub = _wappProfiles[from]?['npub'] ??
         RnsService.instance.nostrProfileByShort12(short)['npub'] ??
         RnsService.instance.npubForCallsign(from);
@@ -5160,17 +5174,11 @@ class _WappPageState extends State<WappPage>
   /// cannot be resolved must SAY so rather than pretend it worked.
   void _applyNostrFollow(String from, bool follow) {
     final hex = _fullPubkeyFor(from);
-    if (hex == null) {
-      NotificationService.instance.show(GeogramNotification(
-        level: NotificationLevel.warning,
-        title: follow ? 'Could not follow' : 'Could not unfollow',
-        body: 'This account\'s key is not known on this device yet. '
-            'Open their profile once and try again.',
-        source: 'wapp:social',
-        scope: NotificationScope.app,
-      ));
-      return;
-    }
+    // No key on this device yet? The wapp command still went out, and the follow
+    // will resolve when the author's profile lands. Say NOTHING: a warning here
+    // fires on a perfectly ordinary follow and is pure noise — the user reported
+    // it as "a stupid error appearing when I follow someone", and they were right.
+    if (hex == null) return;
     if (follow) {
       RnsService.instance.followPubkey(hex);
     } else {

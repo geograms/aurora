@@ -144,6 +144,26 @@ class PreferencesService {
   set keepDataPubkeys(List<String> v) =>
       _prefs.setStringList('social.keepData', v);
 
+  // Following, honestly. THREE sources, because merging them into one set is how
+  // the Following tab came to show accounts the user never followed:
+  //
+  //   * the kind-3 contact list on the relays — MIRRORED, not accumulated. It is
+  //     the account's truth, and it changes.
+  //   * followsLocal — people followed inside geogram.
+  //   * followsUnfollowed — people the user has explicitly unfollowed HERE. This
+  //     is what makes an unfollow stick: without it the next mirror of the
+  //     relay's kind-3 (which we do not rewrite) puts them straight back, which
+  //     is exactly what happened with "Nostr News".
+  List<String> get followsLocal =>
+      _prefs.getStringList('social.followsLocal') ?? const [];
+  set followsLocal(List<String> v) =>
+      _prefs.setStringList('social.followsLocal', v);
+
+  List<String> get followsUnfollowed =>
+      _prefs.getStringList('social.followsUnfollowed') ?? const [];
+  set followsUnfollowed(List<String> v) =>
+      _prefs.setStringList('social.followsUnfollowed', v);
+
   // Social notifications. Two high-water marks, both persisted, because both
   // were in-memory and that is the whole bug: on every restart the standing
   // "#p = me" subscription replays the stored notifications out of SQLite, and

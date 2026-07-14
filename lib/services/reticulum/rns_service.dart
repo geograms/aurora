@@ -5494,6 +5494,18 @@ class RnsService {
   /// pressure). Bridged from the APRS wapp's callsign follows.
   void followPubkey(String key) {
     _follows.add(key);
+    // Remember it as OUR follow, and cancel any prior unfollow — otherwise the
+    // mirror would mask it straight back out again.
+    final mine = _followHex(key);
+    if (mine != null) {
+      final prefs = PreferencesService.instanceSync;
+      if (prefs != null) {
+        prefs.followsLocal = {...prefs.followsLocal, mine}.toList();
+        prefs.followsUnfollowed = prefs.followsUnfollowed
+            .where((h) => h.toLowerCase() != mine)
+            .toList();
+      }
+    }
     // We just followed someone — pull their profile (if reachable) right away.
     refreshFollowedProfiles();
     startFollowsMirror();
@@ -5509,8 +5521,38 @@ class RnsService {
   /// Drop [key] from the follow set.
   void unfollowPubkey(String key) {
     _follows.remove(key);
+    // An unfollow must STICK. We do not rewrite the kind-3 on the relays, so the
+    // next mirror would hand the account straight back — which is precisely how
+    // an account the user had unfollowed kept reappearing under Following.
+    // Recording the unfollow is what makes it durable.
+    final gone = _followHex(key);
+    if (gone != null) {
+      final prefs = PreferencesService.instanceSync;
+      if (prefs != null) {
+        prefs.followsUnfollowed = {...prefs.followsUnfollowed, gone}.toList();
+        prefs.followsLocal = prefs.followsLocal
+            .where((h) => h.toLowerCase() != gone)
+            .toList();
+      }
+    }
     startFollowsMirror();
     pushTrustedAuthors();
+  }
+
+  /// A follow key (npub or hex) as 64-char hex, or null if it is neither — a
+  /// 12-char feed prefix is NOT a key, and silently accepting one is how an
+  /// unfollow became a no-op.
+  String? _followHex(String key) {
+    final k = key.trim();
+    if (k.length == 64 && RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(k)) {
+      return k.toLowerCase();
+    }
+    if (k.toLowerCase().startsWith('npub1')) {
+      try {
+        return NostrCrypto.decodeNpub(k).toLowerCase();
+      } catch (_) {}
+    }
+    return null;
   }
 
   // ── Keep data (this device is a home for these accounts) ───────────────────
@@ -5885,7 +5927,7 @@ class RnsService {
 
   /// What the firehose gate kept, held and dropped, by reason.
   Map<String, int> get nostrFirehoseStats =>
-      _nostrHub?.firehoseStats ?? const {};
+      _nostrHub?.drainFirehoseStatsForLog() ?? const {};
 
   /// Track engagement (likes/replies) for the given post ids (event ids on
   /// screen). The feed calls this as posts scroll into view.
@@ -6301,21 +6343,110 @@ class RnsService {
   void nostrFollow(String key) => followPubkey(key);
   void nostrUnfollow(String key) => unfollowPubkey(key);
 
-  /// Fold my kind-3 contact list (fetched from the relays by the engine) into
-  /// the local follow set, so follows made on OTHER NOSTR clients count too.
+  /// MIRROR my kind-3 contact list into the follow set — do not accumulate it.
+  ///
+  /// This used to be an additive fold: every p-tag of the kind-3 found on the
+  /// relays was added to a persistent set and NOTHING ever removed one. So the
+  /// Following tab showed accounts the user had never followed in this app and
+  /// could not get rid of — unfollow them, and the next rebuild folded them
+  /// straight back in from the relay. That is the "Nostr News" the user kept
+  /// seeing under Following.
+  ///
+  /// The truth is now assembled from three sources, every time:
+  ///
+  ///   follows = (relay kind-3 ∪ followed-here) − unfollowed-here
+  ///
+  /// An account that leaves the contact list leaves Following. An account the
+  /// user unfollows here stays gone, even though we deliberately do NOT rewrite
+  /// their kind-3 on the relays — overwriting somebody's real contact list from
+  /// a mirror we cannot prove is complete is not a risk worth taking for a tab.
   void _mergeMyFollows() {
-    final mine = _nostrHub?.myFollows();
-    if (mine == null || mine.isEmpty) return;
-    var added = false;
-    for (final h in mine) {
-      final hx = h.toLowerCase();
-      if (hx.length == 64 && !_follows.contains(hx)) {
-        _follows.add(hx);
-        added = true;
+    final prefs = PreferencesService.instanceSync;
+    final mine = _nostrHub?.myFollows() ?? const <String>[];
+    final local = prefs?.followsLocal ?? const <String>[];
+    final unfollowed = {
+      for (final h in prefs?.followsUnfollowed ?? const <String>[])
+        h.toLowerCase(),
+    };
+
+    // RECOVERY. If we hold no follows at all and the relays have no contact list
+    // for this account, rebuild from what the device KEPT: the follows mirror
+    // stores a followed author's posts at tier 1, so the distinct tier-1 authors
+    // in the relay store ARE the people the user followed. This exists because
+    // an earlier version of this very function mirrored against an absent
+    // contact list and emptied the persisted follow file — a list the user built
+    // by hand deserves to be rebuilt from evidence, not from their memory.
+    if (_follows.asSet.isEmpty && mine.isEmpty && local.isEmpty) {
+      final kept = _relayStore?.authorsAtTier(1, limit: 500) ?? const <String>[];
+      final recovered = kept
+          .where((h) => h.length == 64 && !unfollowed.contains(h))
+          .toList();
+      if (recovered.isNotEmpty) {
+        for (final h in recovered) {
+          _follows.add(h);
+        }
+        LogService.instance.add(
+            'follows: recovered ${recovered.length} from kept posts (tier 1)');
+        pushTrustedAuthors();
+        refreshFollowedProfiles();
+        return;
       }
     }
-    if (added) refreshFollowedProfiles();
+
+    // AN ABSENT CONTACT LIST IS NOT AN EMPTY ONE.
+    //
+    // The kind-3 is fetched from the relays and takes a while (or never comes, on
+    // a bad network). Treating "not fetched yet" as "you follow nobody" would
+    // mirror the follow set down to nothing — and that set is PERSISTED, so it
+    // would silently destroy the user's follows, empty the Following tab, drop
+    // everyone out of the trusted set and unsubscribe the web-of-trust feed. It
+    // did exactly that the first time I ran this, which is why the guard is here
+    // and why removals are driven ONLY by a contact list we have actually seen.
+    final haveContactList = mine.isNotEmpty;
+
+    final desired = <String>{
+      for (final h in [...mine, ...local])
+        if (h.length == 64) h.toLowerCase(),
+    }..removeAll(unfollowed);
+
+    final current = {..._follows.asSet};
+    var changed = false;
+
+    for (final h in desired.difference(current)) {
+      if (_follows.add(h)) changed = true;
+    }
+    if (haveContactList) {
+      // Now — and only now — an account that has left the contact list (or that
+      // the user unfollowed here) leaves Following.
+      for (final h in current.difference(desired)) {
+        if (_follows.remove(h)) changed = true;
+      }
+    } else {
+      // No snapshot: we can still honour an explicit unfollow, because that is a
+      // decision the USER made and it does not depend on the relays.
+      for (final h in current.intersection(unfollowed)) {
+        if (_follows.remove(h)) changed = true;
+      }
+    }
+
+    if (changed) {
+      LogService.instance.add('follows: contactList=${mine.length} '
+          'local=${local.length} unfollowed=${unfollowed.length} '
+          '-> ${_follows.asSet.length}');
+      pushTrustedAuthors(); // trust follows the follow set, both ways
+      refreshFollowedProfiles();
+    }
   }
+
+  /// What the follow resolution currently sees. For the log line and the tests —
+  /// "Following is empty" must be answerable without guessing.
+  Map<String, int> followsDebug() => {
+        'contactList': _nostrHub?.myFollows().length ?? -1,
+        'local': PreferencesService.instanceSync?.followsLocal.length ?? -1,
+        'unfollowed':
+            PreferencesService.instanceSync?.followsUnfollowed.length ?? -1,
+        'follows': _follows.asSet.length,
+      };
 
   /// My follows as the UI's post-key form: `short12(pubkey).toUpperCase()`, so
   /// the feed's "Following" filter (which matches a post's `from`) resolves.

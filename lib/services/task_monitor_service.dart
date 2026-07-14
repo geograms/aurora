@@ -90,6 +90,15 @@ class TaskMonitorService {
         final s = fh.entries.map((e) => '${e.key}=${e.value}').join(' ');
         LogService.instance.add('perf: nostr firehose $s');
       }
+      // "Following is empty" and "Following shows people I never followed" are
+      // both answerable from this line, and neither was before.
+      {
+        final f = RnsService.instance.followsDebug();
+        if (f.isNotEmpty) {
+          LogService.instance.add(
+              'follows: ${f.entries.map((e) => '${e.key}=${e.value}').join(' ')}');
+        }
+      }
       // Connectionless probes. `silent` is the number of inbound queries we
       // answered with NOTHING — each of which used to cost a full Curve25519
       // link handshake to say "I have nothing".

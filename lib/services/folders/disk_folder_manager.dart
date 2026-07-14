@@ -19,7 +19,7 @@ import 'dart:typed_data';
 import '../../util/nostr_crypto.dart';
 import 'disk_folder.dart';
 import 'folder_keystore.dart';
-import 'folder_event.dart' show pieceSizeForFile;
+import 'folder_event.dart' show pieceSizeForFile, FileEntry;
 import 'folder_service.dart';
 import 'folder_state.dart';
 import 'piece_hashes.dart';
@@ -176,16 +176,30 @@ class DiskFolderManager {
     indexFiles?.call(folderId, src.files);
 
     final state = await localState(folderId);
-    final published = <String, String>{}; // name -> sha
+    final published = <String, FileEntry>{}; // name -> what we published
     for (final e in state.files.values) {
-      published[e.name ?? e.sha] = e.sha;
+      published[e.name ?? e.sha] = e;
     }
 
     var changed = 0;
     for (final f in desired.values) {
       final prev = published[f.name];
-      if (prev == f.sha) continue;
-      if (prev != null) await folders.removeFile(folderId, prev, name: f.name);
+      // Unchanged file, already carrying its piece hashes → nothing to do.
+      //
+      // But a file published BEFORE the piece engine existed has no `ps`/`ph`,
+      // and a rescan is the only chance it ever gets to acquire them. Without
+      // this, every folder that predates the engine would stay stuck on the
+      // whole-file path forever — the upgrade would never reach the content that
+      // needs it most.
+      final needsPieces = storePieceHashes != null && f.size > 0;
+      if (prev != null &&
+          prev.sha == f.sha &&
+          (!needsPieces || prev.hasPieces)) {
+        continue;
+      }
+      if (prev != null && prev.sha != f.sha) {
+        await folders.removeFile(folderId, prev.sha, name: f.name);
+      }
       // Cut the file into pieces and publish the hash list with it, so a
       // downloader can pull it from several peers at once and check each piece
       // as it lands (docs/torrents.md §8 step 2). Signing this op signs the
@@ -219,9 +233,9 @@ class DiskFolderManager {
       changed++;
     }
     for (final entry in published.entries) {
-      // entry.key is the file name, entry.value its sha.
+      // entry.key is the file name, entry.value what we published for it.
       if (!desired.containsKey(entry.key)) {
-        await folders.removeFile(folderId, entry.value, name: entry.key);
+        await folders.removeFile(folderId, entry.value.sha, name: entry.key);
         changed++;
       }
     }

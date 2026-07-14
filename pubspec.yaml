@@ -36,7 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   shared_preferences: ^2.3.0
   graph3d:                               # 3D engine for the reticulum network graph
-    path: ../3d/graph3d
+    path: third_party/graph3d            # vendored: upstream lives in geograms/central 3d/graph3d
   vector_math: ^2.1.4                    # Vector3/Quaternion for the graph layout
   wasm_run_flutter: ^0.1.0
   ffi: ^2.1.0

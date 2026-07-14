@@ -1,0 +1,26 @@
+name: graph3d
+description: >-
+  A native 3D card-graph engine for Flutter: perspective card crowds rendered
+  as baked GPU quads, orbit camera, deterministic layouts, animated scene
+  changes, edges with crawling markers, and manual picking.
+publish_to: 'none'
+
+version: 0.1.0
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Matrices and quaternions. Ships with Flutter; not a third-party risk.
+  vector_math: ^2.1.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+flutter:

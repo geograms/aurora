@@ -521,7 +521,7 @@ packages:
   graph3d:
     dependency: "direct main"
     description:
-      path: "../3d/graph3d"
+      path: "third_party/graph3d"
       relative: true
     source: path
     version: "0.1.0"

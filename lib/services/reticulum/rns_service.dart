@@ -67,7 +67,7 @@ import '../social/host_retention_policy.dart';
 import '../social/retention_tier.dart';
 import '../folders/disk_folder_manager.dart';
 import '../folders/folder_event.dart'
-    show kKindFolderKeyset, kKindFolderOp, FolderShareType;
+    show kKindFolderKeyset, kKindFolderOp, FolderShareType, FileEntry;
 import '../folders/folder_keystore.dart';
 import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
@@ -75,8 +75,9 @@ import '../folders/folder_state.dart';
 import '../folders/folder_export.dart';
 import '../folders/folder_subscriptions.dart';
 import '../folders/nfolder.dart';
+import '../folders/piece_hashes.dart';
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
-import 'package:reticulum/reticulum.dart' show MediaArchive;
+import 'package:reticulum/reticulum.dart' show MediaArchive, MediaRef;
 import 'package:reticulum/reticulum.dart' show BlossomServer;
 
 import '../notification_service.dart';
@@ -2356,6 +2357,30 @@ class RnsService {
               },
               registerSource: (src) => _composite?.add(src),
               unregisterSource: (src) => _composite?.remove(src),
+              // The piece-hash list of a published file is stored like any other
+              // blob and named (signed) by the addFile op. Downloaders fetch it
+              // by that sha, which is what authenticates every piece hash in it.
+              storePieceHashes: (blob) async {
+                final src = fileServeSource;
+                if (src is! MediaFileSource) return null;
+                try {
+                  final token = src.archive.putBytes(blob, 'pieces');
+                  final sha = MediaRef.parse(token)?.sha256 ?? '';
+                  final hex = sha.isEmpty ? null : MediaRef.b64uToHex(sha);
+                  if (hex == null || hex.length != 64) return null;
+                  // Advertise it: a downloader must be able to FIND the list, or
+                  // the file falls back to a whole-file fetch for no reason.
+                  final shaB = _bytesFromHex(hex);
+                  if (shaB != null) {
+                    await _files?.publishKey(shaB, capacity: selfCapacity);
+                  }
+                  return hex;
+                } catch (e) {
+                  LogService.instance
+                      .add('folders: could not store a piece-hash list: $e');
+                  return null;
+                }
+              },
               registryPath: diskFoldersPath ?? ':memory:',
               indexFiles: (folderId, files) {
                 final di = _diskIndex;
@@ -7196,10 +7221,76 @@ class RnsService {
     String name,
   ) async {
     final fid = _normFolderId(folderId);
-    final bytes = await folderFetchBytes(fid, shaHex, ext: _extOf(name));
+    // The torrent path first: when the folder's SIGNED op-log carries piece
+    // metadata for this file, fetch it from the swarm — many peers at once, each
+    // piece checked on arrival (docs/torrents.md §8 step 2). Anything published
+    // before the engine (no `ps`/`ph`) takes the whole-file path, which still
+    // works and is what an older provider speaks.
+    final bytes = await _folderFetchPieces(fid, shaHex, name) ??
+        await folderFetchBytes(fid, shaHex, ext: _extOf(name));
     if (bytes == null) return false;
     _subs?.recordDownload(fid, name, shaHex);
     return true;
+  }
+
+  /// Fetch one file of a folder from a SWARM, or null when this file cannot be
+  /// fetched that way (no piece metadata, no providers, or the swarm could not
+  /// produce every piece — in which case the caller falls back rather than
+  /// leaving the user with nothing).
+  Future<Uint8List?> _folderFetchPieces(
+      String folderId, String shaHex, String name) async {
+    final files = _files;
+    if (files == null) return null;
+    final sha = _normShaHex(shaHex);
+    final shaB = _bytesFromHex(sha);
+    if (shaB == null) return null;
+
+    // The piece metadata comes from the op the folder's owner signed.
+    FileEntry? entry;
+    for (final f in _localFolderStateSync(folderId).files.values) {
+      if (f.sha == sha) {
+        entry = f;
+        break;
+      }
+    }
+    if (entry == null || !entry.hasPieces) return null;
+    final size = entry.size!;
+    final pieceSize = entry.pieceSize!;
+
+    // The piece-hash LIST is itself a content-addressed blob: fetch it like any
+    // other file (it is small), and it is authenticated by the signed op naming
+    // its sha — fetchContentAddressed verifies that hash, so a hostile peer
+    // cannot hand us a list of hashes of its choosing.
+    final listSha = _bytesFromHex(entry.piecesSha!);
+    if (listSha == null) return null;
+    final blob = await fetchContentAddressed(listSha,
+        ext: 'pieces', timeout: const Duration(seconds: 60));
+    if (blob == null) return null;
+    final hashes = unpackPieceHashes(blob);
+    if (hashes == null || hashes.length != pieceCountFor(size, pieceSize)) {
+      LogService.instance.add('folders: piece-hash list for $name is unusable');
+      return null;
+    }
+
+    final providers = await files.resolveProviders(shaB);
+    if (providers.isEmpty) return null;
+
+    final bytes = await files.fetchFilePieces(
+      fileHash: shaB,
+      size: size,
+      pieceSize: pieceSize,
+      pieceHashes: hashes,
+      providers: providers,
+    );
+    if (bytes == null) return null;
+
+    // Keep + re-seed, exactly like a whole-file fetch: a device that downloaded
+    // it is a holder now, and the swarm should know.
+    _archiveAndReseed(shaB, bytes, _extOf(name));
+    LogService.instance.add(
+        'folders: $name came from the SWARM (${hashes.length} pieces, '
+        '${providers.length} provider(s) known)');
+    return bytes;
   }
 
   /// Fetch the raw bytes of a content-addressed file (sha256 hex) over

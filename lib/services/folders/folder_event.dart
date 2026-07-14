@@ -75,8 +75,31 @@ class FileEntry {
   final String? mime;
   final int? size;
   final int? ts; // file date (unix seconds): mtime if known, else when added
+
+  /// Piece metadata (docs/torrents.md §8 step 2). `ps` is the piece size and
+  /// `ph` is the sha256 of the PIECE-HASH LIST (the 32-byte hashes of every
+  /// piece, concatenated, stored content-addressed like any other blob).
+  ///
+  /// This is what makes fetching from strangers in parallel safe: the list is
+  /// named by an op the folder's owner SIGNED, so once the fetched list hashes
+  /// to `ph`, every piece in it is authenticated — and a piece from an unknown
+  /// peer can be checked on its own, before the rest of the file exists. Absent
+  /// on files published before the engine: those fall back to a whole-file fetch.
+  final int? pieceSize; // 'ps'
+  final String? piecesSha; // 'ph'
+
   const FileEntry(this.sha,
-      {this.name, this.desc, this.mime, this.size, this.ts});
+      {this.name,
+      this.desc,
+      this.mime,
+      this.size,
+      this.ts,
+      this.pieceSize,
+      this.piecesSha});
+
+  /// True when this file can be fetched from a swarm rather than one provider.
+  bool get hasPieces =>
+      (pieceSize ?? 0) > 0 && (piecesSha ?? '').length == 64 && (size ?? 0) > 0;
 
   Map<String, dynamic> toJson() => {
         'x': sha,
@@ -85,7 +108,20 @@ class FileEntry {
         if (mime != null) 'mime': mime,
         if (size != null) 'size': size,
         if (ts != null) 'ts': ts,
+        if (pieceSize != null) 'ps': pieceSize,
+        if (piecesSha != null) 'ph': piecesSha,
       };
+}
+
+/// The piece size a file of [size] bytes is cut into.
+///
+/// Small enough that a piece is a cheap unit of work and a liar is caught early;
+/// big enough that the hash list stays small (a 4 GB file → 4096 pieces → a
+/// 128 KB list, which is itself just another content-addressed blob).
+int pieceSizeForFile(int size) {
+  if (size >= 64 * 1024 * 1024) return 1024 * 1024; // ≥64MB → 1 MiB pieces
+  if (size >= 4 * 1024 * 1024) return 256 * 1024; //  ≥4MB → 256 KiB
+  return 64 * 1024; //                                        64 KiB
 }
 
 class LinkEntry {
@@ -141,7 +177,13 @@ NostrEvent buildOp(String authorPrivHex, String folderId,
 // ── Operation payload builders ──────────────────────────────────────────────
 
 Map<String, dynamic> opAddFile(String shaHex,
-        {String? name, String? desc, String? mime, int? size, int? ts}) =>
+        {String? name,
+        String? desc,
+        String? mime,
+        int? size,
+        int? ts,
+        int? pieceSize,
+        String? piecesSha}) =>
     {
       'op': 'addFile',
       'x': shaHex,
@@ -150,6 +192,10 @@ Map<String, dynamic> opAddFile(String shaHex,
       'mime': ?mime,
       'size': ?size,
       'ts': ?ts,
+      // Signing this op signs the piece-hash list it names, which is what lets a
+      // downloader trust one piece from one stranger.
+      'ps': ?pieceSize,
+      'ph': ?piecesSha,
     };
 
 Map<String, dynamic> opRmFile(String shaHex, {String? name}) =>

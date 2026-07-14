@@ -12,6 +12,7 @@
 
 import 'package:flutter/material.dart';
 
+import '../geoui_renderer.dart' show geoUiResolveIcon;
 import 'generated_avatar.dart';
 
 class PeopleViewField extends StatefulWidget {
@@ -162,6 +163,12 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         .where((m) => (m['action'] ?? '').toString().isNotEmpty)
         .toList();
 
+    // A row can name an ICON instead of taking a generated avatar. The avatar is
+    // right when the row is a person (it makes strangers distinguishable at a
+    // glance); it is nonsense when the row is a folder or a file, where a random
+    // coloured sigil says nothing and the type says everything.
+    final iconName = (it['icon'] ?? '').toString();
+
     return InkWell(
       onTap: () => widget.onTap(id),
       child: Padding(
@@ -169,7 +176,18 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            GeneratedAvatar(seed: id, size: 44),
+            if (iconName.isEmpty)
+              GeneratedAvatar(seed: id, size: 44)
+            else
+              SizedBox(
+                width: 44,
+                height: 44,
+                child: Icon(
+                  geoUiResolveIcon(iconName),
+                  size: 30,
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(

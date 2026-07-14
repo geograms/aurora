@@ -12,7 +12,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
 
-import '../files/file_transfer.dart' show FileSource;
+import '../files/file_transfer.dart' show FileSource, PieceMask, RangedFileSource;
 
 /// The hidden key file kept inside an owned folder (excluded from sharing).
 const String kFolderKeyFile = '.folder.json';
@@ -51,7 +51,7 @@ class _DigestCatcher implements Sink<crypto.Digest> {
   void close() {}
 }
 
-class DiskFolderSource implements FileSource {
+class DiskFolderSource implements RangedFileSource {
   final String dirPath;
   final Map<String, String> _byHash = {}; // hex32 -> absolute path
   // Per-file hash cache so a re-scan only re-reads files that actually changed
@@ -228,6 +228,45 @@ class DiskFolderSource implements FileSource {
   /// Opening a file with the OS needs a PATH, not bytes — [read] would pull the
   /// whole thing into memory to hand a viewer something it can open itself.
   String? pathOfHex(String shaHex) => _byHash[shaHex.toLowerCase()];
+
+  // ── Serving PIECES (docs/torrents.md §8 step 2) ───────────────────────────
+  //
+  // A disk folder is the best possible piece server: the bytes are already a
+  // file, so serving a range is a seek and a read — a 4 GB film is served one
+  // piece at a time without ever holding 4 GB in memory (which [read] would).
+
+  @override
+  Uint8List? readRange(Uint8List fileHash, int offset, int length) {
+    final path = _byHash[_hex(fileHash)];
+    if (path == null) return null;
+    RandomAccessFile? raf;
+    try {
+      final f = File(path);
+      final size = f.lengthSync();
+      if (offset < 0 || offset >= size) return null;
+      final end = (offset + length > size) ? size : offset + length;
+      raf = f.openSync();
+      raf.setPositionSync(offset);
+      return raf.readSync(end - offset);
+    } catch (_) {
+      return null;
+    } finally {
+      raf?.closeSync();
+    }
+  }
+
+  @override
+  PieceMask? pieceMask(Uint8List fileHash, int pieceSize) {
+    final path = _byHash[_hex(fileHash)];
+    if (path == null) return null;
+    try {
+      // We hold the whole file (it is on disk and its hash is in our index), so
+      // we hold every piece of it.
+      return PieceMask.full(File(path).lengthSync(), pieceSize);
+    } catch (_) {
+      return null;
+    }
+  }
 
   static String _hex(List<int> b) =>
       b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();

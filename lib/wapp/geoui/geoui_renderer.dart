@@ -1090,7 +1090,18 @@ IconData geoUiResolveIcon(String name) {
       return Icons.create_new_folder;
     case 'file':
     case 'description':
+    case 'insert_drive_file':
       return Icons.insert_drive_file;
+    // File types a browser needs in order to be readable at a glance.
+    case 'image':
+      return Icons.image_outlined;
+    case 'picture_as_pdf':
+      return Icons.picture_as_pdf;
+    case 'archive':
+      return Icons.folder_zip_outlined;
+    case 'apk':
+    case 'android':
+      return Icons.android;
     case 'list':
       return Icons.list;
     case 'category':

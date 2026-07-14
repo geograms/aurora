@@ -19,8 +19,10 @@ import 'dart:typed_data';
 import '../../util/nostr_crypto.dart';
 import 'disk_folder.dart';
 import 'folder_keystore.dart';
+import 'folder_event.dart' show pieceSizeForFile;
 import 'folder_service.dart';
 import 'folder_state.dart';
+import 'piece_hashes.dart';
 
 class DiskFolderManager {
   final FolderService folders;
@@ -36,6 +38,12 @@ class DiskFolderManager {
   /// (sha -> path/size/mtime/name). Optional; null in tests.
   final void Function(String folderId, List<DiskFile> files)? indexFiles;
 
+  /// Store the piece-hash list of a published file, content-addressed, and
+  /// return its sha256 hex. Null in tests / on a host with no archive — the file
+  /// is then published without piece metadata and downloaders fall back to a
+  /// whole-file fetch, exactly as they did before the piece engine existed.
+  final Future<String?> Function(Uint8List blob)? storePieceHashes;
+
   final Map<String, DiskFolderSource> _sources = {}; // folderId -> source
   final Map<String, String> _dirs = {}; // folderId -> dirPath
 
@@ -47,6 +55,7 @@ class DiskFolderManager {
     required this.registerSource,
     this.unregisterSource,
     this.indexFiles,
+    this.storePieceHashes,
     required this.registryPath,
     this.log,
   });
@@ -177,11 +186,36 @@ class DiskFolderManager {
       final prev = published[f.name];
       if (prev == f.sha) continue;
       if (prev != null) await folders.removeFile(folderId, prev, name: f.name);
+      // Cut the file into pieces and publish the hash list with it, so a
+      // downloader can pull it from several peers at once and check each piece
+      // as it lands (docs/torrents.md §8 step 2). Signing this op signs the
+      // list. A host with no archive publishes without it, and downloaders fall
+      // back to a whole-file fetch.
+      int? ps;
+      String? ph;
+      final store = storePieceHashes;
+      if (store != null && f.size > 0) {
+        try {
+          final size = pieceSizeForFile(f.size);
+          final hashes = await pieceHashesOfFile(File(f.path), size);
+          if (hashes.isNotEmpty) {
+            final sha = await store(packPieceHashes(hashes));
+            if (sha != null && sha.length == 64) {
+              ps = size;
+              ph = sha;
+            }
+          }
+        } catch (e) {
+          log?.call('folder: piece hashing failed for ${f.name}: $e');
+        }
+      }
       await folders.addFile(folderId, f.sha,
           name: f.name,
           size: f.size,
           mime: _mime(f.ext),
-          ts: f.mtimeMs > 0 ? f.mtimeMs ~/ 1000 : null);
+          ts: f.mtimeMs > 0 ? f.mtimeMs ~/ 1000 : null,
+          pieceSize: ps,
+          piecesSha: ph);
       changed++;
     }
     for (final entry in published.entries) {

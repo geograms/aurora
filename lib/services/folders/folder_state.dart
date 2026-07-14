@@ -129,6 +129,9 @@ void _apply(FolderState s, Map payload, int createdAt) {
           desc: payload['desc'] as String?,
           mime: payload['mime'] as String?,
           size: payload['size'] is int ? payload['size'] as int : null,
+          // Piece metadata, when the publisher's client knew how to make it.
+          pieceSize: payload['ps'] is int ? payload['ps'] as int : null,
+          piecesSha: payload['ph'] as String?,
           // File date: explicit mtime if the op carries one, else the time the
           // file was added (the op's own timestamp).
           ts: payload['ts'] is int ? payload['ts'] as int : createdAt,

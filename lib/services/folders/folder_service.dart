@@ -136,9 +136,23 @@ class FolderService {
   }
 
   Future<bool> addFile(String folderId, String shaHex,
-          {String? name, String? desc, String? mime, int? size, int? ts}) =>
-      _emitOp(folderId,
-          opAddFile(shaHex, name: name, desc: desc, mime: mime, size: size, ts: ts));
+          {String? name,
+          String? desc,
+          String? mime,
+          int? size,
+          int? ts,
+          int? pieceSize,
+          String? piecesSha}) =>
+      _emitOp(
+          folderId,
+          opAddFile(shaHex,
+              name: name,
+              desc: desc,
+              mime: mime,
+              size: size,
+              ts: ts,
+              pieceSize: pieceSize,
+              piecesSha: piecesSha));
 
   Future<bool> removeFile(String folderId, String shaHex, {String? name}) =>
       _emitOp(folderId, opRmFile(shaHex, name: name));

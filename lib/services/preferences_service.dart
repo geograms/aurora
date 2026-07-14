@@ -252,6 +252,18 @@ class PreferencesService {
   bool get archiveMirrorSmall => _prefs.getBool('archive.mirrorSmall') ?? true;
   set archiveMirrorSmall(bool v) => _prefs.setBool('archive.mirrorSmall', v);
 
+  // The Indexer dashboard's requests-per-hour ring (RateRing.encode()). A
+  // dashboard that resets to zero on every restart teaches the owner nothing.
+  String get indexerQueryRing => _prefs.getString('indexer.queryRing') ?? '';
+  set indexerQueryRing(String v) => _prefs.setString('indexer.queryRing', v);
+
+  // Topics this indexer volunteers for ("what I'm comfortable indexing").
+  // Empty = wide when the hardware allows it: index everything heard.
+  List<String> get indexerTopics =>
+      _prefs.getStringList('indexer.topics') ?? const [];
+  set indexerTopics(List<String> v) =>
+      _prefs.setStringList('indexer.topics', v);
+
   // One cursor per indexer we sync pointers with: (epoch, seq). Eight bytes and
   // a name, persisted — because the whole reason the cursor is a POSITION and
   // not a time is that a node with no clock can still resume after a reboot.

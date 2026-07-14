@@ -52,6 +52,15 @@ class PointerSyncService {
 
   Timer? _timer;
   int _round = 0;
+
+  // Running totals — the dashboard's "is the map actually moving" numbers.
+  // They were computed and thrown away after one log line; a dashboard cannot
+  // read a log line that scrolled off.
+  int exchanges = 0;
+  int totalApplied = 0;
+  int totalRemoved = 0;
+  int totalRejected = 0;
+  int lastSyncMs = 0;
   final Map<String, SyncCursor> _cursors = {}; // peer id hex -> cursor
   bool _loaded = false;
 
@@ -125,6 +134,11 @@ class PointerSyncService {
       }
 
       _cursors[idHex] = out.cursor;
+      exchanges++;
+      totalApplied += out.applied;
+      totalRemoved += out.removed;
+      totalRejected += out.rejected;
+      lastSyncMs = DateTime.now().millisecondsSinceEpoch;
       _trim();
       _save();
 

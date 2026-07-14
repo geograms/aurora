@@ -11,6 +11,7 @@ import 'geoui_ast.dart';
 import '../../editor/code_editor_field.dart';
 import 'widgets/icon_field.dart';
 import 'widgets/log_view_field.dart';
+import 'widgets/stats_grid_field.dart';
 import 'widgets/chat_view_field.dart';
 
 /// Bindings interface for reading/writing field values.
@@ -354,9 +355,30 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       'chat' => _renderChatField(fieldName, label, tip, field),
       'icon' => _renderIconField(fieldName, label, tip, field),
       'qr' => _renderQrField(fieldName, label, tip, field),
+      'stats' => _renderStatsField(fieldName),
       'image' => _renderImageField(fieldName, label, tip, field),
       _ => _renderStringField(fieldName, label, tip, field),
     };
+  }
+
+  /// `$type:"stats"` — the native dashboard grid (stats_grid_field.dart). Tiles
+  /// arrive from the wapp via `ui.stats.set`; a tile with `tap:true` fires
+  /// `<field>_tap` with `<field>_id`, the people-row contract.
+  Widget _renderStatsField(String name) {
+    final raw = widget.bindings.getValue(name);
+    final tiles = raw is List
+        ? raw
+            .whereType<Map>()
+            .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+            .toList()
+        : const <Map<String, dynamic>>[];
+    return StatsGridField(
+      tiles: tiles,
+      onTap: (id) {
+        widget.bindings.setValue('${name}_id', id);
+        widget.onAction?.call('${name}_tap');
+      },
+    );
   }
 
   /// `$type:"qr"` — render a QR code of the field's string value (e.g. a circle

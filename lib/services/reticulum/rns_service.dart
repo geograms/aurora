@@ -2210,6 +2210,11 @@ class RnsService {
           // The owner's decision beats the charger. Without this, picking
           // "Always" set a preference and changed nothing on the wire.
           _relayRole?.volunteer = p?.indexerVolunteer ?? 'auto';
+          // …and what they volunteered to index. Topics persist; an interest
+          // set that resets to empty on every launch is not a setting.
+          for (final t in p?.indexerTopics ?? const <String>[]) {
+            _relayRole?.interests.addTopic(t);
+          }
           // The pointer log this device syncs with other indexers. Its epoch is
           // derived from the identity, so a rebuilt log gets a new epoch and a
           // peer's stale cursor is DETECTED rather than silently honoured.
@@ -3393,6 +3398,79 @@ class RnsService {
       LogService.instance.add('social: author record failed: $e');
     }
   }
+
+  /// Replace the indexer's topic set ("what I'm comfortable indexing"),
+  /// persist it, and RE-ANNOUNCE — a decision the network never hears is not a
+  /// decision. Empty = wide, when the hardware allows it.
+  Timer? _topicsDebounce;
+
+  void setIndexerTopics(List<String> topics) {
+    final clean = [
+      for (final t in topics)
+        if (t.trim().isNotEmpty) t.trim().toLowerCase()
+    ];
+    PreferencesService.instanceSync?.indexerTopics = clean;
+    final role = _relayRole;
+    if (role == null) return;
+    role.interests.topics
+      ..clear()
+      ..addAll(clean);
+    // The topics field is LIVE — it fires per keystroke. The pref and the
+    // in-memory set track every edit (cheap), but the ANNOUNCE waits for two
+    // quiet seconds: typing "offgrid" must not broadcast seven half-words to
+    // the whole mesh.
+    _topicsDebounce?.cancel();
+    _topicsDebounce = Timer(const Duration(seconds: 2), () {
+      final prof = CapacityGovernor.instance.lastProfile;
+      if (prof != null) role.applyCapacity(prof);
+      _announceRelayDest();
+      LogService.instance.add(
+          'indexer: topics=${clean.isEmpty ? '(everything)' : clean.join(',')} — re-announced');
+    });
+  }
+
+  /// Remove pointers older than [age] — preview with [dryRun]. Every REAL
+  /// removal is paired with a pointer-log entry so the deletion travels to the
+  /// indexers we sync with: an indexer that cleans up silently keeps its
+  /// neighbours serving ghosts.
+  int sweepPointersOlderThan(Duration age, {bool dryRun = false}) {
+    final dht = _files?.dht;
+    if (dht == null) return 0;
+    final n = dht.sweepOlderThan(
+      age,
+      dryRun: dryRun,
+      onRemoved: (r) => _pointerLog?.remove(r.sha256, r.providerPub),
+    );
+    if (!dryRun && n > 0) {
+      LogService.instance
+          .add('indexer: swept $n pointer(s) older than ${age.inDays}d');
+    }
+    return n;
+  }
+
+  /// Evict one provider's pointers across all keys — preview with [dryRun].
+  int sweepProviderPointers(String providerPubHex, {bool dryRun = false}) {
+    final dht = _files?.dht;
+    final pub = _hexToBytes(providerPubHex);
+    if (dht == null || pub == null) return 0;
+    final n = dht.dropProviderEverywhere(
+      pub,
+      dryRun: dryRun,
+      onRemoved: (r) => _pointerLog?.remove(r.sha256, r.providerPub),
+    );
+    if (!dryRun && n > 0) {
+      LogService.instance.add(
+          'indexer: evicted $n pointer(s) from ${providerPubHex.substring(0, 12)}');
+    }
+    return n;
+  }
+
+  /// Lifetime query totals (DHT answers + relay REQ/COUNT + probes) — the
+  /// sampler in NodeRoleApi turns deltas of this into requests-per-hour.
+  int get queryTotals =>
+      (_files?.dht?.queriesAnswered ?? 0) +
+      (_relay?.reqsServed ?? 0) +
+      (_relay?.probesAnswered ?? 0);
 
   /// Every author this device advertises itself as a home for.
   Set<String> get advertisedAuthors => Set.unmodifiable(_authorRecords);
@@ -5631,6 +5709,10 @@ class RnsService {
       );
       _relayRole!.volunteer =
           PreferencesService.instanceSync?.indexerVolunteer ?? 'auto';
+      for (final t
+          in PreferencesService.instanceSync?.indexerTopics ?? const <String>[]) {
+        _relayRole!.interests.addTopic(t);
+      }
       final prof = CapacityGovernor.instance.lastProfile;
       if (prof != null) _relayRole!.applyCapacity(prof);
       _announceRelayDest();

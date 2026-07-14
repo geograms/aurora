@@ -1567,6 +1567,19 @@ class _WappPageState extends State<WappPage>
                 .toList();
             changed = true;
           }
+        } else if (type == 'ui.stats.set') {
+          // Replace a $type:"stats" field's tiles — the native dashboard grid
+          // (big value, whispering label, optional sparkline). Statistics are
+          // not a form; a read-only text box is an input somebody disabled.
+          final fieldName = data['field'] as String? ?? 'stats';
+          final tiles = data['tiles'];
+          if (tiles is List) {
+            _fieldValues[fieldName] = tiles
+                .whereType<Map>()
+                .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+                .toList();
+            changed = true;
+          }
         } else if (type == 'ui.rail.set') {
           // Replace a $type:"rail" field's items (the folder navigation rail:
           // [{id,name,icon}]). Tapping one fires `<field>_tap` with `<field>_id`.

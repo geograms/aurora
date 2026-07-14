@@ -1,6 +1,9 @@
 import 'dart:convert';
 
+import 'dart:async';
+
 import 'package:reticulum/src/services/social/node_profile.dart';
+import 'package:reticulum/src/util/rate_ring.dart';
 import 'package:reticulum/src/services/social/relay_role.dart';
 
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
@@ -29,6 +32,38 @@ class NodeRoleApi {
   static final NodeRoleApi instance = NodeRoleApi._();
 
   RnsService get _rns => RnsService.instance;
+
+  // ── The requests-per-hour ring ─────────────────────────────────────────────
+  //
+  // The counters upstream are lifetime totals; this samples their DELTA once a
+  // minute into hourly buckets and persists the ring, so the dashboard has a
+  // shape and survives a restart. One subtraction and (at most) one pref write
+  // per minute — nowhere near any hot path.
+  RateRing? _queryRing;
+  int _lastQueryTotal = 0;
+  Timer? _sampler;
+
+  RateRing get queryRing {
+    if (_queryRing == null) {
+      _queryRing = RateRing.decode(
+          PreferencesService.instanceSync?.indexerQueryRing ?? '');
+      _lastQueryTotal = _rns.queryTotals;
+      _sampler ??= Timer.periodic(const Duration(minutes: 1), (_) => _sample());
+    }
+    return _queryRing!;
+  }
+
+  void _sample() {
+    final ring = _queryRing;
+    if (ring == null) return;
+    final total = _rns.queryTotals;
+    final delta = total - _lastQueryTotal;
+    _lastQueryTotal = total;
+    if (delta > 0) ring.add(delta);
+    // Persist at most once a minute, and only when something moved or an hour
+    // rolled — the encode is a short string either way.
+    PreferencesService.instanceSync?.indexerQueryRing = ring.encode();
+  }
 
   // ── Indexer ───────────────────────────────────────────────────────────────
 
@@ -64,6 +99,27 @@ class NodeRoleApi {
       'logSeq': _rns.pointerLog?.nextSeq ?? 0,
       'logEpoch': _rns.pointerLog?.epoch ?? '',
       'syncPeers': PointerSyncService.instance.peersTracked,
+
+      // The shape, not just the size: is the offer being USED?
+      'queriesLastHour': queryRing.lastHour,
+      'queriesAvgPerHour':
+          double.parse(queryRing.avgPerHour(window: 24).toStringAsFixed(1)),
+      'querySpark': queryRing.series(),
+      'syncExchanges': PointerSyncService.instance.exchanges,
+      'syncApplied': PointerSyncService.instance.totalApplied,
+      'syncRemoved': PointerSyncService.instance.totalRemoved,
+      'lastSyncMs': PointerSyncService.instance.lastSyncMs,
+      'topics': p?.indexerTopics ?? const <String>[],
+      // The same list as a plain CSV, because the wapp seeds a TEXT FIELD with
+      // it — and a text field holding "[]" is a bug wearing quotes.
+      'topicsCsv': (p?.indexerTopics ?? const <String>[]).join(', '),
+      'wideActive': role?.wide ?? false,
+
+      // The network as NUMBERS. Individual peers are not listed anywhere —
+      // there could be millions, and a list of them tells the owner nothing a
+      // count cannot.
+      'indexersKnown': _rns.relayDirectory.indexers().length,
+      'peersKnown': _rns.relayDirectory.entries().length,
 
       // The hardware, so the wapp can show a one-line summary and link into
       // Settings → Hardware rather than asking for any of it a second time.
@@ -148,7 +204,81 @@ class NodeRoleApi {
         _rns.applyHostingSettings();
         LogService.instance.add('indexer: volunteer=$value');
         return 0;
+      case 'topics':
+        _rns.setIndexerTopics(
+            value.isEmpty ? const [] : value.split(','));
+        return 0;
       default:
+        return -1;
+    }
+  }
+
+  /// Previewed maintenance TILES for the dashboard's stats grid: each says
+  /// exactly what it would remove, and only offers that would remove SOMETHING
+  /// appear. Tapping a tile runs [nodeSweep] with the same id — what the person
+  /// saw is what runs. (Not a people list: a people field hijacks its whole
+  /// screen, and maintenance belongs on the dashboard, not behind a tab.)
+  String maintJson() {
+    final dht = _rns.dhtNode;
+    final tiles = <Map<String, dynamic>>[];
+    if (dht != null) {
+      final ages = dht.ageBuckets();
+      tiles.add({
+        'id': '#ages',
+        'label': 'Pointer ages',
+        'value': '${ages.h1 + ages.d1} fresh',
+        'hint': '${ages.d7} under a week · ${ages.older} older — where the map '
+            'came from.',
+      });
+      void offer(String id, String label, String why, int n) {
+        if (n <= 0) return;
+        tiles.add({
+          'id': id,
+          'label': label,
+          'value': '−$n',
+          'unit': 'pointers',
+          'hint': '$why Tap to run exactly this.',
+          'tap': true,
+          'alert': true,
+        });
+      }
+
+      offer(
+        'sweep:old7d',
+        'Drop older than 7 days',
+        'Providers republish every 30 minutes; a week of silence is an answer.',
+        _rns.sweepPointersOlderThan(const Duration(days: 7), dryRun: true),
+      );
+      offer(
+        'sweep:old30d',
+        'Drop older than 30 days',
+        'The conservative sweep: only what has been dead for a month.',
+        _rns.sweepPointersOlderThan(const Duration(days: 30), dryRun: true),
+      );
+    }
+    if (tiles.length <= 1) {
+      tiles.add({
+        'id': '#none',
+        'label': 'Clean up',
+        'value': 'Nothing to do',
+        'hint': 'Every pointer held is fresh.',
+      });
+    }
+    return jsonEncode(tiles);
+  }
+
+  /// Run the sweep the row previewed.  /// Run the sweep the row previewed. Returns pointers removed, -1 on error.
+  int nodeSweep(String id) {
+    switch (id) {
+      case 'sweep:old7d':
+        return _rns.sweepPointersOlderThan(const Duration(days: 7));
+      case 'sweep:old30d':
+        return _rns.sweepPointersOlderThan(const Duration(days: 30));
+      default:
+        if (id.startsWith('provider:')) {
+          final pub = id.substring('provider:'.length);
+          if (pub.length == 128) return _rns.sweepProviderPointers(pub);
+        }
         return -1;
     }
   }

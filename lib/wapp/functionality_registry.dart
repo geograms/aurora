@@ -261,9 +261,16 @@ class FunctionalityRegistry {
           'Indexers and leaves this device knows, as people-widget sections', [],
           ReturnDef('int', 'Bytes written, negated required size if too small')),
       EndpointDef('hal_node_set_pref',
-          'Set a node tunable "key=value" (volunteer=off|auto|always)', [
+          'Set a node tunable "key=value" (volunteer=off|auto|always, topics=csv)', [
         ParamDef('kv', 'string', 'key=value'),
       ], ReturnDef('int', '0 ok, -1 unknown key/bad value')),
+      EndpointDef('hal_node_maint',
+          'Previewed maintenance rows — each says exactly what it would remove', [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_node_sweep',
+          'Run a previewed sweep by row id ("sweep:old7d", "provider:<pub>")', [
+        ParamDef('id', 'string', 'the id of the row the user tapped'),
+      ], ReturnDef('int', 'pointers removed, -1 on error')),
     ]),
     'hal.archive': FunctionalityDef('hal.archive',
         'The Archiver role: storage volunteered for other people, and what is on it', [

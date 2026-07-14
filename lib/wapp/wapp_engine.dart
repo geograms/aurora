@@ -3049,6 +3049,20 @@ class WappEngine {
           NodeRoleApi.instance.setPref(_readStr(kvPtr, kvLen)),
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    final halNodeMaint = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(NodeRoleApi.instance.maintJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halNodeSweep = WasmFunction(
+      (int idPtr, int idLen) =>
+          NodeRoleApi.instance.nodeSweep(_readStr(idPtr, idLen)),
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
 
     // ── hal.archive: what this device holds for other people, and on whose say ─
     final halArchiveStatus = WasmFunction(
@@ -3380,6 +3394,8 @@ class WappEngine {
       WasmImport('hal', 'node_status', halNodeStatus),
       WasmImport('hal', 'node_peers', halNodePeers),
       WasmImport('hal', 'node_set_pref', halNodeSetPref),
+      WasmImport('hal', 'node_maint', halNodeMaint),
+      WasmImport('hal', 'node_sweep', halNodeSweep),
       WasmImport('hal', 'archive_status', halArchiveStatus),
       WasmImport('hal', 'archive_items', halArchiveItems),
       WasmImport('hal', 'archive_drop', halArchiveDrop),

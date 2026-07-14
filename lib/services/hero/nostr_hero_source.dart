@@ -28,11 +28,8 @@ class NostrHeroSource implements HeroSource {
 
   static const int _bufferCap = 40;
 
-
   // Newest-first buffers, keyed by event id so a redelivered event is one row.
   final Map<String, HeroItem> _followsBuf = {};
-  final Map<String, HeroItem> _discoBuf = {};
-
   /// Live kind-1 as the relays push it, through the quality gate. Discovery
   /// only carries posts that have already collected reactions, so on a fresh
   /// device with nobody followed it can take many minutes to say anything —
@@ -41,10 +38,25 @@ class NostrHeroSource implements HeroSource {
   final Map<String, HeroItem> _fireBuf = {};
 
   String? _followsSub;
-  String? _discoSub;
   String? _fireSub;
   String _followsKey = '';
   String _rung = '';
+  bool _active = true;
+
+  void setActive(bool active) {
+    if (_active == active) return;
+    _active = active;
+    if (!active) _closeSubscriptions();
+  }
+
+  void _closeSubscriptions() {
+    final rns = RnsService.instance;
+    for (final sub in [_followsSub, _fireSub]) {
+      if (sub != null) rns.nostrUnsubscribe(sub);
+    }
+    _followsSub = null;
+    _fireSub = null;
+  }
 
   /// Open (or re-open) the standing subscriptions.
   ///
@@ -55,6 +67,7 @@ class NostrHeroSource implements HeroSource {
   /// a leaked NOSTR sub keeps re-querying the relays and paying a signature
   /// verify per event forever (docs/performance.md §3.5).
   void _ensureSubscriptions(List<String> follows) {
+    if (!_active) return;
     final rns = RnsService.instance;
     final key = follows.join(',');
     if (key != _followsKey) {
@@ -66,11 +79,24 @@ class NostrHeroSource implements HeroSource {
     }
     if (_followsSub == null && follows.isNotEmpty) {
       _followsSub = rns.nostrSubscribe(
-        jsonEncode({'kinds': [1], 'authors': follows, 'limit': _bufferCap}),
+        jsonEncode({
+          'kinds': [1],
+          'authors': follows,
+          'limit': _bufferCap,
+        }),
       );
     }
-    _discoSub ??= rns.nostrDiscovery();
-    _fireSub ??= rns.nostrFirehose();
+    if (follows.isNotEmpty) {
+      for (final sub in [_fireSub]) {
+        if (sub != null) rns.nostrUnsubscribe(sub);
+      }
+      _fireSub = null;
+    } else {
+      final stale = _followsSub;
+      if (stale != null) rns.nostrUnsubscribe(stale);
+      _followsSub = null;
+      _fireSub ??= rns.nostrFirehose();
+    }
   }
 
   /// Drain one subscription and fold the NEW events into [buf].
@@ -103,12 +129,12 @@ class NostrHeroSource implements HeroSource {
 
   @override
   Future<List<HeroItem>> candidates() async {
+    if (!_active) return const [];
     final rns = RnsService.instance;
     try {
       final follows = rns.follows.asSet.toList()..sort();
       _ensureSubscriptions(follows);
       await _drainInto(_followsSub, _followsBuf);
-      await _drainInto(_discoSub, _discoBuf);
       await _drainInto(_fireSub, _fireBuf);
 
       // Followed: the hero is theirs alone. The ranker enforces that too, but
@@ -125,45 +151,26 @@ class NostrHeroSource implements HeroSource {
         return _hydrate(items);
       }
 
-      // Nobody followed. Merge everything the device can see, from BOTH
-      // transports, and let the ranker choose:
-      //   discovery — the internet relays' most-engaged posts (slow to warm:
-      //               a post must collect reactions before it qualifies)
-      //   firehose  — live kind-1 off the same relays, quality-gated
-      //   mesh      — what Reticulum itself relayed to us
-      // Discovery alone is what left a new phone staring at an empty banner
-      // for minutes: on a fresh install nothing has any likes yet.
+      // Nobody followed: use only the curated public batch. Discovery and the
+      // raw local store contain useful search/archive material, but mixing them
+      // here bypasses the curator and lets stale promotional link cards back
+      // into the launcher.
       final merged = <String, HeroItem>{};
-      for (final i in _discoBuf.values) {
-        merged[i.id] = i;
-      }
       for (final i in _fireBuf.values) {
-        merged.putIfAbsent(i.id, () => i);
-      }
-      final store = rns.relayStore;
-      if (store != null) {
-        for (final e in store.firehose(limit: 10)) {
-          final item = parseHeroCore(
-            id: e.id ?? '',
-            pubkey: e.pubkey,
-            content: e.content,
-            createdAtSec: e.createdAt,
-          );
-          merged.putIfAbsent(item.id, () => item);
-        }
+        merged[i.id] = i;
       }
       if (merged.isEmpty) {
         // An empty hero is now SAID, with the numbers that explain it: which
         // buffers were dry, and what the relays' firehose gate did with what
         // it saw. Guessing at this cost a whole build cycle.
         LogService.instance.add(
-          'hero: empty (disco=${_discoBuf.length} fire=${_fireBuf.length} '
-          'subs=[d:$_discoSub f:$_fireSub] gate=${rns.nostrFirehoseStats})',
+          'hero: empty (fire=${_fireBuf.length} '
+          'sub=$_fireSub gate=${rns.nostrFirehoseStats})',
         );
         return const [];
       }
       _noteRung(
-        'merged(disco=${_discoBuf.length} fire=${_fireBuf.length})',
+        'curated(fire=${_fireBuf.length})',
         merged.length,
       );
       return _hydrate(merged.values.toList());
@@ -259,11 +266,14 @@ class NostrHeroSource implements HeroSource {
     final claimed = (profile['name'] ?? '').trim();
     // A kind-0 "name" that is really the note's own text is not a name: keep
     // the short npub instead (HeroItem.looksLikePostText).
-    final name = claimed.isNotEmpty &&
+    final name =
+        claimed.isNotEmpty &&
             !HeroItem.looksLikePostText(claimed, i.title, i.summary)
         ? claimed
         : i.authorName;
-    final pic = (profile['pic'] ?? '').isNotEmpty ? profile['pic'] : i.authorPic;
+    final pic = (profile['pic'] ?? '').isNotEmpty
+        ? profile['pic']
+        : i.authorPic;
     // Unchanged items keep their identity, so the carousel doesn't rebuild (and
     // re-decode their images) for nothing.
     if (s.likes == i.likes &&
@@ -302,12 +312,14 @@ List<HeroItem> parseHeroBatch(List<Map<String, dynamic>> raws) {
     final id = (j['id'] ?? '').toString();
     final pubkey = (j['pubkey'] ?? '').toString();
     if (id.isEmpty || pubkey.isEmpty) continue;
-    out.add(parseHeroCore(
-      id: id,
-      pubkey: pubkey,
-      content: (j['content'] ?? '').toString(),
-      createdAtSec: (j['created_at'] as int?) ?? 0,
-    ));
+    out.add(
+      parseHeroCore(
+        id: id,
+        pubkey: pubkey,
+        content: (j['content'] ?? '').toString(),
+        createdAtSec: (j['created_at'] as int?) ?? 0,
+      ),
+    );
   }
   return out;
 }
@@ -340,7 +352,12 @@ HeroItem parseHeroCore({
     authorPubkey: pubkey,
     authorName: _shortAuthor(pubkey),
     deepLink: 'post:$id',
-    payload: {'id': id, 'pubkey': pubkey, 'content': content, 'created_at': createdAtSec},
+    payload: {
+      'id': id,
+      'pubkey': pubkey,
+      'content': content,
+      'created_at': createdAtSec,
+    },
   );
 }
 

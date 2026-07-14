@@ -39,6 +39,7 @@ class ActivityFeed extends StatefulWidget {
   final Future<String?> Function()? onAttach;
   final void Function(Map<String, dynamic> post)? onItemTap;
   final void Function(String from)? onSenderTap;
+
   /// Optional identity lookup: callsign -> short npub (or other detail) shown
   /// under the name on each post. Null = show callsign only.
   final String? Function(String callsign)? npubFor;
@@ -58,11 +59,13 @@ class ActivityFeed extends StatefulWidget {
   final void Function(Map<String, dynamic> post)? onSave;
   final bool Function(String mid)? isReposted;
   final void Function(Map<String, dynamic> post)? onRepost;
+
   /// Bookmarked posts, newest-first, for the Favorites tab.
   final List<Map<String, dynamic>> Function()? savedPosts;
 
   /// Tapping our own avatar (the composer's "me" image) opens our profile.
   final VoidCallback? onSelfTap;
+
   /// Our own avatar image for the composer, if set.
   final ImageProvider? selfAvatar;
 
@@ -99,12 +102,13 @@ class ActivityFeed extends StatefulWidget {
 
   /// Pull-to-refresh: re-query the relays for the latest posts. Awaited so the
   /// spinner shows until new events have had a moment to arrive.
-  final Future<void> Function()? onRefresh;
+  final Future<void> Function(String filter)? onRefresh;
 
   /// Persisted tab choice to open on: 'all' | 'following' | 'favorites'.
   /// Null/unknown → 'all'. Changes are reported via [onFilterChanged].
   final String? initialFilter;
   final ValueChanged<String>? onFilterChanged;
+  final bool curatedAll;
 
   /// Read-only mode (search results): no composer, no All/Following bar, no
   /// "new posts" pill — just the tappable post/result cards, shown as-is.
@@ -144,6 +148,7 @@ class ActivityFeed extends StatefulWidget {
     this.onRefresh,
     this.initialFilter,
     this.onFilterChanged,
+    this.curatedAll = false,
     this.readOnly = false,
     this.hint = "What's happening?",
   });
@@ -184,8 +189,11 @@ class _ActivityFeedState extends State<ActivityFeed> {
       _newCount = 0;
     });
     if (scroll && _scroll.hasClients) {
-      _scroll.animateTo(0,
-          duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+      _scroll.animateTo(
+        0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
     }
   }
 
@@ -211,6 +219,9 @@ class _ActivityFeedState extends State<ActivityFeed> {
     // The back gate below depends on whether the composer has focus, so a
     // focus change has to rebuild it.
     _composeFocus.addListener(_onComposeFocus);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onFilterChanged?.call(_filterToString(_filter));
+    });
   }
 
   @override
@@ -226,7 +237,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
     // Scrolled down → hold the new posts back; count how many (of the ones that
     // pass the current filter) are waiting, to label the pill.
     final shownMids = {
-      for (final p in _filtered(_shown)) (p['mid'] ?? '').toString()
+      for (final p in _filtered(_shown)) (p['mid'] ?? '').toString(),
     };
     var n = 0;
     for (final p in _filtered(widget.posts)) {
@@ -335,16 +346,23 @@ class _ActivityFeedState extends State<ActivityFeed> {
         // hour-old material. The like gate was standing in for spam filtering and
         // doing it badly; the host's quality gate (feed_quality.dart) does that
         // job properly now, upstream, before a post ever reaches this widget.
-        posts = src.reversed
-            .where((p) => _isStreamPost(p) && _isRoot(p))
-            .toList();
+        final curated = widget.curatedAll ||
+            src.any((p) => (p['source'] ?? '') == 'firehose');
+        posts = src.reversed.where((p) {
+          if (!_isStreamPost(p) || !_isRoot(p)) return false;
+          if (!curated) return true; // generic APRS/chat activity feed
+          return (p['source'] ?? '') == 'firehose' || p['dir'] == 'out';
+        }).toList();
         break;
     }
     // Hide posts from blocked/muted callsigns (the wapp pushes the set).
     if (widget.hiddenCalls.isNotEmpty) {
       posts = posts
-          .where((p) =>
-              !widget.hiddenCalls.contains((p['from'] ?? '').toString().toUpperCase()))
+          .where(
+            (p) => !widget.hiddenCalls.contains(
+              (p['from'] ?? '').toString().toUpperCase(),
+            ),
+          )
           .toList();
     }
     return _collapseRepeats(posts);
@@ -367,7 +385,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
     final out = <Map<String, dynamic>>[];
     for (final p in src) {
       // src is newest-first, so the first one we meet is the one to keep.
-      final key = '${(p['from'] ?? '').toString().toUpperCase()} '
+      final key =
+          '${(p['from'] ?? '').toString().toUpperCase()} '
           '${(p['text'] ?? '').toString().trim()}';
       if (!seen.add(key)) continue;
       out.add(p);
@@ -383,8 +402,11 @@ class _ActivityFeedState extends State<ActivityFeed> {
     // while the user reads); the "N new posts" pill pulls the fresh ones in.
     final posts = widget.readOnly
         ? widget.posts.reversed
-            .where((p) => !widget.hiddenCalls
-                .contains((p['from'] ?? '').toString().toUpperCase()))
+              .where(
+                (p) => !widget.hiddenCalls.contains(
+                  (p['from'] ?? '').toString().toUpperCase(),
+                ),
+              )
             .toList()
         : _filtered(_shown);
     // Back while the composer is open means "close the composer" — NOT "leave
@@ -415,10 +437,10 @@ class _ActivityFeedState extends State<ActivityFeed> {
             Expanded(
               child: RefreshIndicator(
                 onRefresh: () async {
-                  await widget.onRefresh?.call();
-                  // Give freshly-requested events a beat to land before the
-                  // spinner retracts, so the user sees the stream update.
-                  await Future<void>.delayed(const Duration(milliseconds: 900));
+                    await widget.onRefresh?.call(_filterToString(_filter));
+                    // The user ASKED for the new posts — adopt them, don't park
+                    // them behind the "N new posts" pill they'd have to tap next.
+                    if (mounted) _pullNew(scroll: false);
                 },
                 child: posts.isEmpty
                     ? ListView(
@@ -428,10 +450,15 @@ class _ActivityFeedState extends State<ActivityFeed> {
                           const SizedBox(height: 120),
                           widget.readOnly
                               ? Center(
-                                  child: Text('No results.',
+                                    child: Text(
+                                      'No results.',
                                       style: TextStyle(
-                                          color: cs.onSurfaceVariant
-                                              .withAlpha(150))))
+                                        color: cs.onSurfaceVariant.withAlpha(
+                                          150,
+                                        ),
+                                      ),
+                                    ),
+                                  )
                               : _empty(cs),
                         ],
                       )
@@ -453,7 +480,9 @@ class _ActivityFeedState extends State<ActivityFeed> {
                           return null;
                         },
                         separatorBuilder: (_, __) => Divider(
-                            height: 1, color: cs.outlineVariant.withAlpha(45)),
+                            height: 1,
+                            color: cs.outlineVariant.withAlpha(45),
+                          ),
                         itemBuilder: (_, i) => ActivityPostCard(
                           key: ValueKey(_postKey(posts[i], i)),
                           post: posts[i],
@@ -517,17 +546,22 @@ class _ActivityFeedState extends State<ActivityFeed> {
               borderRadius: BorderRadius.circular(20),
               onTap: () => _pullNew(),
               child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
                   const Icon(Icons.arrow_upward, size: 15, color: Colors.white),
                   const SizedBox(width: 6),
-                  Text('$_newCount new post${_newCount == 1 ? '' : 's'}',
+                Text(
+                  '$_newCount new post${_newCount == 1 ? '' : 's'}',
                       style: const TextStyle(
                           color: Colors.white,
                           fontSize: 13,
-                          fontWeight: FontWeight.w600)),
-                ]),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
               ),
             ),
           ),
@@ -551,12 +585,14 @@ class _ActivityFeedState extends State<ActivityFeed> {
             children: [
               Icon(icon, size: 18, color: color),
               const SizedBox(width: 5),
-              Text(label,
+              Text(
+                label,
                   style: TextStyle(
                       color: color,
                       fontSize: 13,
-                      fontWeight:
-                          selected ? FontWeight.w700 : FontWeight.w500)),
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
             ],
           ),
         ),
@@ -588,9 +624,11 @@ class _ActivityFeedState extends State<ActivityFeed> {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Text(msg,
+        child: Text(
+          msg,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: ChatPalette.secondary, fontSize: 13)),
+          style: const TextStyle(color: ChatPalette.secondary, fontSize: 13),
+        ),
       ),
     );
   }
@@ -616,17 +654,22 @@ class _ActivityFeedState extends State<ActivityFeed> {
             child: Row(
               children: [
                 GestureDetector(
-                    onTap: widget.onSelfTap, child: _avatar('', cs, me: true)),
+                  onTap: widget.onSelfTap,
+                  child: _avatar('', cs, me: true),
+                ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(widget.hint,
+                  child: Text(
+                    widget.hint,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                          color: Colors.white.withAlpha(110), fontSize: 15)),
+                      color: Colors.white.withAlpha(110),
+                      fontSize: 15,
+                    ),
                 ),
-                Icon(Icons.send,
-                    size: 18, color: ChatPalette.accent),
+                ),
+                Icon(Icons.send, size: 18, color: ChatPalette.accent),
               ],
             ),
           ),
@@ -663,8 +706,10 @@ class _ActivityFeedState extends State<ActivityFeed> {
                   maxLines: 5,
                   decoration: InputDecoration(
                     hintText: widget.hint,
-                    hintStyle:
-                        TextStyle(color: Colors.white.withAlpha(110), fontSize: 16),
+                    hintStyle: TextStyle(
+                      color: Colors.white.withAlpha(110),
+                      fontSize: 16,
+                    ),
                     isDense: true,
                     border: InputBorder.none,
                   ),
@@ -700,7 +745,9 @@ class _ActivityFeedState extends State<ActivityFeed> {
                       color: ChatPalette.accent,
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(
-                          minWidth: 36, minHeight: 36),
+                        minWidth: 36,
+                        minHeight: 36,
+                      ),
                       onPressed: _attach,
                     ),
                   ),
@@ -711,9 +758,12 @@ class _ActivityFeedState extends State<ActivityFeed> {
                     backgroundColor: ChatPalette.accent,
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20)),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 8,
+                    ),
                   ),
                   child: const Text('Post'),
                 ),
@@ -739,14 +789,17 @@ class _ActivityFeedState extends State<ActivityFeed> {
           child: Icon(
               ref.kind == MediaKind.video ? Icons.movie : Icons.insert_drive_file,
               color: Colors.white,
-              size: 22),
+            size: 22,
+          ),
         ),
       );
     }
     return SizedBox(
       width: 64,
       height: 64,
-      child: Stack(fit: StackFit.expand, children: [
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
         ClipRRect(borderRadius: BorderRadius.circular(8), child: inner),
         Positioned(
           top: -6,
@@ -759,7 +812,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
             onPressed: () => setState(() => _pending.removeAt(index)),
           ),
         ),
-      ]),
+        ],
+      ),
     );
   }
 
@@ -784,8 +838,18 @@ String activityMid(String from, String text) {
 }
 
 const _activityMonths = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
 ];
 
 /// Human label for a post's time — [timeAgo], plus this feed's own fallback:
@@ -842,8 +906,13 @@ Uint8List? activityInlineThumb(String raw) {
   }
 }
 
-Widget _activityAvatar(String call, {ImageProvider? image, double radius = 18}) {
-  if (image != null) return CircleAvatar(radius: radius, backgroundImage: image);
+Widget _activityAvatar(
+  String call, {
+  ImageProvider? image,
+  double radius = 18,
+}) {
+  if (image != null)
+    return CircleAvatar(radius: radius, backgroundImage: image);
   return GeneratedAvatar(seed: call, size: radius * 2);
 }
 
@@ -856,8 +925,10 @@ Widget _activityViaChip(String via) {
       borderRadius: BorderRadius.circular(4),
       border: Border.all(color: c.withAlpha(120), width: 0.6),
     ),
-    child: Text(via.toUpperCase(),
-        style: TextStyle(color: c, fontSize: 8.5, fontWeight: FontWeight.w700)),
+    child: Text(
+      via.toUpperCase(),
+      style: TextStyle(color: c, fontSize: 8.5, fontWeight: FontWeight.w700),
+    ),
   );
 }
 
@@ -951,7 +1022,8 @@ class ActivityPostCard extends StatelessWidget {
           if (onFollow != null)
             PopupMenuItem(
               value: 'follow',
-              child: Row(children: [
+          child: Row(
+            children: [
                 Icon(
                   (isFollowing?.call(from) ?? false)
                       ? Icons.person_remove_alt_1
@@ -959,28 +1031,35 @@ class ActivityPostCard extends StatelessWidget {
                   size: 18,
                 ),
                 const SizedBox(width: 10),
-                Text((isFollowing?.call(from) ?? false)
+              Text(
+                (isFollowing?.call(from) ?? false)
                     ? 'Unfollow $from'
-                    : 'Follow $from'),
-              ]),
+                    : 'Follow $from',
+              ),
+            ],
+          ),
             ),
           if (onMute != null)
             PopupMenuItem(
               value: 'mute',
-              child: Row(children: [
+          child: Row(
+            children: [
                 const Icon(Icons.notifications_off_outlined, size: 18),
                 const SizedBox(width: 10),
                 Text('Mute $from'),
-              ]),
+            ],
+          ),
             ),
           if (onBlock != null)
             PopupMenuItem(
               value: 'block',
-              child: Row(children: [
+          child: Row(
+            children: [
                 const Icon(Icons.block, size: 18, color: Colors.red),
                 const SizedBox(width: 10),
                 Text('Block $from'),
-              ]),
+            ],
+          ),
             ),
         ],
       );
@@ -1009,12 +1088,15 @@ class ActivityPostCard extends StatelessWidget {
     // post, or recovered once from the local relay store for older rows.
     var imeta = imetaFromMeta((p['meta'] ?? '').toString());
     if (imeta.isEmpty && mediaUrls.isNotEmpty) imeta = _imetaByMid(mid);
-    final textBody = mediaUrls.isEmpty ? body : _stripMediaUrls(body, mediaUrls);
+    final textBody = mediaUrls.isEmpty
+        ? body
+        : _stripMediaUrls(body, mediaUrls);
     final refs = MediaRef.findAll(raw);
     final prof = from.isEmpty ? null : profileFor?.call(from);
     final hasNick = (prof?.name?.trim().isNotEmpty) ?? false;
-    final displayName =
-        hasNick ? prof!.name!.trim() : (from.isEmpty ? 'unknown' : from);
+    final displayName = hasNick
+        ? prof!.name!.trim()
+        : (from.isEmpty ? 'unknown' : from);
 
     return InkWell(
       onTap: onTap,
@@ -1026,7 +1108,11 @@ class ActivityPostCard extends StatelessWidget {
             if (connector)
               Padding(
                 padding: const EdgeInsets.only(right: 8),
-                child: Container(width: 2, height: 40, color: cs.outlineVariant),
+                child: Container(
+                  width: 2,
+                  height: 40,
+                  color: cs.outlineVariant,
+                ),
               ),
             GestureDetector(
               onTap: (onSenderTap != null && from.isNotEmpty)
@@ -1053,21 +1139,27 @@ class ActivityPostCard extends StatelessWidget {
                                 onTap: (onSenderTap != null && from.isNotEmpty)
                                     ? () => onSenderTap!(from)
                                     : null,
-                                child: Text(displayName,
+                                child: Text(
+                                  displayName,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                         color: Colors.white,
                                         fontWeight: FontWeight.bold,
-                                        fontSize: 14)),
+                                    fontSize: 14,
+                                  ),
+                                ),
                               ),
                             ),
                             if (time.isNotEmpty) ...[
                               const SizedBox(width: 6),
-                              Text('· $time',
+                              Text(
+                                '· $time',
                                   style: TextStyle(
                                       color: Colors.white.withAlpha(120),
-                                      fontSize: 12)),
+                                  fontSize: 12,
+                                ),
+                              ),
                             ],
                             if (via.isNotEmpty) ...[
                               const SizedBox(width: 6),
@@ -1090,7 +1182,8 @@ class ActivityPostCard extends StatelessWidget {
                       child: _ExpandableText(
                         textBody,
                         key: ValueKey(
-                            'body-${mid.isNotEmpty ? mid : '$from$body'.hashCode}'),
+                          'body-${mid.isNotEmpty ? mid : '$from$body'.hashCode}',
+                        ),
                         mentionResolver: mentionResolver,
                         onMentionTap: onMentionTap,
                       ),
@@ -1109,8 +1202,10 @@ class ActivityPostCard extends StatelessWidget {
                                 size: mediaSizeHint(raw),
                                 from: from,
                                 tapOnly: true,
-                                inlineThumb:
-                                    i == 0 ? activityInlineThumb(raw) : null),
+                              inlineThumb: i == 0
+                                  ? activityInlineThumb(raw)
+                                  : null,
+                            ),
                         ],
                       ),
                     ),
@@ -1120,8 +1215,11 @@ class ActivityPostCard extends StatelessWidget {
                   for (final url in mediaUrls)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
-                      child: _RemoteMedia(url,
-                          imeta: imeta[url], key: ValueKey('rm-$url')),
+                      child: _RemoteMedia(
+                        url,
+                        imeta: imeta[url],
+                        key: ValueKey('rm-$url'),
+                      ),
                     ),
                   if (mid.isNotEmpty) _actionRow(cs, mid),
                 ],
@@ -1140,7 +1238,11 @@ class ActivityPostCard extends StatelessWidget {
     const muted = ChatPalette.secondary;
 
     Widget action(
-        IconData icon, String? label, Color color, VoidCallback? onTap) {
+      IconData icon,
+      String? label,
+      Color color,
+      VoidCallback? onTap,
+    ) {
       return InkWell(
         borderRadius: BorderRadius.circular(4),
         onTap: onTap,
@@ -1171,15 +1273,17 @@ class ActivityPostCard extends StatelessWidget {
             onLike == null ? null : () => onLike!(mid, !info.mine),
           ),
           const SizedBox(width: 18),
-          action(Icons.chat_bubble_outline, replies > 0 ? '$replies' : null,
-              muted, onReply),
+          action(
+            Icons.chat_bubble_outline,
+            replies > 0 ? '$replies' : null,
+            muted,
+            onReply,
+          ),
           const SizedBox(width: 18),
           action(
             Icons.repeat,
             null,
-            (isReposted?.call(mid) ?? false)
-                ? const Color(0xFF00BA7C)
-                : muted,
+            (isReposted?.call(mid) ?? false) ? const Color(0xFF00BA7C) : muted,
             onRepost == null ? null : () => onRepost!(post),
           ),
           const SizedBox(width: 18),
@@ -1200,18 +1304,14 @@ class ActivityPostCard extends StatelessWidget {
                 v.mine > 0 ? Icons.thumb_up : Icons.thumb_up_outlined,
                 v.up > 0 ? '${v.up}' : null,
                 v.mine > 0 ? const Color(0xFF4CC38A) : muted,
-                onVote == null
-                    ? null
-                    : () => onVote!(mid, v.mine > 0 ? 0 : 1),
+                onVote == null ? null : () => onVote!(mid, v.mine > 0 ? 0 : 1),
               ),
               const SizedBox(width: 6),
               action(
                 v.mine < 0 ? Icons.thumb_down : Icons.thumb_down_outlined,
                 v.down > 0 ? '${v.down}' : null,
                 v.mine < 0 ? const Color(0xFFE05561) : muted,
-                onVote == null
-                    ? null
-                    : () => onVote!(mid, v.mine < 0 ? 0 : -1),
+                onVote == null ? null : () => onVote!(mid, v.mine < 0 ? 0 : -1),
               ),
             ];
           })(),
@@ -1335,12 +1435,11 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
       (byParent[par] ??= []).add(r);
     }
     final out = <({Map<String, dynamic> post, int depth})>[
-      (post: widget.root, depth: 0)
+      (post: widget.root, depth: 0),
     ];
     void dfs(String mid, int depth) {
       final kids = [...(byParent[mid] ?? const [])]
-        ..sort((a, b) =>
-            (a['t'] as int? ?? 0).compareTo(b['t'] as int? ?? 0));
+        ..sort((a, b) => (a['t'] as int? ?? 0).compareTo(b['t'] as int? ?? 0));
       for (final k in kids) {
         out.add((post: k, depth: depth));
         dfs((k['mid'] ?? '').toString(), depth + 1);
@@ -1394,7 +1493,9 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                   padding: EdgeInsets.zero,
                   itemCount: items.length,
                   separatorBuilder: (_, __) => Divider(
-                      height: 1, color: cs.outlineVariant.withAlpha(45)),
+                    height: 1,
+                    color: cs.outlineVariant.withAlpha(45),
+                  ),
                   itemBuilder: (_, i) {
                     final it = items[i];
                     final depth = it.depth.clamp(0, 6);
@@ -1417,8 +1518,7 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                       mentionResolver: widget.mentionResolver,
                       onMentionTap: widget.onMentionTap,
                       // Reply to the root itself targets the publication (null).
-                      onReply: () =>
-                          _replyTo(i == 0 ? null : it.post),
+                      onReply: () => _replyTo(i == 0 ? null : it.post),
                     );
                   },
                 ),
@@ -1437,8 +1537,7 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
     final target = _replyTarget;
     return Container(
       decoration: BoxDecoration(
-        border:
-            Border(top: BorderSide(color: cs.outlineVariant.withAlpha(80))),
+        border: Border(top: BorderSide(color: cs.outlineVariant.withAlpha(80))),
       ),
       padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
       child: Column(
@@ -1459,13 +1558,18 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                          color: ChatPalette.secondary, fontSize: 12),
+                        color: ChatPalette.secondary,
+                        fontSize: 12,
+                      ),
                     ),
                   ),
                   InkWell(
                     onTap: () => setState(() => _replyTarget = null),
-                    child: const Icon(Icons.close,
-                        size: 16, color: ChatPalette.secondary),
+                    child: const Icon(
+                      Icons.close,
+                      size: 16,
+                      color: ChatPalette.secondary,
+                    ),
                   ),
                 ],
               ),
@@ -1478,8 +1582,10 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                 children: [
                   for (var i = 0; i < _pending.length; i++)
                     Chip(
-                      label: Text(_pending[i].ref.ext.toUpperCase(),
-                          style: const TextStyle(fontSize: 10)),
+                      label: Text(
+                        _pending[i].ref.ext.toUpperCase(),
+                        style: const TextStyle(fontSize: 10),
+                      ),
                       onDeleted: () => setState(() => _pending.removeAt(i)),
                     ),
                 ],
@@ -1508,8 +1614,10 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                     hintStyle: const TextStyle(color: ChatPalette.secondary),
                     filled: true,
                     fillColor: ChatPalette.inBubble,
-                    contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(24),
                       borderSide: BorderSide.none,
@@ -1593,7 +1701,10 @@ class _ExpandableTextState extends State<_ExpandableText> {
     for (final m in _urlRe.allMatches(text)) {
       var url = m.group(0)!;
       String tail = '';
-      final tm = RegExp(r'[.,;:!?)\]}>"' r"']+$").firstMatch(url);
+      final tm = RegExp(
+        r'[.,;:!?)\]}>"'
+        r"']+$",
+      ).firstMatch(url);
       if (tm != null) {
         tail = url.substring(tm.start);
         url = url.substring(0, tm.start);
@@ -1604,16 +1715,19 @@ class _ExpandableTextState extends State<_ExpandableText> {
         span: () {
           final rec = TapGestureRecognizer()..onTap = () => _openUrl(url);
           _recognizers.add(rec);
-          return TextSpan(children: [
+          return TextSpan(
+            children: [
             TextSpan(
               text: url,
               recognizer: rec,
               style: const TextStyle(
                   color: ChatPalette.accent,
-                  decoration: TextDecoration.underline),
+                  decoration: TextDecoration.underline,
+                ),
             ),
             if (tail.isNotEmpty) TextSpan(text: tail),
-          ]);
+            ],
+          );
         },
       ));
     }
@@ -1631,7 +1745,8 @@ class _ExpandableTextState extends State<_ExpandableText> {
               mention,
               mention.isPerson
                   ? widget.mentionResolver?.call(mention.token)
-                  : null);
+                : null,
+          );
           final hex = mention.pubkeyHex;
           final onTap = widget.onMentionTap;
           if (!mention.isPerson || hex == null || onTap == null) {
@@ -1639,7 +1754,8 @@ class _ExpandableTextState extends State<_ExpandableText> {
             // being tappable.
             return TextSpan(
                 text: label,
-                style: const TextStyle(color: ChatPalette.secondary));
+              style: const TextStyle(color: ChatPalette.secondary),
+            );
           }
           final rec = TapGestureRecognizer()..onTap = () => onTap(hex);
           _recognizers.add(rec);
@@ -1647,7 +1763,9 @@ class _ExpandableTextState extends State<_ExpandableText> {
             text: label,
             recognizer: rec,
             style: const TextStyle(
-                color: ChatPalette.accent, fontWeight: FontWeight.w600),
+              color: ChatPalette.accent,
+              fontWeight: FontWeight.w600,
+            ),
           );
         },
       ));
@@ -1672,26 +1790,34 @@ class _ExpandableTextState extends State<_ExpandableText> {
   Widget build(BuildContext context) {
     final t = widget.text;
     final long = t.length > _limit;
-    final shown =
-        (_expanded || !long) ? t : '${t.substring(0, _limit).trimRight()}…';
+    final shown = (_expanded || !long)
+        ? t
+        : '${t.substring(0, _limit).trimRight()}…';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text.rich(
             TextSpan(children: _linkified(shown)),
             style: const TextStyle(
-                color: Colors.white, fontSize: 14, height: 1.3)),
+            color: Colors.white,
+            fontSize: 14,
+            height: 1.3,
+          ),
+        ),
         if (long)
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => setState(() => _expanded = !_expanded),
             child: Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text(_expanded ? 'Less' : 'More',
+              child: Text(
+                _expanded ? 'Less' : 'More',
                   style: const TextStyle(
                       color: ChatPalette.accent,
                       fontSize: 13,
-                      fontWeight: FontWeight.w600)),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
           ),
       ],
@@ -1703,7 +1829,8 @@ class _ExpandableTextState extends State<_ExpandableText> {
 
 final _activityMediaRe = RegExp(
     r'https?://[^\s]+?\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|mov|webm|m4v)(?:\?[^\s]*)?',
-    caseSensitive: false);
+  caseSensitive: false,
+);
 
 /// Up to 4 distinct http(s) image/video URLs mentioned in a post body.
 List<String> activityMediaUrls(String body) {
@@ -1718,13 +1845,17 @@ List<String> activityMediaUrls(String body) {
 
 final _activityMentionRe = RegExp(
     r'nostr:((?:npub1|nprofile1|nevent1|note1|naddr1)[023456789acdefghjklmnpqrstuvwxyz]{20,})',
-    caseSensitive: false);
+  caseSensitive: false,
+);
 
 /// Turn NIP-19 `nostr:` references into readable text:
 ///   • `npub1…` / `nprofile1…`  → `@Name` (via [resolve]) or a short `@npub1…`,
 ///   • `nevent1…` / `note1…` / `naddr1…` → a compact `↗ note` (a quoted note),
 /// instead of dumping the raw 60-char bech32 string into the post.
-String activityFormatMentions(String body, String? Function(String npub)? resolve) {
+String activityFormatMentions(
+  String body,
+  String? Function(String npub)? resolve,
+) {
   if (!body.contains('nostr:')) return body;
   return body.replaceAllMapped(_activityMentionRe, (m) {
     final token = m.group(1)!;
@@ -1870,8 +2001,10 @@ class _RemoteMediaState extends State<_RemoteMedia>
 
   /// Fetch through the persistent disk cache (no re-download across sessions).
   Future<void> _load(int maxBytes) async {
-    final bytes =
-        await MediaDiskCache.instance.fetch(widget.url, maxBytes: maxBytes);
+    final bytes = await MediaDiskCache.instance.fetch(
+      widget.url,
+      maxBytes: maxBytes,
+    );
     if (!mounted) return;
     setState(() {
       if (bytes != null) {
@@ -1919,7 +2052,9 @@ class _RemoteMediaState extends State<_RemoteMedia>
     if (bytes != null && _poster == null) {
       unawaited(() async {
         final png = await WasmVideoThumbnailer.generate(
-            bytes, _extOf(widget.url));
+          bytes,
+          _extOf(widget.url),
+        );
         if (png == null) return;
         await MediaDiskCache.instance.putLocal('${widget.url}#poster', png);
         if (mounted && _poster == null) setState(() => _poster = png);
@@ -1932,8 +2067,12 @@ class _RemoteMediaState extends State<_RemoteMedia>
   void _openFullImage() {
     final img = _bytes;
     if (img == null) return;
-    Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => _FullscreenImage(img), fullscreenDialog: true));
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _FullscreenImage(img),
+        fullscreenDialog: true,
+      ),
+    );
   }
 
   String get _sizeLabel => '';
@@ -1976,8 +2115,10 @@ class _RemoteMediaState extends State<_RemoteMedia>
               ),
             ),
             const SizedBox(height: 8),
-            Text(label,
-                style: const TextStyle(color: Colors.white, fontSize: 12)),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
           ],
         ),
       ),
@@ -2001,7 +2142,10 @@ class _RemoteMediaState extends State<_RemoteMedia>
     switch (_s) {
       case _RmState.checking:
         // Reserve the box; show a spinner while a video's bytes download.
-        return _box(cs, _playing ? _downloadProgress(cs) : const SizedBox.shrink());
+        return _box(
+          cs,
+          _playing ? _downloadProgress(cs) : const SizedBox.shrink(),
+        );
       case _RmState.tooBig:
         // Large image: tap to download now (up to 200 MB).
         return InkWell(
@@ -2023,9 +2167,11 @@ class _RemoteMediaState extends State<_RemoteMedia>
                 Icon(Icons.download, size: 20, color: cs.primary),
                 const SizedBox(width: 8),
                 Flexible(
-                  child: Text('Image — tap to load',
+                  child: Text(
+                    'Image — tap to load',
                       style: TextStyle(color: cs.onSurface, fontSize: 13),
-                      overflow: TextOverflow.ellipsis),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ],
             ),
@@ -2043,18 +2189,23 @@ class _RemoteMediaState extends State<_RemoteMedia>
                           ? Icons.videocam_off_outlined
                           : Icons.broken_image_outlined,
                       color: cs.onSurfaceVariant.withAlpha(120),
-                      size: 30),
+                  size: 30,
+                ),
                   if (_isVid)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
-                      child: Text('Video unavailable (removed from the host)',
+                    child: Text(
+                      'Video unavailable (removed from the host)',
                           style: TextStyle(
                               color: cs.onSurfaceVariant.withAlpha(160),
-                              fontSize: 12)),
+                        fontSize: 12,
+                      ),
+                    ),
                     ),
                 ],
               ),
-            ));
+          ),
+        );
       case _RmState.show:
         // Video: a play card until tapped, then the shared WasmVideoPlayer.
         if (_isVid) {
@@ -2079,16 +2230,18 @@ class _RemoteMediaState extends State<_RemoteMedia>
                       // Poster (imeta image / cached first-frame), with the
                       // blurhash painting the box while it downloads.
                       if (_poster != null)
-                        Image.memory(_poster!,
+                        Image.memory(
+                          _poster!,
                             fit: BoxFit.cover,
                             gaplessPlayback: true,
-                            errorBuilder: (_, __, ___) =>
-                                const SizedBox.shrink())
+                          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                        )
                       else if (_blur != null)
                         RawImage(
                             image: _blur,
                             fit: BoxFit.cover,
-                            filterQuality: FilterQuality.low),
+                          filterQuality: FilterQuality.low,
+                        ),
                       // Dim so the play affordance reads on bright posters.
                       if (_poster != null || _blur != null)
                         Container(color: Colors.black26),
@@ -2098,7 +2251,8 @@ class _RemoteMediaState extends State<_RemoteMedia>
                                 ? Icons.videocam_off_outlined
                                 : Icons.play_circle_fill,
                             size: 64,
-                            color: Colors.white70),
+                          color: Colors.white70,
+                        ),
                       ),
                       // "0:38 · 12.3 MB video", once known.
                       if (chip.isNotEmpty)
@@ -2107,14 +2261,20 @@ class _RemoteMediaState extends State<_RemoteMedia>
                           right: 10,
                           child: Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 3),
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
                             decoration: BoxDecoration(
                               color: Colors.black54,
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: Text(chip,
+                            child: Text(
+                              chip,
                                 style: const TextStyle(
-                                    color: Colors.white, fontSize: 11)),
+                                color: Colors.white,
+                                fontSize: 11,
+                              ),
+                            ),
                           ),
                         ),
                     ],
@@ -2133,13 +2293,17 @@ class _RemoteMediaState extends State<_RemoteMedia>
           final dim = widget.imeta?['dim']?.split('x');
           final dw = double.tryParse(dim?.first ?? '');
           final dh = double.tryParse((dim?.length ?? 0) > 1 ? dim![1] : '');
-          final player =
-              inlineVideoPlayer(mediaBytes: v, ext: _extOf(widget.url));
+          final player = inlineVideoPlayer(
+            mediaBytes: v,
+            ext: _extOf(widget.url),
+          );
           return ClipRRect(
             borderRadius: BorderRadius.circular(10),
             child: (dw != null && dh != null && dw > 0 && dh > 0)
                 ? AspectRatio(
-                    aspectRatio: (dw / dh).clamp(0.5, 2.2), child: player)
+                    aspectRatio: (dw / dh).clamp(0.5, 2.2),
+                    child: player,
+                  )
                 : SizedBox(
                     height: _mediaHeight,
                     width: double.infinity,
@@ -2162,8 +2326,12 @@ class _RemoteMediaState extends State<_RemoteMedia>
               gaplessPlayback: true,
               cacheHeight: 720,
               errorBuilder: (c, e, s) => Center(
-                  child: Icon(Icons.broken_image_outlined,
-                      color: cs.onSurfaceVariant.withAlpha(120), size: 30)),
+                child: Icon(
+                  Icons.broken_image_outlined,
+                  color: cs.onSurfaceVariant.withAlpha(120),
+                  size: 30,
+                ),
+              ),
             ),
           ),
         );

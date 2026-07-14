@@ -344,6 +344,7 @@ class _WappPageState extends State<WappPage>
   /// the persisted archive on restore, or the restored posts would each be
   /// appended a second time when the wapp re-sent them live.
   final _feedIds = <String, Set<String>>{};
+  final _lastFireBatch = <String, int>{};
   int _archived = 0;
   int _archivedLogAt = 0;
 
@@ -1526,6 +1527,26 @@ class _WappPageState extends State<WappPage>
                 _fieldValues[fieldName] = buf;
               }
               final row = msg.map((k, v) => MapEntry(k.toString(), v));
+              final source = (row['source'] ?? '').toString();
+              final batch = (row['batch'] as num?)?.toInt() ?? 0;
+              final batchMode = (row['batch_mode'] ?? '').toString();
+              final batchIndex = (row['batch_index'] as num?)?.toInt() ?? -1;
+              if (fieldName == 'activity' &&
+                  source == 'firehose' &&
+                  batch > 0 &&
+                  batchIndex == 0 &&
+                  batchMode != 'manual' &&
+                  _lastFireBatch[fieldName] != batch) {
+                _lastFireBatch[fieldName] = batch;
+                buf.removeWhere((p) => (p['source'] ?? '') == 'firehose');
+                _activityArchive?.clearSource('firehose');
+                _feedIds[fieldName] = {
+                  for (final p in buf)
+                    if ((p['mid'] ?? '').toString().isNotEmpty)
+                      (p['mid'] ?? '').toString(),
+                };
+                _activityRev.value++;
+              }
               // Recover NIP-92 imeta (video poster / blurhash / dimensions)
               // for feed posts: the wapp forwards only the text, but the full
               // event (tags included) sits in the local relay store under the
@@ -1535,8 +1556,9 @@ class _WappPageState extends State<WappPage>
                 final hasMeta = (row['meta'] ?? '').toString().isNotEmpty;
                 final text = (row['text'] ?? '').toString();
                 if (!hasMeta && mid.length == 64 && text.contains('http')) {
-                  final tags =
-                      RnsService.instance.relayLocalEvent(mid)?['tags'];
+                  final tags = RnsService.instance.relayLocalEvent(
+                    mid,
+                  )?['tags'];
                   if (tags is List) {
                     final m = imetaMetaJson(tags);
                     if (m.isNotEmpty) {
@@ -1562,9 +1584,11 @@ class _WappPageState extends State<WappPage>
                     .add(mid);
               } else if (fieldName == 'search_results') {
                 final from = (row['from'] ?? '').toString();
-                dup = buf.any((e) =>
+                dup = buf.any(
+                  (e) =>
                     (e['mid'] ?? '').toString().isEmpty &&
-                    (e['from'] ?? '').toString() == from);
+                      (e['from'] ?? '').toString() == from,
+                );
               }
               if (!dup) {
                 buf.add(row);
@@ -1578,8 +1602,9 @@ class _WappPageState extends State<WappPage>
                   final nowMs = DateTime.now().millisecondsSinceEpoch;
                   if (nowMs - _archivedLogAt > 30000) {
                     _archivedLogAt = nowMs;
-                    LogService.instance
-                        .add('activity archived: $_archived posts since last report');
+                    LogService.instance.add(
+                      'activity archived: $_archived posts since last report',
+                    );
                     _archived = 0;
                   }
                 }
@@ -3798,7 +3823,8 @@ class _WappPageState extends State<WappPage>
             .where((a) => (a.name ?? '').isNotEmpty)
             .toList();
         if (actions.isEmpty) continue;
-        out.add(PopupMenuButton<String>(
+        out.add(
+          PopupMenuButton<String>(
           tooltip: _i18n.resolve(name),
           icon: Icon(_panelIcon(i)),
           onSelected: _onWappAction,
@@ -3812,13 +3838,13 @@ class _WappPageState extends State<WappPage>
                       Icon(geoUiResolveIcon(a.getString('icon')!), size: 20),
                       const SizedBox(width: 10),
                     ],
-                    Text(_i18n.resolve(
-                        a.getString('label') ?? a.name!)),
+                      Text(_i18n.resolve(a.getString('label') ?? a.name!)),
                   ],
                 ),
               ),
           ],
-        ));
+          ),
+        );
         continue;
       }
       // The screen's own `icon` first — the name mapper only knows a handful
@@ -3827,9 +3853,11 @@ class _WappPageState extends State<WappPage>
       // A notifications panel carries its unread count on the icon — that badge
       // IS the reason to look at it.
       final isNotif = _menuScreens[i].children.any(
-          (c) => c.keyword == 'field' && c.name == 'notifications');
-      final unread =
-          isNotif ? RnsService.instance.nostrNotificationsUnread() : 0;
+        (c) => c.keyword == 'field' && c.name == 'notifications',
+      );
+      final unread = isNotif
+          ? RnsService.instance.nostrNotificationsUnread()
+          : 0;
 
       Widget button = IconButton(
         icon: Icon(_panelIcon(i)),
@@ -3856,7 +3884,10 @@ class _WappPageState extends State<WappPage>
   /// "Join a group"). They used to be a blue icon row above the list, which cost
   /// a whole screen row to carry two or three icons. Hidden while a thread is
   /// open — that thread owns the AppBar, and its `slot:"room"` actions are in ☰.
-  List<Widget> _convListActions(GeoUiBlock? convGroup, {required bool threadOpen}) {
+  List<Widget> _convListActions(
+    GeoUiBlock? convGroup, {
+    required bool threadOpen,
+  }) {
     if (convGroup == null || threadOpen) return const [];
     final field = convGroup.name ?? 'conversations';
     // Compact hit boxes: a wapp can declare three of these (Circles: new, join,
@@ -4284,10 +4315,12 @@ class _WappPageState extends State<WappPage>
     // results feed: its filters. Rendered through the normal GeoUI renderer so
     // a wapp can add a filter without the host learning about it.
     final filters = screen.children
-        .where((c) =>
+        .where(
+          (c) =>
             c.keyword == 'field' &&
             c.name != 'search_results' &&
-            c.name != 'search_input')
+              c.name != 'search_input',
+        )
         .toList();
 
     return Column(
@@ -4305,8 +4338,10 @@ class _WappPageState extends State<WappPage>
                   onChanged: (_) {
                     setState(() {}); // the clear button
                     _searchDebounce?.cancel();
-                    _searchDebounce =
-                        Timer(const Duration(milliseconds: 250), run);
+                    _searchDebounce = Timer(
+                      const Duration(milliseconds: 250),
+                      run,
+                    );
                   },
                   decoration: InputDecoration(
                     hintText: 'Search posts and people',
@@ -4375,15 +4410,16 @@ class _WappPageState extends State<WappPage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(text,
+          Text(
+            text,
                   style: TextStyle(
                       color: cs.primary,
                       fontWeight: FontWeight.w700,
-                      fontSize: 13)),
+              fontSize: 13,
+            ),
+          ),
               const SizedBox(height: 2),
-              Text(tip,
-                  style: TextStyle(
-                      fontSize: 11, color: cs.onSurfaceVariant)),
+          Text(tip, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
             ],
           ),
         );
@@ -4392,8 +4428,7 @@ class _WappPageState extends State<WappPage>
       required TextEditingController ctl,
       required String hint,
       required VoidCallback onAdd,
-    }) =>
-        Padding(
+    }) => Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
           child: Row(
             children: [
@@ -4405,9 +4440,12 @@ class _WappPageState extends State<WappPage>
                     isDense: true,
                     hintText: hint,
                     border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12)),
+                  borderRadius: BorderRadius.circular(12),
+                ),
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 10),
+                  horizontal: 12,
+                  vertical: 10,
+                ),
                   ),
                 ),
               ),
@@ -4419,9 +4457,11 @@ class _WappPageState extends State<WappPage>
 
     return ListView(
       children: [
-        sectionTitle('Relays',
+        sectionTitle(
+          'Relays',
             'Where posts come from and go to. wss:// over the internet, '
-            'rns:// over Reticulum, or this device.'),
+              'rns:// over Reticulum, or this device.',
+        ),
         for (final r in relays)
           SwitchListTile(
             value: r['enabled'] != false,
@@ -4429,18 +4469,26 @@ class _WappPageState extends State<WappPage>
               rns.nostrRelayEnable('${r['uri']}', on);
               setState(() {});
             },
-            title: Text('${r['uri']}',
+            title: Text(
+              '${r['uri']}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13)),
-            subtitle: Row(children: [
-              Icon(Icons.circle,
-                  size: 8, color: statusColour('${r['status']}')),
+              style: const TextStyle(fontSize: 13),
+            ),
+            subtitle: Row(
+              children: [
+                Icon(
+                  Icons.circle,
+                  size: 8,
+                  color: statusColour('${r['status']}'),
+                ),
               const SizedBox(width: 6),
-              Text('${r['status']} · ${r['scheme']}',
-                  style: TextStyle(
-                      fontSize: 11, color: cs.onSurfaceVariant)),
-            ]),
+                Text(
+                  '${r['status']} · ${r['scheme']}',
+                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
             secondary: IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
               tooltip: 'Remove',
@@ -4462,17 +4510,21 @@ class _WappPageState extends State<WappPage>
           },
         ),
         const SizedBox(height: 8),
-        sectionTitle('Blossom media servers',
+        sectionTitle(
+          'Blossom media servers',
             'Images in the feed are fetched from these by their sha256, and '
-            'anything you share is uploaded to them. Tried in order.'),
+              'anything you share is uploaded to them. Tried in order.',
+        ),
         for (final b in blossom)
           ListTile(
             dense: true,
             leading: Icon(Icons.image_outlined, color: cs.onSurfaceVariant),
-            title: Text(b,
+            title: Text(
+              b,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13)),
+              style: const TextStyle(fontSize: 13),
+            ),
             trailing: IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
               tooltip: 'Remove',
@@ -4529,16 +4581,19 @@ class _WappPageState extends State<WappPage>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.notifications_none,
-                size: 40, color: cs.onSurfaceVariant),
+            Icon(
+              Icons.notifications_none,
+              size: 40,
+              color: cs.onSurfaceVariant,
+            ),
             const SizedBox(height: 12),
-            Text('Nothing yet.',
-                style: TextStyle(color: cs.onSurfaceVariant)),
+            Text('Nothing yet.', style: TextStyle(color: cs.onSurfaceVariant)),
             const SizedBox(height: 4),
-            Text('Likes, replies and reposts of your posts land here.',
+            Text(
+              'Likes, replies and reposts of your posts land here.',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                    fontSize: 12, color: cs.onSurfaceVariant)),
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
           ],
         ),
       );
@@ -4564,17 +4619,25 @@ class _WappPageState extends State<WappPage>
         // A kind-1 that p-tags me is only a REPLY when it e-tags one of my
         // posts. Without that it is a mention — and calling every mention a
         // reply sent people looking for a conversation that does not exist.
-        final isReply = kind == 1 &&
+        final isReply =
+            kind == 1 &&
             (((e['tags'] as List?) ?? const []).any(
-                (t) => t is List && t.isNotEmpty && '${t[0]}' == 'e'));
+              (t) => t is List && t.isNotEmpty && '${t[0]}' == 'e',
+            ));
         final (IconData icon, Color colour, String what) = switch (kind) {
-          7 => content.trim() == '-' || content.trim() == '👎'
-              ? (Icons.thumb_down, const Color(0xFFE05561), 'downvoted your post')
+          7 =>
+            content.trim() == '-' || content.trim() == '👎'
+                ? (
+                    Icons.thumb_down,
+                    const Color(0xFFE05561),
+                    'downvoted your post',
+                  )
               : content.trim() == '+' || content.trim() == '👍'
                   ? (Icons.thumb_up, const Color(0xFF4CC38A), 'upvoted your post')
                   : (Icons.favorite, Colors.pink, 'liked your post'),
           6 => (Icons.repeat, const Color(0xFF00BA7C), 'reposted your post'),
-          _ => isReply
+          _ =>
+            isReply
               ? (Icons.chat_bubble, ChatPalette.accent, 'replied to you')
               : (Icons.alternate_email, ChatPalette.accent, 'mentioned you'),
         };
@@ -4590,12 +4653,15 @@ class _WappPageState extends State<WappPage>
             child: Icon(icon, size: 18, color: colour),
           ),
           title: Text.rich(
-            TextSpan(children: [
+            TextSpan(
+              children: [
               TextSpan(
                   text: who,
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
               TextSpan(text: ' $what'),
-            ]),
+              ],
+            ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
@@ -4604,7 +4670,9 @@ class _WappPageState extends State<WappPage>
                   ? Text(
                       timeAgo(DateTime.fromMillisecondsSinceEpoch(ts)),
                       style: TextStyle(
-                          fontSize: 11, color: cs.onSurfaceVariant),
+                          fontSize: 11,
+                          color: cs.onSurfaceVariant,
+                        ),
                     )
                   : null)
               : Text(body, maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -4648,9 +4716,9 @@ class _WappPageState extends State<WappPage>
     }
     // Not here yet — it has just been requested from the relays. Say so, and
     // open it as soon as it lands rather than leaving the tap looking broken.
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      const SnackBar(content: Text('Fetching the post…')),
-    );
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(const SnackBar(content: Text('Fetching the post…')));
     var tries = 0;
     Timer.periodic(const Duration(milliseconds: 400), (t) {
       tries++;
@@ -4665,8 +4733,8 @@ class _WappPageState extends State<WappPage>
   }
 
   Map<String, dynamic>? _postFromArchive(String mid) {
-    for (final p in _activityArchive?.recent() ??
-        const <Map<String, dynamic>>[]) {
+    for (final p
+        in _activityArchive?.recent() ?? const <Map<String, dynamic>>[]) {
       if ((p['mid'] ?? '').toString() == mid) return p;
     }
     return null;
@@ -4707,13 +4775,15 @@ class _WappPageState extends State<WappPage>
 
       if (f.type == 'enum') {
         final options = f.childrenOf('option');
-        final current = _fieldValues[name]?.toString() ??
+        final current =
+            _fieldValues[name]?.toString() ??
             f.getString('default') ??
             (options.isNotEmpty ? (options.first.name ?? '') : '');
         for (final o in options) {
           final value = o.name ?? '';
           final label = _i18n.resolve(o.getString('label') ?? value);
-          chips.add(ChoiceChip(
+          chips.add(
+            ChoiceChip(
             label: Text(label),
             selected: current == value,
             visualDensity: VisualDensity.compact,
@@ -4722,13 +4792,18 @@ class _WappPageState extends State<WappPage>
               setState(() => _fieldValues[name] = value);
               fire(f);
             },
-          ));
+            ),
+          );
         }
       } else if (f.type == 'bool') {
         final on = _fieldValues[name] == true;
-        chips.add(FilterChip(
-          avatar: Icon(Icons.image_outlined,
-              size: 16, color: on ? cs.onSecondaryContainer : cs.onSurfaceVariant),
+        chips.add(
+          FilterChip(
+            avatar: Icon(
+              Icons.image_outlined,
+              size: 16,
+              color: on ? cs.onSecondaryContainer : cs.onSurfaceVariant,
+            ),
           label: Text(_i18n.resolve(f.getString('label') ?? name)),
           selected: on,
           visualDensity: VisualDensity.compact,
@@ -4737,7 +4812,8 @@ class _WappPageState extends State<WappPage>
             setState(() => _fieldValues[name] = v);
             fire(f);
           },
-        ));
+          ),
+        );
       }
     }
     if (chips.isEmpty) return const SizedBox.shrink();
@@ -5160,7 +5236,8 @@ class _WappPageState extends State<WappPage>
       final hex = RnsService.instance.nostrHexFromNpub(short);
       if (hex != null && hex.length == 64) return hex;
     }
-    final npub = _wappProfiles[from]?['npub'] ??
+    final npub =
+        _wappProfiles[from]?['npub'] ??
         RnsService.instance.nostrProfileByShort12(short)['npub'] ??
         RnsService.instance.npubForCallsign(from);
     if (npub != null && npub.isNotEmpty) {
@@ -5300,7 +5377,8 @@ class _WappPageState extends State<WappPage>
                 setState(() {});
               },
               // "Keep data": host their posts + media on this device.
-              keepData: _keepHexOf(npub) != null &&
+              keepData:
+                  _keepHexOf(npub) != null &&
                   RnsService.instance.isKeepData(_keepHexOf(npub)!),
               onSetKeep: _keepHexOf(npub) == null
                   ? null
@@ -5460,6 +5538,10 @@ class _WappPageState extends State<WappPage>
     // post stream) and renders from the PERSISTED archive, so posts received in
     // the background (app closed) appear alongside live ones.
     if (name == 'activity') {
+      // Opening the stream = the user is looking. Recover any socket Android
+      // froze while we were backgrounded, or the feed shows its age instead of
+      // the network. Throttled inside, so calling from build is fine.
+      RnsService.instance.nostrResume();
       final posts =
           _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
       return ActivityFeed(
@@ -5550,20 +5632,44 @@ class _WappPageState extends State<WappPage>
         mentionResolver: RnsService.instance.nostrMentionName,
         onMentionTap: _openNostrProfileByHex,
         onOpenThread: _openActivityThread,
-        onRefresh: () async {
-          // Re-query the relays for the newest posts (pull-to-refresh).
+        onRefresh: (filter) async {
+          // A pull-to-refresh is a request for MORE, now.
+          // 1. Wake the network: reconnect any socket Android froze while the
+          //    app was backgrounded and re-ask the firehose for the missed
+          //    window (since-bounded — one fetch, not the churn loop that got
+          //    the subscription dropped).
+          // 2. Hand over the best 100 the curator is holding rather than making
+          //    the user wait out its ten-second trickle.
+          // Reopen the wapp subscription before asking the host for a batch.
+          // Doing this afterwards raced tab changes: the host returned zero,
+          // then Social finally subscribed when the refresh had already ended.
           _sendCommand('${name}_refresh');
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+          if (filter == 'all') {
+            final count = await RnsService.instance.nostrRefreshBurst(n: 100);
+            LogService.instance.add(
+              'social refresh: filter=all batch=$count',
+            );
+          } else {
+            RnsService.instance.nostrResume();
+            LogService.instance.add('social refresh: filter=$filter reopened');
+          }
         },
+        curatedAll: _wappName == 'social',
         // Remember the All/Following/Saved tab across restarts, per wapp.
         initialFilter: PreferencesService.instanceSync?.getWappUiPref(
           _wappName,
           'feedFilter',
         ),
-        onFilterChanged: (f) => PreferencesService.instanceSync?.setWappUiPref(
+        onFilterChanged: (f) {
+          PreferencesService.instanceSync?.setWappUiPref(
           _wappName,
           'feedFilter',
           f,
-        ),
+          );
+          _fieldValues['activity_filter'] = f;
+          _sendCommand('activity_filter_changed');
+        },
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');
@@ -6047,13 +6153,17 @@ class _WappPageState extends State<WappPage>
           npub: resolvedNpub,
           isSelf: isSelf,
           // Hosting your OWN posts is not a choice — they already live here.
-          keepData: !isSelf &&
+          keepData:
+              !isSelf &&
               _keepHexOf(resolvedNpub) != null &&
               RnsService.instance.isKeepData(_keepHexOf(resolvedNpub)!),
           onSetKeep: isSelf || _keepHexOf(resolvedNpub) == null
               ? null
               : (keep) {
-                  RnsService.instance.setKeepData(_keepHexOf(resolvedNpub)!, keep);
+                  RnsService.instance.setKeepData(
+                    _keepHexOf(resolvedNpub)!,
+                    keep,
+                  );
                   if (mounted) setState(() {});
                 },
           firstSeenMs: arch?.firstSeenMs(c),
@@ -6191,12 +6301,16 @@ class _WappPageState extends State<WappPage>
           // Keyed by hex pubkey — what the mirror, the retention tiers and the
           // relay store all speak — so it is only offered for accounts we can
           // resolve an npub for.
-          keepData: _keepHexOf(resolvedNpub) != null &&
+          keepData:
+              _keepHexOf(resolvedNpub) != null &&
               RnsService.instance.isKeepData(_keepHexOf(resolvedNpub)!),
           onSetKeep: _keepHexOf(resolvedNpub) == null
               ? null
               : (keep) {
-                  RnsService.instance.setKeepData(_keepHexOf(resolvedNpub)!, keep);
+                  RnsService.instance.setKeepData(
+                    _keepHexOf(resolvedNpub)!,
+                    keep,
+                  );
                   if (mounted) setState(() {});
                 },
           fetchMetadata: resolvedNpub == null

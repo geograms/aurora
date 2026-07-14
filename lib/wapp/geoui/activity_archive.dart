@@ -23,8 +23,10 @@ class ActivityArchive {
 
   static final Map<String, ActivityArchive> _instances = {};
   static ActivityArchive forStorage(ProfileStorage dataDir) =>
-      _instances.putIfAbsent(dataDir.basePath,
-          () => ActivityArchive._(dataDir.getAbsolutePath(_fileName)));
+      _instances.putIfAbsent(
+        dataDir.basePath,
+        () => ActivityArchive._(dataDir.getAbsolutePath(_fileName)),
+      );
 
   static const String _fileName = 'activity.sqlite3';
 
@@ -86,7 +88,7 @@ class ActivityArchive {
       // Per-post id (group-threading scheme) so Like/Reply attach to a post.
       final cols = {
         for (final r in db.select('PRAGMA table_info(activity)'))
-          r['name'] as String
+          r['name'] as String,
       };
       if (!cols.contains('mid')) {
         db.execute('ALTER TABLE activity ADD COLUMN mid TEXT;');
@@ -100,20 +102,36 @@ class ActivityArchive {
       if (!cols.contains('pop')) {
         db.execute('ALTER TABLE activity ADD COLUMN pop INTEGER DEFAULT 0;');
       }
-      db.execute('CREATE INDEX IF NOT EXISTS idx_activity_mid ON activity(mid);');
+      if (!cols.contains('source')) {
+        db.execute("ALTER TABLE activity ADD COLUMN source TEXT DEFAULT '';");
+      }
+      if (!cols.contains('batch')) {
+        db.execute('ALTER TABLE activity ADD COLUMN batch INTEGER DEFAULT 0;');
+      }
       db.execute(
-          'CREATE INDEX IF NOT EXISTS idx_activity_parent ON activity(parent);');
+        'CREATE INDEX IF NOT EXISTS idx_activity_source ON activity(source);',
+      );
+      db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_activity_mid ON activity(mid);',
+      );
+      db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_activity_parent ON activity(parent);',
+      );
       // A NOSTR event id (mid) is globally unique and byte-identical no matter
       // which relay served it, so a post must never be stored twice. Purge any
       // existing duplicate copies (keep the earliest row per mid), then enforce
       // it with a partial UNIQUE index — mid-less APRS rows are unaffected.
       try {
-        db.execute("DELETE FROM activity WHERE mid IS NOT NULL AND mid != '' "
+        db.execute(
+          "DELETE FROM activity WHERE mid IS NOT NULL AND mid != '' "
             "AND id NOT IN (SELECT MIN(id) FROM activity "
-            "WHERE mid IS NOT NULL AND mid != '' GROUP BY mid);");
+          "WHERE mid IS NOT NULL AND mid != '' GROUP BY mid);",
+        );
       } catch (_) {}
-      db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_mid_uniq "
-          "ON activity(mid) WHERE mid IS NOT NULL AND mid != '';");
+      db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_mid_uniq "
+        "ON activity(mid) WHERE mid IS NOT NULL AND mid != '';",
+      );
       // Likes on a post id (mid). `mine` flags our own vote.
       db.execute('''
         CREATE TABLE IF NOT EXISTS activity_likes(
@@ -182,14 +200,15 @@ class ActivityArchive {
       if (twin.isNotEmpty) {
         LogService.instance.add(
             'activity: SAME TEXT, other id — new=${mid.isEmpty ? "(none)" : mid.substring(0, 12)} '
-            'have=${(twin.first['mid'] ?? '').toString().isEmpty ? "(none)" : (twin.first['mid'] as String).substring(0, 12)} from=$from');
+          'have=${(twin.first['mid'] ?? '').toString().isEmpty ? "(none)" : (twin.first['mid'] as String).substring(0, 12)} from=$from',
+        );
       }
     } catch (_) {}
 
     try {
       db.execute(
-        'INSERT OR IGNORE INTO activity(t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop) '
-        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'INSERT OR IGNORE INTO activity(t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [
           // Backfilled notes carry their real time so they sort correctly;
           // live posts default to now.
@@ -207,6 +226,8 @@ class ActivityArchive {
           (raw['mid'] ?? '').toString(),
           (raw['parent'] ?? '').toString(),
           (raw['pop'] == 1 || raw['pop'] == '1' || raw['pop'] == true) ? 1 : 0,
+          (raw['source'] ?? '').toString(),
+          (raw['batch'] as num?)?.toInt() ?? 0,
         ],
       );
     } catch (e) {
@@ -223,7 +244,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
+        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch '
         'FROM activity ORDER BY t DESC LIMIT ?',
         [limit],
       );
@@ -243,6 +264,8 @@ class ActivityArchive {
         'parent': (r['parent'] ?? '').toString(),
         'time': (r['time'] ?? '').toString(),
         'pop': (r['pop'] as int?) ?? 0,
+        'source': (r['source'] ?? '').toString(),
+        'batch': (r['batch'] as int?) ?? 0,
       };
       for (final f in const ['convo', 'via', 'meta']) {
         final v = (r[f] ?? '').toString();
@@ -255,6 +278,19 @@ class ActivityArchive {
       out.add(m);
     }
     return out.reversed.toList(); // oldest→newest
+  }
+
+  /// Replace one transient feed source without touching follows, replies,
+  /// authored notes or bookmarks. Used by automatic curated firehose batches.
+  void clearSource(String source) {
+    final db = _ensureDb();
+    if (db == null || source.isEmpty) return;
+    try {
+      db.execute('DELETE FROM activity WHERE source = ?', [source]);
+      _seenMids.clear();
+    } catch (e) {
+      debugPrint('ActivityArchive: source clear failed: $e');
+    }
   }
 
   /// The direct replies to post [mid], oldest→newest (for the thread view).
@@ -301,8 +337,11 @@ class ActivityArchive {
   /// Every reply in the thread rooted at [rootMid] — direct replies and replies
   /// to those replies (BFS over parent links) — oldest→newest. Used for the
   /// thread view so each message is replyable and shows its own reply count.
-  List<Map<String, dynamic>> threadReplies(String rootMid,
-      {int maxDepth = 12, int limit = 500}) {
+  List<Map<String, dynamic>> threadReplies(
+    String rootMid, {
+    int maxDepth = 12,
+    int limit = 500,
+  }) {
     if (rootMid.isEmpty) return const [];
     final out = <Map<String, dynamic>>[];
     final seen = <String>{rootMid};
@@ -372,9 +411,9 @@ class ActivityArchive {
     final db = _ensureDb();
     if (db == null || mid.isEmpty) return false;
     try {
-      return db
-          .select('SELECT 1 FROM activity WHERE mid = ? LIMIT 1', [mid])
-          .isNotEmpty;
+      return db.select('SELECT 1 FROM activity WHERE mid = ? LIMIT 1', [
+        mid,
+      ]).isNotEmpty;
     } catch (_) {
       return false;
     }
@@ -388,7 +427,8 @@ class ActivityArchive {
     try {
       return db.select(
           'SELECT 1 FROM activity WHERE from_call = ? AND text = ? LIMIT 1',
-          [from, text]).isNotEmpty;
+        [from, text],
+      ).isNotEmpty;
     } catch (_) {
       return false;
     }
@@ -399,8 +439,10 @@ class ActivityArchive {
     final db = _ensureDb();
     if (db == null || mid.isEmpty) return 0;
     try {
-      return db.select('SELECT COUNT(*) c FROM activity WHERE parent = ?',
-          [mid]).first['c'] as int;
+      return db.select('SELECT COUNT(*) c FROM activity WHERE parent = ?', [
+            mid,
+          ]).first['c']
+          as int;
     } catch (_) {
       return 0;
     }
@@ -453,10 +495,13 @@ class ActivityArchive {
       if (like) {
         db.execute(
             'INSERT OR REPLACE INTO activity_likes(mid,liker,mine) VALUES(?,?,?)',
-            [mid, liker, mine ? 1 : 0]);
+          [mid, liker, mine ? 1 : 0],
+        );
       } else {
-        db.execute('DELETE FROM activity_likes WHERE mid=? AND liker=?',
-            [mid, liker]);
+        db.execute('DELETE FROM activity_likes WHERE mid=? AND liker=?', [
+          mid,
+          liker,
+        ]);
       }
     } catch (_) {}
   }
@@ -466,8 +511,10 @@ class ActivityArchive {
     final db = _ensureDb();
     if (db == null || mid.isEmpty) return (count: 0, mine: false);
     try {
-      final c = db.select('SELECT COUNT(*) c, MAX(mine) m FROM activity_likes WHERE mid=?',
-          [mid]).first;
+      final c = db.select(
+        'SELECT COUNT(*) c, MAX(mine) m FROM activity_likes WHERE mid=?',
+        [mid],
+      ).first;
       return (count: (c['c'] as int?) ?? 0, mine: ((c['m'] as int?) ?? 0) == 1);
     } catch (_) {
       return (count: 0, mine: false);
@@ -480,8 +527,9 @@ class ActivityArchive {
     final db = _ensureDb();
     if (db == null || mid.isEmpty) return false;
     try {
-      return db.select('SELECT 1 FROM activity_saved WHERE mid=?', [mid])
-          .isNotEmpty;
+      return db.select('SELECT 1 FROM activity_saved WHERE mid=?', [
+        mid,
+      ]).isNotEmpty;
     } catch (_) {
       return false;
     }
@@ -497,8 +545,10 @@ class ActivityArchive {
         db.execute('DELETE FROM activity_saved WHERE mid=?', [mid]);
         return false;
       }
-      db.execute('INSERT OR REPLACE INTO activity_saved(mid,t,json) VALUES(?,?,?)',
-          [mid, DateTime.now().millisecondsSinceEpoch, jsonEncode(post)]);
+      db.execute(
+        'INSERT OR REPLACE INTO activity_saved(mid,t,json) VALUES(?,?,?)',
+        [mid, DateTime.now().millisecondsSinceEpoch, jsonEncode(post)],
+      );
       return true;
     } catch (_) {
       return false;
@@ -511,10 +561,12 @@ class ActivityArchive {
     if (db == null) return const [];
     try {
       final rows = db.select(
-          'SELECT json FROM activity_saved ORDER BY t DESC LIMIT ?', [limit]);
+        'SELECT json FROM activity_saved ORDER BY t DESC LIMIT ?',
+        [limit],
+      );
       return [
         for (final r in rows)
-          (jsonDecode(r['json'] as String) as Map).cast<String, dynamic>()
+          (jsonDecode(r['json'] as String) as Map).cast<String, dynamic>(),
       ];
     } catch (_) {
       return const [];
@@ -526,8 +578,9 @@ class ActivityArchive {
     final db = _ensureDb();
     if (db == null || callsign.isEmpty) return null;
     try {
-      final r = db.select(
-          'SELECT MIN(t) m FROM activity WHERE from_call = ?', [callsign]);
+      final r = db.select('SELECT MIN(t) m FROM activity WHERE from_call = ?', [
+        callsign,
+      ]);
       final v = r.isEmpty ? null : r.first['m'];
       return v is int ? v : null;
     } catch (_) {
@@ -540,8 +593,10 @@ class ActivityArchive {
     final db = _ensureDb();
     if (db == null || callsign.isEmpty) return 0;
     try {
-      return db.select('SELECT COUNT(*) c FROM activity WHERE from_call = ?',
-          [callsign]).first['c'] as int;
+      return db.select('SELECT COUNT(*) c FROM activity WHERE from_call = ?', [
+            callsign,
+          ]).first['c']
+          as int;
     } catch (_) {
       return 0;
     }
@@ -560,8 +615,10 @@ class ActivityArchive {
       _prunedThisSession = true;
       try {
         final cutoff = DateTime.now().millisecondsSinceEpoch - _maxAgeMs;
-        db.execute(
-            'DELETE FROM activity WHERE t < ?$notProt', [cutoff, ...protList]);
+        db.execute('DELETE FROM activity WHERE t < ?$notProt', [
+          cutoff,
+          ...protList,
+        ]);
       } catch (e) {
         debugPrint('ActivityArchive: age-prune failed: $e');
       }
@@ -585,9 +642,14 @@ class ActivityArchive {
       // if we are still over next time, the next prune trims more.
       final bytes = _dataBytes(db);
       if (bytes > _maxBytes) {
-        final rows = db
-            .select('SELECT COUNT(*) c FROM activity WHERE 1=1$notProt', protList)
-            .first['c'] as int;
+        final rows =
+            db
+                    .select(
+                      'SELECT COUNT(*) c FROM activity WHERE 1=1$notProt',
+                      protList,
+                    )
+                    .first['c']
+                as int;
         if (rows > 0) {
           final avg = (bytes / rows).clamp(64, 1 << 20);
           var drop = ((bytes - _maxBytes) / avg).ceil() + 500;
@@ -610,8 +672,10 @@ class ActivityArchive {
   /// return after a delete, so this tracks the real file the user cares about.
   int _dataBytes(Database db) {
     try {
-      final pc = (db.select('PRAGMA page_count').first.values.first as num).toInt();
-      final ps = (db.select('PRAGMA page_size').first.values.first as num).toInt();
+      final pc = (db.select('PRAGMA page_count').first.values.first as num)
+          .toInt();
+      final ps = (db.select('PRAGMA page_size').first.values.first as num)
+          .toInt();
       return pc * ps;
     } catch (_) {
       return 0;

@@ -22,8 +22,9 @@ class HeroFeedService {
   HeroFeedService._();
   static final HeroFeedService instance = HeroFeedService._();
 
-  final ValueNotifier<List<HeroItem>> items =
-      ValueNotifier<List<HeroItem>>(const []);
+  final ValueNotifier<List<HeroItem>> items = ValueNotifier<List<HeroItem>>(
+    const [],
+  );
 
   final List<HeroSource> _sources = [NostrHeroSource(), WappHeroSource()];
 
@@ -50,6 +51,12 @@ class HeroFeedService {
   DateTime? _lastRefresh;
 
   DateTime? get lastRefresh => _lastRefresh;
+
+  void setVisible(bool visible) {
+    for (final source in _sources) {
+      if (source is NostrHeroSource) source.setActive(visible);
+    }
+  }
 
   Future<void> refresh({int limit = 10}) async {
     final serial = ++_serial;
@@ -106,7 +113,7 @@ class HeroRefresher {
   /// A poll interval is a battery setting, not a freshness setting
   /// (docs/performance.md §6.5). The relays PUSH into the hub; this only governs
   /// how often we go back to the buffer it has already filled.
-  static const Duration _every = Duration(minutes: 5);
+  static const Duration _every = Duration(minutes: 10);
 
   /// …but an EMPTY hero is a different situation. On a cold start the relays are
   /// still answering, and making the user wait out a five-minute tick to see the
@@ -123,12 +130,16 @@ class HeroRefresher {
 
   Timer? _timer;
   EventSubscription<AppStartedEvent>? _appStarted;
+  StreamSubscription<void>? _followChanges;
   int _inboxRevision = 0;
 
   void start() {
     _onVisibility(); // the launcher is on screen right now — fill it
     LauncherVisibility.instance.visible.addListener(_onVisibility);
     _appStarted = EventBus().on<AppStartedEvent>((_) => _safeRefresh());
+    _followChanges = RnsService.instance.followChanges.listen((_) {
+      if (LauncherVisibility.instance.visible.value) _safeRefresh();
+    });
     // A wapp can publish while headless; when it does, don't make the user wait
     // out the rest of the 5-minute tick to see the card.
     _inboxRevision = HeroInbox.instance.revision.value;
@@ -141,6 +152,7 @@ class HeroRefresher {
     LauncherVisibility.instance.visible.removeListener(_onVisibility);
     HeroInbox.instance.revision.removeListener(_onInbox);
     _appStarted?.cancel();
+    _followChanges?.cancel();
   }
 
   void _onInbox() {
@@ -150,6 +162,9 @@ class HeroRefresher {
   }
 
   void _onVisibility() {
+    HeroFeedService.instance.setVisible(
+      LauncherVisibility.instance.visible.value,
+    );
     if (!LauncherVisibility.instance.visible.value) {
       _timer?.cancel();
       _timer = null;
@@ -169,15 +184,22 @@ class HeroRefresher {
   void _arm() {
     _fast = HeroFeedService.instance.hasNoRealContent;
     _timer?.cancel();
-    _timer = Timer.periodic(_fast ? _whileEmpty : _every, (_) => _safeRefresh());
+    _timer = Timer.periodic(
+      _fast ? _whileEmpty : _every,
+      (_) => _safeRefresh(),
+    );
   }
 
   void _safeRefresh() {
-    unawaited(refresh().then((_) {
-      // The moment the first post lands, drop back to the slow cadence — the
-      // fast one exists only to get something on screen, not to keep polling.
-      if (!LauncherVisibility.instance.visible.value) return;
-      if (_fast != HeroFeedService.instance.hasNoRealContent) _arm();
-    }).catchError((_) {}));
+    unawaited(
+      refresh()
+          .then((_) {
+            // The moment the first post lands, drop back to the slow cadence — the
+            // fast one exists only to get something on screen, not to keep polling.
+            if (!LauncherVisibility.instance.visible.value) return;
+            if (_fast != HeroFeedService.instance.hasNoRealContent) _arm();
+          })
+          .catchError((_) {}),
+    );
   }
 }

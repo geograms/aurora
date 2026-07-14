@@ -32,12 +32,7 @@ import '../files/dht/holder_hint.dart';
 import '../files/dht/pointer_log.dart';
 import '../files/dht/pointer_sync.dart';
 import '../files/dht/provider_record.dart'
-    show
-        kCapUnknown,
-        kCapArchive,
-        kCapHomeWifi,
-        kCapCellular,
-        ProviderRecord;
+    show kCapUnknown, kCapArchive, kCapHomeWifi, kCapCellular, ProviderRecord;
 import '../files/composite_file_source.dart';
 import '../files/disk_index.dart';
 import '../files/file_node.dart';
@@ -78,7 +73,8 @@ import '../folders/folder_meta.dart';
 import '../folders/nfolder.dart';
 import '../folders/piece_hashes.dart';
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
-import 'package:reticulum/reticulum.dart' show MediaArchive, MediaRef, MediaKind;
+import 'package:reticulum/reticulum.dart'
+    show MediaArchive, MediaRef, MediaKind;
 import 'package:reticulum/reticulum.dart' show BlossomServer;
 
 import '../notification_service.dart';
@@ -222,6 +218,9 @@ class RnsService {
   String? followsPath;
   final FollowSet _follows = FollowSet();
   FollowSet get follows => _follows;
+  final StreamController<void> _followChanges =
+      StreamController<void>.broadcast();
+  Stream<void> get followChanges => _followChanges.stream;
 
   /// Our own NOSTR pubkey (lowercase hex) from the active profile, or null.
   // Cache the decoded self pubkey: decodeNpub is bech32 work and this getter is
@@ -812,11 +811,9 @@ class RnsService {
     final store = _relayStore;
     if (store == null || authors.isEmpty) return 0;
     try {
-      return store.count(NostrFilter(
-        kinds: const [1],
-        authors: authors,
-        since: sinceMs ~/ 1000,
-      ));
+      return store.count(
+        NostrFilter(kinds: const [1], authors: authors, since: sinceMs ~/ 1000),
+      );
     } catch (_) {
       return 0;
     }
@@ -1883,7 +1880,8 @@ class RnsService {
         _partialStore = partialStoreDir == null
             ? null
             : FilePartialStore(Directory(partialStoreDir!));
-        _files = FileTransferNode(
+        _files =
+            FileTransferNode(
           identity: _id!,
           source: _composite!,
           send: (raw) => _transport?.sendLinkAware(raw),
@@ -1938,7 +1936,9 @@ class RnsService {
                     final c = a.announcement.capacity.compareTo(
                       b.announcement.capacity,
                     );
-                    return c != 0 ? c : b.lastSeenMs.compareTo(a.lastSeenMs);
+                          return c != 0
+                              ? c
+                              : b.lastSeenMs.compareTo(a.lastSeenMs);
                   });
             return [for (final e in list.take(6)) e.identity];
           },
@@ -1976,8 +1976,12 @@ class RnsService {
           onServed: (h) {
             final hex = _hex(h);
             final src = fileServeSource;
-            if (src is MediaFileSource) src.archive.incrementDownloads(hex);
-            _serveStats?.record(hex, DateTime.now().millisecondsSinceEpoch);
+                  if (src is MediaFileSource)
+                    src.archive.incrementDownloads(hex);
+                  _serveStats?.record(
+                    hex,
+                    DateTime.now().millisecondsSinceEpoch,
+                  );
           },
           // Store-and-forward Blossom hosting: a peer asks us to keep a blob.
           onDepositOffer: (sha, size, ext, pubHex, sigHex, linkIdHex) {
@@ -2028,7 +2032,8 @@ class RnsService {
               // conservative default, because the direct-link exception is
               // generous and must never be granted by accident.
               final via = ArchiverService.arrivedOver(
-                  linkIdHex.isEmpty ? null : interfaceOfLink(linkIdHex));
+                      linkIdHex.isEmpty ? null : interfaceOfLink(linkIdHex),
+                    );
               final verdict = admitToArchive(
                 policy: policy,
                 tier: tier,
@@ -2226,7 +2231,8 @@ class RnsService {
           // derived from the identity, so a rebuilt log gets a new epoch and a
           // peer's stale cursor is DETECTED rather than silently honoured.
           _pointerLog = PointerLog(
-            epoch: 'e${_hex(_id!.hash).substring(0, 8)}'
+            epoch:
+                'e${_hex(_id!.hash).substring(0, 8)}'
                 '-${DateTime.now().millisecondsSinceEpoch ~/ 3600000}',
           );
           _relay!.pointerServer = PointerSyncServer(_pointerLog!);
@@ -2270,7 +2276,8 @@ class RnsService {
               // …and inside an encrypted profile the feed is real user
               // content: key it like every other profile database.
               dbKeyHex: profileDbKeyHex(feedPath),
-            ).then((c) {
+                )
+                .then((c) {
               LogService.instance.add('NOSTR: engine up (feed $feedPath)');
               _nostrHub = c
                 ..onChanged = _notifyNostrListeners
@@ -2300,9 +2307,12 @@ class RnsService {
               // makes a notification appear.
               _notifTimer?.cancel();
               _notifTimer = Timer.periodic(
-                  const Duration(seconds: 30), (_) => _pumpNotifications());
+                    const Duration(seconds: 30),
+                    (_) => _pumpNotifications(),
+                  );
               _pumpNotifications();
-            }).catchError((Object e) {
+                })
+                .catchError((Object e) {
               // A pipeline that never comes up must SAY so. This one used to
               // fail into silence and take the whole hero with it.
               LogService.instance.add('NOSTR: engine spawn FAILED: $e');
@@ -2377,8 +2387,9 @@ class RnsService {
                   }
                   return hex;
                 } catch (e) {
-                  LogService.instance
-                      .add('folders: could not store a piece-hash list: $e');
+                  LogService.instance.add(
+                    'folders: could not store a piece-hash list: $e',
+                  );
                   return null;
                 }
               },
@@ -2432,8 +2443,9 @@ class RnsService {
             // Keep the physical profile honest: one sample per hour of whether
             // this device actually had power. poweredPct is then an observation,
             // not a boast (docs/NOSTR.md — observed beats claimed).
-            NodeProfileService.instance
-                .sample(powered: p.unlimited || p.servingAllowed);
+            NodeProfileService.instance.sample(
+              powered: p.unlimited || p.servingAllowed,
+            );
             _relayRole?.applyCapacity(p);
             // Keep the responder answering queries (so peers can fetch our published
             // profile/notes) regardless of capacity; only the heavy hosting role is
@@ -2743,9 +2755,7 @@ class RnsService {
         // when the profile is encrypted, plain file otherwise.
         final prv = SecureProfileFile.readBytes(path);
         if (prv != null && prv.length == 64) {
-          final id = await RnsIdentity.fromPrivateKey(
-            Uint8List.fromList(prv),
-          );
+          final id = await RnsIdentity.fromPrivateKey(Uint8List.fromList(prv));
           LogService.instance.add('RNS: loaded identity ${id.hexHash}');
           return id;
         }
@@ -3021,7 +3031,11 @@ class RnsService {
 
   /// A validated (or trusted re-) announce from the transport engine. This is
   /// the continuation of what _onInbound used to do inline after ingest.
-  Future<void> _onValidatedAnnounce(RnsAnnounce ann, int hops, String via) async {
+  Future<void> _onValidatedAnnounce(
+    RnsAnnounce ann,
+    int hops,
+    String via,
+  ) async {
     // A cryptographically-valid announce proves the link really speaks
     // Reticulum (a wrong/dead endpoint can't forge one) — used to validate a
     // bootstrap before declaring the node up.
@@ -3102,7 +3116,8 @@ class RnsService {
         if (_relaySeenRole[id] != role) {
           _relaySeenRole[id] = role;
           LogService.instance.add(
-              'relay: heard $role $id (${_relayDir.indexers().length} indexer(s) known)');
+            'relay: heard $role $id (${_relayDir.indexers().length} indexer(s) known)',
+          );
         }
       }
       // If this relay belongs to a followed author we couldn't reach before,
@@ -3342,8 +3357,7 @@ class RnsService {
   /// insertion — an Indexer that never propagated them would hand out dead
   /// addresses for ever.
   void dropSyncedPointer(Uint8List key, Uint8List providerPub) {
-    final dropped =
-        _files?.dht?.demoteProvider(key, providerPub) ?? false;
+    final dropped = _files?.dht?.demoteProvider(key, providerPub) ?? false;
     if (dropped) _pointerLog?.remove(key, providerPub);
   }
 
@@ -3368,7 +3382,8 @@ class RnsService {
   /// we never saw it — which the Archiver reads as "the internet", the
   /// conservative reading, because the direct-link exception is generous and
   /// must never be granted by accident.
-  String? interfaceOfLink(String linkIdHex) => _linkVia[linkIdHex.toLowerCase()];
+  String? interfaceOfLink(String linkIdHex) =>
+      _linkVia[linkIdHex.toLowerCase()];
 
   /// What we can honestly say about a holder when the DHT hands it out.
   ///
@@ -3436,7 +3451,8 @@ class RnsService {
       _pointerLog?.add(rec);
       LogService.instance.add(
           'social: advertising notes from ${pubHex.substring(0, 12)} '
-          '($holders holder(s) took the pointer)');
+        '($holders holder(s) took the pointer)',
+      );
     } catch (e) {
       _authorRecords.remove(pubHex.toLowerCase());
       LogService.instance.add('social: author record failed: $e');
@@ -3451,7 +3467,7 @@ class RnsService {
   void setIndexerTopics(List<String> topics) {
     final clean = [
       for (final t in topics)
-        if (t.trim().isNotEmpty) t.trim().toLowerCase()
+        if (t.trim().isNotEmpty) t.trim().toLowerCase(),
     ];
     PreferencesService.instanceSync?.indexerTopics = clean;
     final role = _relayRole;
@@ -3469,7 +3485,8 @@ class RnsService {
       if (prof != null) role.applyCapacity(prof);
       _announceRelayDest();
       LogService.instance.add(
-          'indexer: topics=${clean.isEmpty ? '(everything)' : clean.join(',')} — re-announced');
+        'indexer: topics=${clean.isEmpty ? '(everything)' : clean.join(',')} — re-announced',
+      );
     });
   }
 
@@ -3486,8 +3503,9 @@ class RnsService {
       onRemoved: (r) => _pointerLog?.remove(r.sha256, r.providerPub),
     );
     if (!dryRun && n > 0) {
-      LogService.instance
-          .add('indexer: swept $n pointer(s) older than ${age.inDays}d');
+      LogService.instance.add(
+        'indexer: swept $n pointer(s) older than ${age.inDays}d',
+      );
     }
     return n;
   }
@@ -3504,7 +3522,8 @@ class RnsService {
     );
     if (!dryRun && n > 0) {
       LogService.instance.add(
-          'indexer: evicted $n pointer(s) from ${providerPubHex.substring(0, 12)}');
+        'indexer: evicted $n pointer(s) from ${providerPubHex.substring(0, 12)}',
+      );
     }
     return n;
   }
@@ -3574,12 +3593,16 @@ class RnsService {
         final verified = await hub.verifyEvents([events.first.toJson()]);
         if (verified.isEmpty) continue;
         final ev = NostrEvent.fromJson(verified.first);
-        final tier = tierOf(ev.pubkey,
-            selfPubHex: selfPubHex, followsHex: _mirroredAuthors);
+        final tier = tierOf(
+          ev.pubkey,
+          selfPubHex: selfPubHex,
+          followsHex: _mirroredAuthors,
+        );
         store.putAllVerified([ev], tier: tier.index);
         LogService.instance.add(
             'social: note ${eventIdHex.substring(0, 8)} came from the MESH '
-            '(no relay, no IP)');
+          '(no relay, no IP)',
+        );
         return verified.first;
       } catch (_) {
         // That provider did not answer. The next one might; and the DHT demotes
@@ -3599,7 +3622,8 @@ class RnsService {
     final relay = _relay;
     final store = _relayStore;
     final hub = _nostrHub;
-    if (files == null || relay == null || store == null || hub == null) return 0;
+    if (files == null || relay == null || store == null || hub == null)
+      return 0;
     final key = _hexToBytes(pubHex.toLowerCase());
     if (key == null || key.length != 32) return 0;
 
@@ -3613,8 +3637,11 @@ class RnsService {
       try {
         final events = await relay.query(
           p,
-          NostrFilter(authors: [pubHex.toLowerCase()], kinds: const [0, 1],
-              limit: limit),
+          NostrFilter(
+            authors: [pubHex.toLowerCase()],
+            kinds: const [0, 1],
+            limit: limit,
+          ),
           timeout: const Duration(seconds: 12),
         );
         for (final e in events) {
@@ -3638,12 +3665,16 @@ class RnsService {
         batch.add(NostrEvent.fromJson(j));
       } catch (_) {}
     }
-    final tier = tierOf(pubHex.toLowerCase(),
-        selfPubHex: selfPubHex, followsHex: _mirroredAuthors);
+    final tier = tierOf(
+      pubHex.toLowerCase(),
+      selfPubHex: selfPubHex,
+      followsHex: _mirroredAuthors,
+    );
     final stored = store.putAllVerified(batch, tier: tier.index);
     LogService.instance.add(
         'social: mesh gave ${verified.length} note(s) from '
-        '${pubHex.substring(0, 12)} (stored $stored, no internet involved)');
+      '${pubHex.substring(0, 12)} (stored $stored, no internet involved)',
+    );
     return stored;
   }
 
@@ -3689,8 +3720,9 @@ class RnsService {
         try {
           final bytes = await dhtResolveFetch(key, timeout: meshTimeout);
           if (bytes != null && bytes.isNotEmpty) {
-            LogService.instance
-                .add('media: served over RETICULUM (${bytes.length}B, no IP)');
+            LogService.instance.add(
+              'media: served over RETICULUM (${bytes.length}B, no IP)',
+            );
             return (bytes: bytes, source: 'reticulum');
           }
         } catch (_) {
@@ -3701,8 +3733,9 @@ class RnsService {
 
     // 2. The internet, if the user still allows it.
     if (!(PreferencesService.instanceSync?.internetMediaFallback ?? true)) {
-      LogService.instance
-          .add('media: not on the mesh, and the internet fallback is OFF');
+      LogService.instance.add(
+        'media: not on the mesh, and the internet fallback is OFF',
+      );
       return (bytes: null, source: 'none');
     }
     final bytes = await MediaDiskCache.instance.fetch(url, maxBytes: maxBytes);
@@ -4032,7 +4065,8 @@ class RnsService {
     // one assumption in this design we cannot check by reading our own code.
     LogService.instance.add(
         'RNS: npd rx ${NpdType.name(npd.type)} from '
-        '${_hex(npd.senderPub).substring(0, 8)} via $via hops=${p.hops}');
+      '${_hex(npd.senderPub).substring(0, 8)} via $via hops=${p.hops}',
+    );
 
     // An ANSWER to a probe we sent: match it to the waiting query by the nonce
     // it echoes back. (A reply carries the requester's nonce precisely so this
@@ -4100,7 +4134,9 @@ class RnsService {
   /// Query [peer] with a connectionless probe instead of a link. Wired into
   /// [RelayNode.probeQuery]; see that field for the tri-state contract.
   Future<({bool supported, Uint8List? body})> _probeRelay(
-      RnsIdentity peer, Uint8List reqBytes) async {
+    RnsIdentity peer,
+    Uint8List reqBytes,
+  ) async {
     const no = (supported: false, body: null);
 
     // Only probe a peer that advertises it (RelayCap.probe) and whose NOSTR
@@ -4166,7 +4202,8 @@ class RnsService {
     final path = t.pathInfo(destHash);
     LogService.instance.add(
         'RNS: npd tx req to ${_hex(destHash).substring(0, 8)} '
-        'via ${path?['via']} hops=${path?['hops']}');
+      'via ${path?['via']} hops=${path?['hops']}',
+    );
     t.sendPlainTo(destHash, packet, context: kNpdContext);
 
     // Silence IS the answer: a peer holding nothing simply never replies.
@@ -4175,14 +4212,17 @@ class RnsService {
         .whenComplete(() => _npdPending.remove(key));
     LogService.instance.add(
         'RNS: npd ${body == null ? 'silence' : 'answer'} '
-        'from ${_hex(destHash).substring(0, 8)}');
+      'from ${_hex(destHash).substring(0, 8)}',
+    );
     return (supported: true, body: body);
   }
 
   /// Evaluate a probe against whichever node owns [destHash]. Returns null when
   /// we hold nothing — the caller then stays silent.
   Future<({int type, Uint8List body})?> _answerNpdQuery(
-      Uint8List destHash, Npd npd) async {
+    Uint8List destHash,
+    Npd npd,
+  ) async {
     final relay = _relay;
     if (relay != null &&
         RnsCrypto.constantTimeEquals(destHash, relay.relayDestHash)) {
@@ -4869,8 +4909,8 @@ class RnsService {
   // an avatar are free to copy, which is exactly what a spam cluster does.
   Set<String>? _mutedCallsCache;
   Set<String> get _mutedCalls => _mutedCallsCache ??= {
-        for (final c in PreferencesService.instanceSync?.mutedAuthors ??
-            const <String>[])
+    for (final c
+        in PreferencesService.instanceSync?.mutedAuthors ?? const <String>[])
           c.trim().toUpperCase(),
       }..removeWhere((c) => c.isEmpty);
 
@@ -5519,7 +5559,7 @@ class RnsService {
   /// and files get the "followed" retention tier (kept; media evicted only under
   /// pressure). Bridged from the APRS wapp's callsign follows.
   void followPubkey(String key) {
-    _follows.add(key);
+    final changed = _follows.add(key);
     // Remember it as OUR follow, and cancel any prior unfollow — otherwise the
     // mirror would mask it straight back out again.
     final mine = _followHex(key);
@@ -5542,11 +5582,12 @@ class RnsService {
     // notes to us. ignore: discarded_futures
     final hex = key.toLowerCase();
     if (hex.length == 64) unawaited(publishAuthorProvider(hex));
+    if (changed) _followChanges.add(null);
   }
 
   /// Drop [key] from the follow set.
   void unfollowPubkey(String key) {
-    _follows.remove(key);
+    final changed = _follows.remove(key);
     // An unfollow must STICK. We do not rewrite the kind-3 on the relays, so the
     // next mirror would hand the account straight back — which is precisely how
     // an account the user had unfollowed kept reappearing under Following.
@@ -5563,6 +5604,7 @@ class RnsService {
     }
     startFollowsMirror();
     pushTrustedAuthors();
+    if (changed) _followChanges.add(null);
   }
 
   /// A follow key (npub or hex) as 64-char hex, or null if it is neither — a
@@ -5621,8 +5663,9 @@ class RnsService {
     // and the spam gate must stop vetting someone we are deliberately hosting.
     startFollowsMirror();
     pushTrustedAuthors();
-    LogService.instance
-        .add('social: keep-data ${keep ? 'on' : 'off'} for ${k.substring(0, 12)}');
+    LogService.instance.add(
+      'social: keep-data ${keep ? 'on' : 'off'} for ${k.substring(0, 12)}',
+    );
   }
 
   /// Everyone whose posts we mirror and serve: people we follow, plus the
@@ -5677,14 +5720,18 @@ class RnsService {
     // inbound like, for rows nobody reads, and it pegged a core once already
     // (docs/performance.md §3.2). Likes/replies come from the engine's in-memory
     // tallies instead.
-    _mirrorSub = nostrSubscribe(jsonEncode({
+    _mirrorSub = nostrSubscribe(
+      jsonEncode({
       'kinds': [0, 1, 3],
       'authors': follows,
       'limit': 500,
-    }));
+      }),
+    );
 
-    _mirrorTimer ??=
-        Timer.periodic(const Duration(minutes: 2), (_) => _drainFollowsMirror());
+    _mirrorTimer ??= Timer.periodic(
+      const Duration(minutes: 2),
+      (_) => _drainFollowsMirror(),
+    );
   }
 
   void _drainFollowsMirror() {
@@ -5799,8 +5846,10 @@ class RnsService {
         final prof = CapacityGovernor.instance.lastProfile;
         if (prof != null) role.applyCapacity(prof);
         _announceRelayDest();
-        LogService.instance.add('relay: role re-announced (volunteer=$want, '
-            '${role.current.isIndexer ? 'indexer' : 'leaf'})');
+        LogService.instance.add(
+          'relay: role re-announced (volunteer=$want, '
+          '${role.current.isIndexer ? 'indexer' : 'leaf'})',
+        );
       }
     }
 
@@ -5817,7 +5866,8 @@ class RnsService {
       _relayRole!.volunteer =
           PreferencesService.instanceSync?.indexerVolunteer ?? 'auto';
       for (final t
-          in PreferencesService.instanceSync?.indexerTopics ?? const <String>[]) {
+          in PreferencesService.instanceSync?.indexerTopics ??
+              const <String>[]) {
         _relayRole!.interests.addTopic(t);
       }
       final prof = CapacityGovernor.instance.lastProfile;
@@ -5851,8 +5901,9 @@ class RnsService {
   List<String> blossomServers() => List.of(BlossomServer.publicServers);
 
   void blossomSet(List<String> servers) {
-    BlossomServer.publicServers =
-        servers.where((s) => s.trim().isNotEmpty).toList();
+    BlossomServer.publicServers = servers
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
     PreferencesService.instanceSync?.blossomServers =
         BlossomServer.publicServers;
   }
@@ -5878,8 +5929,7 @@ class RnsService {
   }
 
   bool blossomRemove(String uri) {
-    final next =
-        BlossomServer.publicServers.where((s) => s != uri).toList();
+    final next = BlossomServer.publicServers.where((s) => s != uri).toList();
     if (next.length == BlossomServer.publicServers.length) return false;
     blossomSet(next);
     return true;
@@ -5920,8 +5970,10 @@ class RnsService {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _drainLogAt > 30000) {
       _drainLogAt = now;
-      LogService.instance.add('wapp drained: $_drained total; '
-          'by sub ${_drainAsks.entries.map((e) => '${e.key}:${e.value}').join(' ')}');
+      LogService.instance.add(
+        'wapp drained: $_drained total; '
+        'by sub ${_drainAsks.entries.map((e) => '${e.key}:${e.value}').join(' ')}',
+      );
       _drained = 0;
       _drainAsks.clear();
     }
@@ -5953,10 +6005,28 @@ class RnsService {
   /// Self + follows: they bypass the firehose gate. Re-pushed on follow change.
   void pushTrustedAuthors() {
     final me = selfPubHex;
-    _nostrHub?.setTrustedAuthors({
-      if (me != null) me,
-      ..._mirroredAuthors,
-    });
+    _nostrHub?.setTrustedAuthors({if (me != null) me, ..._mirroredAuthors});
+  }
+
+  /// Pull-to-refresh: hand the feed the best N ranked posts, right now. The
+  /// user asked for more; the curator's ten-second trickle is not an answer.
+  Future<int> nostrRefreshBurst({int n = 100}) =>
+      _nostrHub?.refreshBurst(n: n) ?? Future<int>.value(0);
+
+  int _lastResumeMs = 0;
+
+  /// The user is looking NOW (feed opened, pull-to-refresh, app resumed).
+  ///
+  /// Android freezes a backgrounded app's sockets: they sit "connected",
+  /// deliver nothing, and error out together on the next keepalive — which is
+  /// why the feed was minutes old at the moment it was opened. This reconnects
+  /// any zombie socket immediately and re-asks the firehose once, bounded by
+  /// the `since` watermark. Throttled, so calling it from a build is safe.
+  void nostrResume() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastResumeMs < 20000) return;
+    _lastResumeMs = now;
+    _nostrHub?.resumeNetwork();
   }
 
   /// Authors the user muted — the wapp owns the list and pushes it on change.
@@ -6076,16 +6146,20 @@ class RnsService {
     // A like that silently does nothing is worse than one that fails loudly:
     // the heart simply never fills and there is no way to tell why.
     if (pub == null || priv == null || hub == null) {
-      LogService.instance.add('NOSTR: react DROPPED — pub=${pub != null} '
-          'priv=${priv != null} hub=${hub != null}');
+      LogService.instance.add(
+        'NOSTR: react DROPPED — pub=${pub != null} '
+        'priv=${priv != null} hub=${hub != null}',
+      );
       return;
     }
     if (eventId.isEmpty) {
       LogService.instance.add('NOSTR: react DROPPED — empty event id');
       return;
     }
-    LogService.instance.add('NOSTR: react + on '
-        '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}');
+    LogService.instance.add(
+      'NOSTR: react + on '
+      '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}',
+    );
     final ev = NostrEvent(
       pubkey: pub,
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -6172,7 +6246,13 @@ class RnsService {
       _notifReady = true;
       hub.setSelfPubkey(me); // the store keeps MY corner of the network
       _notifSub ??= hub.subscribe([
-        NostrFilter(kinds: const [1, 6, 7], tags: {'p': [me]}, limit: 100),
+        NostrFilter(
+          kinds: const [1, 6, 7],
+          tags: {
+            'p': [me],
+          },
+          limit: 100,
+        ),
       ]);
     }
     final sub = _notifSub;
@@ -6218,7 +6298,8 @@ class RnsService {
     final prof = nostrProfileByShort12(short);
     final who = (prof['name'] ?? '').isNotEmpty ? prof['name']! : short;
     final what = switch (kind) {
-      7 => content == '-'
+      7 =>
+        content == '-'
           ? 'downvoted your post'
           : content == '+'
               ? 'upvoted your post'
@@ -6227,7 +6308,8 @@ class RnsService {
       _ => 'replied to you',
     };
     LogService.instance.add('NOSTR: notify $who $what (${e['id']})');
-    NotificationService.instance.show(GeogramNotification(
+    NotificationService.instance.show(
+      GeogramNotification(
       level: NotificationLevel.info,
       title: '$who $what',
       body: kind == 1 && content.isNotEmpty ? content : null,
@@ -6237,14 +6319,14 @@ class RnsService {
       // can collapse a repeat into the same row instead of minting a new one
       // and lighting the bell again.
       tag: 'nostr:${(e['id'] ?? '').toString()}',
-    ));
+      ),
+    );
   }
 
   /// One event by id — from the store if we hold it, else asked of the relays
   /// (null now, there on a later call). Used to open the post a notification is
   /// about even when this device never saw it in its own feed.
-  Map<String, dynamic>? nostrEventById(String id) =>
-      _nostrHub?.eventById(id);
+  Map<String, dynamic>? nostrEventById(String id) => _nostrHub?.eventById(id);
 
   /// How many notifications arrived since the panel was last opened.
   ///
@@ -6288,8 +6370,10 @@ class RnsService {
     final priv = _profilePrivHex();
     final hub = _nostrHub;
     if (pub == null || priv == null || hub == null || eventId.isEmpty) {
-      LogService.instance.add('NOSTR: vote DROPPED — pub=${pub != null} '
-          'priv=${priv != null} hub=${hub != null}');
+      LogService.instance.add(
+        'NOSTR: vote DROPPED — pub=${pub != null} '
+        'priv=${priv != null} hub=${hub != null}',
+      );
       return;
     }
     final ev = NostrEvent(
@@ -6314,8 +6398,10 @@ class RnsService {
     // it is served from this device over Reticulum whether or not the relay it
     // came from is still alive tomorrow (docs/NOSTR.md, the touch rule).
     KeepService.instance.keep(Touch.react, eventId, authorHex: authorHex);
-    LogService.instance.add('NOSTR: vote ${vote < 0 ? '-' : '+'} on '
-        '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}');
+    LogService.instance.add(
+      'NOSTR: vote ${vote < 0 ? '-' : '+'} on '
+      '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}',
+    );
   }
 
   /// Repost a note (NIP-18 kind-6 "retweet"): publish a signed kind-6 that
@@ -6420,7 +6506,8 @@ class RnsService {
     // contact list and emptied the persisted follow file — a list the user built
     // by hand deserves to be rebuilt from evidence, not from their memory.
     if (_follows.asSet.isEmpty && mine.isEmpty && local.isEmpty) {
-      final kept = _relayStore?.authorsAtTier(1, limit: 500) ?? const <String>[];
+      final kept =
+          _relayStore?.authorsAtTier(1, limit: 500) ?? const <String>[];
       final recovered = kept
           .where((h) => h.length == 64 && !unfollowed.contains(h))
           .toList();
@@ -6429,7 +6516,8 @@ class RnsService {
           _follows.add(h);
         }
         LogService.instance.add(
-            'follows: recovered ${recovered.length} from kept posts (tier 1)');
+          'follows: recovered ${recovered.length} from kept posts (tier 1)',
+        );
         pushTrustedAuthors();
         refreshFollowedProfiles();
         return;
@@ -6473,11 +6561,14 @@ class RnsService {
     }
 
     if (changed) {
-      LogService.instance.add('follows: contactList=${mine.length} '
+      LogService.instance.add(
+        'follows: contactList=${mine.length} '
           'local=${local.length} unfollowed=${unfollowed.length} '
-          '-> ${_follows.asSet.length}');
+        '-> ${_follows.asSet.length}',
+      );
       pushTrustedAuthors(); // trust follows the follow set, both ways
       refreshFollowedProfiles();
+      _followChanges.add(null);
     }
   }
 
@@ -6902,7 +6993,8 @@ class RnsService {
     final hints = <Uint8List>[];
     // Our own destination first when we hold the bytes: the person we are
     // sharing with should try us before anyone else.
-    final own = _diskMgr?.owns(folderId) == true ||
+    final own =
+        _diskMgr?.owns(folderId) == true ||
         _subs?.isSubscribed(folderId) == true;
     final selfDest = own ? _files?.filesDestHash : null;
     if (selfDest != null && selfDest.length == 16) hints.add(selfDest);
@@ -7109,7 +7201,8 @@ class RnsService {
       LogService.instance.add(
           'folders: ${sourcePath.split(Platform.pathSeparator).last} is '
           '${size ~/ (1024 * 1024)}MB — the listing caps media at '
-          '${kMetaMediaMaxBytes ~/ (1024 * 1024)}MB');
+        '${kMetaMediaMaxBytes ~/ (1024 * 1024)}MB',
+      );
       return null;
     }
 
@@ -7131,8 +7224,9 @@ class RnsService {
         break;
       case 'gallery':
         if (meta.gallery.length >= kMetaGalleryMax) {
-          LogService.instance
-              .add('folders: the gallery already holds $kMetaGalleryMax items');
+          LogService.instance.add(
+            'folders: the gallery already holds $kMetaGalleryMax items',
+          );
           return null;
         }
         // mediaN, numbered from what is already there — the number is the order.
@@ -7214,7 +7308,8 @@ class RnsService {
       final sha = (entry['x'] as String?) ?? '';
       if (sha.length != 64) return null;
       final ext = _extOf(name);
-      final have = archive?.has(sha) == true ||
+      final have =
+          archive?.has(sha) == true ||
           _diskMgr?.filePathOf(folderId, sha) != null;
       if (!have) {
         // Small, and the user is looking at it right now.
@@ -7232,12 +7327,21 @@ class RnsService {
 
     // A folder we do NOT own has no meta.json on disk (yet); fall back to the
     // fixed names, which is exactly why the names are fixed.
-    final coverName = meta.cover ??
+    final coverName =
+        meta.cover ??
         byName.keys.firstWhere((n) => n.startsWith('cover.'), orElse: () => '');
-    final bannerName = meta.banner ??
-        byName.keys.firstWhere((n) => n.startsWith('banner.'), orElse: () => '');
-    final trailerName = meta.trailer ??
-        byName.keys.firstWhere((n) => n.startsWith('trailer.'), orElse: () => '');
+    final bannerName =
+        meta.banner ??
+        byName.keys.firstWhere(
+          (n) => n.startsWith('banner.'),
+          orElse: () => '',
+        );
+    final trailerName =
+        meta.trailer ??
+        byName.keys.firstWhere(
+          (n) => n.startsWith('trailer.'),
+          orElse: () => '',
+        );
     final galleryNames = meta.gallery.isNotEmpty
         ? meta.gallery
         : (byName.keys.where((n) => n.startsWith('media')).toList()..sort());
@@ -7300,14 +7404,15 @@ class RnsService {
       outPath: outPath,
     );
     if (path == null) {
-      LogService.instance
-          .add('folders: export of $leaf failed (archive read)');
+      LogService.instance.add('folders: export of $leaf failed (archive read)');
       return false;
     }
     final opened = await openFileWithSystem(path);
-    LogService.instance.add(opened
+    LogService.instance.add(
+      opened
         ? 'folders: opened $leaf with the system viewer'
-        : 'folders: no app on this device opens $leaf');
+          : 'folders: no app on this device opens $leaf',
+    );
     return opened;
   }
 
@@ -7439,7 +7544,8 @@ class RnsService {
     // piece checked on arrival (docs/torrents.md §8 step 2). Anything published
     // before the engine (no `ps`/`ph`) takes the whole-file path, which still
     // works and is what an older provider speaks.
-    final bytes = await _folderFetchPieces(fid, shaHex, name) ??
+    final bytes =
+        await _folderFetchPieces(fid, shaHex, name) ??
         await folderFetchBytes(fid, shaHex, ext: _extOf(name));
     if (bytes == null) return false;
     _subs?.recordDownload(fid, name, shaHex);
@@ -7451,7 +7557,10 @@ class RnsService {
   /// produce every piece — in which case the caller falls back rather than
   /// leaving the user with nothing).
   Future<Uint8List?> _folderFetchPieces(
-      String folderId, String shaHex, String name) async {
+    String folderId,
+    String shaHex,
+    String name,
+  ) async {
     final files = _files;
     if (files == null) return null;
     final sha = _normShaHex(shaHex);
@@ -7476,8 +7585,11 @@ class RnsService {
     // cannot hand us a list of hashes of its choosing.
     final listSha = _bytesFromHex(entry.piecesSha!);
     if (listSha == null) return null;
-    final blob = await fetchContentAddressed(listSha,
-        ext: 'pieces', timeout: const Duration(seconds: 60));
+    final blob = await fetchContentAddressed(
+      listSha,
+      ext: 'pieces',
+      timeout: const Duration(seconds: 60),
+    );
     if (blob == null) return null;
     final hashes = unpackPieceHashes(blob);
     if (hashes == null || hashes.length != pieceCountFor(size, pieceSize)) {
@@ -7502,7 +7614,8 @@ class RnsService {
     _archiveAndReseed(shaB, bytes, _extOf(name));
     LogService.instance.add(
         'folders: $name came from the SWARM (${hashes.length} pieces, '
-        '${providers.length} provider(s) known)');
+      '${providers.length} provider(s) known)',
+    );
     return bytes;
   }
 

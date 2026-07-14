@@ -159,6 +159,18 @@ class PreferencesService {
   int get notifSeenMs => _prefs.getInt('social.notifSeenMs') ?? 0;
   set notifSeenMs(int v) => _prefs.setInt('social.notifSeenMs', v);
 
+  // Accounts the user muted. An account is muted by the first 12 hex chars of
+  // its pubkey — the same key the feed uses for a post's author — so muting
+  // reaches EVERY key of a spam cluster individually, and never mutes a display
+  // name (which anyone can wear).
+  //
+  // Persisted, because a mute the app forgets is not a mute: the same account
+  // would be back in the feed after the next restart.
+  List<String> get mutedAuthors =>
+      _prefs.getStringList('social.mutedAuthors') ?? const [];
+  set mutedAuthors(List<String> v) =>
+      _prefs.setStringList('social.mutedAuthors', v);
+
   // The touch rule (docs/NOSTR.md): liking, replying to, reposting or bookmarking
   // an event archives THE EVENT here, at tier 0, forever. The queue is persisted
   // so a keep survives the app being killed mid-flight — the background service

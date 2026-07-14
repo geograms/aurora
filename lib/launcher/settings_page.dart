@@ -409,6 +409,42 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 12),
+
+                // ── Muted accounts ──
+                //
+                // Where a mute is taken back. Muting itself happens where the
+                // spam is — the ⋯ menu on the post — because that is where the
+                // user is when they decide.
+                Card(
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: BorderSide(color: cs.outlineVariant.withAlpha(80)),
+                  ),
+                  color: cs.surfaceContainerLow,
+                  child: ListTile(
+                    leading: const Icon(Icons.volume_off),
+                    title: const Text('Muted accounts'),
+                    subtitle: Text(
+                      () {
+                        final n = RnsService.instance.mutedCallsigns.length;
+                        return n == 0
+                            ? 'Nobody is muted'
+                            : '$n account${n == 1 ? '' : 's'} — their posts are '
+                                'not shown, and not stored';
+                      }(),
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context)
+                        .push(MaterialPageRoute(
+                            builder: (_) => const MutedPage()))
+                        .then((_) {
+                      if (mounted) setState(() {});
+                    }),
+                  ),
+                ),
                 const SizedBox(height: 24),
 
                 // ── Language ──

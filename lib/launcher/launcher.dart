@@ -72,6 +72,7 @@ import '../wapp/wapp_engine.dart';
 import '../wapp/wapp_page.dart';
 
 import 'hardware_page.dart';
+import 'muted_page.dart';
 import '../services/social/node_profile_service.dart';
 import 'package:reticulum/src/services/social/node_profile.dart';
 

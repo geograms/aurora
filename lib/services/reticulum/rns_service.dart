@@ -2269,6 +2269,11 @@ class RnsService {
               _nostrHub = c
                 ..onChanged = _notifyNostrListeners
                 ..onLog = (m) => LogService.instance.add('NOSTR: $m');
+              // Hand the engine what the user has already refused to carry.
+              // A mute is persisted, so it must be in force from the first
+              // event of the session — not only from the next time it is
+              // toggled.
+              _pushMutedToEngine();
               // Start keeping (and serving) what the people we follow post.
               startFollowsMirror();
               // …and finish any keeps the last run left unfinished. This runs in
@@ -4825,19 +4830,40 @@ class RnsService {
     }
   }
 
-  // Muted callsigns (in-memory) — the Reticulum wapp hides these from its device
-  // lists; toggled from a peer's profile "Mute" action.
-  final Set<String> _mutedCalls = {};
+  // Muted accounts — hidden from the Social feed and from the Reticulum wapp's
+  // device lists. Keyed the way the feed keys an author: a callsign, or the
+  // first 12 hex chars of a NOSTR pubkey.
+  //
+  // PERSISTED. A mute the app forgets is not a mute — the spam is back on the
+  // next restart. And it is keyed on the KEY, never the display name: a name and
+  // an avatar are free to copy, which is exactly what a spam cluster does.
+  Set<String>? _mutedCallsCache;
+  Set<String> get _mutedCalls => _mutedCallsCache ??= {
+        for (final c in PreferencesService.instanceSync?.mutedAuthors ??
+            const <String>[])
+          c.trim().toUpperCase(),
+      }..removeWhere((c) => c.isEmpty);
+
+  /// Everyone the user has muted (upper-case keys). Read-only.
+  Set<String> get mutedCallsigns => Set.unmodifiable(_mutedCalls);
+
   bool isMutedCallsign(String cs) =>
       _mutedCalls.contains(cs.trim().toUpperCase());
+
   void setMutedCallsign(String cs, bool muted) {
     final k = cs.trim().toUpperCase();
     if (k.isEmpty) return;
+    final set = _mutedCalls;
     if (muted) {
-      _mutedCalls.add(k);
+      if (!set.add(k)) return;
     } else {
-      _mutedCalls.remove(k);
+      if (!set.remove(k)) return;
     }
+    PreferencesService.instanceSync?.mutedAuthors = set.toList();
+    // The feed gate lives in the engine isolate and drops a muted author's posts
+    // BEFORE they are ever stored, so a mute stops the flood at the door rather
+    // than merely hiding it after the fact.
+    _pushMutedToEngine();
   }
 
   /// Fetch a NomadNet page from a node. [pubkeyHex] is the node's 64-byte RNS
@@ -5847,6 +5873,11 @@ class RnsService {
   /// Authors the user muted — the wapp owns the list and pushes it on change.
   void nostrSetMuted(Iterable<String> pubkeys) =>
       _nostrHub?.setMutedAuthors(pubkeys);
+
+  /// Hand the mute set to the feed gate in the engine isolate. The gate matches
+  /// on the 12-char author key, so a muted account's posts are rejected before
+  /// they are stored — not merely hidden once they are.
+  void _pushMutedToEngine() => _nostrHub?.setMutedAuthors(_mutedCalls);
 
   /// What the firehose gate kept, held and dropped, by reason.
   Map<String, int> get nostrFirehoseStats =>

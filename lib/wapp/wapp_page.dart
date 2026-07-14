@@ -5154,7 +5154,7 @@ class _WappPageState extends State<WappPage>
               onRepost: _repostPost,
               following: _followedCalls.contains(uc),
               blocked: _activityHidden.contains(uc),
-              muted: _activityHidden.contains(uc),
+              muted: RnsService.instance.isMutedCallsign(uc),
               onMessage: () {
                 final hex = npub == null
                     ? null
@@ -5193,6 +5193,11 @@ class _WappPageState extends State<WappPage>
                       if (mounted) setState(() {});
                     },
               onSetMute: (mute) {
+                // The mute lives in the HOST, persisted. The wapp is told too
+                // (it may keep its own list), but the feed must not depend on a
+                // wapp round-trip to stop showing someone: the button was doing
+                // nothing at all, because no wapp ever implemented the command.
+                RnsService.instance.setMutedCallsign(from, mute);
                 _fieldValues['activity_call'] = from;
                 _sendCommand('activity_mute');
                 setState(() {});
@@ -5355,7 +5360,10 @@ class _WappPageState extends State<WappPage>
           ..._followedCalls,
           ...RnsService.instance.nostrFollowShort12(),
         },
-        hiddenCalls: _activityHidden,
+        hiddenCalls: {
+          ..._activityHidden,
+          ...RnsService.instance.mutedCallsigns,
+        },
         onBlock: (from) {
           if (from.isEmpty) return;
           _fieldValues['activity_call'] = from;
@@ -5363,8 +5371,10 @@ class _WappPageState extends State<WappPage>
         },
         onMute: (from) {
           if (from.isEmpty) return;
+          RnsService.instance.setMutedCallsign(from, true);
           _fieldValues['activity_call'] = from;
           _sendCommand('activity_mute');
+          setState(() {});
         },
         // Follow straight from a post. The wapp does the NOSTR side (kind-3);
         // the host reflects it at once so the ⋯ menu and the Following filter

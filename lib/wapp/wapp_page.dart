@@ -1288,6 +1288,17 @@ class _WappPageState extends State<WappPage>
               );
             changed = true;
           }
+        } else if (type == 'ui.set_field') {
+          // Set one field's value from the wapp: the way a settings screen shows
+          // what the host currently believes (a read-only stat, or the option
+          // that is actually in force). Without this a wapp could only ever
+          // build lists — which is why the Indexer briefly rendered its options
+          // as a people-widget, i.e. as tabs.
+          final name = '${data['name'] ?? ''}';
+          if (name.isNotEmpty) {
+            _fieldValues[name] = '${data['value'] ?? ''}';
+            changed = true;
+          }
         } else if (type == 'ui.attr') {
           // e.g. catalog layout list/grid toggle.
           if ((data['target'] as String? ?? '') == 'catalog' &&

@@ -5,9 +5,6 @@
 > (the who-has layer), [folders.md](folders.md), [mesh.md](mesh.md).
 > This file is the **vision and the architecture**; it marks clearly what is
 > built, what is half-built, and what is not built at all.
->
-> *geogram* is the platform. "Aurora" is only the codename of one edition of it;
-> where code paths below say `aurora/`, read "the app repo".
 
 ## Why
 
@@ -639,8 +636,10 @@ is in `main` with tests, and the device-validated ones say so.
    `SYNC_REQ`/`SYNC_RES`/`SYNC_RESET` served by `RelayNode`, a merge that verifies
    every record against the provider that signed it, and a scheduler that runs
    only when this device IS an Indexer and only talks to peers that say they are
-   too — battery leaves are never sync partners. **Cross-device validation is
-   still pending** (needs a second always-on node). Superseded text:
+   too — battery leaves are never sync partners. **VALIDATED ACROSS TWO INTERNET
+   CONNECTIONS**: two phones on different networks, one published a pointer (a
+   like → keep → author record) and the other pulled it — `sync: 3b02bb89 +2 -0
+   bad=0 seq=2`, after a correct SYNC_RESET on first contact. Superseded text:
    `PointerLog` (append-only, insertions *and* removals, bounded + compacted),
    the `(epoch, seq)` cursor a clockless node can persist, `PointerSyncServer` /
    `PointerSyncClient` (verify every record against the provider that signed it —

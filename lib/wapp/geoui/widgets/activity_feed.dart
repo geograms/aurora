@@ -342,7 +342,32 @@ class _ActivityFeedState extends State<ActivityFeed> {
               !widget.hiddenCalls.contains((p['from'] ?? '').toString().toUpperCase()))
           .toList();
     }
-    return posts;
+    return _collapseRepeats(posts);
+  }
+
+  /// One voice saying the same thing over and over is ONE thing on screen.
+  ///
+  /// These are not duplicate deliveries of one event — they are separate,
+  /// correctly-signed notes with different ids and different timestamps, the
+  /// same text re-posted by the same account (a bot shouting, or a client
+  /// retrying). Dedup by event id cannot touch them, and neither should any
+  /// content rule that looks at text alone: two people both saying "OK" are two
+  /// people. It is the pair — the SAME author AND the same words — that makes a
+  /// repeat, and the feed shows the newest of them.
+  ///
+  /// Display-level only: the archive keeps every note, so nothing is lost and a
+  /// thread still opens.
+  List<Map<String, dynamic>> _collapseRepeats(List<Map<String, dynamic>> src) {
+    final seen = <String>{};
+    final out = <Map<String, dynamic>>[];
+    for (final p in src) {
+      // src is newest-first, so the first one we meet is the one to keep.
+      final key = '${(p['from'] ?? '').toString().toUpperCase()} '
+          '${(p['text'] ?? '').toString().trim()}';
+      if (!seen.add(key)) continue;
+      out.add(p);
+    }
+    return out;
   }
 
   @override

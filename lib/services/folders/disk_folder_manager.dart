@@ -19,6 +19,7 @@ import 'dart:typed_data';
 import '../../util/nostr_crypto.dart';
 import 'disk_folder.dart';
 import 'folder_keystore.dart';
+import 'folder_meta.dart';
 import 'folder_event.dart' show pieceSizeForFile, FileEntry;
 import 'folder_service.dart';
 import 'folder_state.dart';
@@ -241,6 +242,13 @@ class DiskFolderManager {
     }
     if (changed > 0) log?.call('disk folder ${folderId.substring(0, 8)}: $changed change(s) synced');
 
+    // The listing: data/meta.json is what a HUMAN edits, and the signed op-log
+    // is a mirror of it. Emitting setMeta here is what lets a stranger read this
+    // torrent's title and filter it by category WITHOUT downloading anything —
+    // the op-log is what they fetch from the nfolder link, before any bytes.
+    // meta.json wins on every rescan; nothing else writes these fields.
+    await _syncListing(folderId, state);
+
     // Advertise ourselves as a provider of the folder and of each file's bytes.
     // BEST EFFORT — never awaited inline: each DHT publish does an iterative
     // find + STORE and on a flaky link can take tens of seconds, which used to
@@ -268,6 +276,72 @@ class DiskFolderManager {
 
   bool owns(String folderId) => _sources.containsKey(folderId);
   String? dirOf(String folderId) => _dirs[folderId];
+
+  /// `<dir>/data` — where a folder's listing (meta.json + artwork) lives.
+  /// Null when we do not serve this folder from disk.
+  String? dataDirOf(String folderId) {
+    final dir = _dirs[folderId];
+    return dir == null ? null : '$dir${Platform.pathSeparator}$kFolderDataDir';
+  }
+
+  /// The listing this folder publishes, read from `data/meta.json`. An empty
+  /// listing when there is no file, or the file is unreadable/garbage — a folder
+  /// without a listing is the normal case, not an error.
+  FolderMeta readMeta(String folderId) {
+    final data = dataDirOf(folderId);
+    if (data == null) return const FolderMeta();
+    try {
+      final f = File('$data${Platform.pathSeparator}$kFolderMetaFile');
+      if (!f.existsSync()) return const FolderMeta();
+      return FolderMeta.parse(f.readAsStringSync());
+    } catch (e) {
+      log?.call('folder: could not read $kFolderDataDir/$kFolderMetaFile: $e');
+      return const FolderMeta();
+    }
+  }
+
+  /// Write the listing. The caller then rescans, which publishes the file (it is
+  /// an ordinary file in the folder) and mirrors the fields into the op-log.
+  Future<bool> writeMeta(String folderId, FolderMeta meta) async {
+    final data = dataDirOf(folderId);
+    if (data == null) return false;
+    try {
+      final dir = Directory(data);
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final f = File('$data${Platform.pathSeparator}$kFolderMetaFile');
+      await f.writeAsString(meta.encode(), flush: true);
+      return true;
+    } catch (e) {
+      log?.call('folder: could not write the listing: $e');
+      return false;
+    }
+  }
+
+  /// Mirror `data/meta.json` into the signed op-log — one setMeta, only when
+  /// something actually differs (a setMeta per rescan would grow the op-log
+  /// forever for no reason).
+  Future<void> _syncListing(String folderId, FolderState state) async {
+    final meta = readMeta(folderId);
+    if (meta.isEmpty) return; // no listing published: leave the op-log alone
+
+    final sameTitle = (state.title ?? '') == meta.title;
+    final sameDesc = (state.desc ?? '') == meta.desc;
+    final sameCat = (state.cat ?? '') == meta.cat;
+    final sameTags = (state.tags ?? '') == meta.tagsWire;
+    final sameAdult = state.adult == meta.adult;
+    if (sameTitle && sameDesc && sameCat && sameTags && sameAdult) return;
+
+    await folders.setMeta(
+      folderId,
+      desc: meta.desc,
+      tags: meta.tagsWire,
+      title: meta.title,
+      cat: meta.cat,
+      adult: meta.adult,
+    );
+    log?.call('disk folder ${folderId.substring(0, 8)}: listing published '
+        '("${meta.title}", ${meta.cat}${meta.adult ? ', +18' : ''})');
+  }
 
   /// The real on-disk path of one file inside a folder we serve from disk, by
   /// its sha256 (hex). Null when we don't serve that folder from disk, or don't

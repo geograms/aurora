@@ -74,10 +74,11 @@ import '../folders/folder_service.dart';
 import '../folders/folder_state.dart';
 import '../folders/folder_export.dart';
 import '../folders/folder_subscriptions.dart';
+import '../folders/folder_meta.dart';
 import '../folders/nfolder.dart';
 import '../folders/piece_hashes.dart';
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
-import 'package:reticulum/reticulum.dart' show MediaArchive, MediaRef;
+import 'package:reticulum/reticulum.dart' show MediaArchive, MediaRef, MediaKind;
 import 'package:reticulum/reticulum.dart' show BlossomServer;
 
 import '../notification_service.dart';
@@ -6839,6 +6840,11 @@ class RnsService {
       if (full['desc'] != null) 'desc': full['desc'],
       if (full['tags'] != null) 'tags': full['tags'],
       if (full['owner'] != null) 'owner': full['owner'],
+      // The listing (mirrored from data/meta.json into the signed op-log), so a
+      // client can show and filter a torrent it has not downloaded.
+      if (full['title'] != null) 'title': full['title'],
+      if (full['cat'] != null) 'cat': full['cat'],
+      if (full['adult'] == true) 'adult': true,
       'owned': _diskMgr?.owns(folderId) == true,
       'fileCount': files.length,
       'totalBytes': totalBytes,
@@ -7057,6 +7063,196 @@ class RnsService {
   /// advertising itself as a holder).
   bool folderPinned(String folderIdOrNpub) =>
       _subs?.isAutoSync(_normFolderId(folderIdOrNpub)) == true;
+
+  // ── The listing: data/meta.json + its artwork ──────────────────────────────
+
+  /// The listing of a folder we OWN, read from `data/meta.json` on disk.
+  /// An empty listing when the folder has none (the normal case).
+  FolderMeta folderMeta(String folderIdOrNpub) =>
+      _diskMgr?.readMeta(_normFolderId(folderIdOrNpub)) ?? const FolderMeta();
+
+  /// Write the listing of a folder we own, then rescan — which publishes
+  /// `data/meta.json` as an ordinary file AND mirrors its fields into the signed
+  /// op-log, so a stranger sees the new title/category without downloading.
+  Future<bool> folderSetMeta(String folderIdOrNpub, FolderMeta meta) async {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final mgr = _diskMgr;
+    if (mgr == null || !mgr.owns(folderId)) return false;
+    if (!await mgr.writeMeta(folderId, meta)) return false;
+    await mgr.sync(folderId);
+    return true;
+  }
+
+  /// Copy a file into the folder's `data/` under a FIXED name, so a client knows
+  /// what it is without being told: cover / banner / trailer / mediaN. Returns
+  /// the name written (e.g. `media3.webm`), or null.
+  ///
+  /// Refuses anything over [kMetaMediaMaxBytes]: `data/` is what a browsing
+  /// client pulls BEFORE it decides to download the torrent, so the artwork has
+  /// to stay cheap — a 300 MB "cover" would make every listing expensive to look
+  /// at, which defeats the point of having one.
+  Future<String?> folderSetMedia(
+    String folderIdOrNpub,
+    String slot,
+    String sourcePath,
+  ) async {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final mgr = _diskMgr;
+    if (mgr == null || !mgr.owns(folderId)) return null;
+    final dataDir = mgr.dataDirOf(folderId);
+    if (dataDir == null) return null;
+
+    final src = File(sourcePath);
+    if (!src.existsSync()) return null;
+    final size = src.lengthSync();
+    if (size <= 0 || size > kMetaMediaMaxBytes) {
+      LogService.instance.add(
+          'folders: ${sourcePath.split(Platform.pathSeparator).last} is '
+          '${size ~/ (1024 * 1024)}MB — the listing caps media at '
+          '${kMetaMediaMaxBytes ~/ (1024 * 1024)}MB');
+      return null;
+    }
+
+    final ext = _extOf(sourcePath).toLowerCase();
+    final kind = MediaRef.classify(ext);
+    if (kind != MediaKind.image && kind != MediaKind.video) return null;
+
+    var meta = folderMeta(folderId);
+    String name;
+    switch (slot) {
+      case 'cover':
+      case 'banner':
+        if (kind != MediaKind.image) return null;
+        name = '$slot.$ext';
+        break;
+      case 'trailer':
+        if (kind != MediaKind.video) return null;
+        name = 'trailer.$ext';
+        break;
+      case 'gallery':
+        if (meta.gallery.length >= kMetaGalleryMax) {
+          LogService.instance
+              .add('folders: the gallery already holds $kMetaGalleryMax items');
+          return null;
+        }
+        // mediaN, numbered from what is already there — the number is the order.
+        var n = 1;
+        final taken = meta.gallery.toSet();
+        while (taken.any((g) => g.startsWith('media$n.'))) {
+          n++;
+        }
+        name = 'media$n.$ext';
+        break;
+      default:
+        return null;
+    }
+
+    try {
+      final dir = Directory(dataDir);
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      // A slot holds ONE file: replace any previous cover/banner/trailer whose
+      // extension differed, or the folder would publish two covers and the
+      // listing would name only one of them.
+      if (slot != 'gallery') {
+        for (final f in dir.listSync()) {
+          if (f is! File) continue;
+          final leaf = f.path.split(Platform.pathSeparator).last;
+          if (leaf.startsWith('$slot.') && leaf != name) f.deleteSync();
+        }
+      }
+      await src.copy('$dataDir${Platform.pathSeparator}$name');
+    } catch (e) {
+      LogService.instance.add('folders: could not add $name: $e');
+      return null;
+    }
+
+    meta = switch (slot) {
+      'cover' => meta.copyWith(cover: name),
+      'banner' => meta.copyWith(banner: name),
+      'trailer' => meta.copyWith(trailer: name),
+      _ => meta.copyWith(gallery: [...meta.gallery, name]),
+    };
+    await folderSetMeta(folderId, meta);
+    return name;
+  }
+
+  /// The listing's artwork as MEDIA TOKENS the UI can render.
+  ///
+  /// A wapp cannot touch bytes (there is no HAL that hands media into wasm), and
+  /// the host renders exactly one thing: a `file:<sha>.<ext>` token. So this maps
+  /// each `data/<name>` to the sha the folder's own op-log already published for
+  /// it — the artwork is an ordinary file of the folder — and says whether the
+  /// bytes are here yet.
+  ///
+  /// When they are not, the fetch is kicked off: `data/` is small, so the cover
+  /// of a torrent you have NOT downloaded still fills in. That is the whole point
+  /// of a listing.
+  Map<String, dynamic> folderMediaTokens(String folderIdOrNpub) {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final state = folderBrowse(folderId);
+    final files = (state['files'] as List?) ?? const [];
+
+    // name (relative to data/) -> the published file entry
+    final byName = <String, Map<String, dynamic>>{};
+    for (final f in files) {
+      if (f is! Map) continue;
+      final n = (f['name'] as String?) ?? '';
+      if (!n.startsWith('$kFolderDataDir/')) continue;
+      byName[n.substring(kFolderDataDir.length + 1)] =
+          Map<String, dynamic>.from(f);
+    }
+
+    // The listing itself: from disk when we own it, else from the op-log's
+    // mirrored fields plus whatever data/ files the folder published.
+    final meta = folderMeta(folderId);
+    final archive = sharedMediaArchive();
+
+    Map<String, dynamic>? one(String? name) {
+      if (name == null || name.isEmpty) return null;
+      final entry = byName[name];
+      if (entry == null) return null;
+      final sha = (entry['x'] as String?) ?? '';
+      if (sha.length != 64) return null;
+      final ext = _extOf(name);
+      final have = archive?.has(sha) == true ||
+          _diskMgr?.filePathOf(folderId, sha) != null;
+      if (!have) {
+        // Small, and the user is looking at it right now.
+        // ignore: discarded_futures
+        folderDownloadFile(folderId, sha, '$kFolderDataDir/$name');
+      }
+      final b64u = MediaRef.hexToB64u(sha);
+      return {
+        'name': name,
+        if (b64u != null) 'token': 'file:$b64u.$ext',
+        'have': have,
+        if (entry['size'] is int) 'size': entry['size'],
+      };
+    }
+
+    // A folder we do NOT own has no meta.json on disk (yet); fall back to the
+    // fixed names, which is exactly why the names are fixed.
+    final coverName = meta.cover ??
+        byName.keys.firstWhere((n) => n.startsWith('cover.'), orElse: () => '');
+    final bannerName = meta.banner ??
+        byName.keys.firstWhere((n) => n.startsWith('banner.'), orElse: () => '');
+    final trailerName = meta.trailer ??
+        byName.keys.firstWhere((n) => n.startsWith('trailer.'), orElse: () => '');
+    final galleryNames = meta.gallery.isNotEmpty
+        ? meta.gallery
+        : (byName.keys.where((n) => n.startsWith('media')).toList()..sort());
+
+    return {
+      'folderId': folderId,
+      if (one(coverName) != null) 'cover': one(coverName),
+      if (one(bannerName) != null) 'banner': one(bannerName),
+      if (one(trailerName) != null) 'trailer': one(trailerName),
+      'gallery': [
+        for (final g in galleryNames.take(kMetaGalleryMax))
+          if (one(g) != null) one(g)!,
+      ],
+    };
+  }
 
   /// Open one file of a folder with whatever the system uses to view it — the
   /// gallery for a photo, a reader for a PDF, the installer for an APK.

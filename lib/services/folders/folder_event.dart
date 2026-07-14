@@ -206,13 +206,25 @@ Map<String, dynamic> opSetMeta(
         String? desc,
         String? tags,
         String? owner,
-        String? shareType}) =>
+        String? shareType,
+        String? title,
+        String? cat,
+        bool? adult}) =>
     {
       'op': 'setMeta',
       'name': ?name,
       'desc': ?desc,
       'tags': ?tags,
       'owner': ?owner,
+      // The LISTING, mirrored from data/meta.json (folder_meta.dart) so a
+      // stranger can read a torrent's title and filter it by category WITHOUT
+      // downloading anything. meta.json is what a human edits; this is what the
+      // network sees. `title` is the human name of the content (the folder's
+      // `name` stays the directory's name); `cat` is one of kFolderCategories;
+      // `adult` is a flag, not a category — an adult film is still a film.
+      'title': ?title,
+      'cat': ?cat,
+      'adult': ?adult,
       // 'private' (default) | 'readonly' | 'collab'. Advisory: it steers the UI
       // and the auto-subscribe behaviour; the actual write authority is still
       // enforced by the master-signed keyset in reduceFolder.

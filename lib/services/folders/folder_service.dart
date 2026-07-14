@@ -126,13 +126,43 @@ class FolderService {
   String? _signer(String folderId) =>
       keystore.get(folderId)?.priv ?? adminPrivHex();
 
-  Future<bool> _emitOp(String folderId, Map<String, dynamic> op) async {
+  /// A timestamp strictly LATER than every op already published for this folder.
+  ///
+  /// Ops reduce in `created_at` order, and a tie is broken by event id — which is
+  /// deterministic but arbitrary. Two ops that rewrite the SAME field within one
+  /// second (a publisher fixing a typo in the listing, then saving again) would
+  /// therefore resolve by coin-flip: the edit could simply lose, and the folder
+  /// would keep showing the old title with no error anywhere. Rewriting ops
+  /// (setMeta) ask for a timestamp that cannot tie.
+  Future<int> _nextRewriteTs(String folderId) async {
+    final now = _now();
+    try {
+      final ops = await query(NostrFilter(
+        kinds: [kKindFolderOp],
+        tags: {
+          'd': [folderId],
+        },
+        limit: 500,
+      ));
+      var max = 0;
+      for (final e in ops) {
+        if (e.createdAt > max) max = e.createdAt;
+      }
+      return now > max ? now : max + 1;
+    } catch (_) {
+      return now;
+    }
+  }
+
+  Future<bool> _emitOp(String folderId, Map<String, dynamic> op,
+      {int? createdAt}) async {
     final priv = _signer(folderId);
     if (priv == null) {
       log?.call('folder: no signing key for $folderId');
       return false;
     }
-    return publish(buildOp(priv, folderId, op, createdAt: _now()));
+    return publish(
+        buildOp(priv, folderId, op, createdAt: createdAt ?? _now()));
   }
 
   Future<bool> addFile(String folderId, String shaHex,
@@ -157,15 +187,30 @@ class FolderService {
   Future<bool> removeFile(String folderId, String shaHex, {String? name}) =>
       _emitOp(folderId, opRmFile(shaHex, name: name));
 
-  Future<bool> setMeta(String folderId, {String? name, String? desc, String? tags}) =>
+  Future<bool> setMeta(String folderId,
+      {String? name,
+      String? desc,
+      String? tags,
+      String? title,
+      String? cat,
+      bool? adult}) async =>
+      // setMeta REWRITES fields, so it must never tie with an earlier setMeta
+      // (see _nextRewriteTs) — otherwise an edit made in the same second as the
+      // last one can silently lose.
+      //
       // Stamp/refresh the owner npub when we hold the master key, so existing
       // folders gain it on the next edit (for later admin messaging).
-      _emitOp(folderId,
+      _emitOp(
+          folderId,
           opSetMeta(
               name: name,
               desc: desc,
               tags: tags,
-              owner: keystore.owns(folderId) ? _ownerNpub() : null));
+              title: title,
+              cat: cat,
+              adult: adult,
+              owner: keystore.owns(folderId) ? _ownerNpub() : null),
+          createdAt: await _nextRewriteTs(folderId));
 
   Future<bool> linkFolder(String folderId, String targetFolderId,
           {String? name}) =>

@@ -22,6 +22,7 @@ import '../profile/storage_paths.dart';
 import '../services/android_permissions_service.dart';
 import '../services/blossom_server.dart';
 import '../services/preferences_service.dart';
+import '../services/folders/folder_meta.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/log_service.dart';
 import '../services/social/node_role_api.dart';
@@ -1063,6 +1064,70 @@ class WappEngine {
     // installer). arg = "sha\tname". Async: 1 = started. The bytes, when they
     // live in the archive rather than on disk, are exported on a WORKER isolate
     // — a 300MB video must never be pulled through the isolate drawing the UI.
+    // ── The listing: data/meta.json (folder_meta.dart) ──────────────────────
+    // Read the listing of a folder we own → the meta.json shape.
+    final halFolderMetaGet = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (idLen <= 0 || outCap <= 0) return 0;
+        final m = RnsService.instance.folderMeta(_readStr(idPtr, idLen));
+        return _writeStr(outPtr, outCap, jsonEncode(m.toJson()));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Write the listing: rewrites data/meta.json AND rescans, which publishes it
+    // as an ordinary file and mirrors title/cat/tags into the signed op-log.
+    final halFolderMetaSet = WasmFunction(
+      (int idPtr, int idLen, int jsonPtr, int jsonLen) {
+        if (idLen <= 0 || jsonLen <= 0) return 0;
+        // Parse through FolderMeta: the wapp's JSON is input like any other, and
+        // every limit (50/200/10 tags, the category set, no path in a media name)
+        // is enforced in ONE place rather than trusted here.
+        final meta = FolderMeta.parse(_readStr(jsonPtr, jsonLen));
+        // ignore: discarded_futures
+        RnsService.instance.folderSetMeta(_readStr(idPtr, idLen), meta);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Copy a picked file into data/ under its fixed name.
+    // arg = "slot\tpath", slot = cover | banner | trailer | gallery. 1 = started.
+    final halFolderSetMedia = WasmFunction(
+      (int idPtr, int idLen, int argPtr, int argLen) {
+        if (idLen <= 0 || argLen <= 0) return 0;
+        final arg = _readStr(argPtr, argLen);
+        final tab = arg.indexOf('\t');
+        if (tab <= 0) return 0;
+        // ignore: discarded_futures
+        RnsService.instance
+            .folderSetMedia(_readStr(idPtr, idLen), arg.substring(0, tab),
+                arg.substring(tab + 1))
+            .then((name) {
+          if (name == null) {
+            LogService.instance.add(
+                'torrents: that file could not be added to the listing '
+                '(wrong type, or over ${kMetaMediaMaxBytes ~/ (1024 * 1024)}MB)');
+          }
+        });
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // The listing's artwork as media tokens the host can render:
+    // {cover:{token,have}, banner:.., trailer:.., gallery:[..]}. Bytes we do not
+    // hold are fetched in the background — data/ is small, so the cover of a
+    // torrent you have NOT downloaded still fills in.
+    final halFolderMedia = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (idLen <= 0 || outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderMediaTokens(_readStr(idPtr, idLen))));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     final halFolderOpenFile = WasmFunction(
       (int idPtr, int idLen, int argPtr, int argLen) {
         if (idLen <= 0 || argLen <= 0) return 0;
@@ -3312,6 +3377,10 @@ class WappEngine {
       WasmImport('hal', 'folder_swarm', halFolderSwarm),
       WasmImport('hal', 'folder_pin', halFolderPin),
       WasmImport('hal', 'folder_open_file', halFolderOpenFile),
+      WasmImport('hal', 'folder_meta_get', halFolderMetaGet),
+      WasmImport('hal', 'folder_meta_set', halFolderMetaSet),
+      WasmImport('hal', 'folder_set_media', halFolderSetMedia),
+      WasmImport('hal', 'folder_media', halFolderMedia),
       WasmImport('hal', 'fs_listdir', halFsListdir),
       WasmImport('hal', 'fs_home', halFsHome),
       WasmImport('hal', 'storage_request', halStorageRequest),

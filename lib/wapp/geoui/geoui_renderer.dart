@@ -1,6 +1,7 @@
 /// GeoUI Flutter renderer — turns AST blocks into Material 3 widgets.
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
@@ -10,6 +11,8 @@ import '../i18n_context.dart';
 import 'geoui_ast.dart';
 import '../../editor/code_editor_field.dart';
 import 'widgets/icon_field.dart';
+import 'widgets/media_view.dart' show MediaThumbnail;
+import '../../util/media_ref.dart' show MediaRef;
 import 'widgets/log_view_field.dart';
 import 'widgets/stats_grid_field.dart';
 import 'widgets/chat_view_field.dart';
@@ -357,6 +360,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       'qr' => _renderQrField(fieldName, label, tip, field),
       'stats' => _renderStatsField(fieldName),
       'image' => _renderImageField(fieldName, label, tip, field),
+      'gallery' => _renderGalleryField(fieldName, label, tip, field),
       _ => _renderStringField(fieldName, label, tip, field),
     };
   }
@@ -379,6 +383,99 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
         widget.onAction?.call('${name}_tap');
       },
     );
+  }
+
+  /// `$type:"gallery"` — the artwork of a listing: a wide banner, a cover, and a
+  /// row of stills/clips. Read-only; the wapp sets the value (via ui.field.set)
+  /// to the JSON that `hal_folder_media` returns:
+  ///
+  ///   {"banner":{"token":"file:….jpg"},"cover":{…},"trailer":{…},
+  ///    "gallery":[{…},…]}
+  ///
+  /// Every tile is a [MediaThumbnail], which already gives a poster for a video,
+  /// inline playback for a .webm, a fetch-progress chip while the bytes are
+  /// still coming, and a fullscreen viewer on tap. None of that is re-invented
+  /// here — this is layout over the widget chat already uses.
+  Widget _renderGalleryField(
+      String name, String label, String? tip, GeoUiBlock field) {
+    final raw = widget.bindings.getValue(name)?.toString() ?? '';
+    if (raw.isEmpty) return const SizedBox.shrink();
+    Map<String, dynamic> g;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return const SizedBox.shrink();
+      g = decoded.cast<String, dynamic>();
+    } catch (_) {
+      return const SizedBox.shrink();
+    }
+
+    MediaRef? refOf(Object? item) {
+      if (item is! Map) return null;
+      final token = (item['token'] ?? '').toString();
+      return token.isEmpty ? null : MediaRef.parse(token);
+    }
+
+    int? sizeOf(Object? item) =>
+        (item is Map && item['size'] is int) ? item['size'] as int : null;
+
+    final banner = refOf(g['banner']);
+    final cover = refOf(g['cover']);
+    final trailer = refOf(g['trailer']);
+    final gallery = ((g['gallery'] as List?) ?? const []).toList();
+
+    if (banner == null &&
+        cover == null &&
+        trailer == null &&
+        gallery.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final tiles = <Widget>[
+      // The trailer leads: it is the thing a person most wants to press.
+      if (trailer != null)
+        MediaThumbnail(ref: trailer, size: sizeOf(g['trailer'])),
+      for (final item in gallery)
+        if (refOf(item) != null)
+          MediaThumbnail(ref: refOf(item)!, size: sizeOf(item)),
+    ];
+
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (label.isNotEmpty && field.getString('label') != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(label, style: Theme.of(context).textTheme.titleSmall),
+          ),
+        if (banner != null)
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: AspectRatio(
+              aspectRatio: 16 / 6,
+              child: MediaThumbnail(ref: banner, size: sizeOf(g['banner'])),
+            ),
+          ),
+        if (banner != null && cover != null) const SizedBox(height: 10),
+        if (cover != null)
+          // Poster proportions (2:3), left-aligned like box art on a shelf.
+          SizedBox(
+            width: 130,
+            height: 195,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: MediaThumbnail(ref: cover, size: sizeOf(g['cover'])),
+            ),
+          ),
+        if (tiles.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Wrap(spacing: 8, runSpacing: 8, children: tiles),
+        ],
+      ],
+    );
+
+    return tip == null
+        ? content
+        : Tooltip(message: tip, child: content);
   }
 
   /// `$type:"qr"` — render a QR code of the field's string value (e.g. a circle

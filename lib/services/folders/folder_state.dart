@@ -26,6 +26,14 @@ class FolderState {
   String? tags; // comma/space-separated label string (owner metadata)
   String? owner; // owner's personal npub (for messaging the admin), if stamped
   String? shareType; // 'private' | 'readonly' | 'collab' (see FolderShareType)
+
+  // The listing, mirrored from data/meta.json (folder_meta.dart) so a torrent
+  // can be read and filtered WITHOUT downloading it. `name` is the directory's
+  // name; `title` is what the content is called.
+  String? title;
+  String? cat; // one of kFolderCategories
+  bool adult = false; // +18 — a flag, not a category
+
   final Map<String, FileEntry> files = {}; // name (or sha if unnamed) -> entry
   final Map<String, LinkEntry> links = {}; // target folderId -> entry
   List<AdminEntry> admins = const [];
@@ -42,6 +50,9 @@ class FolderState {
         if (tags != null) 'tags': tags,
         if (owner != null) 'owner': owner,
         if (shareType != null) 'shareType': shareType,
+        if (title != null) 'title': title,
+        if (cat != null) 'cat': cat,
+        if (adult) 'adult': true,
         'files': [for (final f in fileList) f.toJson()],
         'links': [for (final l in linkList) l.toJson()],
         'admins': [for (final a in admins) a.toJson()],
@@ -149,6 +160,8 @@ void _apply(FolderState s, Map payload, int createdAt) {
       }
       break;
     case 'setMeta':
+      // Only keys the payload actually CARRIES are touched, so a client that
+      // predates a field cannot wipe it by omitting it.
       if (payload.containsKey('name')) s.name = payload['name'] as String?;
       if (payload.containsKey('desc')) s.desc = payload['desc'] as String?;
       if (payload.containsKey('tags')) s.tags = payload['tags'] as String?;
@@ -156,6 +169,9 @@ void _apply(FolderState s, Map payload, int createdAt) {
       if (payload.containsKey('shareType')) {
         s.shareType = payload['shareType'] as String?;
       }
+      if (payload.containsKey('title')) s.title = payload['title'] as String?;
+      if (payload.containsKey('cat')) s.cat = payload['cat'] as String?;
+      if (payload.containsKey('adult')) s.adult = payload['adult'] == true;
       break;
     case 'link':
       final f = payload['f'];

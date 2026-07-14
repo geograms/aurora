@@ -98,4 +98,55 @@ void main() {
     expect(state.shareType, FolderShareType.collab);
     expect(state.toJson()['shareType'], FolderShareType.collab);
   });
+
+  test('the listing (title/cat/adult) reduces onto the state', () {
+    // This is what a stranger reads from the nfolder link BEFORE downloading a
+    // byte: it is the whole reason the listing is mirrored into the op-log.
+    final master = NostrCrypto.generateKeyPair();
+    final folderId = master.publicKeyHex;
+    const t0 = 1700000000;
+    final ops = <NostrEvent>[
+      buildOp(
+          master.privateKeyHex,
+          folderId,
+          opSetMeta(
+              name: 'bbb',
+              title: 'Big Buck Bunny',
+              desc: 'A large rabbit deals with three bullies.',
+              cat: 'film',
+              tags: '1080p, animation',
+              adult: false),
+          createdAt: t0),
+    ];
+    final state = reduceFolder(folderId, null, ops);
+    expect(state.title, 'Big Buck Bunny');
+    expect(state.cat, 'film');
+    expect(state.tags, '1080p, animation');
+    expect(state.adult, isFalse);
+    expect(state.toJson()['cat'], 'film');
+    expect(state.toJson().containsKey('adult'), isFalse); // false is not emitted
+  });
+
+  test('an OLD client\'s setMeta does not wipe the listing', () {
+    // The reducer only touches keys the payload carries. A client that predates
+    // the listing renames the folder and would otherwise silently erase its
+    // title, category and +18 flag — publishing an adult film as an untagged
+    // "other" to everyone who syncs after it.
+    final master = NostrCrypto.generateKeyPair();
+    final folderId = master.publicKeyHex;
+    const t0 = 1700000000;
+    final ops = <NostrEvent>[
+      buildOp(master.privateKeyHex, folderId,
+          opSetMeta(title: 'Some Film', cat: 'film', adult: true),
+          createdAt: t0),
+      // An older client: it knows only `name`.
+      buildOp(master.privateKeyHex, folderId, {'op': 'setMeta', 'name': 'renamed'},
+          createdAt: t0 + 10),
+    ];
+    final state = reduceFolder(folderId, null, ops);
+    expect(state.name, 'renamed');
+    expect(state.title, 'Some Film');
+    expect(state.cat, 'film');
+    expect(state.adult, isTrue);
+  });
 }

@@ -46,6 +46,10 @@ class ProfileRoute extends StatefulWidget {
   final void Function(Map<String, dynamic> post)? onRepost;
   final String? Function(String npub)? mentionResolver;
 
+  /// Tapping an @mention (in the bio or in one of their posts) opens that
+  /// person — the same screen this one is.
+  final void Function(String pubkeyHex)? onMentionTap;
+
   /// Profile metadata supplied DIRECTLY (e.g. a NOSTR kind-0 already cached by
   /// the wapp): {name, about, pic, banner, nip05, website, lud16}. When present
   /// it's applied synchronously and [fetchMetadata] is not called.
@@ -104,6 +108,7 @@ class ProfileRoute extends StatefulWidget {
     this.isReposted,
     this.onRepost,
     this.mentionResolver,
+    this.onMentionTap,
     this.metadata,
     this.presetName,
     this.presetAvatar,
@@ -241,6 +246,7 @@ class _ProfileRouteState extends State<ProfileRoute> {
       isReposted: widget.isReposted,
       onRepost: widget.onRepost,
       mentionResolver: widget.mentionResolver,
+      onMentionTap: widget.onMentionTap,
       displayName: _name,
       about: _about,
       avatarImage: _avatar,

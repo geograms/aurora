@@ -10,6 +10,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/gestures.dart';
+import '../../../services/social/note_text.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -93,6 +94,9 @@ class ActivityFeed extends StatefulWidget {
   /// Resolve a `npub1…` mention in a post body to a display name.
   final String? Function(String npub)? mentionResolver;
 
+  /// Tapping an @mention opens that person. Given the full 64-char pubkey hex.
+  final void Function(String pubkeyHex)? onMentionTap;
+
   /// Pull-to-refresh: re-query the relays for the latest posts. Awaited so the
   /// spinner shows until new events have had a moment to arrive.
   final Future<void> Function()? onRefresh;
@@ -136,6 +140,7 @@ class ActivityFeed extends StatefulWidget {
     this.onMute,
     this.onFollow,
     this.mentionResolver,
+    this.onMentionTap,
     this.onRefresh,
     this.initialFilter,
     this.onFilterChanged,
@@ -471,6 +476,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
                           onTap: () => widget.onOpenThread?.call(posts[i]),
                           onReply: () => widget.onOpenThread?.call(posts[i]),
                           mentionResolver: widget.mentionResolver,
+                          onMentionTap: widget.onMentionTap,
                         ),
                       ),
               ),
@@ -899,6 +905,9 @@ class ActivityPostCard extends StatelessWidget {
   /// Resolve a `npub1…` mention in the body to a display name.
   final String? Function(String npub)? mentionResolver;
 
+  /// Tapping an @mention opens that person. Given the full 64-char pubkey hex.
+  final void Function(String pubkeyHex)? onMentionTap;
+
   const ActivityPostCard({
     super.key,
     required this.post,
@@ -923,6 +932,7 @@ class ActivityPostCard extends StatelessWidget {
     this.indent = 0,
     this.connector = false,
     this.mentionResolver,
+    this.onMentionTap,
   });
 
   /// Per-post "…" menu: mute or block the author (only for others' posts).
@@ -988,8 +998,10 @@ class ActivityPostCard extends StatelessWidget {
     }
     final time = activityTimeShort(p);
     final via = (p['via'] ?? '').toString();
-    final body =
-        activityFormatMentions(activityStrip(raw), mentionResolver);
+    // RAW (mentions not substituted): _ExpandableText decodes them itself, and
+    // needs the keys to build a tap target. Substituting here is what made a
+    // mention un-tappable.
+    final body = activityStrip(raw);
     // Media links shown inline below are stripped from the visible text (no
     // point repeating a long blossom.band/… URL under its own image).
     final mediaUrls = activityMediaUrls(body);
@@ -1075,8 +1087,13 @@ class ActivityPostCard extends StatelessWidget {
                       padding: const EdgeInsets.only(top: 3),
                       // Long notes (some are thousands of chars) are clamped with
                       // a "More" toggle so one post can't blow up the row.
-                      child: _ExpandableText(textBody,
-                          key: ValueKey('body-${mid.isNotEmpty ? mid : '$from$body'.hashCode}')),
+                      child: _ExpandableText(
+                        textBody,
+                        key: ValueKey(
+                            'body-${mid.isNotEmpty ? mid : '$from$body'.hashCode}'),
+                        mentionResolver: mentionResolver,
+                        onMentionTap: onMentionTap,
+                      ),
                     ),
                   if (refs.isNotEmpty)
                     Padding(
@@ -1246,6 +1263,9 @@ class ActivityThreadPage extends StatefulWidget {
   /// Resolve a `npub1…` mention in a post body to a display name.
   final String? Function(String npub)? mentionResolver;
 
+  /// Tapping an @mention inside the thread opens that person.
+  final void Function(String pubkeyHex)? onMentionTap;
+
   const ActivityThreadPage({
     super.key,
     required this.root,
@@ -1266,6 +1286,7 @@ class ActivityThreadPage extends StatefulWidget {
     this.onAttach,
     this.revision,
     this.mentionResolver,
+    this.onMentionTap,
   });
 
   @override
@@ -1394,6 +1415,7 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
                       indent: depth * 16.0,
                       connector: depth > 0,
                       mentionResolver: widget.mentionResolver,
+                      onMentionTap: widget.onMentionTap,
                       // Reply to the root itself targets the publication (null).
                       onReply: () =>
                           _replyTo(i == 0 ? null : it.post),
@@ -1513,7 +1535,20 @@ class _ActivityThreadPageState extends State<ActivityThreadPage> {
 /// the feed. State is keyed by the post id so it survives list rebuilds.
 class _ExpandableText extends StatefulWidget {
   final String text;
-  const _ExpandableText(this.text, {super.key});
+
+  /// A mention's display name, given its bech32 token. Null → not resolved yet.
+  final String? Function(String token)? mentionResolver;
+
+  /// Tapping @someone opens their profile. Given the mentioned author's full
+  /// 64-char pubkey hex.
+  final void Function(String pubkeyHex)? onMentionTap;
+
+  const _ExpandableText(
+    this.text, {
+    super.key,
+    this.mentionResolver,
+    this.onMentionTap,
+  });
   @override
   State<_ExpandableText> createState() => _ExpandableTextState();
 }
@@ -1539,17 +1574,23 @@ class _ExpandableTextState extends State<_ExpandableText> {
     } catch (_) {}
   }
 
-  /// Split [text] into plain runs + tappable http(s) link spans (opened in the
-  /// system browser). Trailing punctuation stays out of the link.
+  /// Split [text] into plain runs, tappable http(s) links (opened in the system
+  /// browser) and tappable @mentions (which open the mentioned person).
+  ///
+  /// URLs and mentions are matched SEPARATELY and then merged in document order.
+  /// Mentions used to be substituted into the string *before* this ran, which
+  /// discarded the key — so the name was rendered and there was nothing left to
+  /// attach a tap to. The raw text arrives here now, keys and all.
   List<InlineSpan> _linkified(String text) {
     for (final r in _recognizers) {
       r.dispose();
     }
     _recognizers.clear();
-    final spans = <InlineSpan>[];
-    var i = 0;
+
+    // (start, end, builder) for every thing that is not plain text.
+    final marks = <({int start, int end, InlineSpan Function() span})>[];
+
     for (final m in _urlRe.allMatches(text)) {
-      if (m.start > i) spans.add(TextSpan(text: text.substring(i, m.start)));
       var url = m.group(0)!;
       String tail = '';
       final tm = RegExp(r'[.,;:!?)\]}>"' r"']+$").firstMatch(url);
@@ -1557,16 +1598,71 @@ class _ExpandableTextState extends State<_ExpandableText> {
         tail = url.substring(tm.start);
         url = url.substring(0, tm.start);
       }
-      final rec = TapGestureRecognizer()..onTap = () => _openUrl(url);
-      _recognizers.add(rec);
-      spans.add(TextSpan(
-        text: url,
-        recognizer: rec,
-        style: TextStyle(
-            color: ChatPalette.accent, decoration: TextDecoration.underline),
+      marks.add((
+        start: m.start,
+        end: m.end,
+        span: () {
+          final rec = TapGestureRecognizer()..onTap = () => _openUrl(url);
+          _recognizers.add(rec);
+          return TextSpan(children: [
+            TextSpan(
+              text: url,
+              recognizer: rec,
+              style: const TextStyle(
+                  color: ChatPalette.accent,
+                  decoration: TextDecoration.underline),
+            ),
+            if (tail.isNotEmpty) TextSpan(text: tail),
+          ]);
+        },
       ));
-      if (tail.isNotEmpty) spans.add(TextSpan(text: tail));
-      i = m.end;
+    }
+
+    for (final mention in parseNoteMentions(text)) {
+      // Inside a URL the mention loses: the link is the thing the user meant.
+      if (marks.any((k) => mention.start >= k.start && mention.start < k.end)) {
+        continue;
+      }
+      marks.add((
+        start: mention.start,
+        end: mention.end,
+        span: () {
+          final label = mentionLabel(
+              mention,
+              mention.isPerson
+                  ? widget.mentionResolver?.call(mention.token)
+                  : null);
+          final hex = mention.pubkeyHex;
+          final onTap = widget.onMentionTap;
+          if (!mention.isPerson || hex == null || onTap == null) {
+            // A note reference, or nowhere to go: readable, but not a lie about
+            // being tappable.
+            return TextSpan(
+                text: label,
+                style: const TextStyle(color: ChatPalette.secondary));
+          }
+          final rec = TapGestureRecognizer()..onTap = () => onTap(hex);
+          _recognizers.add(rec);
+          return TextSpan(
+            text: label,
+            recognizer: rec,
+            style: const TextStyle(
+                color: ChatPalette.accent, fontWeight: FontWeight.w600),
+          );
+        },
+      ));
+    }
+
+    if (marks.isEmpty) return [TextSpan(text: text)];
+    marks.sort((a, b) => a.start.compareTo(b.start));
+
+    final spans = <InlineSpan>[];
+    var i = 0;
+    for (final k in marks) {
+      if (k.start < i) continue; // overlapping match — first one wins
+      if (k.start > i) spans.add(TextSpan(text: text.substring(i, k.start)));
+      spans.add(k.span());
+      i = k.end;
     }
     if (i < text.length) spans.add(TextSpan(text: text.substring(i)));
     return spans;

@@ -34,6 +34,7 @@ import '../services/log_service.dart';
 import '../services/notification_service.dart';
 import '../services/notification_store.dart';
 import '../services/reticulum/rns_service.dart';
+import '../services/social/note_text.dart';
 import '../services/mesh/mesh_service.dart';
 import '../services/preferences_service.dart';
 import '../services/launch_count_store.dart';

@@ -34,6 +34,9 @@ class ProfileView extends StatefulWidget {
   final void Function(Map<String, dynamic> post)? onRepost;
   final String? Function(String npub)? mentionResolver;
 
+  /// Tapping an @mention in the bio or in a post opens that person.
+  final void Function(String pubkeyHex)? onMentionTap;
+
   /// Current relationship + actions (wired to the APRS wapp). When the callbacks
   /// are null the corresponding control is hidden.
   final bool following;
@@ -97,6 +100,7 @@ class ProfileView extends StatefulWidget {
     this.isReposted,
     this.onRepost,
     this.mentionResolver,
+    this.onMentionTap,
     this.following = false,
     this.blocked = false,
     this.onSetFollow,

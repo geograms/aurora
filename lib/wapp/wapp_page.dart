@@ -5096,6 +5096,15 @@ class _WappPageState extends State<WappPage>
   /// already shows so the header is never blank.
   void _feedSenderTap(String from) => _openNostrProfile(from);
 
+  /// Open the profile of a MENTIONED author. A mention decodes to a full 64-char
+  /// pubkey; the feed (and every profile route) keys an author by the first 12
+  /// chars of it, so this is the same screen the author's avatar opens — no
+  /// second profile path to keep in step.
+  void _openNostrProfileByHex(String hex) {
+    if (hex.length < 12) return;
+    _openNostrProfile(hex.substring(0, 12));
+  }
+
   /// Full-screen Twitter-style profile for a NOSTR author: banner + avatar +
   /// name + bio + nip05/website/lightning + their posts, with Message, Follow,
   /// Mute and Block actions.
@@ -5138,6 +5147,7 @@ class _WappPageState extends State<WappPage>
               },
               // Per-post Like / Reply / Retweet, same wiring as the feed.
               mentionResolver: RnsService.instance.nostrMentionName,
+              onMentionTap: _openNostrProfileByHex,
               likeInfo: _likeInfoFor,
               onLike: (m, like) {
                 _fieldValues['activity_mid'] = m;
@@ -5425,6 +5435,7 @@ class _WappPageState extends State<WappPage>
         selfAvatar: _loadSelfProfile().avatar,
         profileFor: _feedProfileFor,
         mentionResolver: RnsService.instance.nostrMentionName,
+        onMentionTap: _openNostrProfileByHex,
         onOpenThread: _openActivityThread,
         onRefresh: () async {
           // Re-query the relays for the newest posts (pull-to-refresh).
@@ -5462,6 +5473,7 @@ class _WappPageState extends State<WappPage>
             _wappProfiles[c]?['npub'] ?? RnsService.instance.npubForCallsign(c),
         profileFor: _feedProfileFor,
         mentionResolver: RnsService.instance.nostrMentionName,
+        onMentionTap: _openNostrProfileByHex,
         onSenderTap: _feedSenderTap,
         onOpenThread: _openActivityThread,
         replyCount: _replyCountFor,
@@ -5843,6 +5855,7 @@ class _WappPageState extends State<WappPage>
               onSenderTap: _feedSenderTap,
               profileFor: _feedProfileFor,
               mentionResolver: RnsService.instance.nostrMentionName,
+              onMentionTap: _openNostrProfileByHex,
               npubFor: (c) =>
                   _wappProfiles[c]?['npub'] ??
                   RnsService.instance.npubForCallsign(c),

@@ -655,7 +655,12 @@ class _TextBlock extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  item.title,
+                  // A mention is a person, not 63 characters of bech32. Resolved
+                  // at RENDER, not when the item was parsed: a profile usually
+                  // arrives after the post does, so a name baked in at parse time
+                  // would stay a raw key forever.
+                  formatNoteMentions(
+                      item.title, RnsService.instance.nostrMentionName),
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: titleStyle,
@@ -665,7 +670,8 @@ class _TextBlock extends StatelessWidget {
                   Padding(
                     padding: EdgeInsets.only(right: reserveCorner ? 86 : 0),
                     child: Text(
-                      item.summary,
+                      formatNoteMentions(
+                          item.summary, RnsService.instance.nostrMentionName),
                       maxLines: summaryLines,
                       overflow: TextOverflow.ellipsis,
                       style: summaryStyle,

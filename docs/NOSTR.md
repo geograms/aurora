@@ -261,6 +261,101 @@ merged into **one** store, so the feed is a single unified cache and a post goes
 out over both. The user-facing panel is **NOSTR on Internet** (relays + Blossom
 servers: add / remove / enable-disable).
 
+### Reading the public internet: the ingest pipeline — BUILT
+
+This is the half of the system the user actually looks at, and it was the least
+written-down. Everything below is `nostr_relay_hub.dart` +
+`nostr_ws_client.dart`, running inside the **`nostr-engine` isolate** (Schnorr
+never touches the UI thread — see `docs/performance.md`).
+
+**The relay list is a merge, not a seed.** `kDefaultNostrRelays` is offered to a
+device *on every start*, not only when the list is empty — but only for relays it
+has **never been offered before** (`offered`, persisted beside the list). So a
+relay added to the defaults later reaches an install that already exists, and a
+relay the user **removed or disabled stays gone**. Seeding on first run only is
+how a device gets stranded: a phone was found holding two relays, one unreachable
+from its network and one that serves no firehose, with a sixteen-hour-old feed and
+no way for a newer default to ever reach it.
+
+**Five kinds of subscription, and they are not equal.**
+
+| Sub | Filter | Feeds |
+|---|---|---|
+| `fireR*` — the **firehose** | `kinds:[0,1] limit:200` | the **All** tab. Live push, sub-second |
+| `discoR*` / `discoF*` — **discovery** | `kinds:[7]`, then fetch the liked ids | "popular" — can only ever surface a post that *already* has likes |
+| `myfollows` | `authors:[…]` | the **Following** tab |
+| `prof*` / `fireP*` | `kinds:[0]` | names and avatars; batched on a slow timer |
+| `stat*` | reactions/replies for on-screen posts | like and reply counts |
+| notifications | `kinds:[1,6,7] #p:me` | the bell — pinned at tier 0 (see the touch rule) |
+
+Discovery is **not** the All tab and never was: a post cannot have likes the
+moment it is published, so a like-gated feed guarantees the newest thing on
+screen is an hour old. All = firehose + the quality gate.
+
+**Order of operations in `_onEvent` is load-bearing.** In order:
+
+1. **Anything `p`-tagging me is stored first**, at tier 0 — before the reaction
+   short-circuit and **before the rate cap**. A reaction to my post is a fact
+   about me and the relay that carried it may be gone tomorrow.
+2. Reaction receipts for **tracked** posts (the ones on screen) are persisted.
+   The kind-7 firehose is thousands a minute; persisting all of it would be one
+   unbatched INSERT per stranger's like, forever.
+3. Engagement tallies, then discovery tally — both *consume* reactions.
+4. **The firehose branch, and only then the rate cap.** The quality gate
+   (`feed_quality.dart`) decides what is stored and shown; the cap protects the
+   *generic* path, which stores everything it is handed. Getting this backwards
+   is fatal and did happen: relays answer a fresh subscription with a burst (200
+   events each, times every relay), the cap is 15 per 250 ms, so the burst was
+   discarded **before the gate saw a single post** — `dropped=173, fireSeen=0,
+   stored=0` with four relays streaming happily.
+
+> **Invariant for anything added here: a rate limiter must never sit in front of
+> the quality gate.** The gate is the thing that knows what deserves to exist.
+
+**Failure is silent by default, so it must be made loud.** Three ways a relay
+stops feeding you *without raising an error anywhere*:
+
+- **It refuses a subscription** — NIP-01 `CLOSED` (rate-limited, too many
+  filters, auth-required). Parsed and thrown away for a long time; now logged and
+  raised to the hub (`onClosed`).
+- **The socket half-opens** — connected, no data, no error (the phone changed
+  network; a carrier NAT dropped the flow). A client holding open subscriptions
+  is never legitimately silent for minutes: **90 s of silence = the socket is
+  dead**, reconnect (subscriptions are replayed on connect).
+- **It quietly drops one subscription** while still carrying the others. Then the
+  socket looks healthy, the REQ is on the wire, and nothing arrives. Re-sending
+  the REQ down that same connection is useless — the relay already decided to
+  ignore it. Two silent watchdog rounds ⇒ **cycle the socket**, don't re-ask.
+
+> **Invariant: silence is a diagnosis, not a state.** Any new transport must be
+> able to say *why* nothing is arriving — "connected" is not evidence of health.
+
+**Duplicates: three different bugs wearing one face.** They are worth separating,
+because the fixes do not overlap:
+
+1. **The same event on several subscriptions.** One note published to several
+   relays comes back on the firehose *and* discovery *and* follows, each with its
+   own seen-set, and the wapp pours all three into one feed. Fix: **the event id
+   is the post's identity** — the host refuses an append whose id is already in
+   that field (`wapp_page.dart`), and the archive enforces it with a partial
+   UNIQUE index on `mid`.
+2. **A relay re-sending its recent window.** Every re-open replays events. The
+   per-subscription seen-set must be **evicted (oldest first), never cleared** —
+   clearing it made re-sent events look new.
+3. **The same words posted again as a genuinely new event.** Different id,
+   different timestamp, correct signature. Id-dedup cannot see these. Collapse on
+   the **pair — same author AND same text** — newest kept, display-level only.
+   *Text alone is not a duplicate rule*: two people both saying "OK" are two
+   people. And when the same paragraph arrives from **different pubkeys** (a
+   name-and-avatar impersonation cluster), it is not a duplicate at all — it is
+   spam, and it belongs to the gate and the mute list, not to dedup.
+
+**What the gate keeps is observable**: `perf: nostr firehose seen=… kept=… pending=…
+expired=… empty=… flooding=… linkOnly=… duplicate=…`. A filter nobody can see is a
+filter nobody can trust, and "the feed looks empty" has two completely different
+causes — the gate ate it, or the relay sent nothing — with completely different
+fixes.
+
 ## The bridge: bring your account, keep what you touch
 
 **The common case is not a fresh start.** Somebody arrives with a NOSTR account
@@ -384,18 +479,36 @@ is the only honest way to spend it.
 
 ### Where this stands in the code
 
-- **Built**: the unified store (every transport merges into one `RelayEventStore`,
-  verified by signature, deduped by id); tier 0 pinning of everything that
-  `p`-tags you; `RelayNode` serving that store over RNS; `MediaArchive`,
-  content-addressed, fetchable over both HTTP/Blossom and RNS; posting fanned out
-  to the relay list.
-- **Not built**: the touch rule itself (a like does not currently pin its
-  *target* — it pins your reaction), thread-parent backfill, media prefetch on
-  interaction, the provider records that make a kept or newly-written note
-  findable, the notify-the-Indexers half of publishing, and the outbox that lets
-  a publish survive one of the two networks being down. That is road items 1, 2
-  and 10, plus a small `KeepPolicy` sitting between the wapp's "like" and the
-  store's `put(tier:)`.
+**The whole path, end to end, is built and device-validated.** A note fetched
+from a public relay and touched by the user ends up served from this device over
+Reticulum, and the round trip has been demonstrated on a phone:
+
+1. **Fetched** from `wss://` over the firehose/follows subscription, verified in
+   the `nostr-engine` isolate, merged into the one `RelayEventStore` (tier 2 —
+   a stranger, evictable).
+2. **Touched** (like / reply / repost / bookmark / zap). `KeepPolicy` +
+   `KeepService` **promote the target itself to tier 0** — not just your
+   reaction — chase the thread above a reply, ask for the author's kind-0, and
+   pull the referenced media into the content-addressed `MediaArchive`. A keep
+   can only ever *promote*, so a hostile re-send cannot push a kept note back
+   into the evictable slice. The queue is **persisted**, so a like made in a
+   tunnel is finished later by the background service.
+3. **Kept locally** at tier 0, which means it is **already on Reticulum**: your
+   store *is* your relay. `RelayNode` answers `REQ`/`COUNT` over RNS out of the
+   same store, and `local` in the relay list is the same events. The device's own
+   `wss://` server (`NostrWsServer`) serves it to LAN clients too. **Proof: a
+   note first seen on a public relay was afterwards served back out of the
+   phone's own `wss://` relay.**
+4. **Findable**, not merely present: touching or following an author publishes a
+   signed `ProviderRecord` under their pubkey and under the event id — *"I hold
+   this"* — so an Indexer answers *where*, and `fetchAuthorFromMesh` walks the
+   reverse path (resolve → ask the best holders over RNS → verify in the engine
+   isolate → store).
+
+Still **not built** on this path: the outbox that lets a publish survive one of
+the two networks being down (a publish to `wss://` while offline is queued in the
+ws client, but the mesh half is not), and pushing kept events to Indexers and
+Archivers rather than waiting to be asked.
 
 ## Abuse: what a hostile network does to us, and what stops it
 
@@ -624,6 +737,25 @@ is in `main` with tests, and the device-validated ones say so.
 - **Verification off the UI isolate** — BUILT. Events arriving over Reticulum are
   verified in the `nostr-engine` isolate and stored with `putAllVerified`; main
   never runs secp256k1.
+- **Feed health against the public internet** — BUILT and device-validated (a
+  phone whose All/Following had not moved in sixteen hours, on a network hostile
+  to relays). Four defects, each hiding the next, and each one is now an
+  invariant with a test:
+  - **Relay defaults merge on every start** (never-offered only), so an existing
+    install is not stranded on a dead list and a removed relay is not
+    resurrected.
+  - **The quality gate runs before the rate cap.** The cap was discarding the
+    relays' opening burst before the gate saw it: `dropped=173, fireSeen=0,
+    stored=0` with four relays streaming. A burst larger than the cap must still
+    reach the feed.
+  - **A refused subscription (`CLOSED`) and a half-open socket are reported**,
+    and a relay that stops answering gets a **new socket, not another REQ**.
+  - **Duplicates are three separate problems** — same event on several subs (id
+    dedup), a relay re-sending its window (evict the seen-set, never clear it),
+    and one account re-posting the same words (collapse on author+text, newest
+    kept). Same text from *different* pubkeys is spam, not a duplicate: that is
+    the gate's and the mute list's job, and content-only dedup is forbidden — two
+    people saying "OK" are two people.
 
 ### Not built (do not assume it)
 

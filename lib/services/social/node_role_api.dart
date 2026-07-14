@@ -8,6 +8,7 @@ import 'package:reticulum/src/services/social/relay_role.dart';
 
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../log_service.dart';
+import '../notification_service.dart';
 import '../preferences_service.dart';
 import '../reticulum/rns_service.dart';
 import 'package:reticulum/src/util/media_archive.dart';
@@ -311,12 +312,12 @@ class NodeRoleApi {
           ? 0.0
           : double.parse((used / quotaBytes).clamp(0.0, 1.0).toStringAsFixed(3)),
       'servedItems': st?.servedItems ?? 0,
-      'freeableBytes': archive
-              ?.previewSweep(const HostedSweep.strangers())
-              .bytes ??
-          0,
-      'freeableText': _size(
-          archive?.previewSweep(const HostedSweep.strangers()).bytes ?? 0),
+      // What the Free-space button would ACTUALLY give back — everything held
+      // for other people. Previewing a different sweep than the button runs is
+      // how a UI ends up lying to the person about to press it.
+      'freeableBytes': archive?.previewSweep(const HostedSweep.all()).bytes ?? 0,
+      'freeableText':
+          _size(archive?.previewSweep(const HostedSweep.all()).bytes ?? 0),
       'followed': p?.archiveFollowed ?? true,
       'topics': p?.archiveTopics ?? const <String>[],
       'fromLan': p?.archiveFromLan ?? true,
@@ -478,7 +479,9 @@ class NodeRoleApi {
     if (archive == null) return -1;
 
     HostedSweep? sweep;
-    if (id == 'sweep:neverServed') {
+    if (id == 'sweep:all') {
+      sweep = const HostedSweep.all();
+    } else if (id == 'sweep:neverServed') {
       sweep = const HostedSweep.neverServed();
     } else if (id == 'sweep:old90') {
       sweep = const HostedSweep.olderThan(90 * 24 * 3600 * 1000);
@@ -496,6 +499,22 @@ class NodeRoleApi {
     final r = archive.sweepHosted(sweep);
     LogService.instance.add(
         'archive: cleanup $id freed ${_size(r.bytes)} (${r.items} files)');
+
+    // Say it happened. A destructive action that reports nothing leaves the
+    // person unsure whether it ran — and "nothing to delete" is a real,
+    // legitimate outcome that must not look like a broken button.
+    NotificationService.instance.show(GeogramNotification(
+      level: NotificationLevel.info,
+      title: r.items == 0
+          ? 'Nothing to free'
+          : 'Freed ${_size(r.bytes)}',
+      body: r.items == 0
+          ? 'This device is holding nothing for other people.'
+          : '${r.items} file${r.items == 1 ? '' : 's'} kept for other people '
+              'were deleted. Your own files were not touched.',
+      source: 'wapp:archiver',
+      scope: NotificationScope.app,
+    ));
     return r.items;
   }
 

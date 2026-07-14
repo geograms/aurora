@@ -869,6 +869,10 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
     final tip = _t(action.getString('tip'));
     final confirm = action.getBool('confirm') ?? false;
     final confirmLabel = _t(action.getString('confirm-label'));
+    // The dialog had a title and nothing else, so a destructive action could
+    // only ever ask "Confirm?" — which tells the person nothing about what is
+    // about to happen. `confirm-text` is the sentence that says it.
+    final confirmText = _t(action.getString('confirm-text'));
 
     final onPressed = () {
       if (confirm) {
@@ -876,6 +880,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
           context: context,
           builder: (ctx) => AlertDialog(
             title: Text(confirmLabel ?? 'Confirm?'),
+            content: confirmText == null ? null : Text(confirmText),
             actions: [
               TextButton(
                   onPressed: () => Navigator.pop(ctx),

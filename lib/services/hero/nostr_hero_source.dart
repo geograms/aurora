@@ -225,9 +225,37 @@ class NostrHeroSource implements HeroSource {
         ? rns.nostrStats(i.rawEventId)
         : (likes: 0, replies: 0, mine: false);
     final pk = i.authorPubkey ?? '';
-    final profile = pk.isEmpty
-        ? const <String, String>{}
-        : rns.nostrProfile(pk);
+    // TWO lookups, because they answer from different places and only one of
+    // them is durable:
+    //
+    //   nostrProfile()        — the engine's LIVE cache. Empty for an author
+    //                           whose kind-0 arrived in some earlier session (it
+    //                           also subscribes, so the fetch is under way).
+    //   nostrProfileByShort12 — the engine's PERSISTENT store: every kind-0 ever
+    //                           seen. This is what the feed reads, which is why
+    //                           the feed said "Yang Zi" while the hero card next
+    //                           to it still said npub1mxq4j… — same author, same
+    //                           moment, two different answers.
+    //
+    // Ask the live cache first (it is the freshest), then fall back to the store.
+    final live = pk.isEmpty ? const <String, String>{} : rns.nostrProfile(pk);
+    final stored = (pk.length >= 12 && (live['name'] ?? '').trim().isEmpty)
+        ? rns.nostrProfileByShort12(pk.substring(0, 12))
+        : const <String, String>{};
+    // Empties are dropped BEFORE the merge: a blank name from the live cache
+    // must not overwrite a real one from the store (it did, and the chip went on
+    // showing the npub).
+    String? pick(String key) {
+      final l = (live[key] ?? '').trim();
+      if (l.isNotEmpty) return l;
+      final s = (stored[key] ?? '').trim();
+      return s.isNotEmpty ? s : null;
+    }
+
+    final profile = <String, String>{
+      for (final k in const ['name', 'pic'])
+        if (pick(k) != null) k: pick(k)!,
+    };
     final claimed = (profile['name'] ?? '').trim();
     // A kind-0 "name" that is really the note's own text is not a name: keep
     // the short npub instead (HeroItem.looksLikePostText).

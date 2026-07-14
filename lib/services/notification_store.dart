@@ -41,7 +41,12 @@ class StoredNotification {
   factory StoredNotification.fromNotification(GeogramNotification n) {
     final ts = n.timestamp;
     return StoredNotification(
-      id: '${ts.microsecondsSinceEpoch}:${n.source}',
+      // The tag, when there is one, IS the identity: the same event announced
+      // twice must be the same ROW. A timestamp id made every repeat a new row,
+      // so the bell could never stop counting the same thing.
+      id: (n.tag != null && n.tag!.isNotEmpty)
+          ? n.tag!
+          : '${ts.microsecondsSinceEpoch}:${n.source}',
       level: n.level,
       title: n.title,
       body: n.body,
@@ -96,14 +101,36 @@ class NotificationStore {
   }
 
   Future<void> record(GeogramNotification n) async {
+    final incoming = StoredNotification.fromNotification(n);
+    // Same id = same notification. Replace it in place instead of stacking
+    // another copy on top of it.
     final next = [
-      StoredNotification.fromNotification(n),
-      ...items.value,
+      incoming,
+      ...items.value.where((e) => e.id != incoming.id),
     ].take(maxItems).toList(growable: false);
     items.value = next;
     _recomputeUnread();
     try {
       await _persistItems(next);
+    } catch (_) {}
+  }
+
+  /// Mark everything from one source as read — the panel that owns those
+  /// notifications was opened, so the bell must agree with it.
+  Future<void> markSeenBySource(String source) async {
+    final newest = items.value
+        .where((e) => e.source == source)
+        .fold<int>(0, (m, e) {
+      final ms = e.timestamp.millisecondsSinceEpoch;
+      return ms > m ? ms : m;
+    });
+    if (newest == 0 || newest <= _seenMs) return;
+    _seenMs = newest;
+    _recomputeUnread();
+    try {
+      final root = activeProfileRoot();
+      await root.createDirectory('notifications');
+      await root.writeString(_seenFile, '$_seenMs');
     } catch (_) {}
   }
 

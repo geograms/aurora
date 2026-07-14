@@ -3749,7 +3749,8 @@ class _WappPageState extends State<WappPage>
         icon: Icon(_panelIcon(i)),
         tooltip: _i18n.resolve(name),
         onPressed: () {
-          if (isNotif) RnsService.instance.nostrNotificationsMarkRead();
+          // (marking read happens in _buildNotificationsScreen, so every route
+          // into the panel clears the badge — not just this one)
           setState(() {
             _panelScreen = _menuScreens[i];
             _panelName = name;
@@ -4388,6 +4389,15 @@ class _WappPageState extends State<WappPage>
   Widget _buildNotificationsScreen() {
     final cs = Theme.of(context).colorScheme;
     final events = RnsService.instance.nostrNotifications();
+
+    // Looking at the panel IS reading them. This is the one choke point every
+    // route ends up at — the appbar icon, the overflow menu, and ui.screen.open
+    // — so marking here covers all three, where before only the appbar icon did
+    // (and the badge stayed lit for the other two).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      RnsService.instance.nostrNotificationsMarkRead();
+      if (mounted) setState(() {});
+    });
     if (events.isEmpty) {
       return Center(
         child: Column(

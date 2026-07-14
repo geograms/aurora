@@ -53,7 +53,10 @@ class GeogramNotification {
   /// wapp-sourced notifications, `"host:<service>"` for host-sourced.
   final String source;
 
-  /// Optional deduplication key. Reserved for a future debounce layer.
+  /// Deduplication key. Two notifications with the same tag are the SAME
+  /// notification — the second one is suppressed rather than shown again. The
+  /// social inbox sets it to the NOSTR event id, because that is what the
+  /// notification actually IS.
   final String? tag;
 
   final NotificationScope scope;
@@ -159,10 +162,30 @@ class NotificationService {
     });
   }
 
+  /// tag -> when it was last shown. Bounded; a tag nobody repeats simply ages
+  /// out with the rest.
+  final Map<String, int> _shownTags = {};
+  static const int _maxTags = 500;
+
   /// Dispatch [n] to every backend that declares it handles the
   /// notification's scope. Backend errors are swallowed so one broken
   /// backend cannot prevent the others from firing.
+  ///
+  /// A notification carrying a [GeogramNotification.tag] is announced once,
+  /// ever: the tag is its identity, and the same identity twice is a repeat,
+  /// not news. Social rides on this — its inbox is answered out of SQLite, so
+  /// stored events are re-delivered on every start.
   void show(GeogramNotification n) {
+    final tag = n.tag;
+    if (tag != null && tag.isNotEmpty) {
+      // Already announced. Showing it again would tell the user something
+      // happened when nothing did.
+      if (_shownTags.containsKey(tag)) return;
+      _shownTags[tag] = DateTime.now().millisecondsSinceEpoch;
+      if (_shownTags.length > _maxTags) {
+        _shownTags.remove(_shownTags.keys.first);
+      }
+    }
     history.add(n);
     if (history.length > maxHistory) {
       history.removeAt(0);
@@ -182,6 +205,7 @@ class NotificationService {
     _errorSub = null;
     _backends.clear();
     history.clear();
+    _shownTags.clear();
     _initialised = false;
   }
 }

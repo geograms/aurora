@@ -76,6 +76,7 @@ import '../folders/folder_subscriptions.dart';
 import 'package:reticulum/reticulum.dart' show BlossomServer;
 
 import '../notification_service.dart';
+import '../notification_store.dart';
 import '../../profile/profile_db.dart';
 import '../../profile/profile_service.dart';
 import '../../profile/secure_file.dart';
@@ -2282,6 +2283,14 @@ class RnsService {
               // An Archiver takes the weight off the phones around it: pull what
               // they share, then publish ourselves so the DHT stops waking them.
               MirrorService.instance.start();
+              // A reaction the user is never told about might as well not have
+              // happened — and the panel is not always open. The pump owns the
+              // announce cadence; a widget drawing a badge must never be what
+              // makes a notification appear.
+              _notifTimer?.cancel();
+              _notifTimer = Timer.periodic(
+                  const Duration(seconds: 30), (_) => _pumpNotifications());
+              _pumpNotifications();
             }).catchError((Object e) {
               // A pipeline that never comes up must SAY so. This one used to
               // fail into silence and take the whole hero with it.
@@ -5987,8 +5996,31 @@ class RnsService {
 
   String? _notifSub;
   bool _notifReady = false;
+  Timer? _notifTimer;
   final Set<String> _notifAnnounced = {};
-  int _notifSeenMs = 0;
+
+  /// The newest event we have ever raised a card for, and the last time the user
+  /// looked at the panel. BOTH persisted — see PreferencesService. Held in RAM,
+  /// they were the bug: the standing `#p = me` subscription is answered out of
+  /// SQLite, so every restart replayed the stored notifications and every replay
+  /// popped again.
+  int _notifAnnouncedMs = -1; // -1 = not loaded yet
+  int _notifSeenMs = -1;
+
+  int get _announcedMs {
+    if (_notifAnnouncedMs < 0) {
+      _notifAnnouncedMs =
+          PreferencesService.instanceSync?.notifAnnouncedMs ?? 0;
+    }
+    return _notifAnnouncedMs;
+  }
+
+  int get _seenMs {
+    if (_notifSeenMs < 0) {
+      _notifSeenMs = PreferencesService.instanceSync?.notifSeenMs ?? 0;
+    }
+    return _notifSeenMs;
+  }
 
   /// Newest first, READ FROM THE LOCAL STORE.
   ///
@@ -5997,9 +6029,25 @@ class RnsService {
   /// which is the point of an off-grid app. The standing subscription only
   /// keeps the store fed; it is not where the list comes from.
   List<Map<String, dynamic>> nostrNotifications() {
+    _pumpNotifications();
+    return _nostrHub?.notifications ?? const [];
+  }
+
+  /// Drain the standing subscription and announce whatever is genuinely NEW.
+  ///
+  /// Runs on a timer, not on a render. The LIST the panel shows is the store's,
+  /// so nothing is lost when the app dies; this drain exists only to decide what
+  /// deserves a card.
+  ///
+  /// "New" means: newer than the newest thing we have ever announced. That single
+  /// comparison is what makes an announce happen ONCE, EVER — the subscription is
+  /// answered out of SQLite, so every start re-injects the whole stored backlog
+  /// into this drain, and an id set that dies with the process could never tell a
+  /// new reaction from a replay of a week-old one.
+  void _pumpNotifications() {
     final hub = _nostrHub;
     final me = selfPubHex;
-    if (hub == null || me == null) return const [];
+    if (hub == null || me == null) return;
     if (!_notifReady) {
       _notifReady = true;
       hub.setSelfPubkey(me); // the store keeps MY corner of the network
@@ -6007,19 +6055,36 @@ class RnsService {
         NostrFilter(kinds: const [1, 6, 7], tags: {'p': [me]}, limit: 100),
       ]);
     }
-    // Drain the live sub only to raise the launcher's bell for what is new;
-    // the LIST itself is the store's, so nothing is lost when the app dies.
     final sub = _notifSub;
-    if (sub != null) {
-      for (final e in hub.drainEvents(sub, max: 60)) {
-        final id = (e['id'] ?? '').toString();
-        if ((e['pubkey'] ?? '').toString() == me) continue;
-        if (!_notifAnnounced.add(id)) continue;
-        _announceNotification(e);
-      }
-      if (_notifAnnounced.length > 500) _notifAnnounced.clear();
+    if (sub == null) return;
+
+    final was = _announcedMs;
+    var newest = was;
+
+    // First run ever: adopt the backlog silently. A fresh install must not fire
+    // a hundred cards for things that happened before it existed.
+    final firstRun = was == 0;
+
+    for (final e in hub.drainEvents(sub, max: 60)) {
+      final id = (e['id'] ?? '').toString();
+      if ((e['pubkey'] ?? '').toString() == me) continue;
+      final ms = ((e['created_at'] as num?)?.toInt() ?? 0) * 1000;
+      if (ms > newest) newest = ms;
+      if (firstRun || ms <= was) continue; // a replay, or the initial backlog
+      if (!_notifAnnounced.add(id)) continue; // cheap in-session guard
+      _announceNotification(e);
     }
-    return hub.notifications;
+
+    if (newest > was) {
+      _notifAnnouncedMs = newest;
+      PreferencesService.instanceSync?.notifAnnouncedMs = newest;
+    }
+    // Bounded, but NEVER cleared wholesale: dropping the guard used to let
+    // everything announce again. The high-water mark is the real defence, so
+    // this only has to stay small.
+    if (_notifAnnounced.length > 500) {
+      _notifAnnounced.remove(_notifAnnounced.first);
+    }
   }
 
   /// Also raise it on the launcher's bell — a reaction the user never learns
@@ -6041,12 +6106,17 @@ class RnsService {
       6 => 'reposted your post',
       _ => 'replied to you',
     };
+    LogService.instance.add('NOSTR: notify $who $what (${e['id']})');
     NotificationService.instance.show(GeogramNotification(
       level: NotificationLevel.info,
       title: '$who $what',
       body: kind == 1 && content.isNotEmpty ? content : null,
       source: 'wapp:social',
       scope: NotificationScope.app,
+      // The event id IS the identity of this notification. With it, the store
+      // can collapse a repeat into the same row instead of minting a new one
+      // and lighting the bell again.
+      tag: 'nostr:${(e['id'] ?? '').toString()}',
     ));
   }
 
@@ -6057,19 +6127,31 @@ class RnsService {
       _nostrHub?.eventById(id);
 
   /// How many notifications arrived since the panel was last opened.
+  ///
+  /// A pure READ: it does not drain the subscription and cannot announce
+  /// anything. It used to call nostrNotifications(), so merely rendering a badge
+  /// could raise a card — a counter must never be able to CAUSE the thing it
+  /// counts.
   int nostrNotificationsUnread() {
-    final all = nostrNotifications();
+    final all = _nostrHub?.notifications ?? const [];
+    final seen = _seenMs;
     var n = 0;
     for (final e in all) {
       final ts = ((e['created_at'] as num?)?.toInt() ?? 0) * 1000;
-      if (ts > _notifSeenMs) n++;
+      if (ts > seen) n++;
     }
     return n;
   }
 
-  /// The user has looked at them.
+  /// The user has looked at them — by ANY route into the panel. Persisted, so a
+  /// restart does not re-light a badge the user already cleared.
   void nostrNotificationsMarkRead() {
-    _notifSeenMs = DateTime.now().millisecondsSinceEpoch;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _notifSeenMs = now;
+    PreferencesService.instanceSync?.notifSeenMs = now;
+    // The launcher's bell counts the same events from the other side; leaving it
+    // lit after the user has read them is the same bug wearing a different hat.
+    NotificationStore.instance.markSeenBySource('wapp:social');
   }
 
   /// (upvotes, downvotes, myVote ∈ {-1,0,1}) for a post.
@@ -6818,6 +6900,10 @@ class RnsService {
     _rvInboundDests.clear();
     _linkWatchdog?.cancel();
     _linkWatchdog = null;
+    _notifTimer?.cancel();
+    _notifTimer = null;
+    _notifReady = false;
+    _notifSub = null;
     _lxmf = null;
     _relay = null;
     _relayRole = null;

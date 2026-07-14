@@ -144,6 +144,21 @@ class PreferencesService {
   set keepDataPubkeys(List<String> v) =>
       _prefs.setStringList('social.keepData', v);
 
+  // Social notifications. Two high-water marks, both persisted, because both
+  // were in-memory and that is the whole bug: on every restart the standing
+  // "#p = me" subscription replays the stored notifications out of SQLite, and
+  // an in-memory "already announced" set cannot remember that they were
+  // announced last time.
+  //
+  //   notifAnnouncedMs — the newest event we have ever raised a card for.
+  //                      Anything at or below this is, by definition, a replay.
+  //   notifSeenMs      — the last time the user actually LOOKED at the panel.
+  int get notifAnnouncedMs => _prefs.getInt('social.notifAnnouncedMs') ?? 0;
+  set notifAnnouncedMs(int v) => _prefs.setInt('social.notifAnnouncedMs', v);
+
+  int get notifSeenMs => _prefs.getInt('social.notifSeenMs') ?? 0;
+  set notifSeenMs(int v) => _prefs.setInt('social.notifSeenMs', v);
+
   // The touch rule (docs/NOSTR.md): liking, replying to, reposting or bookmarking
   // an event archives THE EVENT here, at tier 0, forever. The queue is persisted
   // so a keep survives the app being killed mid-flight — the background service

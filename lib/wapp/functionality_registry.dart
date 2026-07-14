@@ -271,12 +271,12 @@ class FunctionalityRegistry {
           'Archiver status JSON (quotaGb,usedBytes,items,followed,topics,from*\u2026)', [],
           ReturnDef('int', 'Bytes written, negated required size if too small')),
       EndpointDef('hal_archive_items',
-          'What is held for others, as people-widget sections (size, tier, age)', [],
+          'Where the space went: totals by tier, biggest depositors, and previewed cleanups', [],
           ReturnDef('int', 'Bytes written, negated required size if too small')),
       EndpointDef('hal_archive_drop',
-          'Drop one blob held for somebody else (the user must be able to delete it)', [
-        ParamDef('sha', 'string', 'content hash of the blob'),
-      ], ReturnDef('int', '0 ok, -1 on error')),
+          'Run a previewed cleanup, or evict one depositor ("sweep:*" / "origin:<pub>")', [
+        ParamDef('id', 'string', 'the id of the row the user tapped'),
+      ], ReturnDef('int', 'files removed, -1 on error')),
       EndpointDef('hal_archive_set_pref',
           'Set an archiver tunable "key=value" (quotaGb, followed, topics, fromLan, fromBluetooth, fromRadio, fromWifiDirect, mirrorSmall)', [
         ParamDef('kv', 'string', 'key=value'),

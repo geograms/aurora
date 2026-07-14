@@ -7,6 +7,8 @@ import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../log_service.dart';
 import '../preferences_service.dart';
 import '../reticulum/rns_service.dart';
+import 'package:reticulum/src/util/media_archive.dart';
+
 import 'archiver_service.dart';
 import 'node_profile_service.dart';
 import 'pointer_sync_service.dart';
@@ -180,44 +182,169 @@ class NodeRoleApi {
     });
   }
 
-  /// What strangers actually put on this disk. A user who cannot SEE and DELETE
-  /// what is being held for others has not consented to anything, so this is the
-  /// list, with a Drop on every row.
+  /// Where the space went — statistics, not a list.
+  ///
+  /// An archive is expected to hold hundreds of thousands of blobs. A user
+  /// scrolling that list learns nothing and can do nothing about it. What they
+  /// need is: how full am I, whose is it, is any of it even being used, and how
+  /// do I get a gigabyte back. So this is the breakdown, and [archiveSweep] is
+  /// the way out.
   String archiveItemsJson() {
     final archive = sharedMediaArchive();
     if (archive == null) return '[]';
-    final inv = archive.hostedInventory()
-      ..sort((a, b) => b.bytes.compareTo(a.bytes));
+    final st = archive.hostedStats();
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    return jsonEncode([
-      {
-        'title': 'Held for others (${inv.length})',
+    final sections = <Map<String, dynamic>>[];
+
+    // 1. Where the space went.
+    sections.add({
+      'title': 'Space',
+      'items': [
+        {
+          'id': '#total',
+          'title': '${_size(st.totalBytes)} across ${st.totalItems} files',
+          'subtitle': st.oldestMs > 0
+              ? 'Oldest kept ${_ago(now - st.oldestMs)}'
+              : 'Nothing held for anybody yet',
+          'online': st.totalItems > 0,
+        },
+        {
+          'id': '#strangers',
+          'title': '${_size(st.strangerBytes)} · strangers',
+          'subtitle': '${st.strangerItems} files. The evictable slice — and the '
+              'only thing a cleanup here will ever touch.',
+          'online': false,
+        },
+        {
+          'id': '#followed',
+          'title': '${_size(st.followedBytes)} · people you follow',
+          'subtitle': '${st.followedItems} files. Redundancy for the accounts '
+              'you care about.',
+          'online': true,
+        },
+        {
+          'id': '#pinned',
+          'title': '${_size(st.pinnedBytes)} · kept on purpose',
+          'subtitle': '${st.pinnedItems} files. You asked for these; no cleanup '
+              'will ever remove them.',
+          'online': true,
+        },
+        {
+          'id': '#served',
+          'title': '${st.servedItems} of ${st.totalItems} ever fetched',
+          'subtitle': st.servedItems == 0 && st.totalItems > 0
+              ? 'Nobody has asked for any of it yet. Normal in a new archive; '
+                  'dead weight in an old one.'
+              : 'The rest is dead weight, and cleanup starts there.',
+          'online': st.servedItems > 0,
+        },
+      ],
+    });
+
+    // 2. Whose is it. The row a person can actually act on.
+    final byOrigin = archive.hostedByOrigin(limit: 8);
+    if (byOrigin.isNotEmpty) {
+      sections.add({
+        'title': 'Depositors',
         'items': [
-          for (final it in inv.take(200))
+          for (final o in byOrigin)
             {
-              'id': it.sha,
-              'title': '${_size(it.bytes)} · ${_tierName(it.tier)}',
-              'subtitle': 'kept ${_ago(now - it.receivedAtMs)} · ${it.sha.substring(0, 12)}',
-              'online': it.tier < 2,
+              'id': 'origin:${o.originPub}',
+              'title': '${_size(o.bytes)} · ${o.items} file'
+                  '${o.items == 1 ? '' : 's'}',
+              'subtitle': '${o.originPub.isEmpty ? 'unknown depositor' : o.originPub.substring(0, 16)} — tap to evict everything they put here',
+              'online': false,
             }
         ],
-      }
-    ]);
+      });
+    }
+
+    // 3. The way out. Every option previews what it would free BEFORE it does
+    //    it: a cleanup tool that cannot tell you what it is about to delete is
+    //    not a tool, it is a gamble.
+    final sweeps = <Map<String, dynamic>>[];
+    void offer(String id, String label, String why, ({int bytes, int items}) p) {
+      if (p.items == 0) return;
+      sweeps.add({
+        'id': id,
+        'title': '$label — frees ${_size(p.bytes)} (${p.items} files)',
+        'subtitle': why,
+        'online': false,
+      });
+    }
+
+    offer(
+      'sweep:neverServed',
+      'Never asked for',
+      'Stranger files nobody has ever fetched from you. Dead weight by '
+          'definition.',
+      archive.previewSweep(const HostedSweep.neverServed()),
+    );
+    offer(
+      'sweep:old90',
+      'Strangers over 90 days',
+      'Kept long enough to have been useful. Nobody came.',
+      archive.previewSweep(const HostedSweep.olderThan(90 * 24 * 3600 * 1000)),
+    );
+    offer(
+      'sweep:strangers',
+      'All strangers',
+      'Keeps the people you follow, and everything you asked to keep.',
+      archive.previewSweep(const HostedSweep.strangers()),
+    );
+    offer(
+      'sweep:free1g',
+      'Free up to 1 GB',
+      'Oldest strangers first. It stops when it has enough — and never reaches '
+          'into the media of people you follow.',
+      archive.previewSweep(const HostedSweep.freeBytes(1 << 30)),
+    );
+
+    sections.add({
+      'title': 'Clean up',
+      'items': sweeps.isEmpty
+          ? [
+              {
+                'id': '#clean',
+                'title': 'Nothing to reclaim',
+                'subtitle': 'Everything here is either yours or belongs to '
+                    'somebody you follow — a cleanup would have nothing to take.',
+                'online': true,
+              }
+            ]
+          : sweeps,
+    });
+
+    return jsonEncode(sections);
   }
 
-  /// Drop one blob we were holding for somebody else.
-  int archiveDrop(String sha) {
+  /// Run a cleanup. The id comes straight from the row the user tapped, so what
+  /// they saw previewed is exactly what runs.
+  int archiveSweep(String id) {
     final archive = sharedMediaArchive();
-    if (archive == null || sha.isEmpty) return -1;
-    try {
-      archive.delete(sha);
-      LogService.instance.add('archive: dropped ${sha.substring(0, 12)}');
-      return 0;
-    } catch (e) {
-      LogService.instance.add('archive: drop failed: $e');
-      return -1;
+    if (archive == null) return -1;
+
+    HostedSweep? sweep;
+    if (id == 'sweep:neverServed') {
+      sweep = const HostedSweep.neverServed();
+    } else if (id == 'sweep:old90') {
+      sweep = const HostedSweep.olderThan(90 * 24 * 3600 * 1000);
+    } else if (id == 'sweep:strangers') {
+      sweep = const HostedSweep.strangers();
+    } else if (id == 'sweep:free1g') {
+      sweep = const HostedSweep.freeBytes(1 << 30);
+    } else if (id.startsWith('origin:')) {
+      final pub = id.substring('origin:'.length);
+      if (pub.isEmpty) return -1;
+      sweep = HostedSweep.byOrigin(pub);
     }
+    if (sweep == null) return -1;
+
+    final r = archive.sweepHosted(sweep);
+    LogService.instance.add(
+        'archive: cleanup $id freed ${_size(r.bytes)} (${r.items} files)');
+    return r.items;
   }
 
   int archiveSetPref(String kv) {
@@ -265,12 +392,6 @@ class NodeRoleApi {
         return -1;
     }
   }
-
-  static String _tierName(int tier) => switch (tier) {
-        0 => 'mine',
-        1 => 'someone I follow',
-        _ => 'a stranger',
-      };
 
   static String _size(int b) {
     if (b >= 1 << 30) return '${(b / (1 << 30)).toStringAsFixed(1)} GB';

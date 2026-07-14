@@ -3069,9 +3069,11 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // The wapp no longer drops single blobs (a list of a million files is not a
+    // UI); it runs a previewed CLEANUP, or evicts one depositor.
     final halArchiveDrop = WasmFunction(
       (int shaPtr, int shaLen) =>
-          NodeRoleApi.instance.archiveDrop(_readStr(shaPtr, shaLen)),
+          NodeRoleApi.instance.archiveSweep(_readStr(shaPtr, shaLen)),
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
     final halArchiveSetPref = WasmFunction(

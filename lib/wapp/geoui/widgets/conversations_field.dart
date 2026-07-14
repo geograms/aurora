@@ -122,8 +122,8 @@ Color _hashColor(String s) {
 
 class ConversationsField extends StatefulWidget {
   final ConversationStore store;
-  final String title;
-  final List<ConvAction> listActions;
+  // List-level actions (the wapp's slot:"list" actions and people-search) are
+  // NOT rendered here — the host puts them in its AppBar, next to the ☰.
   final List<ConvAction> roomActions;
 
   /// A conversation row was opened (host tracks selection; wapp may clear
@@ -180,14 +180,20 @@ class ConversationsField extends StatefulWidget {
   final List<Map<String, dynamic>> roomRail;
   final void Function(String id)? onRoomRailTap;
 
-  /// People search for the conversation list. When non-null, a search icon
-  /// appears in the list header; typing a callsign queries this (the local
-  /// database + the Reticulum network) and the matches replace the list.
-  /// Each result map: {npub, callsign, nick, online, devices}.
+  /// People search for the conversation list. Typing a callsign queries this
+  /// (the local database + the Reticulum network) and the matches replace the
+  /// list. Each result map: {npub, callsign, nick, online, devices}.
   final List<Map<String, dynamic>> Function(String query)? onSearchPeople;
 
   /// Open the full profile panel for a tapped search result.
   final void Function(String callsign, String npub)? onOpenProfile;
+
+  /// Controlled search: the host owns the search toggle because the search icon
+  /// lives in its AppBar (next to the ☰), not in a list header. When non-null it
+  /// is the source of truth and [onSearchClose] closes it; when null the widget
+  /// keeps its own flag (legacy behaviour).
+  final bool? searchOpen;
+  final VoidCallback? onSearchClose;
 
   const ConversationsField({
     super.key,
@@ -201,8 +207,6 @@ class ConversationsField extends StatefulWidget {
     this.onBlock,
     this.onMute,
     this.onClose,
-    this.title = 'Conversations',
-    this.listActions = const [],
     this.roomActions = const [],
     this.toggles = const [],
     this.onLocate,
@@ -215,6 +219,8 @@ class ConversationsField extends StatefulWidget {
     this.onRoomRailTap,
     this.onSearchPeople,
     this.onOpenProfile,
+    this.searchOpen,
+    this.onSearchClose,
   });
 
   @override
@@ -225,9 +231,23 @@ class _ConversationsFieldState extends State<ConversationsField> {
   String? _internalOpenId;
 
   // People search (only when widget.onSearchPeople is wired).
-  bool _searching = false;
+  bool _internalSearching = false;
   final TextEditingController _searchCtrl = TextEditingController();
   List<Map<String, dynamic>> _results = const [];
+
+  /// Effective search state: host-owned when it passes [searchOpen], else local.
+  bool get _searching => widget.searchOpen ?? _internalSearching;
+
+  @override
+  void didUpdateWidget(ConversationsField old) {
+    super.didUpdateWidget(old);
+    // The host closed search (AppBar icon / thread opened / tab switched) — drop
+    // the query and its results so reopening starts clean.
+    if (old.searchOpen == true && widget.searchOpen == false) {
+      _searchCtrl.clear();
+      _results = const [];
+    }
+  }
 
   @override
   void dispose() {
@@ -240,13 +260,15 @@ class _ConversationsFieldState extends State<ConversationsField> {
     setState(() => _results = fn == null ? const [] : fn(q));
   }
 
-  void _toggleSearch() {
+  void _closeSearch() {
+    if (widget.onSearchClose != null) {
+      widget.onSearchClose!();
+      return;
+    }
     setState(() {
-      _searching = !_searching;
-      if (!_searching) {
-        _searchCtrl.clear();
-        _results = const [];
-      }
+      _internalSearching = false;
+      _searchCtrl.clear();
+      _results = const [];
     });
   }
 
@@ -286,7 +308,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(width: 320, child: _list(context, wide: true)),
+              SizedBox(width: 320, child: _list(context)),
               const VerticalDivider(width: 1),
               Expanded(
                 child: openId != null
@@ -298,54 +320,28 @@ class _ConversationsFieldState extends State<ConversationsField> {
         }
         return openId != null
             ? _room(context, openId, wide: false)
-            : _list(context, wide: false);
+            : _list(context);
       },
     );
   }
 
   // ── list ───────────────────────────────────────────────────────────
-  Widget _list(BuildContext context, {required bool wide}) {
+  Widget _list(BuildContext context) {
     final items = widget.store.ordered();
-    final canSearch = widget.onSearchPeople != null;
+    // No header band: the search icon and the wapp's list actions live in the
+    // host AppBar (next to the ☰), so the list starts right under it. Only the
+    // search text field needs a band, and only while search is open.
     return Container(
       color: ChatPalette.windowBg,
       child: Column(
       children: [
-        Container(
-          padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
-          child: _searching
-              ? _searchHeader(context)
-              : Row(
-                  children: [
-                    // The narrow (phone) layout already shows the screen name in
-                    // the app bar tab, so the in-list title would just repeat it —
-                    // only show it in the wide side-by-side layout where the list
-                    // is its own column.
-                    if (wide)
-                      Text(widget.title,
-                          style: Theme.of(context)
-                              .textTheme
-                              .titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w700)),
-                    const Spacer(),
-                    if (canSearch)
-                      IconButton(
-                        tooltip: 'Find a user',
-                        icon: const Icon(Icons.search, size: 22),
-                        color: ChatPalette.accent,
-                        onPressed: _toggleSearch,
-                      ),
-                    for (final a in widget.listActions)
-                      IconButton(
-                        tooltip: a.tooltip,
-                        icon: Icon(convIcon(a.icon), size: 22),
-                        color: ChatPalette.accent,
-                        onPressed: () => widget.onAction(a.name, _openId ?? ''),
-                      ),
-                  ],
-                ),
-        ),
-        const Divider(height: 1),
+        if (_searching) ...[
+          Container(
+            padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
+            child: _searchHeader(context),
+          ),
+          const Divider(height: 1),
+        ],
         Expanded(
           child: _searching
               ? _searchResults(context)
@@ -387,7 +383,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
           tooltip: 'Close search',
           icon: const Icon(Icons.close, size: 22),
           color: ChatPalette.accent,
-          onPressed: _toggleSearch,
+          onPressed: _closeSearch,
         ),
       ],
     );

@@ -3812,7 +3812,7 @@ class _WappPageState extends State<WappPage>
     // Compact hit boxes: a wapp can declare three of these (Circles: new, join,
     // plus search) and at the default 48dp pitch they sprawl across the bar and
     // squeeze the title. Grouped tight, they read as one cluster next to the ☰.
-    const dense = BoxConstraints.tightFor(width: 40, height: 40);
+    const dense = BoxConstraints.tightFor(width: 36, height: 36);
     return [
       IconButton(
         tooltip: _convSearching ? 'Close search' : 'Find a user',

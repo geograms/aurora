@@ -292,6 +292,28 @@ parallel fetch** (`folder/download` today pulls a file from one provider), a
 
 ## 9. Honest state of the ground it stands on
 
+### Device-validated, two phones, two networks (2026-07-14)
+
+The test that matters, because same-LAN takes the RNS "via lan" shortcut and is a
+false positive. **C61 on home WiFi (`192.168.178.0/24`), TANK2 on a phone hotspot
+(`172.20.10.0/28`)** — mutually unreachable at IP level, so every packet crossed a
+public hub.
+
+1. **C61 published**: a directory of 3 files (incl. a subfolder) became a torrent —
+   sha256 per file, signed op-log, key minted. Its hashes matched the ones computed
+   on the host, byte for byte.
+2. **C61 pinned it** → provider record announced.
+3. **TANK2 opened the `nfolder1…` link cold** — never having seen the folder. It
+   decoded to the right key, and the **signed op-log arrived over the mesh in ~36 s**:
+   3 files, the folder name, and the owner npub (C61's).
+4. **TANK2 pinned it** → all 3 files downloaded. Its content-addressed store holds
+   bytes hashing to **exactly** the publisher's three sha256s.
+5. **The swarm answered on both sides**: TANK2 sees C61 (2 hops, solar+satellite,
+   LoRa radio); C61 sees TANK2 (2 hops, WiFi). Each holder arrives with its physical
+   profile, which is the whole point of §6.
+
+The publisher's phone is no longer the only copy — which is what a pin is for.
+
 - **The wapp itself** (`wapps/torrents`, id `tools.geogram.torrents`): **built**.
   The five screens, the disk-backed create path, open-by-link, download, pin, and
   the swarm view. It autostarts in the background (aurora's

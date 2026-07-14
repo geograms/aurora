@@ -358,9 +358,21 @@ class PreferencesService {
   // A messaging wapp is useless if it only receives while you are looking at it:
   // a direct message must land (and notify) with the page — or the whole app —
   // closed. So both comms wapps default ON.
-  static const Set<String> _commsWappIds = {'chat', 'messages'};
+  //
+  // Torrents is on for the same structural reason, one layer down: a seeder that
+  // only serves while its page is open is not a seeder. A pinned folder is a
+  // promise to the swarm that this device holds a copy, and the promise has to
+  // survive the screen going off (docs/torrents.md §5). Its tick is near-free —
+  // it polls the host on long periods and diffs every render — so the background
+  // cost is the seeding itself, which is the point of pinning.
+  static const Set<String> _defaultAutostartWappIds = {
+    'chat',
+    'messages',
+    'torrents',
+  };
   bool getWappAutostart(String wappId) =>
-      _prefs.getBool('wapp.autostart.$wappId') ?? _commsWappIds.contains(wappId);
+      _prefs.getBool('wapp.autostart.$wappId') ??
+      _defaultAutostartWappIds.contains(wappId);
   Future<void> setWappAutostart(String wappId, bool v) =>
       _prefs.setBool('wapp.autostart.$wappId', v);
 
@@ -374,8 +386,8 @@ class PreferencesService {
     await _prefs.remove(oldKey);
   }
 
-  /// Ids of all wapps that should autostart (explicitly enabled, plus the comms
-  /// wapp by default unless the user turned it off).
+  /// Ids of all wapps that should autostart (explicitly enabled, plus the ones
+  /// that default on — comms and seeding — unless the user turned them off).
   List<String> autostartWappIds() {
     const prefix = 'wapp.autostart.';
     final ids = _prefs
@@ -383,7 +395,7 @@ class PreferencesService {
         .where((k) => k.startsWith(prefix) && (_prefs.getBool(k) ?? false))
         .map((k) => k.substring(prefix.length))
         .toSet();
-    for (final id in _commsWappIds) {
+    for (final id in _defaultAutostartWappIds) {
       if (_prefs.getBool('$prefix$id') ?? true) {
         ids.add(id);
       } else {

@@ -761,6 +761,41 @@ class RemoteApiService {
       if (req.method == 'GET' && path == '/api/rns/folder/owned') {
         return _json(res, {'owned': RnsService.instance.ownedDiskFolders()});
       }
+      // ── Torrents (docs/torrents.md) ────────────────────────────────────────
+      // The folder's shareable pointer: nfolder1… (key + provider hints + author).
+      if (req.method == 'GET' && path == '/api/rns/folder/link') {
+        final fid = '${req.uri.queryParameters['folderId'] ?? ''}'.trim();
+        if (fid.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId required'},
+              status: HttpStatus.badRequest);
+        }
+        return _json(res, {'ok': true, 'link': RnsService.instance.folderLink(fid)});
+      }
+      // Who has this folder: the holders + their physical profile, best first.
+      // Answers from the cached snapshot and refreshes in the background, so a
+      // cold call legitimately returns [] — ask again in a moment.
+      if (req.method == 'GET' && path == '/api/rns/folder/swarm') {
+        final fid = '${req.uri.queryParameters['folderId'] ?? ''}'.trim();
+        if (fid.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId required'},
+              status: HttpStatus.badRequest);
+        }
+        return _json(
+            res, {'ok': true, 'holders': RnsService.instance.folderSwarm(fid)});
+      }
+      // Pin/unpin: keep a full copy and advertise ourselves to the Indexers.
+      if (req.method == 'POST' && path == '/api/rns/folder/pin') {
+        // {"folderId":..,"on":true}
+        final data = await _body(req);
+        final fid = '${data['folderId'] ?? ''}'.trim();
+        if (fid.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId required'},
+              status: HttpStatus.badRequest);
+        }
+        RnsService.instance.folderPin(fid, data['on'] == true);
+        return _json(res,
+            {'ok': true, 'pinned': RnsService.instance.folderPinned(fid)});
+      }
       // ── Update Center (drives the real UpdateService) ──────────────────────
       if (req.method == 'POST' && path == '/api/update/config') {
         // {"betaFolder":"<npub|hex>","beta":true} — point the beta channel at a

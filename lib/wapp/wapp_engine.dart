@@ -338,7 +338,18 @@ class WappEngine {
     _i18n = context;
   }
 
-  WappEngine() {
+  /// True when NO UI page is attached to this engine — a background service, a
+  /// functionality broker, a headless player.
+  ///
+  /// A headless engine's `ui.*` messages are read by nobody, so a wapp that
+  /// renders lists on a timer is doing that work for an audience of zero — and
+  /// paying for it on the main isolate, where it shows up as a stall
+  /// (docs/performance.md). `hal_ui_attached` lets a wapp skip the render and
+  /// keep only the work that has a reason to run with the screen off (receiving,
+  /// notifying, seeding).
+  bool headless = false;
+
+  WappEngine({this.headless = false}) {
     _byId[engineId] = this;
     WappEventBroker.instance.registerEngine(engineId);
   }
@@ -1013,6 +1024,49 @@ class WappEngine {
             jsonEncode(RnsService.instance.folderSubscriptions()));
       },
       params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // 1 when a UI page is attached to this engine, 0 when it is headless (a
+    // background service). A wapp uses this to skip rendering into a void: a
+    // background engine's ui.* messages are read by nobody, and building them
+    // costs main-isolate time (docs/performance.md).
+    final halUiAttached = WasmFunction(
+      () => headless ? 0 : 1,
+      params: [],
+      results: [ValueTy.i32],
+    );
+    // The folder's shareable pointer: nfolder1… (docs/torrents.md §11) — the
+    // folder key plus a few provider hints and the publisher.
+    final halFolderLink = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (idLen <= 0 || outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            RnsService.instance.folderLink(_readStr(idPtr, idLen)));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Who has this folder → JSON [{dest, pubkey, provenance, lastHeardMs, hops,
+    // capacity, power, uplink, bwClass, region, radios}], best holder first.
+    // Answers from the last snapshot and refreshes in the background (the DHT
+    // resolve is async; this HAL is not).
+    final halFolderSwarm = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (idLen <= 0 || outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderSwarm(_readStr(idPtr, idLen))));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Pin/unpin: keep a full copy of the folder and advertise it to the Indexers.
+    final halFolderPin = WasmFunction(
+      (int idPtr, int idLen, int on) {
+        if (idLen <= 0) return 0;
+        RnsService.instance.folderPin(_readStr(idPtr, idLen), on != 0);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
     // List a real directory (for the in-app folder browser): JSON
@@ -3207,6 +3261,10 @@ class WappEngine {
       WasmImport('hal', 'folder_autosync', halFolderAutosync),
       WasmImport('hal', 'folder_owned', halFolderOwned),
       WasmImport('hal', 'folder_subs', halFolderSubs),
+      WasmImport('hal', 'ui_attached', halUiAttached),
+      WasmImport('hal', 'folder_link', halFolderLink),
+      WasmImport('hal', 'folder_swarm', halFolderSwarm),
+      WasmImport('hal', 'folder_pin', halFolderPin),
       WasmImport('hal', 'fs_listdir', halFsListdir),
       WasmImport('hal', 'fs_home', halFsHome),
       WasmImport('hal', 'storage_request', halStorageRequest),

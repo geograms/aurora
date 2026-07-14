@@ -73,6 +73,7 @@ import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
 import '../folders/folder_state.dart';
 import '../folders/folder_subscriptions.dart';
+import '../folders/nfolder.dart';
 import 'package:reticulum/reticulum.dart' show BlossomServer;
 
 import '../notification_service.dart';
@@ -6431,10 +6432,17 @@ class RnsService {
     return folderId;
   }
 
-  /// Normalize a folderId to hex: accepts hex already or an `npub1...` address.
+  /// Normalize a folderId to hex: accepts hex, an `npub1...` address, or an
+  /// `nfolder1...` pointer (docs/torrents.md §11) — whose provider hints are
+  /// handed to the DHT so a cold open tries a known holder before walking it.
   String _normFolderId(String id) {
     final s = id.trim();
     if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(s)) return s.toLowerCase();
+    final ref = Nfolder.decode(s);
+    if (ref != null) {
+      if (ref.hints.isNotEmpty) _seedSwarmHints(ref.folderId, ref.hints);
+      return ref.folderId;
+    }
     if (s.startsWith('npub1')) {
       try {
         return NostrCrypto.decodeNpub(s);
@@ -6669,6 +6677,210 @@ class RnsService {
       ],
     };
   }
+
+  // ── Torrents: the link, the swarm, and pinning (docs/torrents.md) ──────────
+
+  // Who-has snapshots, per folderId. The DHT resolve is async and the HAL is
+  // synchronous, so this follows the same shape as the browse cache: answer from
+  // the snapshot at once, refresh in the background. The MISS is cached too — a
+  // folder nobody holds must not re-walk the DHT on every render
+  // (docs/performance.md §3.2, "cache the miss, not just the hit").
+  final Map<String, List<Map<String, dynamic>>> _swarmCache = {};
+  final Map<String, int> _swarmAt = {};
+  static const int _swarmTtlMs = 60 * 1000;
+
+  /// Provider hints carried in an `nfolder1…` link: destination hashes worth
+  /// asking before the DHT walk. Unsigned, so they are a hint and nothing more —
+  /// a bad hint costs one failed link and can never alter a signed op-log.
+  final Map<String, List<Uint8List>> _swarmHints = {};
+
+  void _seedSwarmHints(String folderId, List<Uint8List> hints) {
+    final list = _swarmHints.putIfAbsent(folderId, () => <Uint8List>[]);
+    for (final h in hints) {
+      if (h.length != 16) continue;
+      if (list.any((e) => _bytesEq(e, h))) continue;
+      list.add(h);
+    }
+    if (list.length > 8) list.removeRange(8, list.length);
+  }
+
+  static bool _bytesEq(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// The folder's shareable pointer: `nfolder1…` (docs/torrents.md §11) — the
+  /// folder key, up to 3 provider hints, and the publisher when we are them.
+  /// Falls back to the npub if the key is not encodable (never, in practice).
+  String folderLink(String folderIdOrNpub) {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final hints = <Uint8List>[];
+    // Our own destination first when we hold the bytes: the person we are
+    // sharing with should try us before anyone else.
+    final own = _diskMgr?.owns(folderId) == true ||
+        _subs?.isSubscribed(folderId) == true;
+    final selfDest = own ? _files?.filesDestHash : null;
+    if (selfDest != null && selfDest.length == 16) hints.add(selfDest);
+    for (final p in _swarmCache[folderId] ?? const <Map<String, dynamic>>[]) {
+      if (hints.length >= 3) break;
+      final h = _hexToBytes('${p['dest'] ?? ''}');
+      if (h == null || h.length != 16) continue;
+      if (hints.any((e) => _bytesEq(e, h))) continue;
+      hints.add(h);
+    }
+    try {
+      return Nfolder.encode(
+        folderId,
+        hints: hints,
+        authorHex: own ? selfPubHex : null,
+      );
+    } catch (_) {
+      return NostrCrypto.encodeNpub(folderId);
+    }
+  }
+
+  /// Who has this folder — the swarm, as the Indexers answer it: a list of
+  /// holders, each with what a caller needs in order to choose well (NOSTR.md,
+  /// "What an Indexer actually answers"). Returns the last snapshot immediately
+  /// and refreshes in the background; call again for fresher data.
+  List<Map<String, dynamic>> folderSwarm(String folderIdOrNpub) {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final at = _swarmAt[folderId] ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - at > _swarmTtlMs) {
+      _swarmAt[folderId] = now; // claim the slot first: no concurrent resolves
+      // ignore: discarded_futures
+      _refreshSwarm(folderId);
+    }
+    return _swarmCache[folderId] ?? const [];
+  }
+
+  Future<void> _refreshSwarm(String folderId) async {
+    final files = _files;
+    if (files == null) return;
+    final key = _hexToBytes(folderId);
+    if (key == null || key.length != 32) return;
+    try {
+      final providers = await files.resolveProviders(key);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final out = <Map<String, dynamic>>[];
+      for (final p in providers) {
+        // What we know about this holder ourselves: an announce we HEARD carries
+        // the physical profile (power, uplink, radios, region) and a hop count.
+        // A holder we only know from a DHT record is reported as such — the age
+        // of the information is not the age of the device.
+        final e = _relayDir.byIdentity(p);
+        final ann = e?.announcement;
+        final prof = ann?.profile;
+        out.add({
+          'dest': p.hexHash,
+          if (ann?.pubkey != null) 'pubkey': ann!.pubkey,
+          'provenance': e == null ? 'dht' : 'direct',
+          if (e != null) 'lastHeardMs': now - e.lastSeenMs,
+          if (e != null) 'hops': e.hops,
+          if (ann != null) 'capacity': ann.capacity,
+          if (ann != null) 'role': ann.role.name,
+          if (prof != null) 'power': prof.power.name,
+          if (prof != null) 'poweredPct': prof.poweredPct,
+          if (prof != null) 'uplink': prof.uplink.name,
+          if (prof != null) 'bwClass': prof.bwClass,
+          if (prof != null && prof.geohash.isNotEmpty) 'region': prof.geohash,
+          if (prof != null && prof.radios.isNotEmpty)
+            'radios': [for (final r in prof.radios) r.mode],
+        });
+      }
+      // An awake machine on mains and a real uplink first; a battery phone on a
+      // metered link last, and only if nothing else has it. Ranking here (not in
+      // the wapp) keeps the policy in one place for every caller.
+      out.sort((a, b) => _holderScore(b).compareTo(_holderScore(a)));
+      _swarmCache[folderId] = out;
+    } catch (_) {
+      // A resolve that fails leaves the previous snapshot in place; the TTL will
+      // try again. It does NOT clear the list — a momentary DHT miss is not
+      // evidence that the swarm is gone.
+    }
+  }
+
+  /// Rank a holder the way the user would call fair (NOSTR.md): mains + a fat
+  /// uplink beats a phone on cellular, an awake node beats a stale one, and a
+  /// nearby node beats a distant one. Facts only — nothing self-declared.
+  int _holderScore(Map<String, dynamic> h) {
+    var score = 0;
+    // PowerSource (node_profile.dart): a box that is still up next week beats a
+    // phone that is precious for hours.
+    switch ('${h['power'] ?? ''}') {
+      case 'solarBattery':
+      case 'windHydro':
+      case 'gridUps':
+        score += 400;
+        break;
+      case 'grid':
+        score += 350;
+        break;
+      case 'solar': // daylight only
+        score += 200;
+        break;
+      case 'vehicle':
+        score += 50;
+        break;
+      case 'batteryOnly': // a phone
+        score -= 250;
+        break;
+    }
+    // UplinkKind: prefer the fat, unmetered line. Cellular is somebody's data
+    // plan, and the network should feel that way to the person carrying it.
+    switch ('${h['uplink'] ?? ''}') {
+      case 'fibre':
+        score += 300;
+        break;
+      case 'wifi':
+        score += 200;
+        break;
+      case 'satellite':
+        score += 120;
+        break;
+      case 'cellular':
+        score -= 300;
+        break;
+      case 'none': // offgrid: reachable only over the mesh, if at all
+        score -= 100;
+        break;
+    }
+    final bw = h['bwClass'];
+    if (bw is int) score += bw * 5; // measured throughput, log-bucketed
+    final cap = h['capacity'];
+    if (cap is int) score += (9 - cap) * 20;
+    final hops = h['hops'];
+    if (hops is int) score -= hops * 10;
+    if ('${h['provenance']}' == 'direct') score += 60;
+    final heard = h['lastHeardMs'];
+    if (heard is int) score -= (heard ~/ 60000).clamp(0, 60); // minutes stale
+    return score;
+  }
+
+  /// Pin/unpin a folder: keep a complete copy of it on this device and tell the
+  /// Indexers we hold it, so the publisher's phone stops being the only source.
+  /// A pin is a vote that the thing should survive (docs/torrents.md §5).
+  void folderPin(String folderIdOrNpub, bool on) {
+    final folderId = _normFolderId(folderIdOrNpub);
+    setFolderAutoSync(folderId, on);
+    if (!on) return;
+    // Publish the provider record now, rather than after the first byte lands:
+    // we have committed to holding this, and a swarm that learns about us early
+    // is a swarm that stops waking the publisher.
+    // ignore: discarded_futures
+    _folderRelay?.publish(folderId);
+    // ignore: discarded_futures
+    folderDownloadAll(folderId);
+  }
+
+  /// True when this device is pinning [folderIdOrNpub] (keeping a full copy and
+  /// advertising itself as a holder).
+  bool folderPinned(String folderIdOrNpub) =>
+      _subs?.isAutoSync(_normFolderId(folderIdOrNpub)) == true;
 
   /// Reduce a folder's current state from the LOCAL event store, synchronously
   /// (store.query is sync). Authoritative for owned folders.

@@ -100,7 +100,7 @@ class BackgroundWappManager {
         return;
       }
       final prefs = await PreferencesService.instance();
-      final engine = WappEngine();
+      final engine = WappEngine(headless: true);
       engine.setStorage(wappDataStorageFor(prefs, name));
       // Identify the wapp BEFORE load so hal_rns_* has a channel tag — without
       // this a headless engine can neither send nor receive Reticulum datagrams

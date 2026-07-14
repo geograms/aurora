@@ -81,6 +81,10 @@ class FolderSubscriptions {
   }
 
   bool isSubscribed(String folderId) => _subs.containsKey(folderId);
+
+  /// True when this folder is kept in sync (a "pin": we hold a full copy and
+  /// advertise ourselves as a holder). See docs/torrents.md §5.
+  bool isAutoSync(String folderId) => _subs[folderId]?.autoSync == true;
   List<String> folderIds() => _subs.keys.toList();
 
   Map<String, dynamic> status(String folderId) {

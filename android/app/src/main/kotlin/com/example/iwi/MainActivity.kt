@@ -218,6 +218,11 @@ class MainActivity : FlutterFragmentActivity() {
                 if (path == null) { result.error("ARG", "path required", null) }
                 else result.success(openFolder(path))
             }
+            "openFile" -> {
+                val path = call.argument<String>("path")
+                if (path == null) { result.error("ARG", "path required", null) }
+                else result.success(openFile(path))
+            }
             else -> result.notImplemented()
         }
     }
@@ -389,6 +394,47 @@ class MainActivity : FlutterFragmentActivity() {
         try {
             dm().remove(id)
         } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Hand ONE file to whatever app views that type: a photo to the gallery, a
+     * PDF to a reader, a video to a player. An .apk is not "viewed" — it is
+     * INSTALLED, and that path already exists (with its own permission gate), so
+     * it is routed there rather than opening a chooser that leads nowhere.
+     *
+     * A raw file:// URI is refused by the platform since API 24, so this goes
+     * through the same FileProvider the updater uses.
+     */
+    private fun openFile(filePath: String): Boolean {
+        return try {
+            val file = File(filePath)
+            if (!file.exists() || file.length() == 0L) return false
+            if (file.extension.lowercase() == "apk") return installApk(filePath)
+
+            val ext = file.extension.lowercase()
+            val mime = android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(ext) ?: "*/*"
+            val uri = FileProvider.getUriForFile(
+                this, "$packageName.fileprovider", file,
+            )
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // No app for this type is a normal outcome (a .bin, a .tar), not a
+            // crash: say so and let the caller tell the user.
+            if (intent.resolveActivity(packageManager) == null) {
+                val chooser = Intent.createChooser(intent, file.name)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (chooser.resolveActivity(packageManager) == null) return false
+                startActivity(chooser)
+                return true
+            }
+            startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 

@@ -3764,13 +3764,53 @@ class _WappPageState extends State<WappPage>
         : _iconForScreen(_menuNames[i]);
   }
 
+  /// Fire one wapp action by name (the same message an inline `<action>` sends).
+  void _onWappAction(String action) {
+    _engine.sendMessage(jsonEncode({'type': 'action', 'action': action}));
+    _engine.handleEvent();
+    _drainOutbox();
+  }
+
   /// Icon buttons in the app bar for menu screens flagged `"appbar": true`.
-  /// They open exactly the same panel the options menu would.
+  /// They open exactly the same panel the options menu would — unless the screen
+  /// also says `"popup": true`, in which case its actions ARE the button: a
+  /// popup menu that fires them directly. A "+" that costs one tap to reach
+  /// "Open a link" / "Share a folder" should not open a page to do it.
   List<Widget> _appBarPanelButtons() {
     final out = <Widget>[];
     for (var i = 0; i < _menuScreens.length; i++) {
       if (_menuScreens[i].getBool('appbar') != true) continue;
       final name = _menuNames[i];
+
+      if (_menuScreens[i].getBool('popup') == true) {
+        final actions = _menuScreens[i]
+            .childrenOf('action')
+            .where((a) => (a.name ?? '').isNotEmpty)
+            .toList();
+        if (actions.isEmpty) continue;
+        out.add(PopupMenuButton<String>(
+          tooltip: _i18n.resolve(name),
+          icon: Icon(_panelIcon(i)),
+          onSelected: _onWappAction,
+          itemBuilder: (_) => [
+            for (final a in actions)
+              PopupMenuItem<String>(
+                value: a.name!,
+                child: Row(
+                  children: [
+                    if ((a.getString('icon') ?? '').isNotEmpty) ...[
+                      Icon(geoUiResolveIcon(a.getString('icon')!), size: 20),
+                      const SizedBox(width: 10),
+                    ],
+                    Text(_i18n.resolve(
+                        a.getString('label') ?? a.name!)),
+                  ],
+                ),
+              ),
+          ],
+        ));
+        continue;
+      }
       // The screen's own `icon` first — the name mapper only knows a handful
       // of well-known screens and falls back to a generic dashboard glyph,
       // which is how a Search panel ended up with a grid icon.
@@ -5100,6 +5140,44 @@ class _WappPageState extends State<WappPage>
   /// pubkey; the feed (and every profile route) keys an author by the first 12
   /// chars of it, so this is the same screen the author's avatar opens — no
   /// second profile path to keep in step.
+  /// The full 64-char pubkey behind a feed's 12-char author key. The host knows
+  /// this from the profile store and from the archive — it does not need the
+  /// wapp's ring of recent authors, which is exactly what used to fail.
+  String? _fullPubkeyFor(String from) {
+    final short = from.trim().toLowerCase();
+    if (short.length == 64) return short;
+    final npub = _wappProfiles[from]?['npub'] ??
+        RnsService.instance.nostrProfileByShort12(short)['npub'] ??
+        RnsService.instance.npubForCallsign(from);
+    if (npub != null && npub.isNotEmpty) {
+      final hex = RnsService.instance.nostrHexFromNpub(npub);
+      if (hex != null && hex.length == 64) return hex;
+    }
+    return null;
+  }
+
+  /// Follow/unfollow an author of a post, by their full key. An unfollow that
+  /// cannot be resolved must SAY so rather than pretend it worked.
+  void _applyNostrFollow(String from, bool follow) {
+    final hex = _fullPubkeyFor(from);
+    if (hex == null) {
+      NotificationService.instance.show(GeogramNotification(
+        level: NotificationLevel.warning,
+        title: follow ? 'Could not follow' : 'Could not unfollow',
+        body: 'This account\'s key is not known on this device yet. '
+            'Open their profile once and try again.',
+        source: 'wapp:social',
+        scope: NotificationScope.app,
+      ));
+      return;
+    }
+    if (follow) {
+      RnsService.instance.followPubkey(hex);
+    } else {
+      RnsService.instance.unfollowPubkey(hex);
+    }
+  }
+
   void _openNostrProfileByHex(String hex) {
     if (hex.length < 12) return;
     _openNostrProfile(hex.substring(0, 12));
@@ -5203,6 +5281,9 @@ class _WappPageState extends State<WappPage>
                     _sendCommand('follows_list_tap');
                   }
                 }
+                // …and durably, host-side, with the full key: the wapp commands
+                // above are a courtesy, not the record.
+                _applyNostrFollow(npub ?? from, follow);
                 setState(() {});
               },
               onSetBlock: (block) {
@@ -5416,6 +5497,13 @@ class _WappPageState extends State<WappPage>
               _followedCalls.remove(uc);
             }
           });
+          // Do the follow HOST-side with the full key. Handing the wapp a 12-char
+          // prefix and hoping it can resolve it was a silent failure: the wapp
+          // looks the prefix up in a 96-entry ring of recently-seen authors, and
+          // if the account had scrolled out of that ring the follow set was never
+          // touched at all — so an unfollow did nothing and the account was back
+          // on the next rebuild.
+          _applyNostrFollow(from, follow);
           _fieldValues['profile_target'] = from;
           _sendCommand(follow ? 'profile_follow' : 'profile_unfollow');
         },
@@ -6073,6 +6161,7 @@ class _WappPageState extends State<WappPage>
             } else {
               _followedCalls.remove(uc);
             }
+            _applyNostrFollow(c, follow);
             _fieldValues['profile_target'] = c;
             _sendCommand(follow ? 'profile_follow' : 'profile_unfollow');
           },

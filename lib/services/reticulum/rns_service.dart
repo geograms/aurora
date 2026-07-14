@@ -72,8 +72,11 @@ import '../folders/folder_keystore.dart';
 import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
 import '../folders/folder_state.dart';
+import '../folders/folder_export.dart';
 import '../folders/folder_subscriptions.dart';
 import '../folders/nfolder.dart';
+import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
+import 'package:reticulum/reticulum.dart' show MediaArchive;
 import 'package:reticulum/reticulum.dart' show BlossomServer;
 
 import '../notification_service.dart';
@@ -6881,6 +6884,68 @@ class RnsService {
   /// advertising itself as a holder).
   bool folderPinned(String folderIdOrNpub) =>
       _subs?.isAutoSync(_normFolderId(folderIdOrNpub)) == true;
+
+  /// Open one file of a folder with whatever the system uses to view it — the
+  /// gallery for a photo, a reader for a PDF, the installer for an APK.
+  ///
+  /// Two cases, and neither reads a large file on the UI isolate:
+  ///  - a folder we serve **from disk**: the file already IS a file. Open it.
+  ///  - a folder we **downloaded**: the bytes are a row in the content-addressed
+  ///    archive, so they are exported to a real path on a WORKER isolate first
+  ///    (`folder_export.dart`) and the export is reused on the next open.
+  ///
+  /// Returns false when we do not hold the bytes (the file was never downloaded)
+  /// or no app on this device can open that type — both are honest outcomes the
+  /// caller should say out loud, not silent failures.
+  Future<bool> folderOpenFile(
+    String folderIdOrNpub,
+    String shaHex, {
+    String? name,
+  }) async {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final sha = _normShaHex(shaHex);
+    if (sha.length != 64) return false;
+
+    // Served from disk: nothing to materialise.
+    final onDisk = _diskMgr?.filePathOf(folderId, sha);
+    if (onDisk != null) return openFileWithSystem(onDisk);
+
+    final archive = sharedMediaArchive();
+    if (archive == null || !archive.has(sha)) return false;
+    final key = MediaArchive.storageKeyOf(sha);
+    if (key == null) return false;
+
+    // Keep the file's real name (and therefore its extension — the OS routes on
+    // it) and keep folders apart, so two torrents holding "readme.txt" do not
+    // overwrite each other's export.
+    final leaf = (name == null || name.isEmpty)
+        ? sha
+        : name.split('/').last.replaceAll(RegExp(r'[^\w.\- ]'), '_');
+    final dir = _folderExportDir;
+    if (dir == null) return false;
+    final outPath = '$dir/${folderId.substring(0, 12)}/$leaf';
+
+    final path = await exportArchiveFile(
+      dbPath: archive.dbPath,
+      storageKey: key,
+      outPath: outPath,
+    );
+    if (path == null) {
+      LogService.instance
+          .add('folders: export of $leaf failed (archive read)');
+      return false;
+    }
+    final opened = await openFileWithSystem(path);
+    LogService.instance.add(opened
+        ? 'folders: opened $leaf with the system viewer'
+        : 'folders: no app on this device opens $leaf');
+    return opened;
+  }
+
+  /// Where exported files are materialised for the OS to open. Set by the app
+  /// (a real directory the platform lets other apps read via the FileProvider).
+  String? folderExportDir;
+  String? get _folderExportDir => folderExportDir;
 
   /// Reduce a folder's current state from the LOCAL event store, synchronously
   /// (store.query is sync). Authoritative for owned folders.

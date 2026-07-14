@@ -783,6 +783,23 @@ class RemoteApiService {
         return _json(
             res, {'ok': true, 'holders': RnsService.instance.folderSwarm(fid)});
       }
+      // Open one file with the system viewer (gallery / reader / installer).
+      // {"folderId":..,"sha":..,"name":..}. A downloaded file is exported out of
+      // the content-addressed archive on a worker isolate first; a disk-backed
+      // one is opened in place. false = we don't hold it, or nothing here opens
+      // that type.
+      if (req.method == 'POST' && path == '/api/rns/folder/open') {
+        final data = await _body(req);
+        final fid = '${data['folderId'] ?? ''}'.trim();
+        final sha = '${data['sha'] ?? ''}'.trim();
+        if (fid.isEmpty || sha.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId and sha required'},
+              status: HttpStatus.badRequest);
+        }
+        final ok = await RnsService.instance
+            .folderOpenFile(fid, sha, name: '${data['name'] ?? ''}');
+        return _json(res, {'ok': ok});
+      }
       // Pin/unpin: keep a full copy and advertise ourselves to the Indexers.
       if (req.method == 'POST' && path == '/api/rns/folder/pin') {
         // {"folderId":..,"on":true}

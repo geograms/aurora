@@ -224,6 +224,11 @@ class DiskFolderSource implements FileSource {
 
   bool has(Uint8List fileHash) => _byHash.containsKey(_hex(fileHash));
 
+  /// The file's real path on disk, when this folder is the one serving it.
+  /// Opening a file with the OS needs a PATH, not bytes — [read] would pull the
+  /// whole thing into memory to hand a viewer something it can open itself.
+  String? pathOfHex(String shaHex) => _byHash[shaHex.toLowerCase()];
+
   static String _hex(List<int> b) =>
       b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
 }

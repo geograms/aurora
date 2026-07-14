@@ -68,6 +68,9 @@ Future<void> ensureRnsAutostart() async {
     rns.folderStorePath = ws.getAbsolutePath('folders.json');
     rns.diskFoldersPath = ws.getAbsolutePath('disk_folders.json');
     rns.subscriptionsPath = ws.getAbsolutePath('folder_subscriptions.json');
+    // Where a downloaded file is materialised so the OS can open it (the bytes
+    // themselves live content-addressed in the archive; a viewer needs a path).
+    rns.folderExportDir = ws.getAbsolutePath('opened');
     rns.serveStatsPath = ws.getAbsolutePath('serve_stats.sqlite3');
     rns.identityPath = ws.getAbsolutePath('rns_identity.key');
     rns.blossomLoad(); // the user's media servers, not just the shipped ones

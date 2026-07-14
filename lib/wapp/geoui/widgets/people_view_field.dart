@@ -106,7 +106,12 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         ),
         alignment: Alignment.center,
         child: Text(
-          count > 0 ? '$title  $count' : title,
+          // "Downloaded (3)". A bare trailing number read as part of the title
+          // ("Downloaded 3"), and a wapp that wrote its own count into the title
+          // ended up saying it twice. The count belongs to the tab, so the tab
+          // formats it — and it says (0) rather than hiding, because "none yet"
+          // is information the user wants, not a state to conceal.
+          '$title ($count)',
           style: TextStyle(
             fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
             color: sel ? cs.onSurface : cs.onSurfaceVariant,

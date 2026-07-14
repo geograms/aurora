@@ -1059,6 +1059,33 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Open one file of a folder with the system viewer (gallery / PDF reader /
+    // installer). arg = "sha\tname". Async: 1 = started. The bytes, when they
+    // live in the archive rather than on disk, are exported on a WORKER isolate
+    // — a 300MB video must never be pulled through the isolate drawing the UI.
+    final halFolderOpenFile = WasmFunction(
+      (int idPtr, int idLen, int argPtr, int argLen) {
+        if (idLen <= 0 || argLen <= 0) return 0;
+        final arg = _readStr(argPtr, argLen);
+        final tab = arg.indexOf('\t');
+        final sha = tab >= 0 ? arg.substring(0, tab) : arg;
+        final name = tab >= 0 ? arg.substring(tab + 1) : '';
+        if (sha.isEmpty) return 0;
+        // ignore: discarded_futures
+        RnsService.instance
+            .folderOpenFile(_readStr(idPtr, idLen), sha, name: name)
+            .then((ok) {
+          if (!ok) {
+            LogService.instance.add(
+                'torrents: could not open $name — not downloaded, or no app '
+                'on this device opens that type');
+          }
+        });
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // Pin/unpin: keep a full copy of the folder and advertise it to the Indexers.
     final halFolderPin = WasmFunction(
       (int idPtr, int idLen, int on) {
@@ -3265,6 +3292,7 @@ class WappEngine {
       WasmImport('hal', 'folder_link', halFolderLink),
       WasmImport('hal', 'folder_swarm', halFolderSwarm),
       WasmImport('hal', 'folder_pin', halFolderPin),
+      WasmImport('hal', 'folder_open_file', halFolderOpenFile),
       WasmImport('hal', 'fs_listdir', halFsListdir),
       WasmImport('hal', 'fs_home', halFsHome),
       WasmImport('hal', 'storage_request', halStorageRequest),

@@ -221,6 +221,13 @@ class DiskFolderManager {
   bool owns(String folderId) => _sources.containsKey(folderId);
   String? dirOf(String folderId) => _dirs[folderId];
 
+  /// The real on-disk path of one file inside a folder we serve from disk, by
+  /// its sha256 (hex). Null when we don't serve that folder from disk, or don't
+  /// have that file. Used to OPEN a file: the bytes are already a real file
+  /// here, so there is nothing to export.
+  String? filePathOf(String folderId, String shaHex) =>
+      _sources[folderId]?.pathOfHex(shaHex);
+
   /// Stop sharing a disk folder: unregister its source (stop serving its bytes),
   /// drop it from the owned list + registry + keystore so it no longer appears
   /// nor is advertised. The on-disk files and the in-folder key file are LEFT

@@ -44,6 +44,13 @@ class NodeRoleApi {
   int _lastQueryTotal = 0;
   Timer? _sampler;
 
+  // The Archiver's two: what other people ASKED for, and what it cost the
+  // uplink to give it to them.
+  RateRing? _reqRing;
+  RateRing? _bwRing;
+  int _lastReqTotal = 0;
+  int _lastBwTotal = 0;
+
   RateRing get queryRing {
     if (_queryRing == null) {
       _queryRing = RateRing.decode(
@@ -54,16 +61,47 @@ class NodeRoleApi {
     return _queryRing!;
   }
 
+  /// The serve rings. Lazily restored from prefs on first read, then advanced by
+  /// the same one-minute sampler that feeds the Indexer's.
+  ({RateRing req, RateRing bw}) get serveRings {
+    if (_reqRing == null || _bwRing == null) {
+      final p = PreferencesService.instanceSync;
+      _reqRing = RateRing.decode(p?.archiveReqRing ?? '');
+      _bwRing = RateRing.decode(p?.archiveBwRing ?? '');
+      final q = _rns.serveQuota;
+      _lastReqTotal = q?.requestsServedTotal ?? 0;
+      _lastBwTotal = q?.bytesServedTotal ?? 0;
+      _sampler ??= Timer.periodic(const Duration(minutes: 1), (_) => _sample());
+    }
+    return (req: _reqRing!, bw: _bwRing!);
+  }
+
   void _sample() {
+    final p = PreferencesService.instanceSync;
+
     final ring = _queryRing;
-    if (ring == null) return;
-    final total = _rns.queryTotals;
-    final delta = total - _lastQueryTotal;
-    _lastQueryTotal = total;
-    if (delta > 0) ring.add(delta);
-    // Persist at most once a minute, and only when something moved or an hour
-    // rolled — the encode is a short string either way.
-    PreferencesService.instanceSync?.indexerQueryRing = ring.encode();
+    if (ring != null) {
+      final total = _rns.queryTotals;
+      final delta = total - _lastQueryTotal;
+      _lastQueryTotal = total;
+      if (delta > 0) ring.add(delta);
+      // Persist at most once a minute — the encode is a short string either way.
+      p?.indexerQueryRing = ring.encode();
+    }
+
+    final q = _rns.serveQuota;
+    final req = _reqRing;
+    final bw = _bwRing;
+    if (q != null && req != null && bw != null) {
+      final rDelta = q.requestsServedTotal - _lastReqTotal;
+      final bDelta = q.bytesServedTotal - _lastBwTotal;
+      _lastReqTotal = q.requestsServedTotal;
+      _lastBwTotal = q.bytesServedTotal;
+      if (rDelta > 0) req.add(rDelta);
+      if (bDelta > 0) bw.add(bDelta);
+      p?.archiveReqRing = req.encode();
+      p?.archiveBwRing = bw.encode();
+    }
   }
 
   // ── Indexer ───────────────────────────────────────────────────────────────
@@ -312,6 +350,19 @@ class NodeRoleApi {
           ? 0.0
           : double.parse((used / quotaBytes).clamp(0.0, 1.0).toStringAsFixed(3)),
       'servedItems': st?.servedItems ?? 0,
+
+      // The last 48 hours: what people asked for, and what it cost the uplink.
+      // Bandwidth is graphed in kB per hour — bytes make a sparkline of
+      // meaningless magnitudes.
+      'reqLastHour': serveRings.req.lastHour,
+      'reqAvgPerHour':
+          double.parse(serveRings.req.avgPerHour(window: 24).toStringAsFixed(1)),
+      'reqSpark': serveRings.req.series(),
+      'bwLastHourText': _size(serveRings.bw.lastHour),
+      'bwPerHourText': _size(serveRings.bw.avgPerHour(window: 24).round()),
+      'bwSpark': [
+        for (final v in serveRings.bw.series()) (v / 1024).round(),
+      ],
       // What the Free-space button would ACTUALLY give back — everything held
       // for other people. Previewing a different sweep than the button runs is
       // how a UI ends up lying to the person about to press it.

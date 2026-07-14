@@ -257,6 +257,15 @@ class PreferencesService {
   String get indexerQueryRing => _prefs.getString('indexer.queryRing') ?? '';
   set indexerQueryRing(String v) => _prefs.setString('indexer.queryRing', v);
 
+  // The Archiver dashboard's 48-hour graphs: requests served and bytes served,
+  // one bucket per hour (RateRing.encode()). Persisted, because a graph that
+  // resets on every app start shows nothing worth looking at.
+  String get archiveReqRing => _prefs.getString('archive.reqRing') ?? '';
+  set archiveReqRing(String v) => _prefs.setString('archive.reqRing', v);
+
+  String get archiveBwRing => _prefs.getString('archive.bwRing') ?? '';
+  set archiveBwRing(String v) => _prefs.setString('archive.bwRing', v);
+
   // Topics this indexer volunteers for ("what I'm comfortable indexing").
   // Empty = wide when the hardware allows it: index everything heard.
   List<String> get indexerTopics =>

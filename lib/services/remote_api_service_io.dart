@@ -495,6 +495,8 @@ class RemoteApiService {
               wappsDataStorage(prefs).getAbsolutePath('folder_subscriptions.json');
           RnsService.instance.serveStatsPath =
               wappsDataStorage(prefs).getAbsolutePath('serve_stats.sqlite3');
+          RnsService.instance.popularityPath = wappsDataStorage(prefs)
+              .getAbsolutePath('folder_popularity.sqlite3');
           RnsService.instance.identityPath =
               wappsDataStorage(prefs).getAbsolutePath('rns_identity.key');
         }

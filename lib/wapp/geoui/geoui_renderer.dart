@@ -15,6 +15,7 @@ import 'widgets/media_view.dart' show MediaThumbnail, GalleryMediaTile;
 import '../../util/media_ref.dart' show MediaRef;
 import 'widgets/log_view_field.dart';
 import 'widgets/stats_grid_field.dart';
+import 'widgets/popularity_chart_field.dart';
 import 'widgets/chat_view_field.dart';
 
 /// Bindings interface for reading/writing field values.
@@ -359,10 +360,35 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       'icon' => _renderIconField(fieldName, label, tip, field),
       'qr' => _renderQrField(fieldName, label, tip, field),
       'stats' => _renderStatsField(fieldName),
+      'popularity' => _renderPopularityField(fieldName),
       'image' => _renderImageField(fieldName, label, tip, field),
       'gallery' => _renderGalleryField(fieldName, label, tip, field),
       _ => _renderStringField(fieldName, label, tip, field),
     };
+  }
+
+  /// `$type:"popularity"` — a native monthly bar chart of seeders and unique
+  /// leechers (popularity_chart_field.dart). The wapp sets the field value (via
+  /// `ui.field.set`) to a list of `{ym, seeders, leechers}`.
+  Widget _renderPopularityField(String name) {
+    final raw = widget.bindings.getValue(name);
+    List monthsRaw = const [];
+    if (raw is List) {
+      monthsRaw = raw;
+    } else if (raw is Map && raw['months'] is List) {
+      monthsRaw = raw['months'] as List;
+    } else if (raw is String && raw.isNotEmpty) {
+      try {
+        final d = jsonDecode(raw);
+        if (d is List) monthsRaw = d;
+        else if (d is Map && d['months'] is List) monthsRaw = d['months'] as List;
+      } catch (_) {}
+    }
+    final months = monthsRaw
+        .whereType<Map>()
+        .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+        .toList();
+    return PopularityChartField(months: months);
   }
 
   /// `$type:"stats"` — the native dashboard grid (stats_grid_field.dart). Tiles
@@ -454,6 +480,8 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
         banner != null || cover != null || trailer != null || gallery.isNotEmpty;
     final fileCount = (g['fileCount'] as num?)?.toInt() ?? 0;
     final totalBytes = (g['totalBytes'] as num?)?.toInt() ?? 0;
+    // Seeders known to the Indexers (cached; -1 when the field is absent).
+    final seeders = (g['seeders'] as num?)?.toInt() ?? -1;
 
     if (banner == null &&
         cover == null &&
@@ -550,6 +578,18 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
           Text(desc,
               style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant)),
         ],
+        if (seeders >= 0) ...[
+          const SizedBox(height: 12),
+          Row(children: [
+            Icon(Icons.upload_rounded, size: 16, color: cs.primary),
+            const SizedBox(width: 6),
+            Text('$seeders seeder${seeders == 1 ? '' : 's'}',
+                style: tt.bodyMedium?.copyWith(
+                    color: cs.onSurface, fontWeight: FontWeight.w600)),
+            Text('  ·  others holding this now',
+                style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          ]),
+        ],
         if (!hasPreview && fileCount > 0) ...[
           const SizedBox(height: 14),
           Text(
@@ -576,7 +616,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
           ),
         ],
         if (files.isNotEmpty || path.isNotEmpty)
-          _fileList(name, files, path, cs, tt),
+          _fileList(name, files, path, totalBytes, cs, tt),
       ],
     );
 
@@ -587,7 +627,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
   /// via the field's onAction (the selection rides a field so a 64-char sha is
   /// not truncated into the short command buffer).
   Widget _fileList(String field, List<Map<String, dynamic>> files, String path,
-      ColorScheme cs, TextTheme tt) {
+      int totalBytes, ColorScheme cs, TextTheme tt) {
     void fire(String action, [String? sel]) {
       if (sel != null) widget.bindings.setValue('${field}_sel', sel);
       widget.onAction?.call(action);
@@ -617,15 +657,12 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const SizedBox(height: 18),
-        Row(children: [
-          Text('Files', style: tt.titleSmall?.copyWith(color: cs.onSurfaceVariant)),
-          const Spacer(),
-          TextButton.icon(
-            onPressed: () => fire('${field}_full'),
-            icon: const Icon(Icons.open_in_full, size: 16),
-            label: const Text('Browse'),
-          ),
-        ]),
+        // "Files (1.2 GB)" — the whole-torrent total, so the size is visible
+        // without opening the browser. (Browse now lives in the ☰ menu.)
+        Text(
+          totalBytes > 0 ? 'Files (${_fmtGalleryBytes(totalBytes)})' : 'Files',
+          style: tt.titleSmall?.copyWith(color: cs.onSurfaceVariant),
+        ),
         Divider(height: 1, color: cs.outlineVariant.withAlpha(60)),
         if (path.isNotEmpty)
           row(Icons.arrow_upward, '..', 'up', () => fire('${field}_up')),

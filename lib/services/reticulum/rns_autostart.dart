@@ -72,6 +72,7 @@ Future<void> ensureRnsAutostart() async {
     // themselves live content-addressed in the archive; a viewer needs a path).
     rns.folderExportDir = ws.getAbsolutePath('opened');
     rns.serveStatsPath = ws.getAbsolutePath('serve_stats.sqlite3');
+    rns.popularityPath = ws.getAbsolutePath('folder_popularity.sqlite3');
     rns.identityPath = ws.getAbsolutePath('rns_identity.key');
     rns.blossomLoad(); // the user's media servers, not just the shipped ones
     rns.followsPath = ws.getAbsolutePath('host_follows.json');

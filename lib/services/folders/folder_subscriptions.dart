@@ -12,11 +12,20 @@ import 'dart:io';
 
 class FolderSub {
   bool autoSync;
+  // When true the user has FROZEN this folder at the version they hold: the
+  // owner may push changes, but we do not pull them (saves bandwidth / keeps a
+  // static copy). Default false = follow updates. Independent of autoSync (a
+  // pinned folder can still be frozen: keep + seed what you have, don't refresh).
+  bool frozen;
   final Map<String, String> downloaded; // logical name -> sha (hex)
-  FolderSub({this.autoSync = false, Map<String, String>? downloaded})
+  FolderSub(
+      {this.autoSync = false,
+      this.frozen = false,
+      Map<String, String>? downloaded})
       : downloaded = downloaded ?? {};
 
-  Map<String, dynamic> toJson() => {'autoSync': autoSync, 'downloaded': downloaded};
+  Map<String, dynamic> toJson() =>
+      {'autoSync': autoSync, 'frozen': frozen, 'downloaded': downloaded};
   static FolderSub fromJson(Object? o) {
     if (o is! Map) return FolderSub();
     final d = <String, String>{};
@@ -24,7 +33,10 @@ class FolderSub {
     if (raw is Map) {
       raw.forEach((k, v) => d['$k'] = '$v');
     }
-    return FolderSub(autoSync: o['autoSync'] == true, downloaded: d);
+    return FolderSub(
+        autoSync: o['autoSync'] == true,
+        frozen: o['frozen'] == true,
+        downloaded: d);
   }
 }
 
@@ -71,6 +83,14 @@ class FolderSubscriptions {
     _save();
   }
 
+  /// True when the user has frozen this folder (do not pull owner updates).
+  bool frozenOf(String folderId) => _subs[folderId]?.frozen ?? false;
+
+  void setFrozen(String folderId, bool on) {
+    _of(folderId).frozen = on;
+    _save();
+  }
+
   Map<String, String> downloadedOf(String folderId) =>
       Map.unmodifiable(_subs[folderId]?.downloaded ?? const {});
 
@@ -92,6 +112,7 @@ class FolderSubscriptions {
     return {
       'subscribed': s != null,
       'autoSync': s?.autoSync ?? false,
+      'frozen': s?.frozen ?? false,
       'downloaded': s?.downloaded.length ?? 0,
     };
   }

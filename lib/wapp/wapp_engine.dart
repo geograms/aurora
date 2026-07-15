@@ -1227,6 +1227,40 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Device-local popularity over months → JSON {folderId, months:[{ym,
+    // seeders, leechers}]}. Kept on this device only, never in the folder.
+    final halFolderPopularity = WasmFunction(
+      (int idPtr, int idLen, int outPtr, int outCap) {
+        if (idLen <= 0 || outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderPopularity(_readStr(idPtr, idLen))));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Enable/disable pulling owner updates for a folder (on == 0 freezes it at
+    // the held version; on != 0 resumes following changes).
+    final halFolderSetUpdates = WasmFunction(
+      (int idPtr, int idLen, int on) {
+        if (idLen <= 0) return 0;
+        RnsService.instance.folderSetUpdates(_readStr(idPtr, idLen), on != 0);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // Whether a folder currently follows owner updates: 1 = updates on (default),
+    // 0 = frozen.
+    final halFolderUpdates = WasmFunction(
+      (int idPtr, int idLen) {
+        if (idLen <= 0) return 1;
+        return RnsService.instance.folderGetUpdates(_readStr(idPtr, idLen))
+            ? 1
+            : 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // List a real directory (for the in-app folder browser): JSON
     // [{"name","path","dir"}], directories first. Subject to OS file access.
     final halFsListdir = WasmFunction(
@@ -3442,6 +3476,9 @@ class WappEngine {
       WasmImport('hal', 'folder_link', halFolderLink),
       WasmImport('hal', 'folder_swarm', halFolderSwarm),
       WasmImport('hal', 'folder_pin', halFolderPin),
+      WasmImport('hal', 'folder_popularity', halFolderPopularity),
+      WasmImport('hal', 'folder_set_updates', halFolderSetUpdates),
+      WasmImport('hal', 'folder_updates', halFolderUpdates),
       WasmImport('hal', 'folder_open_file', halFolderOpenFile),
       WasmImport('hal', 'folder_meta_get', halFolderMetaGet),
       WasmImport('hal', 'folder_meta_set', halFolderMetaSet),

@@ -1883,197 +1883,197 @@ class RnsService {
             : FilePartialStore(Directory(partialStoreDir!));
         _files =
             FileTransferNode(
-          identity: _id!,
-          source: _composite!,
-          send: (raw) => _transport?.sendLinkAware(raw),
-          log: (m) => LogService.instance.add('RNS/files: $m'),
-          enableDht: true,
-          partialStore: _partialStore,
-          // Relaxed Kademlia fanout, now that persistence anchors (below) guarantee
-          // findability independent of XOR distance/k: resolve queries the always-on
-          // anchors FIRST and publish stores to them, so the XOR-walk is only a
-          // secondary/redundancy path. We therefore no longer need k to span the
-          // whole overlay (the old k=96 was a workaround for records living only on
-          // their holder). k=20/alpha=6 (vs the library's safe 96/12 default for
-          // consumers WITHOUT anchors) cuts per-lookup RPCs and burst substantially.
-          dhtK: 20,
-          dhtAlpha: 6,
-          // Run DHT RPC links over the CHAT destination, not the dedicated
-          // geogram/dht dest. Public hubs rate-limit announces and routinely drop
-          // the geogram/dht announce, so peers have no transport path to each
-          // other's dht dest and STOREs never land (replication failed; resolve
-          // only worked because the holder kept its own record + k=96). The chat
-          // announce is the most reliably propagated one, so routing RPC there
-          // makes any chat-reachable peer DHT-reachable. The Kademlia node id is
-          // still derived from geogram/dht locally and is unaffected. Updated nodes
-          // also dual-accept on the legacy dht dest for the mixed-fleet migration.
-          rpcApp: _app, // 'geogram'
-          rpcAspects: _aspects, // ['chat']
-          // Persistence anchors: the always-on relay indexers. The DHT also STOREs
-          // provider records to them and queries them FIRST on resolve, so records
-          // survive churn of the ephemeral k-closest and stay findable regardless
-          // of XOR distance (the enabler for shrinking k later). We pick the most
-          // stable (lowest kCap) fresh indexers, excluding ourselves, capped to a
-          // few to bound the extra traffic. Empty when none are known → unchanged.
-          stableAnchors: () {
-            final selfHash = _id?.hash;
-            final list =
-                _relayDir
-                    .indexers()
-                    .where((e) {
-                      final c = e.announcement.capacity;
-                      return c >= kCapArchive && c <= kCapHomeWifi;
-                    })
-                    .where(
-                      (e) =>
-                          selfHash == null ||
-                          !RnsCrypto.constantTimeEquals(
-                            e.identity.hash,
-                            selfHash,
-                          ),
-                    )
-                    .toList()
-                  ..sort((a, b) {
-                    final c = a.announcement.capacity.compareTo(
-                      b.announcement.capacity,
-                    );
+                identity: _id!,
+                source: _composite!,
+                send: (raw) => _transport?.sendLinkAware(raw),
+                log: (m) => LogService.instance.add('RNS/files: $m'),
+                enableDht: true,
+                partialStore: _partialStore,
+                // Relaxed Kademlia fanout, now that persistence anchors (below) guarantee
+                // findability independent of XOR distance/k: resolve queries the always-on
+                // anchors FIRST and publish stores to them, so the XOR-walk is only a
+                // secondary/redundancy path. We therefore no longer need k to span the
+                // whole overlay (the old k=96 was a workaround for records living only on
+                // their holder). k=20/alpha=6 (vs the library's safe 96/12 default for
+                // consumers WITHOUT anchors) cuts per-lookup RPCs and burst substantially.
+                dhtK: 20,
+                dhtAlpha: 6,
+                // Run DHT RPC links over the CHAT destination, not the dedicated
+                // geogram/dht dest. Public hubs rate-limit announces and routinely drop
+                // the geogram/dht announce, so peers have no transport path to each
+                // other's dht dest and STOREs never land (replication failed; resolve
+                // only worked because the holder kept its own record + k=96). The chat
+                // announce is the most reliably propagated one, so routing RPC there
+                // makes any chat-reachable peer DHT-reachable. The Kademlia node id is
+                // still derived from geogram/dht locally and is unaffected. Updated nodes
+                // also dual-accept on the legacy dht dest for the mixed-fleet migration.
+                rpcApp: _app, // 'geogram'
+                rpcAspects: _aspects, // ['chat']
+                // Persistence anchors: the always-on relay indexers. The DHT also STOREs
+                // provider records to them and queries them FIRST on resolve, so records
+                // survive churn of the ephemeral k-closest and stay findable regardless
+                // of XOR distance (the enabler for shrinking k later). We pick the most
+                // stable (lowest kCap) fresh indexers, excluding ourselves, capped to a
+                // few to bound the extra traffic. Empty when none are known → unchanged.
+                stableAnchors: () {
+                  final selfHash = _id?.hash;
+                  final list =
+                      _relayDir
+                          .indexers()
+                          .where((e) {
+                            final c = e.announcement.capacity;
+                            return c >= kCapArchive && c <= kCapHomeWifi;
+                          })
+                          .where(
+                            (e) =>
+                                selfHash == null ||
+                                !RnsCrypto.constantTimeEquals(
+                                  e.identity.hash,
+                                  selfHash,
+                                ),
+                          )
+                          .toList()
+                        ..sort((a, b) {
+                          final c = a.announcement.capacity.compareTo(
+                            b.announcement.capacity,
+                          );
                           return c != 0
                               ? c
                               : b.lastSeenMs.compareTo(a.lastSeenMs);
-                  });
-            return [for (final e in list.take(6)) e.identity];
-          },
-          nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
-          // Per-destination routing (Reticulum routes per-dest, not per-identity):
-          // the files/dht dests of a node may be reached via different hubs, so the
-          // link request must be transport-addressed to the hub that has a route to
-          // THIS dest — using any of the identity's paths sent it to the wrong hub,
-          // which dropped it (the silent device-to-device link failure).
-          nextHopForDest: (h) => _transport?.pathFor(h)?.nextHop,
-          hasPathForDest: (h) => _transport?.hasPath(h) ?? false,
-          // Link MTU discovery: offer the next-hop interface's HW MTU so file
-          // links over TCP negotiate large resource parts (much higher throughput).
-          nextHopMtuForDest: (h) =>
-              _transport?.nextHopInterfaceHwMtu(h) ?? kRnsMtu,
-          // Pull a path to a peer we know by identity but have no cached route to
-          // (its announce was never flooded to us) so DHT resolve + file fetch
-          // links are routable — the fix that makes device-to-device folder
-          // discovery work on busy/asymmetric public hubs.
-          requestPath: (h) => _transport?.requestPath(h),
-          // Pin an outbound file link to its dest's path interface (the LAN) up
-          // front, so our GET_FILE/resource traffic can't be flipped onto a slow
-          // hub by a proof copy arriving there.
-          onLinkOpened: (linkId, destHash) {
-            final via = _transport?.pathFor(destHash)?.via;
-            if (via != null) _transport?.noteLinkIface(linkId, via);
-          },
-          // (LAN link-failure demotion intentionally NOT wired: the LAN lane is
-          // reliable unicast now, so demoting it on a transient miss only flapped
-          // co-located transfers onto a slower/again-failing hub. noteLinkFailure
-          // stays available for a future, less trigger-happy policy.)
-          // Count a download whenever we serve a file's manifest to another node.
-          // Both the media-archive metric (for archived files) and the serve-stats
-          // store (works for disk-folder files too — they're never in the archive).
-          onServed: (h) {
-            final hex = _hex(h);
-            final src = fileServeSource;
+                        });
+                  return [for (final e in list.take(6)) e.identity];
+                },
+                nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
+                // Per-destination routing (Reticulum routes per-dest, not per-identity):
+                // the files/dht dests of a node may be reached via different hubs, so the
+                // link request must be transport-addressed to the hub that has a route to
+                // THIS dest — using any of the identity's paths sent it to the wrong hub,
+                // which dropped it (the silent device-to-device link failure).
+                nextHopForDest: (h) => _transport?.pathFor(h)?.nextHop,
+                hasPathForDest: (h) => _transport?.hasPath(h) ?? false,
+                // Link MTU discovery: offer the next-hop interface's HW MTU so file
+                // links over TCP negotiate large resource parts (much higher throughput).
+                nextHopMtuForDest: (h) =>
+                    _transport?.nextHopInterfaceHwMtu(h) ?? kRnsMtu,
+                // Pull a path to a peer we know by identity but have no cached route to
+                // (its announce was never flooded to us) so DHT resolve + file fetch
+                // links are routable — the fix that makes device-to-device folder
+                // discovery work on busy/asymmetric public hubs.
+                requestPath: (h) => _transport?.requestPath(h),
+                // Pin an outbound file link to its dest's path interface (the LAN) up
+                // front, so our GET_FILE/resource traffic can't be flipped onto a slow
+                // hub by a proof copy arriving there.
+                onLinkOpened: (linkId, destHash) {
+                  final via = _transport?.pathFor(destHash)?.via;
+                  if (via != null) _transport?.noteLinkIface(linkId, via);
+                },
+                // (LAN link-failure demotion intentionally NOT wired: the LAN lane is
+                // reliable unicast now, so demoting it on a transient miss only flapped
+                // co-located transfers onto a slower/again-failing hub. noteLinkFailure
+                // stays available for a future, less trigger-happy policy.)
+                // Count a download whenever we serve a file's manifest to another node.
+                // Both the media-archive metric (for archived files) and the serve-stats
+                // store (works for disk-folder files too — they're never in the archive).
+                onServed: (h) {
+                  final hex = _hex(h);
+                  final src = fileServeSource;
                   if (src is MediaFileSource)
                     src.archive.incrementDownloads(hex);
                   _serveStats?.record(
                     hex,
                     DateTime.now().millisecondsSinceEpoch,
                   );
-          },
-          // Store-and-forward Blossom hosting: a peer asks us to keep a blob.
-          onDepositOffer: (sha, size, ext, pubHex, sigHex, linkIdHex) {
-            if (!hostingActive) {
-              return const DepositVerdict.reject('not hosting');
-            }
-            final src = fileServeSource;
-            if (src is! MediaFileSource) {
-              return const DepositVerdict.reject('no archive');
-            }
-            // Verify the compact NOSTR auth binds this depositor to this blob.
-            final shaHex = _hex(sha);
-            final msg = depositAuthMessageHex(shaHex);
-            if (!NostrCrypto.schnorrVerify(msg, sigHex, pubHex)) {
-              return const DepositVerdict.reject('bad deposit auth');
-            }
-            final tier = tierOf(
-              pubHex,
-              selfPubHex: selfPubHex,
-              followsHex: _mirroredAuthors,
-            );
-            final totals = src.archive.hostedTotals();
-            final u = _relayStore?.hostUsage();
-            final d = admit(
-              tier,
-              size,
-              isMedia: true,
-              totalHostedBytes: totals.totalHostedBytes,
-              strangerHostedBytes: totals.strangerBytes,
-              strangerNotesThisMonth: u?.strangerNotesThisMonth ?? 0,
-              q: hostQuota(),
-            );
-            if (!d.ok) return DepositVerdict.reject(d.reason);
+                },
+                // Store-and-forward Blossom hosting: a peer asks us to keep a blob.
+                onDepositOffer: (sha, size, ext, pubHex, sigHex, linkIdHex) {
+                  if (!hostingActive) {
+                    return const DepositVerdict.reject('not hosting');
+                  }
+                  final src = fileServeSource;
+                  if (src is! MediaFileSource) {
+                    return const DepositVerdict.reject('no archive');
+                  }
+                  // Verify the compact NOSTR auth binds this depositor to this blob.
+                  final shaHex = _hex(sha);
+                  final msg = depositAuthMessageHex(shaHex);
+                  if (!NostrCrypto.schnorrVerify(msg, sigHex, pubHex)) {
+                    return const DepositVerdict.reject('bad deposit auth');
+                  }
+                  final tier = tierOf(
+                    pubHex,
+                    selfPubHex: selfPubHex,
+                    followsHex: _mirroredAuthors,
+                  );
+                  final totals = src.archive.hostedTotals();
+                  final u = _relayStore?.hostUsage();
+                  final d = admit(
+                    tier,
+                    size,
+                    isMedia: true,
+                    totalHostedBytes: totals.totalHostedBytes,
+                    strangerHostedBytes: totals.strangerBytes,
+                    strangerNotesThisMonth: u?.strangerNotesThisMonth ?? 0,
+                    q: hostQuota(),
+                  );
+                  if (!d.ok) return DepositVerdict.reject(d.reason);
 
-            // The Archiver's own contract with its owner, on top of the host
-            // quota. The LINK matters here: a peer that reached us over the LAN,
-            // Bluetooth or LoRa has no route to anywhere else, and its data dies
-            // if we refuse it — so those links get in on the strength of the
-            // link alone, if the owner offered them. Everything else has to be
-            // something the owner actually volunteered for (docs/NOSTR.md).
-            final policy = ArchiverService.instance.policy;
-            if (policy.isArchiving) {
-              // The link IS the policy. We recorded the arrival interface when
-              // the packet came in (_noteLinkVia), so a peer that reached us
-              // over the LAN, Bluetooth or LoRa is recognised as what it is: a
-              // peer with no route to anywhere else, whose data dies if we
-              // refuse it. An unknown link is read as "the internet" — the
-              // conservative default, because the direct-link exception is
-              // generous and must never be granted by accident.
-              final via = ArchiverService.arrivedOver(
+                  // The Archiver's own contract with its owner, on top of the host
+                  // quota. The LINK matters here: a peer that reached us over the LAN,
+                  // Bluetooth or LoRa has no route to anywhere else, and its data dies
+                  // if we refuse it — so those links get in on the strength of the
+                  // link alone, if the owner offered them. Everything else has to be
+                  // something the owner actually volunteered for (docs/NOSTR.md).
+                  final policy = ArchiverService.instance.policy;
+                  if (policy.isArchiving) {
+                    // The link IS the policy. We recorded the arrival interface when
+                    // the packet came in (_noteLinkVia), so a peer that reached us
+                    // over the LAN, Bluetooth or LoRa is recognised as what it is: a
+                    // peer with no route to anywhere else, whose data dies if we
+                    // refuse it. An unknown link is read as "the internet" — the
+                    // conservative default, because the direct-link exception is
+                    // generous and must never be granted by accident.
+                    final via = ArchiverService.arrivedOver(
                       linkIdHex.isEmpty ? null : interfaceOfLink(linkIdHex),
                     );
-              final verdict = admitToArchive(
-                policy: policy,
-                tier: tier,
-                bytes: size,
-                usedBytes: totals.totalHostedBytes,
-                via: via,
-                authorFollowed: tier == Tier.followed,
-              );
-              if (!verdict.accept) {
-                // A refusal always says why: a node that goes silent when it is
-                // full teaches its neighbours nothing, and they keep trying.
-                return DepositVerdict.reject(verdict.reason);
-              }
-            }
-            return DepositVerdict.accept(tier.index, pubHex, ext);
-          },
-          onDepositStore: (sha, bytes, originPubHex, tier, ext) {
-            final src = fileServeSource;
-            if (src is! MediaFileSource) return;
-            src.archive.putHosted(
-              bytes,
-              ext,
-              originPubHex: originPubHex,
-              tier: tier,
-            );
-            // Auto-seed: advertise ourselves as a provider so the network can fetch
-            // the blob we now host.
-            unawaited(dhtPublish(sha));
-            LogService.instance.add(
-              'RNS/host: stored ${_hex(sha).substring(0, 8)} '
-              '(${bytes.length}B, tier $tier) from '
-              '${originPubHex.substring(0, 8)}',
-            );
-          },
-        )
-          // When we answer "these devices have it", say what we know about each
-          // of them — so the caller wakes the box on mains rather than a phone
-          // on a metered plan (docs/NOSTR.md).
-          ..holderHint = _holderHintFor;
+                    final verdict = admitToArchive(
+                      policy: policy,
+                      tier: tier,
+                      bytes: size,
+                      usedBytes: totals.totalHostedBytes,
+                      via: via,
+                      authorFollowed: tier == Tier.followed,
+                    );
+                    if (!verdict.accept) {
+                      // A refusal always says why: a node that goes silent when it is
+                      // full teaches its neighbours nothing, and they keep trying.
+                      return DepositVerdict.reject(verdict.reason);
+                    }
+                  }
+                  return DepositVerdict.accept(tier.index, pubHex, ext);
+                },
+                onDepositStore: (sha, bytes, originPubHex, tier, ext) {
+                  final src = fileServeSource;
+                  if (src is! MediaFileSource) return;
+                  src.archive.putHosted(
+                    bytes,
+                    ext,
+                    originPubHex: originPubHex,
+                    tier: tier,
+                  );
+                  // Auto-seed: advertise ourselves as a provider so the network can fetch
+                  // the blob we now host.
+                  unawaited(dhtPublish(sha));
+                  LogService.instance.add(
+                    'RNS/host: stored ${_hex(sha).substring(0, 8)} '
+                    '(${bytes.length}B, tier $tier) from '
+                    '${originPubHex.substring(0, 8)}',
+                  );
+                },
+              )
+              // When we answer "these devices have it", say what we know about each
+              // of them — so the caller wakes the box on mains rather than a phone
+              // on a metered plan (docs/NOSTR.md).
+              ..holderHint = _holderHintFor;
         _lxmf = LxmfRouter(
           identity: _id!,
           send: (raw) => _transport?.sendLinkAware(raw),
@@ -2265,59 +2265,59 @@ class RnsService {
             final feedPath = '${base}nostr_feed.sqlite3';
             // ignore: discarded_futures
             NostrClient.spawn(
-              storePath: feedPath,
-              persistPath: '${base}nostr_relays.json',
-              selfPubHex: selfPubHex,
-              // The sqlite3 loader override is PER-ISOLATE. Aurora bundles
-              // SQLCipher (encrypted profiles), so without this the engine
-              // isolate looked for a libsqlite3.so the app does not ship,
-              // threw, and the entire NOSTR pipeline — internet relays
-              // included — never started. Silently.
-              sqliteLibrary: engineSqliteLibrary(),
-              // …and inside an encrypted profile the feed is real user
-              // content: key it like every other profile database.
-              dbKeyHex: profileDbKeyHex(feedPath),
+                  storePath: feedPath,
+                  persistPath: '${base}nostr_relays.json',
+                  selfPubHex: selfPubHex,
+                  // The sqlite3 loader override is PER-ISOLATE. Aurora bundles
+                  // SQLCipher (encrypted profiles), so without this the engine
+                  // isolate looked for a libsqlite3.so the app does not ship,
+                  // threw, and the entire NOSTR pipeline — internet relays
+                  // included — never started. Silently.
+                  sqliteLibrary: engineSqliteLibrary(),
+                  // …and inside an encrypted profile the feed is real user
+                  // content: key it like every other profile database.
+                  dbKeyHex: profileDbKeyHex(feedPath),
                 )
                 .then((c) {
-              LogService.instance.add('NOSTR: engine up (feed $feedPath)');
-              _nostrHub = c
-                ..onChanged = _notifyNostrListeners
-                ..onLog = (m) => LogService.instance.add('NOSTR: $m');
-              // Hand the engine what the user has already refused to carry.
-              // A mute is persisted, so it must be in force from the first
-              // event of the session — not only from the next time it is
-              // toggled.
-              _pushMutedToEngine();
-              // Start keeping (and serving) what the people we follow post.
-              startFollowsMirror();
-              // …and finish any keeps the last run left unfinished. This runs in
-              // whichever isolate owns RnsService — including the headless engine
-              // behind the Android background service — so a like made in a
-              // tunnel is archived once there is a network again, app open or not.
-              KeepService.instance.resume();
-              // Indexers spread the pointer map among themselves, so the phones
-              // never have to answer for it. This device only runs the loop when
-              // it IS an indexer, and only talks to peers that say they are too.
-              PointerSyncService.instance.start();
-              // An Archiver takes the weight off the phones around it: pull what
-              // they share, then publish ourselves so the DHT stops waking them.
-              MirrorService.instance.start();
-              // A reaction the user is never told about might as well not have
-              // happened — and the panel is not always open. The pump owns the
-              // announce cadence; a widget drawing a badge must never be what
-              // makes a notification appear.
-              _notifTimer?.cancel();
-              _notifTimer = Timer.periodic(
+                  LogService.instance.add('NOSTR: engine up (feed $feedPath)');
+                  _nostrHub = c
+                    ..onChanged = _notifyNostrListeners
+                    ..onLog = (m) => LogService.instance.add('NOSTR: $m');
+                  // Hand the engine what the user has already refused to carry.
+                  // A mute is persisted, so it must be in force from the first
+                  // event of the session — not only from the next time it is
+                  // toggled.
+                  _pushMutedToEngine();
+                  // Start keeping (and serving) what the people we follow post.
+                  startFollowsMirror();
+                  // …and finish any keeps the last run left unfinished. This runs in
+                  // whichever isolate owns RnsService — including the headless engine
+                  // behind the Android background service — so a like made in a
+                  // tunnel is archived once there is a network again, app open or not.
+                  KeepService.instance.resume();
+                  // Indexers spread the pointer map among themselves, so the phones
+                  // never have to answer for it. This device only runs the loop when
+                  // it IS an indexer, and only talks to peers that say they are too.
+                  PointerSyncService.instance.start();
+                  // An Archiver takes the weight off the phones around it: pull what
+                  // they share, then publish ourselves so the DHT stops waking them.
+                  MirrorService.instance.start();
+                  // A reaction the user is never told about might as well not have
+                  // happened — and the panel is not always open. The pump owns the
+                  // announce cadence; a widget drawing a badge must never be what
+                  // makes a notification appear.
+                  _notifTimer?.cancel();
+                  _notifTimer = Timer.periodic(
                     const Duration(seconds: 30),
                     (_) => _pumpNotifications(),
                   );
-              _pumpNotifications();
+                  _pumpNotifications();
                 })
                 .catchError((Object e) {
-              // A pipeline that never comes up must SAY so. This one used to
-              // fail into silence and take the whole hero with it.
-              LogService.instance.add('NOSTR: engine spawn FAILED: $e');
-            });
+                  // A pipeline that never comes up must SAY so. This one used to
+                  // fail into silence and take the whole hero with it.
+                  LogService.instance.add('NOSTR: engine spawn FAILED: $e');
+                });
           }
         } catch (e) {
           LogService.instance.add(
@@ -2438,8 +2438,8 @@ class RnsService {
               q.strangerDailyBudgetBytes = p.capacity == kCapCellular
                   ? 0
                   : (PreferencesService.instanceSync?.strangerServeMb ?? 512) *
-                      1024 *
-                      1024;
+                        1024 *
+                        1024;
             }
             // Keep the physical profile honest: one sample per hour of whether
             // this device actually had power. poweredPct is then an observation,
@@ -3451,7 +3451,7 @@ class RnsService {
       );
       _pointerLog?.add(rec);
       LogService.instance.add(
-          'social: advertising notes from ${pubHex.substring(0, 12)} '
+        'social: advertising notes from ${pubHex.substring(0, 12)} '
         '($holders holder(s) took the pointer)',
       );
     } catch (e) {
@@ -3601,7 +3601,7 @@ class RnsService {
         );
         store.putAllVerified([ev], tier: tier.index);
         LogService.instance.add(
-            'social: note ${eventIdHex.substring(0, 8)} came from the MESH '
+          'social: note ${eventIdHex.substring(0, 8)} came from the MESH '
           '(no relay, no IP)',
         );
         return verified.first;
@@ -3673,7 +3673,7 @@ class RnsService {
     );
     final stored = store.putAllVerified(batch, tier: tier.index);
     LogService.instance.add(
-        'social: mesh gave ${verified.length} note(s) from '
+      'social: mesh gave ${verified.length} note(s) from '
       '${pubHex.substring(0, 12)} (stored $stored, no internet involved)',
     );
     return stored;
@@ -4065,7 +4065,7 @@ class RnsService {
     // PLAIN packet survives forwarding by a reference (Python) rnsd hub — the
     // one assumption in this design we cannot check by reading our own code.
     LogService.instance.add(
-        'RNS: npd rx ${NpdType.name(npd.type)} from '
+      'RNS: npd rx ${NpdType.name(npd.type)} from '
       '${_hex(npd.senderPub).substring(0, 8)} via $via hops=${p.hops}',
     );
 
@@ -4202,7 +4202,7 @@ class RnsService {
     _npdPending[key] = done;
     final path = t.pathInfo(destHash);
     LogService.instance.add(
-        'RNS: npd tx req to ${_hex(destHash).substring(0, 8)} '
+      'RNS: npd tx req to ${_hex(destHash).substring(0, 8)} '
       'via ${path?['via']} hops=${path?['hops']}',
     );
     t.sendPlainTo(destHash, packet, context: kNpdContext);
@@ -4212,7 +4212,7 @@ class RnsService {
         .timeout(_npdSilenceTimeout, onTimeout: () => null)
         .whenComplete(() => _npdPending.remove(key));
     LogService.instance.add(
-        'RNS: npd ${body == null ? 'silence' : 'answer'} '
+      'RNS: npd ${body == null ? 'silence' : 'answer'} '
       'from ${_hex(destHash).substring(0, 8)}',
     );
     return (supported: true, body: body);
@@ -4917,8 +4917,8 @@ class RnsService {
   Set<String> get _mutedCalls => _mutedCallsCache ??= {
     for (final c
         in PreferencesService.instanceSync?.mutedAuthors ?? const <String>[])
-          c.trim().toUpperCase(),
-      }..removeWhere((c) => c.isEmpty);
+      c.trim().toUpperCase(),
+  }..removeWhere((c) => c.isEmpty);
 
   /// Everyone the user has muted (upper-case keys). Read-only.
   Set<String> get mutedCallsigns => Set.unmodifiable(_mutedCalls);
@@ -5728,9 +5728,9 @@ class RnsService {
     // tallies instead.
     _mirrorSub = nostrSubscribe(
       jsonEncode({
-      'kinds': [0, 1, 3],
-      'authors': follows,
-      'limit': 500,
+        'kinds': [0, 1, 3],
+        'authors': follows,
+        'limit': 500,
       }),
     );
 
@@ -6032,7 +6032,9 @@ class RnsService {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastResumeMs < 20000) return;
     _lastResumeMs = now;
-    _nostrHub?.resumeNetwork();
+    // Resume is also a bounded foreground poll.  Merely reopening the socket
+    // leaves the previous batch on screen until the ten-minute timer fires.
+    unawaited(_nostrHub?.resumeAndRefreshFirehose(n: 100));
   }
 
   /// Authors the user muted — the wapp owns the list and pushes it on change.
@@ -6306,25 +6308,25 @@ class RnsService {
     final what = switch (kind) {
       7 =>
         content == '-'
-          ? 'downvoted your post'
-          : content == '+'
-              ? 'upvoted your post'
-              : 'liked your post',
+            ? 'downvoted your post'
+            : content == '+'
+            ? 'upvoted your post'
+            : 'liked your post',
       6 => 'reposted your post',
       _ => 'replied to you',
     };
     LogService.instance.add('NOSTR: notify $who $what (${e['id']})');
     NotificationService.instance.show(
       GeogramNotification(
-      level: NotificationLevel.info,
-      title: '$who $what',
-      body: kind == 1 && content.isNotEmpty ? content : null,
-      source: 'wapp:social',
-      scope: NotificationScope.app,
-      // The event id IS the identity of this notification. With it, the store
-      // can collapse a repeat into the same row instead of minting a new one
-      // and lighting the bell again.
-      tag: 'nostr:${(e['id'] ?? '').toString()}',
+        level: NotificationLevel.info,
+        title: '$who $what',
+        body: kind == 1 && content.isNotEmpty ? content : null,
+        source: 'wapp:social',
+        scope: NotificationScope.app,
+        // The event id IS the identity of this notification. With it, the store
+        // can collapse a repeat into the same row instead of minting a new one
+        // and lighting the bell again.
+        tag: 'nostr:${(e['id'] ?? '').toString()}',
       ),
     );
   }
@@ -6511,11 +6513,11 @@ class RnsService {
       contactSnapshot: contact,
       localFollows: local,
       explicitUnfollows: unfollowed,
-        );
+    );
     if (_follows.replaceAll(desired)) {
       LogService.instance.add(
         'follows: contactList=${contact.length} loaded=$liveLoaded '
-          'local=${local.length} unfollowed=${unfollowed.length} '
+        'local=${local.length} unfollowed=${unfollowed.length} '
         '-> ${_follows.asSet.length}',
       );
       pushTrustedAuthors(); // trust follows the follow set, both ways
@@ -6527,13 +6529,13 @@ class RnsService {
   /// What the follow resolution currently sees. For the log line and the tests —
   /// "Following is empty" must be answerable without guessing.
   Map<String, int> followsDebug() => {
-        'contactList': _nostrHub?.myFollows().length ?? -1,
+    'contactList': _nostrHub?.myFollows().length ?? -1,
     'contactLoaded': (_nostrHub?.myFollowsLoaded ?? false) ? 1 : 0,
-        'local': PreferencesService.instanceSync?.followsLocal.length ?? -1,
-        'unfollowed':
-            PreferencesService.instanceSync?.followsUnfollowed.length ?? -1,
-        'follows': _follows.asSet.length,
-      };
+    'local': PreferencesService.instanceSync?.followsLocal.length ?? -1,
+    'unfollowed':
+        PreferencesService.instanceSync?.followsUnfollowed.length ?? -1,
+    'follows': _follows.asSet.length,
+  };
 
   /// My follows as the UI's post-key form: `short12(pubkey).toUpperCase()`, so
   /// the feed's "Following" filter (which matches a post's `from`) resolves.
@@ -7155,8 +7157,8 @@ class RnsService {
     final size = src.lengthSync();
     if (size <= 0 || size > kMetaMediaMaxBytes) {
       LogService.instance.add(
-          'folders: ${sourcePath.split(Platform.pathSeparator).last} is '
-          '${size ~/ (1024 * 1024)}MB — the listing caps media at '
+        'folders: ${sourcePath.split(Platform.pathSeparator).last} is '
+        '${size ~/ (1024 * 1024)}MB — the listing caps media at '
         '${kMetaMediaMaxBytes ~/ (1024 * 1024)}MB',
       );
       return null;
@@ -7366,7 +7368,7 @@ class RnsService {
     final opened = await openFileWithSystem(path);
     LogService.instance.add(
       opened
-        ? 'folders: opened $leaf with the system viewer'
+          ? 'folders: opened $leaf with the system viewer'
           : 'folders: no app on this device opens $leaf',
     );
     return opened;
@@ -7569,7 +7571,7 @@ class RnsService {
     // it is a holder now, and the swarm should know.
     _archiveAndReseed(shaB, bytes, _extOf(name));
     LogService.instance.add(
-        'folders: $name came from the SWARM (${hashes.length} pieces, '
+      'folders: $name came from the SWARM (${hashes.length} pieces, '
       '${providers.length} provider(s) known)',
     );
     return bytes;

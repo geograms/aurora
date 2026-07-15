@@ -56,9 +56,9 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
     final items = sections.isEmpty
         ? const <Map<String, dynamic>>[]
         : ((sections[_section]['items'] as List?) ?? const [])
-            .whereType<Map>()
-            .map((m) => m.cast<String, dynamic>())
-            .toList();
+              .whereType<Map>()
+              .map((m) => m.cast<String, dynamic>())
+              .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -79,9 +79,10 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
               : ListView.separated(
                   itemCount: items.length,
                   separatorBuilder: (_, __) => Divider(
-                      height: 1,
-                      indent: 72,
-                      color: cs.outlineVariant.withAlpha(50)),
+                    height: 1,
+                    indent: 72,
+                    color: cs.outlineVariant.withAlpha(50),
+                  ),
                   itemBuilder: (context, i) => _row(cs, items[i]),
                 ),
         ),
@@ -144,6 +145,7 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         .toList();
     final action = (it['action'] ?? '').toString();
     final actionLabel = (it['actionLabel'] ?? '').toString();
+    final avatar = (it['avatar'] ?? '').toString();
     // "filled" reads as the suggestion (Follow), "outlined" as the current
     // state (Following) — matching the familiar social-app pattern.
     final filled = (it['actionStyle'] ?? 'outlined').toString() == 'filled';
@@ -176,7 +178,18 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (iconName.isEmpty)
+            if (avatar.isNotEmpty)
+              ClipOval(
+                child: Image.network(
+                  avatar,
+                  width: 44,
+                  height: 44,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) =>
+                      GeneratedAvatar(seed: id, size: 44),
+                ),
+              )
+            else if (iconName.isEmpty)
               GeneratedAvatar(seed: id, size: 44)
             else
               SizedBox(
@@ -193,19 +206,27 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w700, fontSize: 15)),
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                    ),
+                  ),
                   if (subtitle.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 1),
-                      child: Text(subtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              color: cs.onSurfaceVariant, fontSize: 12.5)),
+                      child: Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: cs.onSurfaceVariant,
+                          fontSize: 12.5,
+                        ),
+                      ),
                     ),
                   if (tags.isNotEmpty)
                     Padding(
@@ -217,15 +238,20 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
                           for (final t in tags)
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 2),
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
                               decoration: BoxDecoration(
                                 color: cs.primaryContainer.withAlpha(110),
                                 borderRadius: BorderRadius.circular(10),
                               ),
-                              child: Text(t,
-                                  style: TextStyle(
-                                      fontSize: 11,
-                                      color: cs.onPrimaryContainer)),
+                              child: Text(
+                                t,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: cs.onPrimaryContainer,
+                                ),
+                              ),
                             ),
                         ],
                       ),
@@ -239,8 +265,7 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
                   ? FilledButton(
                       style: FilledButton.styleFrom(
                         visualDensity: VisualDensity.compact,
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 16),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
                       ),
                       onPressed: () => widget.onAction(action, id),
                       child: Text(actionLabel),
@@ -248,8 +273,7 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
                   : OutlinedButton(
                       style: OutlinedButton.styleFrom(
                         visualDensity: VisualDensity.compact,
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 16),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
                       ),
                       onPressed: () => widget.onAction(action, id),
                       child: Text(actionLabel),

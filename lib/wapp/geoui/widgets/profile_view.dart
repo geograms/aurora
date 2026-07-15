@@ -37,7 +37,7 @@ class ProfileView extends StatefulWidget {
   final bool Function(String mid)? isSaved;
   final void Function(Map<String, dynamic> post)? onSave;
   final ({String? name, ImageProvider? avatar}) Function(String callsign)?
-      profileFor;
+  profileFor;
   final String? Function(String callsign)? npubFor;
 
   /// Tapping an @mention in the bio or in a post opens that person.
@@ -177,9 +177,11 @@ class _ProfileViewState extends State<ProfileView> {
     widget.onSetKeep?.call(_keep);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(_keep
-            ? 'Keeping $_name’s posts and media on this device'
-            : 'No longer keeping $_name’s data'),
+        content: Text(
+          _keep
+              ? 'Keeping $_name’s posts and media on this device'
+              : 'No longer keeping $_name’s data',
+        ),
         duration: const Duration(seconds: 2),
       ),
     );
@@ -536,8 +538,17 @@ class _ProfileViewState extends State<ProfileView> {
                   ],
                 ),
               ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+            ],
+          ),
+          if (widget.isSelf && widget.onEdit != null ||
+              !widget.isSelf &&
+                  (widget.onSetFollow != null || widget.onMessage != null)) ...[
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 6,
                 children: [
                   if (widget.isSelf && widget.onEdit != null)
                     OutlinedButton.icon(
@@ -547,18 +558,16 @@ class _ProfileViewState extends State<ProfileView> {
                     ),
                   if (!widget.isSelf && widget.onSetFollow != null)
                     _followButton(cs),
-                  if (!widget.isSelf && widget.onMessage != null) ...[
-                    const SizedBox(height: 6),
+                  if (!widget.isSelf && widget.onMessage != null)
                     OutlinedButton.icon(
                       onPressed: widget.onMessage,
                       icon: const Icon(Icons.mail_outline, size: 16),
                       label: const Text('Message'),
                     ),
-                  ],
                 ],
               ),
-            ],
-          ),
+            ),
+          ],
           // The npub, on a line of its own and in one piece.
           //
           // It used to sit in the narrow column between the avatar and the
@@ -790,8 +799,11 @@ class _ProfileViewState extends State<ProfileView> {
                 ),
               ),
               const SizedBox(width: 6),
-              Icon(Icons.copy_rounded,
-                  size: 14, color: Colors.white.withAlpha(120)),
+              Icon(
+                Icons.copy_rounded,
+                size: 14,
+                color: Colors.white.withAlpha(120),
+              ),
             ],
           ),
         ),
@@ -814,5 +826,4 @@ class _ProfileViewState extends State<ProfileView> {
     }
     return GeneratedAvatar(seed: call, size: radius * 2);
   }
-
 }

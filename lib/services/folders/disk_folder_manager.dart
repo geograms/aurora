@@ -87,6 +87,7 @@ class DiskFolderManager {
   /// Re-adopt previously-registered disk folders (index + serve), without
   /// forcing a publish (the periodic sync handles that).
   Future<void> load() async {
+    _loadDownloadRoot();
     var pruned = false;
     for (final entry in _readRegistry().entries) {
       final folderId = entry.key, dir = entry.value;
@@ -95,19 +96,42 @@ class DiskFolderManager {
         pruned = true;
         continue; // not re-adopted; pruned from the registry below
       }
+      // Owned folder (holds the master key in .folder.json) → adopt WITH the key
+      // so we can sign edits. Downloaded folder (a keyless .torrent.json sidecar)
+      // → adopt read-only: we index + serve its bytes from disk, but can't edit.
       final key = _readKeyFile(dir);
-      if (key == null) continue;
-      folders.keystore
-          .add(FolderKey(folderId, key.$1, key.$2, _now()));
-      // Index in the background (yielding) so adopting a large shared folder at
-      // startup never freezes the UI; serving works once the first scan lands.
-      final src = DiskFolderSource(dir);
-      _sources[folderId] = src;
-      _dirs[folderId] = dir;
-      registerSource(src);
-      unawaited(src.scanAsync());
+      if (key != null) {
+        _adoptDir(folderId, dir, key: key);
+        continue;
+      }
+      if (_readSidecar(dir) == folderId) {
+        _adoptDir(folderId, dir);
+        continue;
+      }
+      // Neither marker present → the directory is gone or was cleared; prune.
+      pruned = true;
     }
     if (pruned) _writeRegistry();
+    // Also pick up any torrents that already live under the download root but
+    // are not in our registry — this is how "point at an existing folder from a
+    // previous install" re-adopts everything under it.
+    await adoptRoot();
+  }
+
+  /// Register a directory as a disk-backed folder. With [key] it is OWNED (we can
+  /// sign edits); without, it is a DOWNLOADED read-only copy we index and serve.
+  void _adoptDir(String folderId, String dir, {(String, String, String)? key}) {
+    if (_sources.containsKey(folderId)) return;
+    if (key != null) {
+      folders.keystore.add(FolderKey(folderId, key.$1, key.$2, _now()));
+    }
+    // Index in the background (yielding) so adopting a large folder at startup
+    // never freezes the UI; serving works once the first scan lands.
+    final src = DiskFolderSource(dir);
+    _sources[folderId] = src;
+    _dirs[folderId] = dir;
+    registerSource(src);
+    unawaited(src.scanAsync());
   }
 
   /// Register [dirPath] as an owned folder and synchronize it. Returns folderId,
@@ -362,6 +386,303 @@ class DiskFolderManager {
     _writeRegistry();
     final tag = folderId.length >= 8 ? folderId.substring(0, 8) : folderId;
     log?.call('disk folder $tag: removed (stopped sharing)');
+  }
+
+  // ── download root + library (organizing torrents as real dirs on disk) ────
+
+  /// The default when the user has not chosen one (external storage, set by the
+  /// host once permissions are known). The user override wins.
+  String? defaultDownloadRoot;
+  String? _downloadRoot; // user-chosen, persisted
+  static const String _kTorrentSidecar = '.torrent.json';
+
+  /// Where downloaded torrents materialize and where organizing subfolders live.
+  String? get downloadRoot => _downloadRoot ?? defaultDownloadRoot;
+
+  String get _rootFilePath =>
+      '${File(registryPath).parent.path}/download_root.txt';
+
+  void _loadDownloadRoot() {
+    if (registryPath == ':memory:') return;
+    try {
+      final f = File(_rootFilePath);
+      if (f.existsSync()) {
+        final s = f.readAsStringSync().trim();
+        if (s.isNotEmpty) _downloadRoot = s;
+      }
+    } catch (_) {}
+  }
+
+  /// Choose the download folder. Creates it, persists the choice, and adopts any
+  /// torrents already sitting under it (real files from a previous install).
+  Future<void> setDownloadRoot(String path) async {
+    final dir = Directory(path).absolute.path;
+    if (_isUnsafeShareRoot(dir)) {
+      log?.call('download root: refusing a whole-storage root $dir');
+      return;
+    }
+    _downloadRoot = dir;
+    try {
+      await Directory(dir).create(recursive: true);
+    } catch (_) {}
+    if (registryPath != ':memory:') {
+      try {
+        File(_rootFilePath).writeAsStringSync(dir);
+      } catch (_) {}
+    }
+    await adoptRoot();
+  }
+
+  /// Walk the download root and adopt every torrent directory under it that we
+  /// are not already serving (owned via .folder.json, downloaded via the keyless
+  /// sidecar). Organizing subfolders are plain directories and are skipped.
+  Future<void> adoptRoot() async {
+    final root = downloadRoot;
+    if (root == null) return;
+    final base = Directory(root);
+    if (!base.existsSync()) return;
+    var found = false;
+    try {
+      for (final e in base.listSync(recursive: true, followLinks: false)) {
+        if (e is! Directory) continue;
+        final key = _readKeyFile(e.path);
+        if (key != null) {
+          if (!_sources.containsKey(key.$3)) {
+            _adoptDir(key.$3, e.path, key: key);
+            found = true;
+          }
+          continue;
+        }
+        final side = _readSidecar(e.path);
+        if (side != null && !_sources.containsKey(side)) {
+          _adoptDir(side, e.path);
+          found = true;
+        }
+      }
+    } catch (e) {
+      log?.call('download root: scan failed: $e');
+    }
+    if (found) _writeRegistry();
+  }
+
+  /// Materialize a downloaded torrent as a real directory under the download
+  /// root (keyless, read-only), so its files can be written to disk and served
+  /// content-addressed. Returns the directory, or null if no root is set. Idempotent.
+  Future<String?> addDownloaded(String folderId, String name,
+      {String subPath = ''}) async {
+    final existing = _dirs[folderId];
+    if (existing != null) return existing;
+    final root = downloadRoot;
+    if (root == null) return null;
+    final leaf = _safeName(name.isEmpty ? folderId.substring(0, 8) : name);
+    final rel = _normRel(subPath);
+    final dir = rel.isEmpty ? '$root/$leaf' : '$root/$rel/$leaf';
+    try {
+      await Directory(dir).create(recursive: true);
+    } catch (e) {
+      log?.call('download root: cannot create $dir: $e');
+      return null;
+    }
+    _writeSidecar(dir, folderId, name);
+    _adoptDir(folderId, dir);
+    _writeRegistry();
+    return dir;
+  }
+
+  /// Write one downloaded file into a disk-backed folder (creating parent dirs),
+  /// then re-index so it is served content-addressed from disk. Returns false if
+  /// the folder is not disk-backed here.
+  Future<bool> writeDownloadedFile(
+      String folderId, String relName, Uint8List bytes) async {
+    final dir = _dirs[folderId];
+    if (dir == null) return false;
+    final rel = _normRel(relName);
+    if (rel.isEmpty) return false;
+    try {
+      final f = File('$dir/$rel');
+      if (!f.parent.existsSync()) f.parent.createSync(recursive: true);
+      await f.writeAsBytes(bytes);
+      unawaited(_sources[folderId]?.scanAsync() ?? Future.value());
+      return true;
+    } catch (e) {
+      log?.call('download root: write $relName failed: $e');
+      return false;
+    }
+  }
+
+  /// One level of the download-folder tree for the wapp's navigable list: the
+  /// organizing subfolders directly under [relPath], and the torrents that live
+  /// at [relPath]. Torrents registered OUTSIDE the root are listed at the root
+  /// level (ungrouped) so nothing is ever hidden.
+  Map<String, dynamic> libraryLevel(String relPath) {
+    final root = downloadRoot;
+    final rel = _normRel(relPath);
+    final dirs = <String>{};
+    final torrents = <Map<String, dynamic>>[];
+
+    for (final e in _dirs.entries) {
+      final fid = e.key, dir = e.value;
+      final owned = folders.keystore.owns(fid);
+      if (root != null && _isUnder(dir, root)) {
+        final r = _relOf(dir, root);
+        if (_parentOf(r) == rel) {
+          torrents.add(
+              {'folderId': fid, 'name': _leafOf(r), 'owned': owned, 'path': rel});
+        }
+      } else if (rel.isEmpty) {
+        torrents.add(
+            {'folderId': fid, 'name': _leafOf(dir), 'owned': owned, 'path': ''});
+      }
+    }
+
+    if (root != null) {
+      final base = rel.isEmpty ? root : '$root/$rel';
+      try {
+        for (final e in Directory(base).listSync(followLinks: false)) {
+          if (e is! Directory) continue;
+          final leaf = _leafOf(e.path);
+          if (leaf.startsWith('.')) continue;
+          final isTorrent = File('${e.path}/$kFolderKeyFile').existsSync() ||
+              File('${e.path}/$_kTorrentSidecar').existsSync();
+          if (!isTorrent) dirs.add(leaf);
+        }
+      } catch (_) {}
+    }
+
+    return {
+      'root': root ?? '',
+      'path': rel,
+      'dirs': [
+        for (final d in (dirs.toList()..sort())) {'name': d}
+      ],
+      'torrents': torrents,
+    };
+  }
+
+  /// Create an organizing subfolder under the download root. Returns false if no
+  /// root is set or the name is unusable.
+  Future<bool> createSubfolder(String relPath) async {
+    final root = downloadRoot;
+    if (root == null) return false;
+    final rel = _normRel(relPath);
+    if (rel.isEmpty) return false;
+    try {
+      await Directory('$root/$rel').create(recursive: true);
+      return true;
+    } catch (e) {
+      log?.call('download root: mkdir $rel failed: $e');
+      return false;
+    }
+  }
+
+  /// Move a torrent's directory to [newRelPath] (a subfolder under the root),
+  /// keeping its files, key/sidecar and folderId. Re-registers the source at the
+  /// new location. Returns false when it isn't disk-backed or the root is unset.
+  Future<bool> moveTorrent(String folderId, String newRelPath) async {
+    final root = downloadRoot;
+    final dir = _dirs[folderId];
+    if (root == null || dir == null) return false;
+    final leaf = _leafOf(dir);
+    final rel = _normRel(newRelPath);
+    final destDir = rel.isEmpty ? '$root/$leaf' : '$root/$rel/$leaf';
+    if (Directory(destDir).absolute.path == Directory(dir).absolute.path) {
+      return true;
+    }
+    try {
+      final parent = Directory(rel.isEmpty ? root : '$root/$rel');
+      if (!parent.existsSync()) parent.createSync(recursive: true);
+      if (Directory(destDir).existsSync()) {
+        log?.call('download root: $destDir already exists');
+        return false;
+      }
+      await Directory(dir).rename(destDir);
+    } catch (e) {
+      log?.call('download root: move failed: $e');
+      return false;
+    }
+    // Re-point the source at the new directory.
+    final old = _sources.remove(folderId);
+    if (old != null) unregisterSource?.call(old);
+    final src = DiskFolderSource(destDir);
+    _sources[folderId] = src;
+    _dirs[folderId] = destDir;
+    registerSource(src);
+    unawaited(src.scanAsync());
+    _writeRegistry();
+    return true;
+  }
+
+  // Path helpers, all on '/'-normalized absolute paths.
+  static String _norm(String p) {
+    var s = p.replaceAll('\\', '/');
+    while (s.length > 1 && s.endsWith('/')) s = s.substring(0, s.length - 1);
+    return s;
+  }
+
+  static bool _isUnder(String dir, String root) {
+    final d = _norm(dir), r = _norm(root);
+    return d == r || d.startsWith('$r/');
+  }
+
+  static String _relOf(String dir, String root) {
+    final d = _norm(dir), r = _norm(root);
+    if (d == r) return '';
+    return d.startsWith('$r/') ? d.substring(r.length + 1) : d;
+  }
+
+  static String _parentOf(String rel) {
+    final i = rel.lastIndexOf('/');
+    return i < 0 ? '' : rel.substring(0, i);
+  }
+
+  static String _leafOf(String path) {
+    final s = _norm(path);
+    final i = s.lastIndexOf('/');
+    return i < 0 ? s : s.substring(i + 1);
+  }
+
+  /// Sanitize a single path segment: no separators, no dot-leading (which would
+  /// hide it from sharing), bounded length.
+  static String _safeName(String name) {
+    var s = name.replaceAll(RegExp(r'[/\\\x00-\x1f]'), '_').trim();
+    while (s.startsWith('.')) s = s.substring(1);
+    if (s.isEmpty) s = 'torrent';
+    return s.length > 80 ? s.substring(0, 80) : s;
+  }
+
+  /// Sanitize a relative path: drop empty / '.' / '..' segments and dot-leading
+  /// ones, so a hostile name can never escape the root.
+  static String _normRel(String rel) {
+    final parts = <String>[];
+    for (final raw in _norm(rel).split('/')) {
+      final seg = raw.trim();
+      if (seg.isEmpty || seg == '.' || seg == '..' || seg.startsWith('.')) {
+        continue;
+      }
+      parts.add(seg.replaceAll(RegExp(r'[\\\x00-\x1f]'), '_'));
+    }
+    return parts.join('/');
+  }
+
+  String? _readSidecar(String dir) {
+    try {
+      final f = File('$dir/$_kTorrentSidecar');
+      if (!f.existsSync()) return null;
+      final m = jsonDecode(f.readAsStringSync());
+      if (m is Map && m['folderId'] is String) return m['folderId'] as String;
+    } catch (_) {}
+    return null;
+  }
+
+  void _writeSidecar(String dir, String folderId, String name) {
+    try {
+      final d = Directory(dir);
+      if (!d.existsSync()) d.createSync(recursive: true);
+      File('$dir/$_kTorrentSidecar').writeAsStringSync(
+          jsonEncode({'folderId': folderId, 'name': name}));
+    } catch (e) {
+      log?.call('disk folder: cannot write sidecar: $e');
+    }
   }
 
   // ── key file + registry ─────────────────────────────────────────────────

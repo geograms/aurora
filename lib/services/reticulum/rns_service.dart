@@ -2419,6 +2419,7 @@ class RnsService {
               },
               log: (m) => LogService.instance.add('RNS/folders: $m'),
             );
+            _diskMgr!.defaultDownloadRoot = _defaultDownloadRoot();
             await _diskMgr!.load();
           }
         } catch (e) {
@@ -7246,8 +7247,96 @@ class RnsService {
     // ignore: discarded_futures
     _folderRelay?.publish(folderId);
     // ignore: discarded_futures
-    folderDownloadAll(folderId);
+    _materializeThenDownload(folderId);
   }
+
+  /// A pinned (kept) torrent becomes a real directory in the download library,
+  /// so its files land on disk — indexed content-addressed and served from disk,
+  /// browsable, and surviving a reinstall. Owned folders are already on disk.
+  Future<void> _materializeThenDownload(String folderId) async {
+    final mgr = _diskMgr;
+    if (mgr != null &&
+        mgr.dirOf(folderId) == null &&
+        _folders?.keystore.owns(folderId) != true) {
+      final st = _localFolderStateSync(folderId);
+      final name = (st.title != null && st.title!.isNotEmpty)
+          ? st.title!
+          : (st.name ?? folderId.substring(0, 8));
+      await mgr.addDownloaded(folderId, name);
+    }
+    await folderDownloadAll(folderId);
+  }
+
+  // ── Download library: where files live on disk, and how they are organized ──
+
+  /// A sensible default download folder when the user has not chosen one:
+  /// external storage on Android, the home dir elsewhere.
+  String? _defaultDownloadRoot() {
+    try {
+      if (Platform.isAndroid) {
+        for (final r in const ['/storage/emulated/0', '/sdcard']) {
+          if (Directory(r).existsSync()) return '$r/Aurora/Torrents';
+        }
+        return null;
+      }
+      final home = Platform.environment['HOME'];
+      if (home != null && home.isNotEmpty) return '$home/Aurora/Torrents';
+    } catch (_) {}
+    return null;
+  }
+
+  /// The folder new downloads are written into (real files on the memory card).
+  String folderDownloadRoot() => _diskMgr?.downloadRoot ?? '';
+
+  /// Choose the download folder; adopts any torrents already under it.
+  Future<void> folderSetDownloadRoot(String path) async {
+    await _diskMgr?.setDownloadRoot(path);
+  }
+
+  /// One level of the organizing folder tree: subfolders + torrents at [relPath].
+  /// The disk-backed tree (owned + materialized downloads) comes from the manager;
+  /// at the root we also fold in subscriptions that are not on disk yet (archive
+  /// only), so "All" shows EVERY torrent — a download that has not been pinned to
+  /// the library included.
+  Map<String, dynamic> folderLibraryLevel(String relPath) {
+    final level = _diskMgr?.libraryLevel(relPath) ??
+        <String, dynamic>{
+          'root': '',
+          'path': relPath,
+          'dirs': const [],
+          'torrents': <Map<String, dynamic>>[],
+        };
+    final rel = (level['path'] ?? '').toString();
+    if (rel.isEmpty) {
+      final torrents = ((level['torrents'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((m) => m.cast<String, dynamic>())
+          .toList();
+      final have = {for (final t in torrents) t['folderId']};
+      for (final s in folderSubscriptions()) {
+        final fid = s['folderId'];
+        if (fid is! String || have.contains(fid)) continue;
+        final st = folderStats(fid);
+        torrents.add({
+          'folderId': fid,
+          'name': '${st['title'] ?? st['name'] ?? fid}',
+          'owned': false,
+          'path': '',
+        });
+      }
+      level['torrents'] = torrents;
+    }
+    return level;
+  }
+
+  /// Create an organizing subfolder under the download root.
+  Future<bool> folderCreateSubfolder(String relPath) async =>
+      await _diskMgr?.createSubfolder(relPath) ?? false;
+
+  /// Move a torrent into a subfolder of the download root.
+  Future<bool> folderMove(String folderIdOrNpub, String relPath) async =>
+      await _diskMgr?.moveTorrent(_normFolderId(folderIdOrNpub), relPath) ??
+      false;
 
   /// True when this device is pinning [folderIdOrNpub] (keeping a full copy and
   /// advertising itself as a holder).
@@ -7734,6 +7823,15 @@ class RnsService {
         await folderFetchBytes(fid, shaHex, ext: _extOf(name));
     if (bytes == null) return false;
     _subs?.recordDownload(fid, name, shaHex);
+    // A pinned torrent is disk-backed but NOT owned → write the file to its real
+    // directory so it exists on disk, indexed content-addressed and served from
+    // disk. Owned folders already hold their files on disk.
+    final mgr = _diskMgr;
+    if (mgr != null &&
+        mgr.dirOf(fid) != null &&
+        _folders?.keystore.owns(fid) != true) {
+      await mgr.writeDownloadedFile(fid, name, bytes);
+    }
     return true;
   }
 

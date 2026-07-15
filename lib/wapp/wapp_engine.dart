@@ -1140,6 +1140,60 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // The download library: where files live on disk and how they are organized.
+    final halFolderDownloadRoot = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        return _writeStr(outPtr, outCap, RnsService.instance.folderDownloadRoot());
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halFolderSetDownloadRoot = WasmFunction(
+      (int pPtr, int pLen) {
+        if (pLen <= 0) return 0;
+        // ignore: discarded_futures
+        RnsService.instance.folderSetDownloadRoot(_readStr(pPtr, pLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halFolderLibrary = WasmFunction(
+      (int relPtr, int relLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final rel = relLen > 0 ? _readStr(relPtr, relLen) : '';
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderLibraryLevel(rel)));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    final halFolderMkdir = WasmFunction(
+      (int pPtr, int pLen) {
+        if (pLen <= 0) return 0;
+        // ignore: discarded_futures
+        RnsService.instance.folderCreateSubfolder(_readStr(pPtr, pLen));
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // arg = "folderId\trelPath" — move a torrent into a subfolder.
+    final halFolderMove = WasmFunction(
+      (int argPtr, int argLen) {
+        if (argLen <= 0) return 0;
+        final arg = _readStr(argPtr, argLen);
+        final tab = arg.indexOf('\t');
+        final fid = tab >= 0 ? arg.substring(0, tab) : arg;
+        final rel = tab >= 0 ? arg.substring(tab + 1) : '';
+        // ignore: discarded_futures
+        RnsService.instance.folderMove(fid, rel);
+        return 1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     final halFolderOpenFile = WasmFunction(
       (int idPtr, int idLen, int argPtr, int argLen) {
         if (idLen <= 0 || argLen <= 0) return 0;
@@ -3394,6 +3448,11 @@ class WappEngine {
       WasmImport('hal', 'folder_set_media', halFolderSetMedia),
       WasmImport('hal', 'folder_media', halFolderMedia),
       WasmImport('hal', 'folder_search', halFolderSearch),
+      WasmImport('hal', 'folder_download_root', halFolderDownloadRoot),
+      WasmImport('hal', 'folder_set_download_root', halFolderSetDownloadRoot),
+      WasmImport('hal', 'folder_library', halFolderLibrary),
+      WasmImport('hal', 'folder_mkdir', halFolderMkdir),
+      WasmImport('hal', 'folder_move', halFolderMove),
       WasmImport('hal', 'fs_listdir', halFsListdir),
       WasmImport('hal', 'fs_home', halFsHome),
       WasmImport('hal', 'storage_request', halStorageRequest),

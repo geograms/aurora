@@ -415,68 +415,155 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       return token.isEmpty ? null : MediaRef.parse(token);
     }
 
-    int? sizeOf(Object? item) =>
-        (item is Map && item['size'] is int) ? item['size'] as int : null;
+
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
 
     final banner = refOf(g['banner']);
     final cover = refOf(g['cover']);
     final trailer = refOf(g['trailer']);
     final gallery = ((g['gallery'] as List?) ?? const []).toList();
 
+    final title = (g['title'] ?? '').toString();
+    final cat = (g['cat'] ?? '').toString();
+    final adult = g['adult'] == true;
+    final desc = (g['desc'] ?? '').toString();
+    final tags = ((g['tags'] as List?) ?? const [])
+        .map((t) => t.toString())
+        .where((t) => t.isNotEmpty)
+        .toList();
+
     if (banner == null &&
         cover == null &&
         trailer == null &&
-        gallery.isEmpty) {
+        gallery.isEmpty &&
+        title.isEmpty &&
+        desc.isEmpty) {
       return const SizedBox.shrink();
     }
 
-    final tiles = <Widget>[
-      // The trailer leads: it is the thing a person most wants to press.
+    Widget chip(String text, {Color? bg, Color? fg}) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+          decoration: BoxDecoration(
+            color: bg ?? cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Text(text,
+              style: tt.labelSmall?.copyWith(
+                  color: fg ?? cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w600)),
+        );
+
+    // The identity block: category + adult, then the title, then the tags.
+    final meta = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (cat.isNotEmpty || adult)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Wrap(spacing: 6, runSpacing: 6, children: [
+              if (cat.isNotEmpty)
+                chip(cat[0].toUpperCase() + cat.substring(1),
+                    bg: cs.primaryContainer, fg: cs.onPrimaryContainer),
+              if (adult)
+                chip('18+', bg: cs.errorContainer, fg: cs.onErrorContainer),
+            ]),
+          ),
+        if (title.isNotEmpty)
+          Text(title,
+              style: tt.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis),
+        if (tags.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [for (final t in tags) chip(t)],
+            ),
+          ),
+      ],
+    );
+
+    // Screenshots (trailer first — it is the thing a person most wants to press)
+    // scroll sideways, like every store page, so they never crowd the text.
+    final strip = <Widget>[
       if (trailer != null)
-        MediaThumbnail(ref: trailer, size: sizeOf(g['trailer'])),
+        _galleryTile(trailer),
       for (final item in gallery)
-        if (refOf(item) != null)
-          MediaThumbnail(ref: refOf(item)!, size: sizeOf(item)),
+        if (refOf(item) != null) _galleryTile(refOf(item)!),
     ];
 
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (label.isNotEmpty && field.getString('label') != null)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Text(label, style: Theme.of(context).textTheme.titleSmall),
-          ),
         if (banner != null)
           ClipRRect(
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(12),
             child: AspectRatio(
               aspectRatio: 16 / 6,
-              child: MediaThumbnail(ref: banner, size: sizeOf(g['banner'])),
+              child: MediaThumbnail(ref: banner, showSize: false),
             ),
           ),
-        if (banner != null && cover != null) const SizedBox(height: 10),
-        if (cover != null)
-          // Poster proportions (2:3), left-aligned like box art on a shelf.
-          SizedBox(
-            width: 130,
-            height: 195,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: MediaThumbnail(ref: cover, size: sizeOf(g['cover'])),
+        if (banner != null) const SizedBox(height: 14),
+        // Poster beside the identity block — the shape of a store listing.
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (cover != null) ...[
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 104,
+                  height: 156,
+                  child:
+                      MediaThumbnail(ref: cover, showSize: false),
+                ),
+              ),
+              const SizedBox(width: 14),
+            ],
+            Expanded(child: meta),
+          ],
+        ),
+        if (desc.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          Text(desc,
+              style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant)),
+        ],
+        if (strip.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text('Screenshots',
+              style: tt.titleSmall?.copyWith(color: cs.onSurfaceVariant)),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (var i = 0; i < strip.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 8),
+                  strip[i],
+                ],
+              ],
             ),
           ),
-        if (tiles.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          Wrap(spacing: 8, runSpacing: 8, children: tiles),
         ],
       ],
     );
 
-    return tip == null
-        ? content
-        : Tooltip(message: tip, child: content);
+    return content;
   }
+
+  /// One 16:9 screenshot/clip tile for the gallery strip.
+  Widget _galleryTile(MediaRef ref) => ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: SizedBox(
+          width: 168,
+          height: 94,
+          child: MediaThumbnail(ref: ref, showSize: false),
+        ),
+      );
 
   /// `$type:"qr"` — render a QR code of the field's string value (e.g. a circle
   /// id to share). Read-only; the value is set by the wapp via ui.field.set.

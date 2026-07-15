@@ -7305,11 +7305,36 @@ class RnsService {
       final sha = (entry['x'] as String?) ?? '';
       if (sha.length != 64) return null;
       final ext = _extOf(name);
-      final have =
-          archive?.has(sha) == true ||
-          _diskMgr?.filePathOf(folderId, sha) != null;
+
+      // The UI renders a media TOKEN by reading its bytes from the archive
+      // (MediaThumbnail). A folder we SERVE FROM DISK keeps its bytes on disk and
+      // never in the archive — so for the artwork to show, the disk bytes have to
+      // be copied in. This is cheap (art is capped at 30MB and usually KB) and it
+      // is also correct: once the bytes are archived we can seed them to others.
+      var have = archive?.has(sha) == true;
       if (!have) {
-        // Small, and the user is looking at it right now.
+        final diskPath = _diskMgr?.filePathOf(folderId, sha);
+        if (diskPath != null && archive != null) {
+          try {
+            final bytes = File(diskPath).readAsBytesSync();
+            final token = archive.putBytes(bytes, ext.isEmpty ? 'bin' : ext);
+            have = archive.has(sha);
+            LogService.instance.add(
+              'folders: art $name -> archive ${have ? 'ok' : 'MISMATCH'} '
+              '(${bytes.length}B, $token vs $sha)',
+            );
+          } catch (e) {
+            LogService.instance.add('folders: art $name copy failed: $e');
+          }
+        } else {
+          LogService.instance.add(
+            'folders: art $name has no disk path (owned=$folderId)',
+          );
+        }
+      }
+      if (!have) {
+        // Not on disk and not archived → fetch it. Small, and the user is looking
+        // at it right now; the tile shows the progress until it lands.
         // ignore: discarded_futures
         folderDownloadFile(folderId, sha, '$kFolderDataDir/$name');
       }
@@ -7345,6 +7370,14 @@ class RnsService {
 
     return {
       'folderId': folderId,
+      // The listing text rides along, from the SIGNED op-log (so it is here even
+      // for a torrent we have not downloaded) — the gallery field draws one hero
+      // card: banner, poster, title, category, tags, description, screenshots.
+      if (state['title'] != null) 'title': state['title'],
+      if (state['cat'] != null) 'cat': state['cat'],
+      if (state['adult'] == true) 'adult': true,
+      if (state['desc'] != null) 'desc': state['desc'],
+      'tags': FolderMeta.tagsFromWire('${state['tags'] ?? ''}'),
       if (one(coverName) != null) 'cover': one(coverName),
       if (one(bannerName) != null) 'banner': one(bannerName),
       if (one(trailerName) != null) 'trailer': one(trailerName),

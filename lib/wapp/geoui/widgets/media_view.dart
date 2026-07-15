@@ -60,6 +60,11 @@ class MediaThumbnail extends StatefulWidget {
   /// user taps. Used on the Activity feed, where posts can carry large media the
   /// user should choose to fetch.
   final bool tapOnly;
+
+  /// Draw the size badge on the thumbnail. On a chat/download tile it tells you
+  /// how big a fetch will be; on a listing poster it is noise, so the gallery
+  /// turns it off.
+  final bool showSize;
   /// A tiny PNG preview embedded with the post (`tn:` token). When the full file
   /// isn't local yet, this is shown as the thumbnail so the user sees a preview
   /// WITHOUT downloading; tapping fetches the full-resolution media.
@@ -70,6 +75,7 @@ class MediaThumbnail extends StatefulWidget {
       this.size,
       this.from,
       this.tapOnly = false,
+      this.showSize = true,
       this.inlineThumb});
 
   @override
@@ -646,7 +652,7 @@ class _MediaThumbnailState extends State<MediaThumbnail> {
           if (ref.kind == MediaKind.video || ref.kind == MediaKind.audio)
             Center(child: _playButton()),
           // Size badge (from the wire hint or the stored size).
-          if (_sizeLabel != null || meta.size > 0)
+          if (widget.showSize && (_sizeLabel != null || meta.size > 0))
             Positioned(
               right: 4,
               bottom: 4,

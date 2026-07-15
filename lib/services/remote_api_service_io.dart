@@ -783,6 +783,16 @@ class RemoteApiService {
         return _json(
             res, {'ok': true, 'holders': RnsService.instance.folderSwarm(fid)});
       }
+      // The listing's artwork as media tokens (same as the wapp's hal_folder_media)
+      // — drives the disk→archive copy and returns what the gallery would render.
+      if (req.method == 'GET' && path == '/api/rns/folder/media') {
+        final fid = '${req.uri.queryParameters['folderId'] ?? ''}'.trim();
+        if (fid.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'folderId required'},
+              status: HttpStatus.badRequest);
+        }
+        return _json(res, RnsService.instance.folderMediaTokens(fid));
+      }
       // Open one file with the system viewer (gallery / reader / installer).
       // {"folderId":..,"sha":..,"name":..}. A downloaded file is exported out of
       // the content-addressed archive on a worker isolate first; a disk-backed

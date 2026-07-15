@@ -222,6 +222,22 @@ signal, not a claim of freshness.
    `created_at` is **seconds** (multiply). `recent()` is oldest→newest and the feed
    card reverses for display; the curation re-sort must respect "best last → top".
 
+10. **Memory and the main thread will OOM/ANR a budget phone if you are careless.**
+    Three traps, all hit and fixed:
+    - **Never decode avatars/banners at source resolution.** A profile picture is
+      often 1000px+; 100+ cached profiles + a full-res profile banner blew GPU
+      texture memory to ~94MB and OOM'd. Use `avatar_image.dart`
+      (`avatarImage`/`bannerImage`, `ResizeImage`); post images use `cacheHeight`.
+      The global `imageCache` is capped in `main.dart`.
+    - **Batch archive writes.** The archive is SQLCipher (encrypted) — hundreds of
+      individual `add`/`setReaction` INSERTs blocked the UI thread for seconds
+      (ANR). The poller wraps its whole persist in `ActivityArchive.transact()`.
+    - **Do not do sqlite in `build()`.** `_socialActivityPosts` reads like/reply
+      counts to rank; unmemoised it ran ~800 queries per build (every scroll frame).
+      It is memoised on the archive revision. And remember the **poll decodes every
+      collected event's JSON on the main isolate** (sockets can't be on the engine)
+      — keep the reaction/fresh sample sizes modest or it janks the UI.
+
 ---
 
 ## 10. History

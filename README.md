@@ -1,21 +1,22 @@
 # Geogram
 
 **Geogram is an off-grid-first messenger and app launcher.** It speaks several
-networks at once — the internet, a [Reticulum](docs/reticulum-connections.md) overlay, the
-[APRS](docs/aprs.md) network, and direct [Bluetooth LE](docs/ble.md) — and glues
-them together so a message or a file reaches the other side over whatever path
-is available. When there's no internet, it falls back to radio and Bluetooth;
-when there is, it uses it. No accounts, no central server.
+networks at once — the internet, a [Reticulum](docs/reticulum-connections.md)
+overlay, and direct [Bluetooth LE](docs/ble.md) — and glues them together so a
+message or a file reaches the other side over whatever path is available. When
+there's no internet, it falls back to a Bluetooth street mesh and long-range
+radio; when there is, it uses it. **No accounts, no phone number, no central
+server.**
 
-On top of that transport core, Geogram is a **launcher for "wapps"** —
-sandboxed WebAssembly apps that render through a shared native UI. The flagship
-wapp, **Chat**, is shown throughout this README as an example of what the
-platform does.
+On top of that transport core, Geogram is a **launcher for "wapps"** — sandboxed
+WebAssembly apps that render through one shared native UI and ride the host's
+transports. This README tours the four flagship wapps: **Chat**, **Social**,
+**Reticulum**, and **Torrents**.
 
 <p align="center">
-  <img src="docs/screenshots/01-launcher.png" width="240" alt="Geogram launcher">
-  <img src="docs/screenshots/02-activity.png" width="240" alt="Chat: Activity feed">
-  <img src="docs/screenshots/04-chat.png" width="240" alt="Chat: 1:1 with media">
+  <img src="docs/screenshots/launcher.png" width="240" alt="Geogram launcher">
+  <img src="docs/screenshots/chat-groups.png" width="240" alt="Chat: group channels">
+  <img src="docs/screenshots/reticulum-graph.png" width="240" alt="Reticulum: live node graph">
 </p>
 
 ---
@@ -38,113 +39,185 @@ source — see [Build & run](#build--run).
 
 ## What it does
 
-- **Multi-transport messaging** — one message goes out over internet (APRS-IS),
-  Bluetooth LE, or Reticulum/LXMF, and incoming messages are tagged with the
-  path they arrived on (`NET`, `BLE`, `RET`/`RNS`, `RLY`).
-- **Off-grid by design** — APRS over radio and connectionless BLE broadcast keep
-  working with no internet at all. A phone with internet automatically
-  **bridges** its BLE-only peers onto the Reticulum hubs, so an offline device
-  stays reachable worldwide.
+- **Multi-transport by default** — one message goes out over the internet,
+  Bluetooth LE, or [Reticulum](docs/reticulum-connections.md)/LXMF, and incoming
+  messages are tagged with the path they arrived on (`NET`, `BLE`, `RET`/`RNS`,
+  `RLY`). First path to arrive wins; the rest are de-duplicated.
+- **Off-grid by design** — a [Bluetooth street mesh](docs/mesh.md) carries
+  messages phone-to-phone with no infrastructure, and low-power **LoRa** dongles
+  extend it over kilometres. A phone that *does* have internet automatically
+  **bridges** its Bluetooth-only and LoRa neighbours onto the worldwide Reticulum
+  network — so an offline device stays reachable across the planet.
+- **Your device is the server** — there is no backend. Every phone stores, serves
+  and re-seeds its own data. Identity, messages, files and social posts live on
+  the devices that create them; the network is just the wire between them.
 - **Decentralized identity** — every station has a Nostr keypair (secp256k1) and
   periodically announces its public key, enabling **signed** and
-  **end-to-end-encrypted** 1:1 messages without any directory server.
-- **Content-addressed files** — media and files are referenced by `sha256` hash,
-  found through a Kademlia DHT over Reticulum, and re-seeded by every downloader.
-- **Wapp platform** — install/run sandboxed WebAssembly apps (Chat, Reticulum,
-  Circles, Player, Terminal, …) that share one native UI and the host's
-  transports.
+  **end-to-end-encrypted** messages with no directory server. Your private key
+  never leaves the device (and is backed up under an emoji passphrase).
+- **Content-addressed files** — media and files are referenced by `sha256`,
+  located through a Kademlia **DHT over Reticulum**, and re-seeded by every
+  downloader.
 - **Cross-platform** — Linux, Windows, macOS, Android. In-app Update Center
   (stable / beta channels) for OTA updates.
 
 ---
 
-## The Chat wapp — a tour
+## The wapps
 
-Geogram's main app is **Chat**: a full messaging station that puts an Activity
-feed, 1:1 and group messaging, a live map, and a follow roster behind one panel.
+Wapps are sandboxed WebAssembly apps that share Geogram's native UI and
+transports. All app-specific logic lives in the wapp, so it updates on its own
+without a new install. Four flagship wapps ship in the box.
 
-### Launcher
-
-![Launcher](docs/screenshots/01-launcher.png)
-
-Wapps are grouped on the home screen; the red **Chat** tile opens the messenger.
-The profile pill (top-left) carries your callsign and a deterministic identicon.
-
-### Activity feed
-
-![Activity](docs/screenshots/02-activity.png)
-
-A public, Twitter-style stream of the people you follow. Posts carry text,
-embedded media thumbnails, like / reply / save actions, a transport badge per
-post, and a three-dot menu to **block** or **mute** an author.
-
-### Messages — 1:1 and groups
-
-![Messages](docs/screenshots/03-messages.png)
-
-Direct chats and `#`-prefixed group channels in one list. `(global)` groups are
-followed worldwide; local groups only within your map radius. Fresh installs are
-seeded with global groups (`#DEV`, `#NEWS`, `#HELP`, …) and every contact gets a
-generated identicon.
+### 💬 Chat — off-grid messaging
 
 <p align="center">
-  <img src="docs/screenshots/07-add-group.png" width="240" alt="Add a group">
-  <img src="docs/screenshots/04-chat.png" width="240" alt="Chat with media">
+  <img src="docs/screenshots/chat-groups.png" width="260" alt="Chat: group channels with transport badges">
 </p>
 
-Join a group from preset chips or a custom tag (left). Inside a chat (right),
-messages have timestamps, file attachments, and inline content-addressed images;
-1:1 DMs are encrypted to the recipient's key when known, and can be signed.
+Encrypted messages to anyone nearby over Bluetooth, or across the world over
+Reticulum. Group channels (`#DEV`, `#NEWS`, `#HELP`, …) are `(global)` — followed
+worldwide — or local, seen only within your map radius. 1:1 chats are
+**end-to-end encrypted** to the recipient's key and **signed**, so they can't be
+forged. The app bar shows which transports are live right now (`RET`, `BLE`), and
+three tabs put a **Geochat** live map of nearby stations and a **Follows** roster
+behind the same panel. Messages ride the Bluetooth mesh and Reticulum/LXMF
+interchangeably.
 
-### Geochat — live map
+### 🟣 Social — a decentralized feed
 
-![Geochat](docs/screenshots/05-geochat.png)
+<p align="center">
+  <img src="docs/screenshots/social-feed.png" width="260" alt="Social: All / Following / Saved feed with composer">
+</p>
 
-A live map of stations and geotagged messages around you. The range slider sets
-your filter radius; pins cluster nearby beacons. Position, status, emergency and
-timed beacons are composed and broadcast from here.
+A NOSTR-style public feed. Post short notes with media, follow people by their
+key, like/reply, and read three lanes — **All** (a global firehose gathered from
+the relays your device can reach), **Following** (only people you follow), and
+**Saved**. Posts are `kind-1` notes and profiles are `kind-0`, distributed over
+Reticulum and fetched **directly from the author** for people you follow — there
+is no feed server curating what you see. Everything you publish is signed with
+your own key.
 
-### Follows
+### 🛰️ Reticulum — see the mesh
 
-![Follows](docs/screenshots/06-follows.png)
+<p align="center">
+  <img src="docs/screenshots/reticulum-graph.png" width="260" alt="Reticulum: native node radar with peers, hubs, LoRa/Radio">
+</p>
 
-Manage who you follow and who follows you; following a callsign streams their
-public Activity into your feed.
+A native, off-thread visualization of the Reticulum network as your device hears
+it: a live radar of **peers**, **hubs** and fellow **geograms**, with **LoRa**
+and **Radio** interface counters along the bottom. Filter by network, browse the
+reachable devices (each with its callsign and public key), send an **LXMF direct
+message** to any of them, and even browse **NomadNet** node pages over the mesh.
+It is an observed-only map — nothing here is a central directory; it is simply
+what announces have reached this node.
+
+### ⬇️ Torrents — folders that live on the mesh
+
+<p align="center">
+  <img src="docs/screenshots/torrents-list.png" width="240" alt="Torrents: library list">
+  <img src="docs/screenshots/torrents-info.png" width="240" alt="Torrents: listing / info page">
+  <img src="docs/screenshots/torrents-popularity.png" width="240" alt="Torrents: popularity over months">
+</p>
+
+A torrent client whose unit of sharing is a **folder**, addressed by a key
+(`ntorrent1…`) rather than a fixed content hash — so the publisher can change the
+contents and the link never breaks. Files inside stay `sha256`-addressed and
+[content-verified](docs/torrents.md). Download a torrent and its files become
+**real files on disk** that your device then **seeds for others**; pin it to keep
+a full copy. Each listing carries a title, category, tags, cover art and a
+favicon.
+
+The Info page shows the folder's total size, a **cached seeder count** ("others
+holding this now"), and a full **Popularity** panel — a native chart of seeders
+and unique leechers per month, kept **on your device only**, never in the folder.
+Because a folder is dynamic, a **Get updates** toggle lets a follower **freeze a
+static copy** and stop pulling the publisher's changes. Share a torrent by link
+or **QR code** (scanning is Android-only); the publisher's identity is **kept out
+of the link unless you opt in** — an unsigned name is a phishing surface.
+
+> Other bundled wapps include **Messages** (one unified encrypted NOSTR inbox),
+> **Circles** (private group chat with rotating shared keys), a media **Player**,
+> and the **Wapp Store**.
+
+---
+
+## Indexers, archivers, and true decentralization
+
+There is no server anywhere. The network is made only of user devices, and a
+device can volunteer for two extra roles:
+
+- **Indexers** are the mesh's trackers. A holder publishes a **provider record**
+  — "this destination holds folder *F* / file *sha*" — and indexers keep those
+  pointers and answer text search, so a downloader can find *who has* something
+  with no central catalog. Indexers store pointers, never the content.
+- **Archivers** keep the bytes alive. They accept store-and-forward deposits and
+  **mirror** followed folders, so content stays reachable even while its original
+  owner is offline. Any downloader is already a partial archiver: it re-seeds what
+  it fetched.
+
+Put together, **every user's device is its own hosting server.** Your posts, your
+files and your torrents are served by your phone and by whoever chose to mirror
+them — not by a company. Take the whole rest of the network away and your device
+still holds, serves and verifies its own data.
+
+---
+
+## Privacy
+
+Reticulum makes casual, at-scale surveillance structurally hard:
+
+- **No IP addresses.** Reticulum addresses are 16-byte **destination hashes**,
+  never IPs. The copyright-troll / mass-scrape model — collect IPs from a swarm,
+  mail threats — simply has nothing to collect.
+- **Everything is encrypted.** Links are end-to-end encrypted with forward
+  secrecy. **Hubs and relays route bytes only — they never see content.** 1:1
+  messages are encrypted to the recipient's key; groups use rotating shared keys.
+- **Pseudonymous keys, not people.** Identities are Nostr keypairs. A torrent's
+  folder key is separate from your personal identity, and the publisher's `npub`
+  is left out of a shared link by default — so a listing need not be attributable
+  to a person.
+- **Honest about the limits.** The unavoidable exposure in any swarm is the
+  *who-has* map (provider records). Reticulum keeps that pseudonymous rather than
+  tied to an IP, but it is not anonymity against an adversary who joins the mesh
+  to correlate. See [`docs/torrents.md`](docs/torrents.md) for the full picture
+  and the roadmap (ephemeral per-folder serving destinations, relay serving).
 
 ---
 
 ## How it reaches people
 
 ```
-            ┌─────────────────────────────────────────────────────────┐
-            │                     Geogram chat (wapps)                 │
-            │   APRX message conventions  +  file: media references    │
-            └───────────────┬───────────────────────┬─────────────────┘
-                            │                       │
-                 message transport          file transport / discovery
-                 ┌──────────┴──────────┐    ┌────────┴───────────────┐
-                 │  APRS-IS    BLE      │    │  Reticulum links        │
-                 │  (TNC2)   (compact)  │    │  + DHT (find by hash)   │
-                 │                      │    │  + relay (find by text) │
-                 └──────────────────────┘    └────────┬───────────────┘
-                                                      │
-                                              ┌───────┴────────┐
-                                              │  Reticulum RNS  │
-                                              │ TCP/UDP/BLE/Auto│
-                                              └─────────────────┘
+        ┌──────────────────────────────────────────────────────────┐
+        │            Wapps  (Chat · Social · Reticulum · Torrents)  │
+        └───────────────┬──────────────────────────┬───────────────┘
+                        │                          │
+              message transport            file transport / discovery
+        ┌───────────────┴───────────┐    ┌─────────┴────────────────┐
+        │  Reticulum / LXMF         │    │  Reticulum links          │
+        │  Bluetooth mesh + LoRa    │    │  + DHT   (find by hash)   │
+        │  internet                 │    │  + Indexers (find by text)│
+        └───────────────┬───────────┘    └─────────┬────────────────┘
+                        │                          │
+                        └────────────┬─────────────┘
+                              ┌──────┴───────────┐
+                              │   Reticulum RNS   │
+                              │ TCP/UDP/BLE/LoRa  │
+                              └───────────────────┘
 ```
 
-- **Messages** ride APRS (internet APRS-IS or off-grid BLE) and Reticulum/LXMF.
+- **Messages** ride the Bluetooth mesh, LoRa, the internet, and Reticulum/LXMF —
+  whichever is up.
 - **Files** are *referenced* by content hash inside messages and *transferred*
   out of band over Reticulum, the DHT, a LAN, or BitTorrent.
-- **Reticulum** is the transport that lets two devices on different networks
-  reach each other; the **DHT** is the decentralized index that finds *who holds
-  a file* with no central server. Hubs relay bytes only — they never see content.
+- **Reticulum** is the transport that lets two devices on different networks reach
+  each other; the **DHT** and **Indexers** are the decentralized indexes that find
+  *who holds* a file with no central server.
 
 The protocol/networking layers are documented with file/line pointers into the
 code under [`docs/`](docs/README.md):
-[reticulum-connections](docs/reticulum-connections.md), [aprs](docs/aprs.md),
-[ble](docs/ble.md), [aprx](docs/aprx.md), [circles](docs/circles.md).
+[reticulum-connections](docs/reticulum-connections.md), [ble](docs/ble.md),
+[mesh](docs/mesh.md), [torrents](docs/torrents.md), [circles](docs/circles.md).
 
 ---
 
@@ -163,8 +236,8 @@ Android:
 ./launch-android.sh         # build + install on a connected device
 ```
 
-The bundled wapps live in `assets/wapps/`. To rebuild a wapp from source, see
-the [`geograms/wapps`](https://github.com/geograms/wapps) repository.
+The bundled wapps live in `assets/wapps/`. To rebuild a wapp from source, see the
+[`geograms/wapps`](https://github.com/geograms/wapps) repository.
 
 ---
 
@@ -177,12 +250,10 @@ the [`geograms/wapps`](https://github.com/geograms/wapps) repository.
 > bumps, and a slow rollout — see [Validation](docs/validation.md)). So the default
 > home for new functionality is a **wapp**. Touch the core engine **only when the
 > feature genuinely cannot live in a wapp** — a new transport, a HAL primitive a wapp
-> needs but can't express, a cross-cutting host service. When you find yourself about
-> to add feature logic to the engine, stop and ask whether it belongs in a wapp
-> instead; the answer is usually yes. Keep the host **generic** — app-specific logic
-> (APRS/Chat conventions, social rules) lives in the wapp's C + GeoUI, never in
-> `lib/`. Most changes should land in [`geograms/wapps`](https://github.com/geograms/wapps),
-> not here.
+> needs but can't express, a cross-cutting host service. Keep the host **generic** —
+> app-specific logic (Chat conventions, social rules, torrent formats) lives in the
+> wapp's C + GeoUI, never in `lib/`. Most changes should land in
+> [`geograms/wapps`](https://github.com/geograms/wapps), not here.
 
 These documents define how code is written and accepted in this repo. Read the
 relevant one before touching that area — they are the conventions, not just notes.

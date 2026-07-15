@@ -75,6 +75,7 @@ import '../folders/nfolder.dart';
 import '../folders/piece_hashes.dart';
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../../wapp/geoui/activity_archive.dart';
+import '../../wapp/android_foreground_service.dart';
 import 'package:reticulum/reticulum.dart'
     show MediaArchive, MediaRef, MediaKind;
 import 'package:reticulum/reticulum.dart' show BlossomServer;
@@ -2285,6 +2286,10 @@ class RnsService {
                   _nostrHub = c
                     ..onChanged = _notifyNostrListeners
                     ..onLog = (m) => LogService.instance.add('NOSTR: $m');
+                  AndroidForegroundService.instance.addTickListener(
+                    _nostrBackgroundTick,
+                  );
+                  unawaited(AndroidForegroundService.instance.hold('nostr'));
                   // Hand the engine what the user has already refused to carry.
                   // A mute is persisted, so it must be in force from the first
                   // event of the session — not only from the next time it is
@@ -6064,9 +6069,11 @@ class RnsService {
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastResumeMs < 20000) return;
     _lastResumeMs = now;
-    // Resume is also a bounded foreground poll.  Merely reopening the socket
-    // leaves the previous batch on screen until the ten-minute timer fires.
-    unawaited(_nostrHub?.resumeAndRefreshFirehose(n: 100));
+    _nostrHub?.resumeNetwork();
+  }
+
+  void _nostrBackgroundTick() {
+    _nostrHub?.backgroundTick(DateTime.now().millisecondsSinceEpoch);
   }
 
   /// Authors the user muted — the wapp owns the list and pushes it on change.
@@ -7758,6 +7765,8 @@ class RnsService {
     // ignore: discarded_futures
     _nostrHub?.close();
     _nostrHub = null;
+    AndroidForegroundService.instance.removeTickListener(_nostrBackgroundTick);
+    unawaited(AndroidForegroundService.instance.release('nostr'));
     // ignore: discarded_futures
     _nostrWs?.stop();
     _nostrWs = null;

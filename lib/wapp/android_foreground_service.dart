@@ -32,6 +32,7 @@ class AndroidForegroundService {
   // several subsystems (background wapps, the Reticulum node) can each keep the
   // process alive independently without stomping on each other.
   final Set<String> _holders = {};
+  final Set<void Function()> _tickListeners = {};
   String? _wappLabel; // label contributed by the 'wapps' holder
 
   bool get _supported => !kIsWeb && Platform.isAndroid;
@@ -45,6 +46,9 @@ class AndroidForegroundService {
     if (call.method == 'onTick') {
       // Native heartbeat — advance every live background engine.
       BackgroundWappManager.instance.tickAllFromNative();
+      for (final listener in List<void Function()>.of(_tickListeners)) {
+        listener();
+      }
     } else if (call.method == 'media.action') {
       final action = (call.arguments is Map)
           ? (call.arguments['action']?.toString() ?? '')
@@ -112,6 +116,12 @@ class AndroidForegroundService {
     await _sync();
   }
 
+  void addTickListener(void Function() listener) =>
+      _tickListeners.add(listener);
+
+  void removeTickListener(void Function() listener) =>
+      _tickListeners.remove(listener);
+
   /// Background-wapp holder: start (or refresh the label of) the service for the
   /// given running wapps. Releasing happens via [stop].
   Future<void> start(List<String> wappNames) async {
@@ -143,5 +153,4 @@ class AndroidForegroundService {
       debugPrint('AndroidForegroundService: notify failed: $e');
     }
   }
-
 }

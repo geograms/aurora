@@ -5678,10 +5678,6 @@ class _WappPageState extends State<WappPage>
     // post stream) and renders from the PERSISTED archive, so posts received in
     // the background (app closed) appear alongside live ones.
     if (name == 'activity') {
-      // Opening the stream = the user is looking. Recover any socket Android
-      // froze while we were backgrounded, or the feed shows its age instead of
-      // the network. Throttled inside, so calling from build is fine.
-      RnsService.instance.nostrResume();
       final posts = _socialActivityPosts();
       return ActivityFeed(
         posts: posts,

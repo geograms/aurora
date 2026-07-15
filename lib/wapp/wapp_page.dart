@@ -638,6 +638,15 @@ class _WappPageState extends State<WappPage>
   // `messages/<field>.json` and reloaded on open, so the Messenger survives a
   // restart. Writes are debounced and coalesced across fields.
   static const String _convDir = 'messages';
+
+  // App-bar icons sat at the 48dp Material tap pitch, which sprawled them across
+  // the bar with big ugly gaps. These pull every app-bar icon (plain buttons and
+  // popup menus alike) into a tight ~3px cluster, matching the dense conversation
+  // actions. Global: every wapp's app bar uses these.
+  static const EdgeInsets _kAppBarIconPad = EdgeInsets.symmetric(horizontal: 2);
+  static const BoxConstraints _kAppBarIconConstraints =
+      BoxConstraints(minWidth: 0, minHeight: 40);
+
   Timer? _convSaveTimer;
   final Set<String> _convDirty = {};
 
@@ -3882,6 +3891,7 @@ class _WappPageState extends State<WappPage>
           PopupMenuButton<String>(
             tooltip: _i18n.resolve(name),
             icon: Icon(_panelIcon(i)),
+            padding: _kAppBarIconPad,
             onSelected: _onWappAction,
             itemBuilder: (_) => [
               for (final a in actions)
@@ -3917,6 +3927,9 @@ class _WappPageState extends State<WappPage>
       Widget button = IconButton(
         icon: Icon(_panelIcon(i)),
         tooltip: _i18n.resolve(name),
+        padding: _kAppBarIconPad,
+        constraints: _kAppBarIconConstraints,
+        visualDensity: VisualDensity.compact,
         onPressed: () {
           // (marking read happens in _buildNotificationsScreen, so every route
           // into the panel clears the badge — not just this one)
@@ -4048,6 +4061,7 @@ class _WappPageState extends State<WappPage>
     return PopupMenuButton<String>(
       icon: const Icon(Icons.menu),
       tooltip: 'Options',
+      padding: _kAppBarIconPad,
       onSelected: (value) {
         if (value == 'edit') {
           _editThisWapp();

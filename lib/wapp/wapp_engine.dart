@@ -1128,6 +1128,18 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Search the listings this node knows: {q,cat,sort} in →
+    // {cats:[{cat,count}], results:[{folderId,title,cat,seeders,size,updated}]}.
+    final halFolderSearch = WasmFunction(
+      (int qPtr, int qLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final query = qLen > 0 ? _readStr(qPtr, qLen) : '{}';
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderSearch(query)));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     final halFolderOpenFile = WasmFunction(
       (int idPtr, int idLen, int argPtr, int argLen) {
         if (idLen <= 0 || argLen <= 0) return 0;
@@ -3381,6 +3393,7 @@ class WappEngine {
       WasmImport('hal', 'folder_meta_set', halFolderMetaSet),
       WasmImport('hal', 'folder_set_media', halFolderSetMedia),
       WasmImport('hal', 'folder_media', halFolderMedia),
+      WasmImport('hal', 'folder_search', halFolderSearch),
       WasmImport('hal', 'fs_listdir', halFsListdir),
       WasmImport('hal', 'fs_home', halFsHome),
       WasmImport('hal', 'storage_request', halStorageRequest),

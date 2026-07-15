@@ -6948,6 +6948,107 @@ class RnsService {
     };
   }
 
+  /// The last time a folder's contents changed — the newest file timestamp in its
+  /// reduced state (0 when unknown). Used to sort listings by "recently updated".
+  int _folderUpdatedTs(String folderId) {
+    var newest = 0;
+    final files = (folderBrowse(folderId)['files'] as List?) ?? const [];
+    for (final f in files) {
+      if (f is Map && f['ts'] is int) {
+        final t = f['ts'] as int;
+        if (t > newest) newest = t;
+      }
+    }
+    return newest;
+  }
+
+  /// Search the listings this node knows (owned + subscribed) — GENERIC, no
+  /// torrent-specific logic. [jsonQuery] = {q, cat, sort}: match `q` against
+  /// title/name/description/tags, optionally restrict to one `cat`, and sort by
+  /// seeders (default) | updated | size. Also returns the categories that
+  /// actually have listings (with counts) so a browser can hide empty ones.
+  Map<String, dynamic> folderSearch(String jsonQuery) {
+    var q = '';
+    var cat = '';
+    var sort = 'seeders';
+    try {
+      final m = jsonDecode(jsonQuery);
+      if (m is Map) {
+        q = '${m['q'] ?? ''}'.trim().toLowerCase();
+        cat = '${m['cat'] ?? ''}'.trim();
+        sort = '${m['sort'] ?? 'seeders'}'.trim();
+      }
+    } catch (_) {}
+
+    // Union of every folder this node knows about.
+    final ids = <String>{};
+    for (final o in folderList()) {
+      final id = o['folderId'];
+      if (id is String && id.isNotEmpty) ids.add(id);
+    }
+    for (final o in folderSubscriptions()) {
+      final id = o['folderId'];
+      if (id is String && id.isNotEmpty) ids.add(id);
+    }
+
+    final catCount = <String, int>{};
+    final rows = <Map<String, dynamic>>[];
+    for (final id in ids) {
+      final st = folderStats(id);
+      final title = '${st['title'] ?? st['name'] ?? ''}';
+      final c = '${st['cat'] ?? ''}';
+      final desc = '${st['desc'] ?? ''}';
+      final tags = '${st['tags'] ?? ''}';
+      final seeders = folderSwarm(id).length;
+      final size = st['totalBytes'] is int ? st['totalBytes'] as int : 0;
+      final updated = _folderUpdatedTs(id);
+
+      // Count categories over the WHOLE known set (not the filtered one) so the
+      // category browser shows every non-empty bucket regardless of the query.
+      if (c.isNotEmpty) catCount[c] = (catCount[c] ?? 0) + 1;
+
+      if (cat.isNotEmpty && c != cat) continue;
+      if (q.isNotEmpty) {
+        final hay = '$title\n$desc\n$tags\n${st['name'] ?? ''}'.toLowerCase();
+        if (!hay.contains(q)) continue;
+      }
+      rows.add({
+        'folderId': id,
+        'title': title.isEmpty ? '${st['name'] ?? id}' : title,
+        'cat': c,
+        'adult': st['adult'] == true,
+        'seeders': seeders,
+        'size': size,
+        'updated': updated,
+      });
+    }
+
+    int cmp(Map<String, dynamic> a, Map<String, dynamic> b) {
+      switch (sort) {
+        case 'size':
+          return (b['size'] as int).compareTo(a['size'] as int);
+        case 'updated':
+          return (b['updated'] as int).compareTo(a['updated'] as int);
+        default: // seeders, size as the tie-break
+          final s = (b['seeders'] as int).compareTo(a['seeders'] as int);
+          return s != 0 ? s : (b['size'] as int).compareTo(a['size'] as int);
+      }
+    }
+
+    rows.sort(cmp);
+
+    return {
+      'q': q,
+      'cat': cat,
+      'sort': sort,
+      'cats': [
+        for (final c in kFolderCategories)
+          if ((catCount[c] ?? 0) > 0) {'cat': c, 'count': catCount[c]},
+      ],
+      'results': rows,
+    };
+  }
+
   // ── Torrents: the link, the swarm, and pinning (docs/torrents.md) ──────────
 
   // Who-has snapshots, per folderId. The DHT resolve is async and the HAL is
@@ -7406,10 +7507,24 @@ class RnsService {
       });
     }
 
+    // Whole-torrent totals (content only — data/ is chrome), so the gallery can
+    // fall back to a "N files · X" line when there is nothing to preview.
+    var totalFiles = 0;
+    var totalBytes = 0;
+    for (final f in files) {
+      if (f is! Map) continue;
+      final n = (f['name'] as String?) ?? '';
+      if (n.startsWith('$kFolderDataDir/')) continue;
+      totalFiles++;
+      if (f['size'] is int) totalBytes += f['size'] as int;
+    }
+
     return {
       'folderId': folderId,
       'path': path,
       'files': browse,
+      'fileCount': totalFiles,
+      'totalBytes': totalBytes,
       // The listing text rides along, from the SIGNED op-log (so it is here even
       // for a torrent we have not downloaded) — the gallery field draws one hero
       // card: banner, poster, title, category, tags, description, screenshots.

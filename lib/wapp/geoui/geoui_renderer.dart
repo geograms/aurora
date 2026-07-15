@@ -396,6 +396,13 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
   /// inline playback for a .webm, a fetch-progress chip while the bytes are
   /// still coming, and a fullscreen viewer on tap. None of that is re-invented
   /// here — this is layout over the widget chat already uses.
+  static String _fmtGalleryBytes(int n) {
+    if (n < 1024) return '$n B';
+    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+    if (n < 1024 * 1024 * 1024) return '${(n / 1048576).toStringAsFixed(1)} MB';
+    return '${(n / 1073741824).toStringAsFixed(2)} GB';
+  }
+
   Widget _renderGalleryField(
       String name, String label, String? tip, GeoUiBlock field) {
     final raw = widget.bindings.getValue(name)?.toString() ?? '';
@@ -440,6 +447,13 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
         .map((m) => m.cast<String, dynamic>())
         .toList();
     final path = (g['path'] ?? '').toString();
+
+    // Nothing visual to show? Fall back to a one-line summary of the payload
+    // (feedback 3), so an artless torrent still reads as more than a blank box.
+    final hasPreview =
+        banner != null || cover != null || trailer != null || gallery.isNotEmpty;
+    final fileCount = (g['fileCount'] as num?)?.toInt() ?? 0;
+    final totalBytes = (g['totalBytes'] as num?)?.toInt() ?? 0;
 
     if (banner == null &&
         cover == null &&
@@ -538,6 +552,15 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
           const SizedBox(height: 14),
           Text(desc,
               style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant)),
+        ],
+        if (!hasPreview && fileCount > 0) ...[
+          const SizedBox(height: 14),
+          Text(
+            'No preview was provided for this torrent. '
+            'It holds $fileCount file${fileCount == 1 ? '' : 's'}'
+            '${totalBytes > 0 ? ', ${_fmtGalleryBytes(totalBytes)} in total' : ''}.',
+            style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
+          ),
         ],
         if (strip.isNotEmpty) ...[
           const SizedBox(height: 16),

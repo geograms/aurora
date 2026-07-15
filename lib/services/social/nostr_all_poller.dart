@@ -189,7 +189,12 @@ class NostrAllPoller {
 List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
   final events = (arg['events'] as List).cast<Map<String, dynamic>>();
   final muted = (arg['muted'] as List).map((e) => e.toString()).toSet();
-  final out = <Map<String, dynamic>>[];
+
+  // First pass: parse, gate, verify. Collect survivors so a second pass can
+  // rank and de-flood across the whole batch (a single author firehosing
+  // encoded junk otherwise buries every real post — the "sp_…drift.gits.net"
+  // flood seen on-device).
+  final kept = <_Cand>[];
   for (final j in events) {
     final NostrEvent ev;
     try {
@@ -198,9 +203,10 @@ List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
       continue;
     }
     if (ev.kind != 1) continue;
-    final content = ev.content;
-    if (content.trim().isEmpty) continue;
+    final content = ev.content.trim();
+    if (content.isEmpty) continue;
     if (contentVerdict(content) is! FeedKeep) continue; // spam gate
+    if (_looksMachineJunk(content)) continue; // encoded-blob flood
     final pub = ev.pubkey.toLowerCase();
     if (pub.isEmpty) continue;
     if (muted.contains(pub) ||
@@ -210,23 +216,36 @@ List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
     final id = ev.id ?? '';
     if (id.isEmpty) continue;
     if (!ev.verify()) continue; // forged signature → drop
+    kept.add(_Cand(ev, content, pub, id));
+  }
+
+  // Newest first, then cap per author so no single flooder dominates. A cap of
+  // 2 keeps a prolific-but-real account visible without letting a bot take over.
+  kept.sort((a, b) => b.ev.createdAt.compareTo(a.ev.createdAt));
+  const perAuthorCap = 2;
+  final perAuthor = <String, int>{};
+  final out = <Map<String, dynamic>>[];
+  for (final c in kept) {
+    final n = (perAuthor[c.pub] ?? 0);
+    if (n >= perAuthorCap) continue;
+    perAuthor[c.pub] = n + 1;
     var parent = '';
-    for (final t in ev.tags) {
+    for (final t in c.ev.tags) {
       if (t.isNotEmpty && t[0] == 'e' && t.length > 1) {
         parent = t[1];
         break;
       }
     }
-    final created = ev.createdAt;
+    final created = c.ev.createdAt;
     final dt = DateTime.fromMillisecondsSinceEpoch(created * 1000);
     final hhmm =
         '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
     out.add(<String, dynamic>{
       'dir': 'in',
-      'from': pub.length >= 12 ? pub.substring(0, 12) : pub,
-      'author': pub,
-      'text': content,
-      'mid': id,
+      'from': c.pub.length >= 12 ? c.pub.substring(0, 12) : c.pub,
+      'author': c.pub,
+      'text': c.content,
+      'mid': c.id,
       'parent': parent,
       'pop': 0,
       'source': 'firehose',
@@ -235,4 +254,33 @@ List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
     });
   }
   return out;
+}
+
+class _Cand {
+  _Cand(this.ev, this.content, this.pub, this.id);
+  final NostrEvent ev;
+  final String content;
+  final String pub;
+  final String id;
+}
+
+/// A post that is really a machine payload, not prose — long unbroken
+/// base32/base58-looking runs, or a bare `token.token.token.host` blob. These
+/// are what one flooding account was pumping into the firehose. Keep it
+/// conservative so real posts with a link or an address are not caught.
+bool _looksMachineJunk(String content) {
+  final s = content.trim();
+  if (s.contains(' ')) {
+    // Has whitespace → looks like prose unless it is almost all one giant token.
+    final longest = s
+        .split(RegExp(r'\s+'))
+        .fold<int>(0, (m, w) => w.length > m ? w.length : m);
+    return longest >= 60 && longest > s.length * 0.6;
+  }
+  // No spaces at all: a single token. Junk if it is long and high-entropy
+  // (lots of uppercase+digits), e.g. "sp_….UVY5CWLHUCYNUD…drift.gits.net".
+  if (s.length < 40) return false;
+  final alnum = RegExp(r'[A-Za-z0-9]').allMatches(s).length;
+  final upperDigit = RegExp(r'[A-Z0-9]').allMatches(s).length;
+  return alnum > 0 && upperDigit >= alnum * 0.5;
 }

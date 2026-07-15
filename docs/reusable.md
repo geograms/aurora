@@ -7,6 +7,17 @@ non-obvious constraints a future caller needs to know.
 > The wider geogram repo has its own `../docs/reusable.md` covering the
 > parent app's components. This file is scoped to `iwi/lib/` only.
 
+> **Prefer the wapp layer to the core engine.** Updating a wapp is cheap — it
+> ships as a small `.wapp` through the Wapp Store with no reinstall. Updating the
+> core engine means a **whole new APK** the user must download and install (a signed
+> Android update, versionCode bump, slow rollout). So new functionality belongs in a
+> **wapp** unless it genuinely cannot: a new transport, a HAL primitive, or a
+> cross-cutting host service that many wapps share. The services catalogued below
+> exist precisely so a wapp can reuse them instead of forcing a change into the
+> engine — reach for one of these (or add a *generic* one) before growing the core.
+> App-specific logic (APRS/Chat conventions, social rules) never goes in `lib/`; it
+> lives in the wapp's C + GeoUI. When in doubt, the change goes in the wapp.
+
 ---
 
 ## Storage

@@ -36,9 +36,32 @@ For any UI-affecting change, before claiming done:
      "succeeded". **Verify the running versionCode after install** — do not assume.
    - Builds go through the machine lock: `~/bin/android-build-locked flutter build apk …`
      (never invoke `flutter`/`gradlew` build directly — see global instructions).
-2. **Launch cleanly.** `am force-stop` then `am start -n com.geogram.aurora/.MainActivity`
-   — not `adb monkey` (it injects a random tap). Give it time to settle before you
-   start clicking.
+   - **The APK must bundle the wapp version you changed.** A host-only rebuild ships
+     the *old* `assets/wapps/*.wapp` — your wapp fix isn't in the APK at all. Rebuild
+     the `.wapp`, refresh the copy under `assets/wapps/`, then build the APK, and after
+     launch confirm the running wapp version (its `/api/...` version line or the
+     in-app version label) is the new one. An installed APK carrying a stale wapp is
+     the single most common reason a "landed" fix appears not to have landed.
+2. **Fully kill the old app, then launch — installing is NOT enough.** An install
+   over a running app does **not** restart it: the *old* Geogram process keeps
+   running the *old* code, and every tap you then make tests the version you thought
+   you replaced. This is the trap that most often makes a real fix look like it
+   didn't land — the AI concludes the change failed and re-does work that was already
+   correct. So, every time, before touching the UI:
+   ```sh
+   adb shell am force-stop com.geogram.aurora
+   adb shell pidof com.geogram.aurora        # MUST print nothing — if it prints a PID, kill again
+   adb shell am start -n com.geogram.aurora/.MainActivity
+   ```
+   `force-stop` (not just closing the app, not just a back-swipe — those leave the
+   foreground service and its process alive, §Device hygiene). Confirm `pidof` is
+   empty *before* relaunching. Launch with `am start`, not `adb monkey` (it injects a
+   random tap). Then give it time to settle before you start clicking.
+
+   > **Rule: install → force-stop → confirm `pidof` empty → launch → verify version.
+   > Skip any of these and you may be testing the old build and not know it.** If a
+   > fix "didn't work", suspect a stale process or stale wapp *before* suspecting the
+   > fix, and re-verify the running version first.
 3. **Drive the real flow with real input.** Tap the buttons a user taps, type what a
    user types, navigate the screens a user navigates. `adb shell input tap/text/keyevent`
    or the equivalent. Exercise the path the task was about, from entry to result.

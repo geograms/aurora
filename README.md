@@ -170,6 +170,20 @@ the [`geograms/wapps`](https://github.com/geograms/wapps) repository.
 
 ## Development
 
+> **Build on the wapp layer, not the core engine — by default.** A wapp updates
+> in place: users get it through the Wapp Store, or it ships as a small `.wapp` with
+> no reinstall. Changing the **core engine means a whole new APK** the user must
+> download and install (and on Android that is a signed-update dance, versionCode
+> bumps, and a slow rollout — see [Validation](docs/validation.md)). So the default
+> home for new functionality is a **wapp**. Touch the core engine **only when the
+> feature genuinely cannot live in a wapp** — a new transport, a HAL primitive a wapp
+> needs but can't express, a cross-cutting host service. When you find yourself about
+> to add feature logic to the engine, stop and ask whether it belongs in a wapp
+> instead; the answer is usually yes. Keep the host **generic** — app-specific logic
+> (APRS/Chat conventions, social rules) lives in the wapp's C + GeoUI, never in
+> `lib/`. Most changes should land in [`geograms/wapps`](https://github.com/geograms/wapps),
+> not here.
+
 These documents define how code is written and accepted in this repo. Read the
 relevant one before touching that area — they are the conventions, not just notes.
 

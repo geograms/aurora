@@ -5422,10 +5422,34 @@ class _WappPageState extends State<WappPage>
     // Top-level only: replies (parent set) are stored so a post's reply count is
     // real, but the All list shows roots — a reply to some off-screen post has no
     // context here and would just be clutter.
-    return [
-      for (final p in _activityArchive?.recent() ?? const <Map<String, dynamic>>[])
+    final arch = _activityArchive;
+    final roots = [
+      for (final p in arch?.recent(limit: 400) ?? const <Map<String, dynamic>>[])
         if ((p['parent'] ?? '').toString().isEmpty) p,
     ];
+    if (arch == null) return roots;
+    // CURATE: a pure freshest-first firehose only ever shows seconds-old posts,
+    // which by definition have no likes yet — so the feed looked engagement-dead.
+    // Rank by a recency-DOMINATED score with an engagement boost: a like is worth
+    // ~10 minutes of freshness, a reply ~15. Fresh posts still ride high, but a
+    // slightly-older post that people actually liked surfaces near the top
+    // instead of being buried, so likes/replies are visible without deep
+    // scrolling. Returned oldest/worst-first to match the feed's newest-last
+    // convention (it reverses for display, so best ends up on top).
+    final now = DateTime.now().millisecondsSinceEpoch;
+    double score(Map<String, dynamic> p) {
+      final t = (p['t'] as int?) ?? now;
+      final ageMin = (now - t) / 60000.0;
+      final mid = (p['mid'] ?? '').toString();
+      final likes = mid.isEmpty ? 0 : arch.likeInfo(mid).count;
+      final replies = mid.isEmpty ? 0 : arch.replyCount(mid);
+      return -ageMin + likes * 10.0 + replies * 15.0;
+    }
+
+    final scored = [
+      for (final p in roots) (p: p, s: score(p)),
+    ]..sort((a, b) => a.s.compareTo(b.s)); // ascending: best last → top
+    return [for (final e in scored) e.p];
   }
 
   Future<List<Map<String, dynamic>>> _loadOlderSocialPosts(int beforeMs) async {

@@ -36,6 +36,7 @@ import 'file_folder_picker.dart';
 import 'geoui/geoui_ast.dart';
 import 'geoui/geoui_parser.dart';
 import 'geoui/geoui_renderer.dart';
+import 'geoui/avatar_image.dart';
 import '../editor/code_editor_field.dart';
 import 'geoui/widgets/log_view_field.dart';
 import 'geoui/widgets/chat_palette.dart';
@@ -5447,10 +5448,7 @@ class _WappPageState extends State<WappPage>
     final p = _wappProfiles[from];
     if (p != null && (p['name'] != null || p['pic'] != null)) {
       final pic = p['pic'];
-      return (
-        name: p['name'],
-        avatar: (pic != null && pic.isNotEmpty) ? NetworkImage(pic) : null,
-      );
+      return (name: p['name'], avatar: avatarImage(pic));
     }
     // Persistent engine store (any author whose kind-0 we've EVER fetched),
     // keyed by the 12-char prefix — resolves Saved/old-thread authors that
@@ -5460,10 +5458,7 @@ class _WappPageState extends State<WappPage>
     if ((eName != null && eName.isNotEmpty) ||
         (eng['pic']?.isNotEmpty == true)) {
       final pic = eng['pic'];
-      return (
-        name: eName,
-        avatar: (pic != null && pic.isNotEmpty) ? NetworkImage(pic) : null,
-      );
+      return (name: eName, avatar: avatarImage(pic));
     }
     // My own posts/replies: use my local profile so my name + avatar always
     // show (my kind-0 isn't fetched from relays — I am the author).
@@ -5509,12 +5504,25 @@ class _WappPageState extends State<WappPage>
     return null;
   }
 
+  // Memoised curated list: recomputing the ranking (a likeInfo + replyCount
+  // sqlite pair for up to 400 posts) on EVERY build lagged the UI badly — build
+  // runs on scroll, image loads, any setState. Recompute only when the archive
+  // actually changed (its revision) or the tab switched.
+  List<Map<String, dynamic>>? _rankedCache;
+  int _rankedCacheRev = -1;
+  String _rankedCacheFilter = '';
+
   List<Map<String, dynamic>> _socialActivityPosts() {
     if (_wappName != 'social') {
       return _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
     }
     if (_socialFeedFilter == 'following') {
       return _followingArchive?.recent() ?? const <Map<String, dynamic>>[];
+    }
+    if (_rankedCache != null &&
+        _rankedCacheRev == _activityRev.value &&
+        _rankedCacheFilter == _socialFeedFilter) {
+      return _rankedCache!;
     }
     // Top-level only: replies (parent set) are stored so a post's reply count is
     // real, but the All list shows roots — a reply to some off-screen post has no
@@ -5550,7 +5558,7 @@ class _WappPageState extends State<WappPage>
     // Keep a bounded, curated list (a few cycles' worth), best last.
     const maxShown = 60;
     final start = scored.length > maxShown ? scored.length - maxShown : 0;
-    return [
+    final result = [
       for (final e in scored.sublist(start))
         () {
           // Flag "(updated)": an old post whose newest like/reply landed well
@@ -5563,6 +5571,10 @@ class _WappPageState extends State<WappPage>
           return updated ? ({...e.p, 'updated': true}) : e.p;
         }(),
     ];
+    _rankedCache = result;
+    _rankedCacheRev = _activityRev.value;
+    _rankedCacheFilter = _socialFeedFilter;
+    return result;
   }
 
   Future<List<Map<String, dynamic>>> _loadOlderSocialPosts(int beforeMs) async {
@@ -5803,9 +5815,7 @@ class _WappPageState extends State<WappPage>
                         children: [
                           CircleAvatar(
                             radius: 30,
-                            backgroundImage: (pic != null && pic.isNotEmpty)
-                                ? NetworkImage(pic)
-                                : null,
+                            backgroundImage: avatarImage(pic),
                             child: (pic == null || pic.isEmpty)
                                 ? Text(
                                     name.isNotEmpty

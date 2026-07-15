@@ -91,8 +91,8 @@ Future<void> main() async {
   if (defaultTargetPlatform == TargetPlatform.android ||
       defaultTargetPlatform == TargetPlatform.iOS) {
     PaintingBinding.instance.imageCache
-      ..maximumSizeBytes = 32 << 20
-      ..maximumSize = 100;
+      ..maximumSizeBytes = 20 << 20
+      ..maximumSize = 60;
   }
 
   // The shared-package Blossom server logs through this injectable sink

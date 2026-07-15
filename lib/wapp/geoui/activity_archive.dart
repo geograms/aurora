@@ -253,13 +253,27 @@ class ActivityArchive {
   /// signature verification happen in the NOSTR isolate; this keeps the small
   /// main-isolate handoff to one fsync instead of one fsync per publication.
   void addAll(Iterable<Map<String, dynamic>> posts) {
-    final db = _ensureDb();
-    if (db == null) return;
-    db.execute('BEGIN IMMEDIATE;');
-    try {
+    transact(() {
       for (final post in posts) {
         add(post);
       }
+    });
+  }
+
+  /// Run [body] inside ONE SQLite transaction. Hundreds of individual
+  /// `add`/`setReaction` writes are cheap batched but brutal one-by-one —
+  /// SQLCipher fsyncs each, which blocked the UI thread for seconds (ANR) when
+  /// the curated poll persisted its posts + per-liker reactions + replies. Wrap
+  /// the whole persist in this.
+  void transact(void Function() body) {
+    final db = _ensureDb();
+    if (db == null) {
+      body();
+      return;
+    }
+    db.execute('BEGIN IMMEDIATE;');
+    try {
+      body();
       db.execute('COMMIT;');
     } catch (_) {
       try {

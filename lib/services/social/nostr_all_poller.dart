@@ -76,13 +76,16 @@ class NostrAllPoller {
   static const Duration _cadence = Duration(minutes: 10);
 
   /// Reactions/reposts sample window — wide enough that genuinely popular posts
-  /// (which take time to gather likes) are found.
+  /// (which take time to gather likes) are found. Kept modest: EVERY collected
+  /// event is JSON-decoded on the MAIN isolate (sockets can't live on the engine
+  /// isolate), so a huge sample janks the UI. A sample, not a census — popular
+  /// posts show up in any reasonable sample because they have many reactions.
   static const int _reactWindowSec = 120 * 60; // 2h
-  static const int _reactLimit = 500; // per relay
+  static const int _reactLimit = 250; // per relay
 
   /// A little fresh content so brand-new-but-already-liked posts can appear.
   static const int _freshWindowSec = 20 * 60;
-  static const int _freshLimit = 150;
+  static const int _freshLimit = 100;
 
   /// How many popular post ids to actually fetch + rank.
   static const int _topPopular = 80;
@@ -275,19 +278,23 @@ class NostrAllPoller {
         });
       }
 
-      // Persist curated posts, their likes and their replies.
+      // Persist curated posts, their likes and their replies — ALL in one
+      // transaction. Per-row SQLCipher INSERTs (hundreds of them) blocked the UI
+      // thread for seconds otherwise (ANR).
       final keptIds = <String>{};
-      for (final row in kept) {
-        archive.add(row);
-        final mid = (row['mid'] ?? '').toString();
-        keptIds.add(mid);
-        for (final liker in likers[mid] ?? const <String>{}) {
-          archive.setReaction(mid, liker.toLowerCase(), true, false);
+      archive.transact(() {
+        for (final row in kept) {
+          archive.add(row);
+          final mid = (row['mid'] ?? '').toString();
+          keptIds.add(mid);
+          for (final liker in likers[mid] ?? const <String>{}) {
+            archive.setReaction(mid, liker.toLowerCase(), true, false);
+          }
         }
-      }
-      for (final r in replyRows) {
-        if (keptIds.contains((r['parent'] ?? '').toString())) archive.add(r);
-      }
+        for (final r in replyRows) {
+          if (keptIds.contains((r['parent'] ?? '').toString())) archive.add(r);
+        }
+      });
 
       // Report last-activity for the curated posts, so the feed can mark an old
       // post that just gathered engagement as "(updated)".

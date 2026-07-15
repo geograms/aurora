@@ -2398,7 +2398,11 @@ class _RemoteMediaState extends State<_RemoteMedia>
               width: double.infinity,
               height: _mediaHeight,
               gaplessPlayback: true,
-              cacheHeight: 720,
+              // Decode near display size, not source: the feed is width-bound and
+              // the box is ~350px tall, so 512 covers it crisply at a fraction of
+              // the texture memory a full-res photo would burn (this feed OOM'd a
+              // budget phone on image-heavy curated posts).
+              cacheHeight: 512,
               errorBuilder: (c, e, s) => Center(
                 child: Icon(
                   Icons.broken_image_outlined,

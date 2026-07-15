@@ -11,6 +11,7 @@
 import 'package:flutter/material.dart';
 
 import 'profile_view.dart';
+import '../avatar_image.dart';
 
 typedef SelfData = ({String? name, String? about, ImageProvider? avatar});
 
@@ -169,15 +170,14 @@ class _ProfileRouteState extends State<ProfileRoute> {
   }
 
   void _applyMetadata(Map<String, String> m) {
-    ImageProvider? img(String? url) =>
-        (url != null && url.startsWith('http')) ? NetworkImage(url) : null;
     setState(() {
       final n = (m['name'] ?? '').trim();
       if (n.isNotEmpty) _name = n;
       if ((m['about'] ?? '').isNotEmpty) _about = m['about'];
-      final a = img(m['pic']);
+      // Bounded decode — full-res avatars/banners OOM'd budget phones.
+      final a = avatarImage(m['pic']);
       if (a != null) _avatar = a; // never blank a seeded avatar
-      final b = img(m['banner']);
+      final b = bannerImage(m['banner']);
       if (b != null) _banner = b;
       if ((m['nip05'] ?? '').isNotEmpty) _nip05 = m['nip05'];
       if ((m['website'] ?? '').isNotEmpty) _website = m['website'];
@@ -220,7 +220,8 @@ class _ProfileRouteState extends State<ProfileRoute> {
         final a = widget.resolveAvatar?.call(picture);
         if (a != null) _avatar = a;
       }
-      if (banner.startsWith('http')) _banner = NetworkImage(banner);
+      final bimg = bannerImage(banner);
+      if (bimg != null) _banner = bimg;
       if ((meta['nip05'] ?? '').toString().isNotEmpty) {
         _nip05 = meta['nip05'].toString();
       }

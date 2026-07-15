@@ -92,6 +92,15 @@ class FolderMeta {
   final String? cover;
   final String? banner;
   final String? trailer;
+
+  /// The listing's icon — a small square image, the way a website names its tab
+  /// icon. Mirrors `<link rel="icon" href="…">`: when set it names the file (in
+  /// `data/`); when absent the well-known `data/favicon.*` / `data/icon.*` is used
+  /// (mirroring the `/favicon.ico` convention). The same file is the browser-tab
+  /// icon once a torrent is served as its own website (see
+  /// docs/torrents-as-websites.md).
+  final String? icon;
+
   final List<String> gallery; // ≤ kMetaGalleryMax, ordered
 
   /// Keys we did not recognise, kept so that a NEWER publisher's field is not
@@ -107,6 +116,7 @@ class FolderMeta {
     this.cover,
     this.banner,
     this.trailer,
+    this.icon,
     this.gallery = const [],
     this.extra = const {},
   });
@@ -118,6 +128,7 @@ class FolderMeta {
       cover == null &&
       banner == null &&
       trailer == null &&
+      icon == null &&
       gallery.isEmpty;
 
   /// Every media file this listing references, in `data/<name>` form — what the
@@ -126,6 +137,7 @@ class FolderMeta {
         if (cover != null) cover!,
         if (banner != null) banner!,
         if (trailer != null) trailer!,
+        if (icon != null) icon!,
         ...gallery,
       ];
 
@@ -151,6 +163,7 @@ class FolderMeta {
       'cover',
       'banner',
       'trailer',
+      'icon',
       'gallery',
     };
 
@@ -163,6 +176,7 @@ class FolderMeta {
       cover: _mediaName(m['cover'], want: MediaKind.image),
       banner: _mediaName(m['banner'], want: MediaKind.image),
       trailer: _mediaName(m['trailer'], want: MediaKind.video),
+      icon: _iconName(m['icon']),
       gallery: _gallery(m['gallery']),
       extra: {
         for (final e in m.entries)
@@ -181,6 +195,7 @@ class FolderMeta {
         if (cover != null) 'cover': cover,
         if (banner != null) 'banner': banner,
         if (trailer != null) 'trailer': trailer,
+        if (icon != null) 'icon': icon,
         if (gallery.isNotEmpty) 'gallery': gallery,
       };
 
@@ -195,6 +210,7 @@ class FolderMeta {
     String? cover,
     String? banner,
     String? trailer,
+    String? icon,
     List<String>? gallery,
   }) =>
       FolderMeta(
@@ -206,6 +222,7 @@ class FolderMeta {
         cover: cover ?? this.cover,
         banner: banner ?? this.banner,
         trailer: trailer ?? this.trailer,
+        icon: icon ?? this.icon,
         gallery: (gallery ?? this.gallery).take(kMetaGalleryMax).toList(),
         extra: extra,
       );
@@ -280,5 +297,30 @@ class FolderMeta {
     if (kind != MediaKind.image && kind != MediaKind.video) return null;
     if (want != null && kind != want) return null;
     return n;
+  }
+
+  /// Extensions accepted for the icon — the raster/vector formats a browser
+  /// would take for a favicon (svg + ico included, which `MediaRef.classify`
+  /// does not treat as "image", so the icon has its own allow-list).
+  static const Set<String> iconExts = {
+    'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'ico',
+  };
+
+  /// The well-known icon file names, tried in order when the listing does not
+  /// name one — `favicon` first, matching the web's `/favicon.ico` convention.
+  static const List<String> iconStems = ['favicon', 'icon'];
+
+  /// Validate an icon reference: a bare `data/` file name with an icon
+  /// extension. Same path-safety boundary as [_mediaName].
+  static String? _iconName(Object? raw) {
+    if (raw is! String) return null;
+    final n = raw.trim();
+    if (n.isEmpty || n.length > 64) return null;
+    if (n.contains('/') || n.contains('\\')) return null;
+    if (n.contains('..') || n.startsWith('.')) return null;
+    if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(n)) return null;
+    final dot = n.lastIndexOf('.');
+    if (dot <= 0 || dot == n.length - 1) return null;
+    return iconExts.contains(n.substring(dot + 1).toLowerCase()) ? n : null;
   }
 }

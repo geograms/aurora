@@ -10,10 +10,16 @@
  * The host knows nothing about what the rows or actions mean.
  */
 
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
+import '../../../util/media_ref.dart';
+import '../../shared_media_fetch.dart' show resolveSharedMedia;
 import '../geoui_renderer.dart' show geoUiResolveIcon;
 import 'generated_avatar.dart';
+import 'media_view.dart' show sharedMediaArchive;
 
 class PeopleViewField extends StatefulWidget {
   final String fieldName;
@@ -178,7 +184,12 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (avatar.isNotEmpty)
+            if (avatar.startsWith('file:'))
+              // A content-addressed media token (e.g. a torrent's favicon-style
+              // icon): render from the local archive, fetching if we do not hold
+              // it yet. Falls back to the generated avatar until it lands.
+              _TokenAvatar(token: avatar, seed: id, size: 44)
+            else if (avatar.isNotEmpty)
               ClipOval(
                 child: Image.network(
                   avatar,
@@ -328,5 +339,95 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
       default:
         return Icons.more_horiz;
     }
+  }
+}
+
+/// A circular avatar rendered from a content-addressed media token (`file:<sha>.
+/// <ext>`) — a torrent's favicon-style icon. Reads the bytes from the local
+/// archive, kicks off a fetch when we do not hold them yet, and shows the
+/// generated avatar until they land (so the row is never blank).
+class _TokenAvatar extends StatefulWidget {
+  final String token;
+  final String seed;
+  final double size;
+  const _TokenAvatar({
+    required this.token,
+    required this.seed,
+    this.size = 44,
+  });
+
+  @override
+  State<_TokenAvatar> createState() => _TokenAvatarState();
+}
+
+class _TokenAvatarState extends State<_TokenAvatar> {
+  Uint8List? _bytes;
+  Timer? _poll;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _TokenAvatar old) {
+    super.didUpdateWidget(old);
+    if (old.token != widget.token) {
+      _bytes = null;
+      _poll?.cancel();
+      _poll = null;
+      _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  void _load() {
+    final ref = MediaRef.parse(widget.token);
+    if (ref == null) return;
+    final a = sharedMediaArchive();
+    if (a == null) return;
+    final b = a.get(ref.sha256);
+    if (b != null && b.isNotEmpty) {
+      setState(() => _bytes = b);
+      return;
+    }
+    // Not held yet — pull it (icons are tiny) and poll briefly for arrival.
+    // ignore: discarded_futures
+    resolveSharedMedia(ref.sha256, ref.ext);
+    _poll = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      final bb = sharedMediaArchive()?.get(ref.sha256);
+      if (bb != null && bb.isNotEmpty) {
+        t.cancel();
+        setState(() => _bytes = bb);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_bytes == null) {
+      return GeneratedAvatar(seed: widget.seed, size: widget.size);
+    }
+    return ClipOval(
+      child: Image.memory(
+        _bytes!,
+        width: widget.size,
+        height: widget.size,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) =>
+            GeneratedAvatar(seed: widget.seed, size: widget.size),
+      ),
+    );
   }
 }

@@ -137,4 +137,24 @@ void main() {
     }
     expect(kFolderCategories.contains(kFolderCategoryFallback), isTrue);
   });
+
+  test('the icon is a favicon-style ref: icon formats (svg/ico) allowed, '
+      'traversal refused, round-trips', () {
+    // Favicon formats a browser takes, including svg/ico which are NOT "media".
+    for (final n in ['favicon.png', 'icon.svg', 'brand.ico', 'logo.webp']) {
+      expect(FolderMeta.parse(jsonEncode({'icon': n})).icon, n,
+          reason: n);
+    }
+    // A non-icon extension is refused (it is not a favicon format).
+    expect(FolderMeta.parse(jsonEncode({'icon': 'clip.webm'})).icon, isNull);
+    // Same path-safety boundary as the other media: no climbing out of data/.
+    expect(
+        FolderMeta.parse(jsonEncode({'icon': '../../.folder.json'})).icon,
+        isNull);
+    expect(FolderMeta.parse(jsonEncode({'icon': 'a/b.png'})).icon, isNull);
+    // Round-trips through toJson.
+    const m = FolderMeta(icon: 'favicon.png');
+    expect(FolderMeta.parse(m.encode()).icon, 'favicon.png');
+    expect(m.mediaNames, contains('favicon.png')); // the size cap covers it
+  });
 }

@@ -6934,6 +6934,8 @@ class RnsService {
       if (full['title'] != null) 'title': full['title'],
       if (full['cat'] != null) 'cat': full['cat'],
       if (full['adult'] == true) 'adult': true,
+      // The listing icon (favicon-style) as a media token, for the row avatar.
+      if (folderIconToken(folderId).isNotEmpty) 'icon': folderIconToken(folderId),
       'owned': _diskMgr?.owns(folderId) == true,
       'fileCount': files.length,
       'totalBytes': totalBytes,
@@ -7021,6 +7023,7 @@ class RnsService {
         'seeders': seeders,
         'size': size,
         'updated': updated,
+        if (st['icon'] != null) 'icon': st['icon'],
       });
     }
 
@@ -7395,11 +7398,23 @@ class RnsService {
 
     final ext = _extOf(sourcePath).toLowerCase();
     final kind = MediaRef.classify(ext);
-    if (kind != MediaKind.image && kind != MediaKind.video) return null;
+    // The icon accepts favicon formats (svg/ico too, which are not "image" to
+    // MediaRef); every other slot is image-or-video.
+    if (slot == 'icon') {
+      if (!FolderMeta.iconExts.contains(ext)) return null;
+    } else if (kind != MediaKind.image && kind != MediaKind.video) {
+      return null;
+    }
 
     var meta = folderMeta(folderId);
     String name;
     switch (slot) {
+      case 'icon':
+        // The well-known favicon file name, so a stranger resolves it without
+        // meta.json — the same file becomes the browser tab icon when a torrent
+        // is served as a website (docs/torrents-as-websites.md).
+        name = 'favicon.$ext';
+        break;
       case 'cover':
       case 'banner':
         if (kind != MediaKind.image) return null;
@@ -7431,14 +7446,15 @@ class RnsService {
     try {
       final dir = Directory(dataDir);
       if (!dir.existsSync()) dir.createSync(recursive: true);
-      // A slot holds ONE file: replace any previous cover/banner/trailer whose
-      // extension differed, or the folder would publish two covers and the
-      // listing would name only one of them.
+      // A slot holds ONE file: replace any previous cover/banner/trailer/icon
+      // whose extension differed, or the folder would publish two and the listing
+      // would name only one. Match the file STEM (icon writes favicon.*).
       if (slot != 'gallery') {
+        final stem = name.substring(0, name.lastIndexOf('.'));
         for (final f in dir.listSync()) {
           if (f is! File) continue;
           final leaf = f.path.split(Platform.pathSeparator).last;
-          if (leaf.startsWith('$slot.') && leaf != name) f.deleteSync();
+          if (leaf.startsWith('$stem.') && leaf != name) f.deleteSync();
         }
       }
       await src.copy('$dataDir${Platform.pathSeparator}$name');
@@ -7448,6 +7464,7 @@ class RnsService {
     }
 
     meta = switch (slot) {
+      'icon' => meta.copyWith(icon: name),
       'cover' => meta.copyWith(cover: name),
       'banner' => meta.copyWith(banner: name),
       'trailer' => meta.copyWith(trailer: name),
@@ -7571,6 +7588,10 @@ class RnsService {
         ? meta.gallery
         : (byName.keys.where((n) => n.startsWith('media')).toList()..sort());
 
+    // The listing's icon (favicon-style): the name the listing gives, else the
+    // well-known favicon.* / icon.* file it published.
+    final iconName = _folderIconNameIn(meta, byName);
+
     // The compact file browser under the hero: one directory level at [path].
     // `data/` is chrome (it holds the listing's own art), so hide it at the root.
     final level = folderBrowseLevel(folderId, path);
@@ -7625,11 +7646,67 @@ class RnsService {
       if (one(coverName) != null) 'cover': one(coverName),
       if (one(bannerName) != null) 'banner': one(bannerName),
       if (one(trailerName) != null) 'trailer': one(trailerName),
+      if (one(iconName) != null) 'icon': one(iconName),
       'gallery': [
         for (final g in galleryNames.take(kMetaGalleryMax))
           if (one(g) != null) one(g)!,
       ],
     };
+  }
+
+  /// The icon file name for a listing: the one it names (`meta.icon`), else the
+  /// well-known `favicon.*` / `icon.*` it published — the `/favicon.ico`
+  /// convention. [byName] maps a `data/` file name to its published entry.
+  String _folderIconNameIn(
+      FolderMeta meta, Map<String, Map<String, dynamic>> byName) {
+    if (meta.icon != null && byName.containsKey(meta.icon)) return meta.icon!;
+    for (final stem in FolderMeta.iconStems) {
+      for (final n in byName.keys) {
+        if (n.startsWith('$stem.') &&
+            FolderMeta.iconExts.contains(_extOf(n).toLowerCase())) {
+          return n;
+        }
+      }
+    }
+    return '';
+  }
+
+  /// The listing icon of a folder as a MEDIA TOKEN (favicon-style), for the list
+  /// row's avatar — resolvable even for a torrent we have not downloaded (the icon
+  /// is a small published file). '' when the folder has no icon.
+  String folderIconToken(String folderIdOrNpub) {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final files = (folderBrowse(folderId)['files'] as List?) ?? const [];
+    final byName = <String, Map<String, dynamic>>{};
+    for (final f in files) {
+      if (f is! Map) continue;
+      final n = (f['name'] as String?) ?? '';
+      if (!n.startsWith('$kFolderDataDir/')) continue;
+      byName[n.substring(kFolderDataDir.length + 1)] =
+          Map<String, dynamic>.from(f);
+    }
+    final name = _folderIconNameIn(folderMeta(folderId), byName);
+    if (name.isEmpty) return '';
+    final entry = byName[name];
+    final sha = (entry?['x'] as String?) ?? '';
+    if (sha.length != 64) return '';
+    // Make sure the bytes are renderable: copy disk→archive, or fetch if absent.
+    final archive = sharedMediaArchive();
+    if (archive?.has(sha) != true) {
+      final diskPath = _diskMgr?.filePathOf(folderId, sha);
+      if (diskPath != null && archive != null) {
+        try {
+          final ext = _extOf(name);
+          archive.putBytes(File(diskPath).readAsBytesSync(),
+              ext.isEmpty ? 'bin' : ext);
+        } catch (_) {}
+      } else {
+        // ignore: discarded_futures
+        folderDownloadFile(folderId, sha, '$kFolderDataDir/$name');
+      }
+    }
+    final b64u = MediaRef.hexToB64u(sha);
+    return b64u == null ? '' : 'file:$b64u.${_extOf(name)}';
   }
 
   /// Open one file of a folder with whatever the system uses to view it — the

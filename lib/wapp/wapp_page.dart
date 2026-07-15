@@ -38,6 +38,7 @@ import '../editor/code_editor_field.dart';
 import 'geoui/widgets/log_view_field.dart';
 import 'geoui/widgets/chat_palette.dart';
 import 'geoui/widgets/chat_view_field.dart';
+import '../services/social/nostr_all_poller.dart';
 import 'geoui/widgets/activity_feed.dart';
 import 'geoui/widgets/micron_view.dart';
 import 'geoui/widgets/profile_route.dart';
@@ -430,19 +431,13 @@ class _WappPageState extends State<WappPage>
   /// page rebuilds with newly-arrived replies/likes.
   final ValueNotifier<int> _activityRev = ValueNotifier<int>(0);
 
-  /// Host-side firehose delivery for the Social "All" tab.
-  ///
-  /// The wapp C code also drains the firehose (its `g_sub_fire`), but that path
-  /// proved fragile: the wapp caches its subscription id and only re-subscribes
-  /// when it is empty, so once the hub tears the firehose down or its module_tick
-  /// stalls, the "All" feed freezes for the life of the process — while the
-  /// launcher Hero (which drains the firehose host-side, in Dart, re-acquiring
-  /// its id every cycle) keeps showing fresh posts. This host-side drain gives
-  /// the feed the Hero's reliability: our own subscription, drained on a timer,
-  /// written straight into [_activityArchive]. Dedup is by event id inside the
-  /// archive, so it coexists with the wapp path without ever double-posting.
-  String? _socialHostFireSub;
-  Timer? _socialHostFireTimer;
+  /// The Social "All" firehose: a ONE-SHOT poll-and-close poller on the MAIN
+  /// isolate. The engine isolate freezes whenever it reopens a WebSocket, so the
+  /// feed died every time the public relays cut its persistent sockets. Modern
+  /// NOSTR clients (and off-grid reality) demand the opposite: open a socket only
+  /// as briefly as needed, pull what is new, disconnect. This poller does exactly
+  /// that and writes survivors into [_activityArchive]. See NostrAllPoller.
+  NostrAllPoller? _allPoller;
 
   /// Absolute like/reply counts a wapp pushes for its posts via
   /// `ui.activity.stats` (keyed by post mid). Generic: any wapp can report
@@ -1129,7 +1124,15 @@ class _WappPageState extends State<WappPage>
         followedPubkeys: RnsService.instance.nostrFollowPubkeys(),
       );
       _activityArchive!.retainSources({'firehose', 'discovery'});
-      _startSocialHostFirehose();
+      _allPoller = NostrAllPoller(
+        archive: _activityArchive!,
+        onChanged: () {
+          if (mounted) {
+            _activityRev.value++;
+            setState(() {});
+          }
+        },
+      )..start();
     }
     // NOSTR web of trust: never firehose-evict posts from people the user
     // follows or who follow them. Harmless for other wapps (their callsign
@@ -3422,76 +3425,6 @@ class _WappPageState extends State<WappPage>
   }
 
   /// Drain the curated firehose host-side into the Social "All" archive.
-  ///
-  /// Runs only while the Social page is mounted, so the firehose stays a
-  /// "while someone is looking" feed. Each tick pops the curated batch the hub
-  /// delivered to our subscription and writes the text notes straight into
-  /// [_activityArchive]; the archive dedups by event id, so posts the wapp's own
-  /// drain already stored are ignored, and posts it missed are recovered.
-  void _startSocialHostFirehose() {
-    _socialHostFireTimer?.cancel();
-    _socialHostFireTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!mounted) return;
-      final rns = RnsService.instance;
-      // Re-acquire the id each tick until it takes — exactly what makes the Hero
-      // self-heal where the wapp's cache-once-and-keep did not.
-      _socialHostFireSub ??= rns.nostrFirehose();
-      final sub = _socialHostFireSub;
-      if (sub == null) return;
-      final raws = rns.nostrDrain(sub, max: 100);
-      if (raws.isEmpty) return;
-      final arch = _activityArchive;
-      if (arch == null) return;
-      var added = 0;
-      for (final e in raws) {
-        final row = _firehoseEventToActivityRow(e);
-        if (row == null) continue;
-        arch.add(row);
-        added++;
-      }
-      if (added > 0) _activityRev.value++;
-    });
-  }
-
-  /// Convert a drained NIP-01 firehose event into an [ActivityArchive] row,
-  /// matching the shape the Social wapp emits via `ui.chat.append`. Returns null
-  /// for anything that is not a renderable text note (kind-1 with content).
-  Map<String, dynamic>? _firehoseEventToActivityRow(Map<String, dynamic> e) {
-    if ((e['kind'] as num?)?.toInt() != 1) return null; // kind-0 profiles etc.
-    final content = (e['content'] ?? '').toString();
-    if (content.isEmpty) return null;
-    final pubkey = (e['pubkey'] ?? '').toString().toLowerCase();
-    final id = (e['id'] ?? '').toString();
-    final createdAt = (e['created_at'] as num?)?.toInt() ?? 0;
-    var parent = '';
-    final tags = e['tags'];
-    if (tags is List) {
-      for (final t in tags) {
-        if (t is List && t.isNotEmpty && t[0] == 'e' && t.length > 1) {
-          parent = t[1].toString();
-          break;
-        }
-      }
-    }
-    final dt = createdAt > 0
-        ? DateTime.fromMillisecondsSinceEpoch(createdAt * 1000)
-        : DateTime.now();
-    final hhmm =
-        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    return <String, dynamic>{
-      'dir': 'in',
-      'from': pubkey.isNotEmpty ? pubkey.substring(0, min(12, pubkey.length)) : '',
-      'author': pubkey,
-      'text': content,
-      'mid': id,
-      'parent': parent,
-      'pop': 0,
-      'source': 'firehose',
-      't': createdAt > 0 ? createdAt * 1000 : null,
-      'time': hhmm,
-    };
-  }
-
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -3500,14 +3433,9 @@ class _WappPageState extends State<WappPage>
     _nostrSearchCtl.dispose();
     _feedBackfillTimer?.cancel();
     _fastBackfillTimer?.cancel();
-    _socialHostFireTimer?.cancel();
-    // Release our firehose subscription so it can tear down when nobody else is
-    // looking — the feed must not keep polling relays after Social is closed.
-    final hostFireSub = _socialHostFireSub;
-    if (hostFireSub != null) {
-      RnsService.instance.nostrUnsubscribe(hostFireSub);
-      _socialHostFireSub = null;
-    }
+    // Stop the one-shot firehose poller: no more polls once nobody is looking.
+    _allPoller?.stop();
+    _allPoller = null;
     _tickTimer?.cancel();
     // Flush any pending conversation writes so the latest messages aren't lost.
     _convSaveTimer?.cancel();
@@ -5896,8 +5824,15 @@ class _WappPageState extends State<WappPage>
           _sendCommand('${name}_refresh');
           await Future<void>.delayed(const Duration(milliseconds: 250));
           if (filter == 'all') {
+            // The reliable path: a one-shot poll on the main isolate (open,
+            // fetch, disconnect). Also nudge the legacy curator burst in case
+            // the engine sockets happen to be alive — harmless, deduped by mid.
+            final poller = _allPoller;
+            final fresh = poller == null ? 0 : await poller.pollOnce();
             final count = await RnsService.instance.nostrRefreshBurst(n: 100);
-            LogService.instance.add('social refresh: filter=all batch=$count');
+            LogService.instance.add(
+              'social refresh: filter=all poll=$fresh burst=$count',
+            );
           } else {
             RnsService.instance.nostrResume();
             LogService.instance.add('social refresh: filter=$filter reopened');

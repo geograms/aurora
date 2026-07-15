@@ -11,7 +11,7 @@ import '../i18n_context.dart';
 import 'geoui_ast.dart';
 import '../../editor/code_editor_field.dart';
 import 'widgets/icon_field.dart';
-import 'widgets/media_view.dart' show MediaThumbnail;
+import 'widgets/media_view.dart' show MediaThumbnail, GalleryMediaTile;
 import '../../util/media_ref.dart' show MediaRef;
 import 'widgets/log_view_field.dart';
 import 'widgets/stats_grid_field.dart';
@@ -433,12 +433,22 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
         .where((t) => t.isNotEmpty)
         .toList();
 
+    // The compact file browser (feedback 2): a simple list under the hero, with
+    // a button to open the full-screen browser.
+    final files = ((g['files'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((m) => m.cast<String, dynamic>())
+        .toList();
+    final path = (g['path'] ?? '').toString();
+
     if (banner == null &&
         cover == null &&
         trailer == null &&
         gallery.isEmpty &&
         title.isEmpty &&
-        desc.isEmpty) {
+        desc.isEmpty &&
+        files.isEmpty &&
+        path.isEmpty) {
       return const SizedBox.shrink();
     }
 
@@ -489,11 +499,12 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
 
     // Screenshots (trailer first — it is the thing a person most wants to press)
     // scroll sideways, like every store page, so they never crowd the text.
+    // A screenshot the device does not hold shows a download button, not a
+    // spinner — feedback 5: pull it only when asked, with a % wheel meanwhile.
     final strip = <Widget>[
-      if (trailer != null)
-        _galleryTile(trailer),
+      if (trailer != null) _shot(trailer),
       for (final item in gallery)
-        if (refOf(item) != null) _galleryTile(refOf(item)!),
+        if (refOf(item) != null) _shot(refOf(item)!),
     ];
 
     final content = Column(
@@ -504,7 +515,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
             borderRadius: BorderRadius.circular(12),
             child: AspectRatio(
               aspectRatio: 16 / 6,
-              child: MediaThumbnail(ref: banner, showSize: false),
+              child: GalleryMediaTile(ref: banner),
             ),
           ),
         if (banner != null) const SizedBox(height: 14),
@@ -513,14 +524,10 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (cover != null) ...[
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: SizedBox(
-                  width: 104,
-                  height: 156,
-                  child:
-                      MediaThumbnail(ref: cover, showSize: false),
-                ),
+              SizedBox(
+                width: 104,
+                height: 156,
+                child: GalleryMediaTile(ref: cover),
               ),
               const SizedBox(width: 14),
             ],
@@ -549,21 +556,87 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
             ),
           ),
         ],
+        if (files.isNotEmpty || path.isNotEmpty)
+          _fileList(name, files, path, cs, tt),
       ],
     );
 
     return content;
   }
 
-  /// One 16:9 screenshot/clip tile for the gallery strip.
-  Widget _galleryTile(MediaRef ref) => ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: SizedBox(
-          width: 168,
-          height: 94,
-          child: MediaThumbnail(ref: ref, showSize: false),
-        ),
+  /// The compact, tappable file list under a listing hero. Rows fire a command
+  /// via the field's onAction (the selection rides a field so a 64-char sha is
+  /// not truncated into the short command buffer).
+  Widget _fileList(String field, List<Map<String, dynamic>> files, String path,
+      ColorScheme cs, TextTheme tt) {
+    void fire(String action, [String? sel]) {
+      if (sel != null) widget.bindings.setValue('${field}_sel', sel);
+      widget.onAction?.call(action);
+    }
+
+    Widget row(IconData icon, String title, String? sub, VoidCallback onTap) =>
+        InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 9),
+            child: Row(children: [
+              Icon(icon, size: 22, color: cs.onSurfaceVariant),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: tt.bodyMedium),
+              ),
+              if (sub != null)
+                Text(sub, style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant)),
+            ]),
+          ),
+        );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 18),
+        Row(children: [
+          Text('Files', style: tt.titleSmall?.copyWith(color: cs.onSurfaceVariant)),
+          const Spacer(),
+          TextButton.icon(
+            onPressed: () => fire('${field}_full'),
+            icon: const Icon(Icons.open_in_full, size: 16),
+            label: const Text('Browse'),
+          ),
+        ]),
+        Divider(height: 1, color: cs.outlineVariant.withAlpha(60)),
+        if (path.isNotEmpty)
+          row(Icons.arrow_upward, '..', 'up', () => fire('${field}_up')),
+        for (final f in files)
+          () {
+            final isDir = f['dir'] == true;
+            final title = (f['title'] ?? '').toString();
+            final sub = (f['sub'] ?? '').toString();
+            final id = (f['id'] ?? '').toString();
+            final iconName = (f['icon'] ?? '').toString();
+            return row(
+              iconName.isEmpty
+                  ? (isDir ? Icons.folder : Icons.insert_drive_file)
+                  : geoUiResolveIcon(iconName),
+              title,
+              sub.isEmpty ? null : sub,
+              () => fire(isDir ? '${field}_cd' : '${field}_open', id),
+            );
+          }(),
+      ],
+    );
+  }
+
+  /// One 16:9 screenshot/clip tile for the gallery strip (download-on-tap).
+  Widget _shot(MediaRef ref) => SizedBox(
+        width: 168,
+        height: 94,
+        child: GalleryMediaTile(ref: ref, autoFetch: false),
       );
+
 
   /// `$type:"qr"` — render a QR code of the field's string value (e.g. a circle
   /// id to share). Read-only; the value is set by the wapp via ui.field.set.
@@ -1339,6 +1412,7 @@ IconData geoUiResolveIcon(String name) {
       return Icons.library_music;
     case 'audiotrack':
     case 'music_note':
+    case 'audio':
       return Icons.music_note;
     case 'movie':
     case 'film':

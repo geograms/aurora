@@ -874,3 +874,204 @@ class _MediaViewerPageState extends State<MediaViewerPage> {
         ),
       );
 }
+
+/// A single tile of a listing's gallery (cover, banner, screenshot, clip).
+///
+/// Purpose-built for a FIXED box (it fills its parent), unlike [MediaThumbnail]
+/// whose states are wide chat-row cards. Three states, and they are exactly what
+/// a store page needs:
+///   * bytes local          → the image (a video shows its poster + a play badge);
+///                            tapping opens the fullscreen viewer.
+///   * mentioned, not local → a download button; tapping fetches it, and a
+///                            circular wheel shows the percentage as it arrives.
+///   * absent from the folder → never reaches here (the renderer omits it), so
+///                            there is no dangling placeholder.
+class GalleryMediaTile extends StatefulWidget {
+  final MediaRef ref;
+
+  /// Fetch automatically on mount (right for a cover/banner that a person
+  /// expects to just appear). False = wait for a tap on the download button.
+  final bool autoFetch;
+
+  const GalleryMediaTile({super.key, required this.ref, this.autoFetch = true});
+
+  @override
+  State<GalleryMediaTile> createState() => _GalleryMediaTileState();
+}
+
+class _GalleryMediaTileState extends State<GalleryMediaTile> {
+  Uint8List? _preview; // decoded image bytes or a video poster
+  bool _fetching = false;
+  Timer? _poll;
+
+  MediaRef get ref => widget.ref;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant GalleryMediaTile old) {
+    super.didUpdateWidget(old);
+    if (old.ref.sha256 != ref.sha256) {
+      _preview = null;
+      _poll?.cancel();
+      _poll = null;
+      _fetching = false;
+      _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  bool get _local {
+    final a = sharedMediaArchive();
+    return a != null && a.has(ref.sha256);
+  }
+
+  void _load() {
+    final a = sharedMediaArchive();
+    if (a == null) return;
+    final preview = a.getScreenshot(ref.sha256) ??
+        (ref.kind == MediaKind.image ? a.get(ref.sha256) : null);
+    if (preview != null && preview.isNotEmpty) {
+      setState(() => _preview = preview);
+      return;
+    }
+    if (_local) {
+      // A video/clip we hold but have no poster for — still playable.
+      setState(() {});
+      return;
+    }
+    if (widget.autoFetch) _fetch();
+  }
+
+  Uint8List? _shaBytes() {
+    try {
+      final b = base64Url.decode('${ref.sha256}=');
+      return b.length == 32 ? b : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  int? _pct() {
+    final sha = _shaBytes();
+    if (sha == null) return null;
+    final p = RnsService.instance.fileFetchProgress(sha);
+    if (p == null || p.total <= 0) return null;
+    return ((p.received / p.total) * 100).clamp(0, 100).round();
+  }
+
+  void _fetch() {
+    if (_fetching) return;
+    setState(() => _fetching = true);
+    // ignore: discarded_futures
+    resolveSharedMedia(ref.sha256, ref.ext);
+    _poll = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      if (_local) {
+        t.cancel();
+        setState(() {
+          _fetching = false;
+          _load();
+        });
+        return;
+      }
+      setState(() {}); // refresh the percentage
+    });
+  }
+
+  void _open() => MediaViewerPage.open(context, ref);
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isVideo =
+        ref.kind == MediaKind.video || ref.kind == MediaKind.audio;
+
+    Widget body;
+    if (_preview != null) {
+      body = Stack(fit: StackFit.expand, children: [
+        Image.memory(_preview!,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            errorBuilder: (_, __, ___) =>
+                Container(color: cs.surfaceContainerHighest)),
+        if (isVideo) Center(child: _playBadge(cs)),
+      ]);
+    } else if (_local) {
+      body = Container(
+        color: cs.surfaceContainerHighest,
+        child: Center(child: isVideo ? _playBadge(cs) : _icon(cs)),
+      );
+    } else {
+      // Not local: a download control, or a percentage wheel while it arrives.
+      body = Container(
+        color: cs.surfaceContainerHighest.withAlpha(140),
+        child: Center(child: _fetching ? _wheel(cs) : _downloadButton(cs)),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: GestureDetector(
+        onTap: (_local || _preview != null) ? _open : null,
+        child: body,
+      ),
+    );
+  }
+
+  Widget _icon(ColorScheme cs) =>
+      Icon(Icons.image_outlined, color: cs.onSurfaceVariant, size: 28);
+
+  Widget _playBadge(ColorScheme cs) => Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+            color: Colors.black.withAlpha(120), shape: BoxShape.circle),
+        child: const Icon(Icons.play_arrow, color: Colors.white, size: 26),
+      );
+
+  Widget _downloadButton(ColorScheme cs) => IconButton(
+        icon: const Icon(Icons.download),
+        color: cs.primary,
+        tooltip: 'Download',
+        onPressed: _fetch,
+      );
+
+  Widget _wheel(ColorScheme cs) {
+    final p = _pct();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 30,
+          height: 30,
+          child: CircularProgressIndicator(
+            strokeWidth: 3,
+            value: p == null ? null : p / 100,
+            color: cs.primary,
+          ),
+        ),
+        if (p != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text('$p%',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: cs.onSurfaceVariant,
+                    fontWeight: FontWeight.w600)),
+          ),
+      ],
+    );
+  }
+}

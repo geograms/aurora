@@ -7278,8 +7278,21 @@ class RnsService {
   /// When they are not, the fetch is kicked off: `data/` is small, so the cover
   /// of a torrent you have NOT downloaded still fills in. That is the whole point
   /// of a listing.
+  static String _fmtBytes(int n) {
+    if (n < 1024) return '$n B';
+    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+    if (n < 1024 * 1024 * 1024) return '${(n / 1048576).toStringAsFixed(1)} MB';
+    return '${(n / 1073741824).toStringAsFixed(2)} GB';
+  }
+
   Map<String, dynamic> folderMediaTokens(String folderIdOrNpub) {
-    final folderId = _normFolderId(folderIdOrNpub);
+    // Accept "folderId\tpath" so the same call returns the file list at a
+    // directory level for the listing's compact browser (the wapp forwards it to
+    // the gallery field; the host draws hero + files as one card).
+    final tab = folderIdOrNpub.indexOf('\t');
+    final path = tab >= 0 ? folderIdOrNpub.substring(tab + 1) : '';
+    final folderId =
+        _normFolderId(tab >= 0 ? folderIdOrNpub.substring(0, tab) : folderIdOrNpub);
     final state = folderBrowse(folderId);
     final files = (state['files'] as List?) ?? const [];
 
@@ -7368,8 +7381,35 @@ class RnsService {
         ? meta.gallery
         : (byName.keys.where((n) => n.startsWith('media')).toList()..sort());
 
+    // The compact file browser under the hero: one directory level at [path].
+    // `data/` is chrome (it holds the listing's own art), so hide it at the root.
+    final level = folderBrowseLevel(folderId, path);
+    final browse = <Map<String, dynamic>>[];
+    for (final d in (level['dirs'] as List? ?? const [])) {
+      final dn = (d is Map ? d['name'] as String? : null) ?? '';
+      if (dn.isEmpty) continue;
+      if (path.isEmpty && dn == kFolderDataDir) continue;
+      browse.add({'id': dn, 'title': dn, 'sub': '', 'icon': 'folder', 'dir': true});
+    }
+    for (final f in (level['files'] as List? ?? const [])) {
+      if (f is! Map) continue;
+      final base = (f['base'] as String?) ?? '';
+      final sha = (f['x'] as String?) ?? '';
+      if (base.isEmpty || sha.length != 64) continue;
+      final size = f['size'] is int ? f['size'] as int : 0;
+      browse.add({
+        'id': '$sha\t${path.isEmpty ? '' : path}$base',
+        'title': base,
+        'sub': size > 0 ? _fmtBytes(size) : '',
+        'icon': MediaRef.classify(_extOf(base)).name,
+        'dir': false,
+      });
+    }
+
     return {
       'folderId': folderId,
+      'path': path,
+      'files': browse,
       // The listing text rides along, from the SIGNED op-log (so it is here even
       // for a torrent we have not downloaded) — the gallery field draws one hero
       // card: banner, poster, title, category, tags, description, screenshots.

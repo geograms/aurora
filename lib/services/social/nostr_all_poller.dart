@@ -16,10 +16,14 @@
  * the spam gate run in a throwaway `compute` isolate (pure Dart, no sockets, so
  * none of the engine-isolate freeze applies).
  *
- * Flow, each poll: connect every relay → REQ kind-1 since the last window →
- * collect for a few seconds → DISCONNECT all → verify + gate off-thread → write
- * the survivors into the feed archive. Runs on a timer while Social is open, on
- * open, and on pull-to-refresh.
+ * Each poll, on ONE set of short-lived sockets:
+ *   phase 1 — REQ kind-1 since the last window; collect a few seconds; gate +
+ *             verify off-thread; write survivors into the feed archive.
+ *   phase 2 — REQ reactions/replies (#e) for the recently-shown posts; count
+ *             them into the archive so likes/reply badges fill in and keep
+ *             growing as fresh posts gather engagement.
+ * Then DISCONNECT. Runs on a timer while Social is open, on open, and on
+ * pull-to-refresh.
  */
 import 'dart:async';
 
@@ -44,27 +48,38 @@ class NostrAllPoller {
   /// it dedups by event id, so re-fetching the same post is a no-op.
   final ActivityArchive archive;
 
-  /// Bumped when new posts were written, so the feed rebuilds.
+  /// Bumped when new posts (or new engagement) were written, so the feed
+  /// rebuilds.
   final void Function() onChanged;
 
+  /// True while a poll is in flight — the UI shows "Getting fresh posts…".
+  final ValueNotifier<bool> polling = ValueNotifier<bool>(false);
+
   Timer? _timer;
-  bool _polling = false;
+  bool _busy = false;
 
   /// Newest created_at (unix seconds) we have already written, so the next poll
   /// asks only for what is newer — a cheap window, not the whole backlog.
   int _newestSec = 0;
 
-  /// How long a single poll holds its sockets open. Brief on purpose.
-  static const Duration _collect = Duration(seconds: 7);
+  /// How long phase 1 (posts) holds the sockets. Brief on purpose.
+  static const Duration _collectPosts = Duration(seconds: 6);
+
+  /// How long phase 2 (reactions/replies) holds them.
+  static const Duration _collectStats = Duration(seconds: 4);
 
   /// How far back the FIRST poll of a session looks (later polls use [_newestSec]).
   static const Duration _coldWindow = Duration(minutes: 30);
 
-  /// Cadence while Social is open. The relays get a fresh, short-lived client
-  /// each time, never a lingering one.
+  /// Cadence while Social is open. Fresh short-lived client each time.
   static const Duration _cadence = Duration(minutes: 3);
 
-  bool get isPolling => _polling;
+  /// Fetch engagement for at most this many recently-shown posts per poll (relay
+  /// filters cannot be unbounded, and this is enough to keep the visible feed's
+  /// badges current).
+  static const int _statsFanout = 60;
+
+  bool get isPolling => _busy;
 
   void start() {
     stop();
@@ -77,13 +92,20 @@ class NostrAllPoller {
     _timer = null;
   }
 
-  /// Fetch what is new, add it, disconnect. Concurrency-safe: a poll already in
-  /// flight wins and a second caller is a no-op (returns 0).
+  void dispose() {
+    stop();
+    polling.dispose();
+  }
+
+  /// Fetch what is new + refresh engagement, then disconnect. Concurrency-safe:
+  /// a poll already in flight wins and a second caller is a no-op (returns 0).
   Future<int> pollOnce() async {
-    if (_polling) return 0;
-    _polling = true;
+    if (_busy) return 0;
+    _busy = true;
+    polling.value = true;
     final clients = <NostrWsClient>[];
-    final collected = <String, NostrEvent>{};
+    final posts = <String, NostrEvent>{};
+    final stats = <NostrEvent>[];
     try {
       final relays = _relays();
       if (relays.isEmpty) return 0;
@@ -91,25 +113,75 @@ class NostrAllPoller {
       final since = _newestSec > 0
           ? (_newestSec - 60) // small overlap for relay clock skew
           : (nowSec - _coldWindow.inSeconds);
-      final filter = NostrFilter(kinds: const [1], since: since, limit: 300);
 
+      // Route events by subscription id: 'p' = new posts, 's' = engagement.
       for (final uri in relays) {
         final c = NostrWsClient(uri);
         c.onEvent = (sub, ev) {
-          final id = ev.id;
-          if (id != null) collected[id] = ev;
+          if (sub == 'p') {
+            final id = ev.id;
+            if (id != null) posts[id] = ev;
+          } else if (sub == 's') {
+            stats.add(ev);
+          }
         };
         clients.add(c);
         // Fire the connect; don't await the handshake serially — the collect
-        // window is the wait, and a relay that never answers must not hold up
-        // the others. subscribe() replays once the socket is up.
+        // window is the wait, and a dead relay must not hold up the others.
         unawaited(
-          c.connect().then((_) => c.subscribe('all', [filter])).catchError(
-            (_) {},
-          ),
+          c
+              .connect()
+              .then((_) => c.subscribe('p', [
+                    NostrFilter(kinds: const [1], since: since, limit: 300),
+                  ]))
+              .catchError((_) {}),
         );
       }
-      await Future<void>.delayed(_collect);
+      await Future<void>.delayed(_collectPosts);
+
+      // Gate + verify the posts off-thread, then persist. Do this while the
+      // sockets are still open so phase 2 can reuse them.
+      final muted = RnsService.instance.mutedCallsigns
+          .map((c) => c.toLowerCase())
+          .toList();
+      var added = 0;
+      if (posts.isNotEmpty) {
+        final raw = [for (final e in posts.values) e.toJson()];
+        final rows = await compute(
+          _verifyGateBuild,
+          {'events': raw, 'muted': muted},
+        );
+        for (final row in rows) {
+          archive.add(row);
+          final sec = ((row['t'] as int?) ?? 0) ~/ 1000;
+          if (sec > _newestSec) _newestSec = sec;
+          added++;
+        }
+        if (added > 0) onChanged();
+      }
+
+      // Phase 2: refresh engagement for the posts on screen. Ask every relay for
+      // reactions (7), reposts (6) and replies (1) that reference them.
+      final ids = _recentPostIds();
+      if (ids.isNotEmpty) {
+        final statsFilter = NostrFilter(
+          kinds: const [1, 6, 7],
+          tags: {'e': ids},
+          limit: 500,
+        );
+        for (final c in clients) {
+          try {
+            c.subscribe('s', [statsFilter]);
+          } catch (_) {}
+        }
+        await Future<void>.delayed(_collectStats);
+      }
+
+      LogService.instance.add(
+        'all-poll: ${posts.length} fetched, $added kept, '
+        '${stats.length} engagement '
+        '(newest ${_newestSec == 0 ? "-" : "${nowAgeSec()}s"} ago)',
+      );
     } catch (e) {
       LogService.instance.add('all-poll: FAILED $e');
     } finally {
@@ -117,57 +189,111 @@ class NostrAllPoller {
       // disconnect) marks the client done so it never tries to reconnect.
       for (final c in clients) {
         try {
-          c.unsubscribe('all');
+          c.unsubscribe('p');
+        } catch (_) {}
+        try {
+          c.unsubscribe('s');
         } catch (_) {}
         unawaited(c.close());
       }
-      _polling = false;
+      _busy = false;
+      polling.value = false;
     }
 
-    if (collected.isEmpty) {
-      LogService.instance.add('all-poll: 0 events this window');
-      return 0;
+    // Fold engagement into the archive (off the sockets, on main — cheap: no
+    // crypto, just counting). Reaction verification is not worth ~100ms a
+    // signature for a like badge on a stranger's post.
+    if (stats.isNotEmpty) {
+      final known = _recentPostIdSet();
+      var changed = false;
+      for (final ev in stats) {
+        final target = _referencedEventId(ev, known);
+        if (target == null) continue;
+        if (ev.kind == 7) {
+          // A reaction. '-' is a downvote; everything else counts as a like.
+          final positive = ev.content.trim() != '-';
+          if (positive) {
+            archive.setReaction(target, ev.pubkey.toLowerCase(), true, false);
+            changed = true;
+          }
+        } else if (ev.kind == 1) {
+          // A reply — store it (parent set) so replyCount(target) sees it. It is
+          // filtered out of the top-level All list (roots only) by the feed.
+          final row = _replyRow(ev, target);
+          if (row != null) {
+            archive.add(row);
+            changed = true;
+          }
+        }
+        // kind 6 (repost) is collected but not yet surfaced as a badge.
+      }
+      if (changed) onChanged();
     }
 
-    // Verify + gate off the UI thread. Pure Dart, no sockets — safe in a
-    // throwaway isolate, and it keeps ~100ms-a-signature Schnorr off the frame.
-    final raw = [for (final e in collected.values) e.toJson()];
-    final muted = RnsService.instance.mutedCallsigns
-        .map((c) => c.toLowerCase())
-        .toList();
-    List<Map<String, dynamic>> rows;
-    try {
-      rows = await compute(_verifyGateBuild, {'events': raw, 'muted': muted});
-    } catch (e) {
-      LogService.instance.add('all-poll: gate FAILED $e');
-      return 0;
-    }
-
-    var added = 0;
-    for (final row in rows) {
-      archive.add(row);
-      final sec = ((row['t'] as int?) ?? 0) ~/ 1000;
-      if (sec > _newestSec) _newestSec = sec;
-      added++;
-    }
-    if (added > 0) onChanged();
-    LogService.instance.add(
-      'all-poll: ${collected.length} fetched, $added kept '
-      '(newest ${_newestSec == 0 ? "-" : "${nowAgeSec()}s"} ago)',
-    );
-    return added;
+    return 0;
   }
 
-  int nowAgeSec() =>
-      _newestSec == 0 ? -1 : (DateTime.now().millisecondsSinceEpoch ~/ 1000) - _newestSec;
+  int nowAgeSec() => _newestSec == 0
+      ? -1
+      : (DateTime.now().millisecondsSinceEpoch ~/ 1000) - _newestSec;
+
+  /// The most-recent post ids currently in the feed, for the engagement query.
+  List<String> _recentPostIds() {
+    final out = <String>[];
+    for (final r in archive.recent(limit: _statsFanout)) {
+      final mid = (r['mid'] ?? '').toString();
+      final parent = (r['parent'] ?? '').toString();
+      if (mid.length == 64 && parent.isEmpty) out.add(mid); // roots only
+    }
+    return out;
+  }
+
+  Set<String> _recentPostIdSet() => _recentPostIds().toSet();
+
+  /// The event id this reaction/reply is about, if it targets one of [known].
+  /// For NIP-25 reactions the last 'e' tag is the reacted-to event; for replies
+  /// any referenced 'e' that we know about is good enough for a count.
+  String? _referencedEventId(NostrEvent ev, Set<String> known) {
+    String? last;
+    for (final t in ev.tags) {
+      if (t.isNotEmpty && t[0] == 'e' && t.length > 1) {
+        final id = t[1];
+        if (known.contains(id)) last = id;
+      }
+    }
+    return last;
+  }
+
+  Map<String, dynamic>? _replyRow(NostrEvent ev, String parent) {
+    final content = ev.content.trim();
+    if (content.isEmpty) return null;
+    final id = ev.id ?? '';
+    if (id.isEmpty) return null;
+    final pub = ev.pubkey.toLowerCase();
+    final created = ev.createdAt;
+    final dt = DateTime.fromMillisecondsSinceEpoch(created * 1000);
+    final hhmm =
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    return <String, dynamic>{
+      'dir': 'in',
+      'from': pub.length >= 12 ? pub.substring(0, 12) : pub,
+      'author': pub,
+      'text': content,
+      'mid': id,
+      'parent': parent,
+      'pop': 0,
+      'source': 'thread',
+      't': created * 1000,
+      'time': hhmm,
+    };
+  }
 
   /// Enabled wss relays the user configured, falling back to the well-known
-  /// public set. Read via the host (never the possibly-frozen engine's sockets).
+  /// public set. Read via the host's main-side cache (never the possibly-frozen
+  /// engine's sockets).
   List<String> _relays() {
     final list = <String>[];
     try {
-      // Main-side cached copy of the relay list — safe even if the engine
-      // isolate is wedged; never a proxy call that could hang on it.
       for (final r in RnsService.instance.nostrRelays()) {
         final uri = (r['uri'] ?? '').toString();
         final enabled = r['enabled'] != false;
@@ -184,16 +310,12 @@ class NostrAllPoller {
 }
 
 /// Top-level so it can run in a `compute` isolate. Verify each event's Schnorr
-/// signature, drop spam/muted, and build feed-archive rows. Input:
-/// `{'events': [nip01 json...], 'muted': [lowercased pubkey prefixes]}`.
+/// signature, drop spam/muted/machine-junk, de-flood per author, and build feed
+/// rows. Input: `{'events': [nip01 json...], 'muted': [lowercased pubkeys]}`.
 List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
   final events = (arg['events'] as List).cast<Map<String, dynamic>>();
   final muted = (arg['muted'] as List).map((e) => e.toString()).toSet();
 
-  // First pass: parse, gate, verify. Collect survivors so a second pass can
-  // rank and de-flood across the whole batch (a single author firehosing
-  // encoded junk otherwise buries every real post — the "sp_…drift.gits.net"
-  // flood seen on-device).
   final kept = <_Cand>[];
   for (final j in events) {
     final NostrEvent ev;
@@ -219,14 +341,13 @@ List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
     kept.add(_Cand(ev, content, pub, id));
   }
 
-  // Newest first, then cap per author so no single flooder dominates. A cap of
-  // 2 keeps a prolific-but-real account visible without letting a bot take over.
+  // Newest first, then cap per author so no single flooder dominates.
   kept.sort((a, b) => b.ev.createdAt.compareTo(a.ev.createdAt));
   const perAuthorCap = 2;
   final perAuthor = <String, int>{};
   final out = <Map<String, dynamic>>[];
   for (final c in kept) {
-    final n = (perAuthor[c.pub] ?? 0);
+    final n = perAuthor[c.pub] ?? 0;
     if (n >= perAuthorCap) continue;
     perAuthor[c.pub] = n + 1;
     var parent = '';
@@ -265,20 +386,16 @@ class _Cand {
 }
 
 /// A post that is really a machine payload, not prose — long unbroken
-/// base32/base58-looking runs, or a bare `token.token.token.host` blob. These
-/// are what one flooding account was pumping into the firehose. Keep it
-/// conservative so real posts with a link or an address are not caught.
+/// base32/base58-looking runs, or a bare `token.token.host` blob. Conservative
+/// so real posts with a link or an address are not caught.
 bool _looksMachineJunk(String content) {
   final s = content.trim();
   if (s.contains(' ')) {
-    // Has whitespace → looks like prose unless it is almost all one giant token.
     final longest = s
         .split(RegExp(r'\s+'))
         .fold<int>(0, (m, w) => w.length > m ? w.length : m);
     return longest >= 60 && longest > s.length * 0.6;
   }
-  // No spaces at all: a single token. Junk if it is long and high-entropy
-  // (lots of uppercase+digits), e.g. "sp_….UVY5CWLHUCYNUD…drift.gits.net".
   if (s.length < 40) return false;
   final alnum = RegExp(r'[A-Za-z0-9]').allMatches(s).length;
   final upperDigit = RegExp(r'[A-Z0-9]').allMatches(s).length;

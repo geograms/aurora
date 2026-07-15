@@ -3434,7 +3434,7 @@ class _WappPageState extends State<WappPage>
     _feedBackfillTimer?.cancel();
     _fastBackfillTimer?.cancel();
     // Stop the one-shot firehose poller: no more polls once nobody is looking.
-    _allPoller?.stop();
+    _allPoller?.dispose();
     _allPoller = null;
     _tickTimer?.cancel();
     // Flush any pending conversation writes so the latest messages aren't lost.
@@ -3504,9 +3504,28 @@ class _WappPageState extends State<WappPage>
   @override
   Widget build(BuildContext context) {
     if (_tabController == null) {
+      // Give the open a voice. The social wapp spends this moment loading and
+      // firing its first firehose poll; a spinner + "Getting fresh posts" beats a
+      // silent two-second freeze. Other wapps show their status line.
+      final loadingLabel = _wappName == 'social'
+          ? 'Getting fresh posts…'
+          : (_status.isEmpty ? 'Loading…' : _status);
       return Scaffold(
         appBar: AppBar(title: Text(widget.title)),
-        body: Center(child: Text(_status)),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+              const SizedBox(height: 16),
+              Text(loadingLabel, style: const TextStyle(fontSize: 15)),
+            ],
+          ),
+        ),
       );
     }
 
@@ -5400,7 +5419,13 @@ class _WappPageState extends State<WappPage>
     if (_socialFeedFilter == 'following') {
       return _followingArchive?.recent() ?? const <Map<String, dynamic>>[];
     }
-    return _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
+    // Top-level only: replies (parent set) are stored so a post's reply count is
+    // real, but the All list shows roots — a reply to some off-screen post has no
+    // context here and would just be clutter.
+    return [
+      for (final p in _activityArchive?.recent() ?? const <Map<String, dynamic>>[])
+        if ((p['parent'] ?? '').toString().isEmpty) p,
+    ];
   }
 
   Future<List<Map<String, dynamic>>> _loadOlderSocialPosts(int beforeMs) async {

@@ -88,7 +88,7 @@ class ActivityFeed extends StatefulWidget {
   /// Resolve a post author's callsign to its display name + avatar (from its
   /// NOSTR profile). Null/absent fields fall back to callsign + initials.
   final ({String? name, ImageProvider? avatar}) Function(String callsign)?
-      profileFor;
+  profileFor;
 
   /// Number of replies to a post id, shown on each post in the feed.
   final int Function(String mid)? replyCount;
@@ -125,6 +125,7 @@ class ActivityFeed extends StatefulWidget {
   /// Pull-to-refresh: re-query the relays for the latest posts. Awaited so the
   /// spinner shows until new events have had a moment to arrive.
   final Future<void> Function(String filter)? onRefresh;
+  final Future<List<Map<String, dynamic>>> Function(int oldestMs)? onLoadOlder;
 
   /// Persisted tab choice to open on: 'all' | 'following' | 'favorites'.
   /// Null/unknown → 'all'. Changes are reported via [onFilterChanged].
@@ -171,6 +172,7 @@ class ActivityFeed extends StatefulWidget {
     this.mentionResolver,
     this.onMentionTap,
     this.onRefresh,
+    this.onLoadOlder,
     this.initialFilter,
     this.onFilterChanged,
     this.curatedAll = false,
@@ -199,12 +201,39 @@ class _ActivityFeedState extends State<ActivityFeed> {
   // and surfaced via the "N new posts" pill.
   List<Map<String, dynamic>> _shown = const [];
   int _newCount = 0;
+  bool _loadingOlder = false;
 
   bool get _atTop => !_scroll.hasClients || _scroll.offset <= 12;
 
   void _onScroll() {
     // Reaching the top adopts whatever arrived while reading below.
     if (_atTop && _newCount > 0) _pullNew(scroll: false);
+    if (_scroll.hasClients && _scroll.position.extentAfter < 280) {
+      _loadOlder();
+    }
+  }
+
+  Future<void> _loadOlder() async {
+    if (_loadingOlder || _shown.isEmpty || widget.onLoadOlder == null) return;
+    var oldest = DateTime.now().millisecondsSinceEpoch;
+    for (final post in _shown) {
+      final t = (post['t'] as num?)?.toInt();
+      if (t != null && t < oldest) oldest = t;
+    }
+    _loadingOlder = true;
+    try {
+      final older = await widget.onLoadOlder!(oldest);
+      if (!mounted || older.isEmpty) return;
+      final ids = {for (final p in _shown) (p['mid'] ?? '').toString()};
+      setState(
+        () => _shown = [
+          ...older.where((p) => ids.add((p['mid'] ?? '').toString())),
+          ..._shown,
+        ],
+      );
+    } finally {
+      _loadingOlder = false;
+    }
   }
 
   /// Show the freshest posts: adopt the latest list + jump to the top.
@@ -223,15 +252,15 @@ class _ActivityFeedState extends State<ActivityFeed> {
   }
 
   static _ActivityFilter _filterFromString(String? s) => switch (s) {
-        'following' => _ActivityFilter.following,
-        'favorites' => _ActivityFilter.favorites,
-        _ => _ActivityFilter.all,
-      };
+    'following' => _ActivityFilter.following,
+    'favorites' => _ActivityFilter.favorites,
+    _ => _ActivityFilter.all,
+  };
   static String _filterToString(_ActivityFilter f) => switch (f) {
-        _ActivityFilter.following => 'following',
-        _ActivityFilter.favorites => 'favorites',
-        _ActivityFilter.all => 'all',
-      };
+    _ActivityFilter.following => 'following',
+    _ActivityFilter.favorites => 'favorites',
+    _ActivityFilter.all => 'all',
+  };
 
   @override
   void initState() {
@@ -386,7 +415,13 @@ class _ActivityFeedState extends State<ActivityFeed> {
         posts = src.reversed.where((p) {
           if (!_isStreamPost(p) || !_isRoot(p)) return false;
           if (!curated) return true; // generic APRS/chat activity feed
-          return (p['source'] ?? '') == 'firehose' || p['dir'] == 'out';
+          // Social's All view is curated strangers PLUS the complete direct
+          // following stream. The two histories live in separate SQLite files
+          // but are merged by the host before reaching this filter.
+          final source = (p['source'] ?? '').toString();
+          return source == 'firehose' ||
+              source == 'following' ||
+              p['dir'] == 'out';
         }).toList();
         break;
     }
@@ -442,7 +477,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
                   (p['from'] ?? '').toString().toUpperCase(),
                 ),
               )
-            .toList()
+              .toList()
         : _filtered(_shown);
     // Back while the composer is open means "close the composer" — NOT "leave
     // the app". Android's back gesture went straight past an expanded composer
@@ -456,35 +491,35 @@ class _ActivityFeedState extends State<ActivityFeed> {
         setState(() => _composing = false);
       },
       child: Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 640),
-        child: Column(
-          children: [
-            // The filter bar stays at the top (it says WHAT you are reading),
-            // but the composer belongs at the BOTTOM, on the thumb, where the
-            // Chat wapp puts it. Writing is the last thing you do on this
-            // screen, not the first — and a composer above the stream pushed
-            // the newest post down and out of sight.
-            if (!widget.readOnly) ...[
-              _filterBar(cs),
-              Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
-            ],
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: () async {
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 640),
+          child: Column(
+            children: [
+              // The filter bar stays at the top (it says WHAT you are reading),
+              // but the composer belongs at the BOTTOM, on the thumb, where the
+              // Chat wapp puts it. Writing is the last thing you do on this
+              // screen, not the first — and a composer above the stream pushed
+              // the newest post down and out of sight.
+              if (!widget.readOnly) ...[
+                _filterBar(cs),
+                Divider(height: 1, color: cs.outlineVariant.withAlpha(45)),
+              ],
+              Expanded(
+                child: RefreshIndicator(
+                  onRefresh: () async {
                     await widget.onRefresh?.call(_filterToString(_filter));
                     // The user ASKED for the new posts — adopt them, don't park
                     // them behind the "N new posts" pill they'd have to tap next.
                     if (mounted) _pullNew(scroll: false);
-                },
-                child: posts.isEmpty
-                    ? ListView(
-                        controller: _scroll,
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        children: [
-                          const SizedBox(height: 120),
-                          widget.readOnly
-                              ? Center(
+                  },
+                  child: posts.isEmpty
+                      ? ListView(
+                          controller: _scroll,
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: [
+                            const SizedBox(height: 120),
+                            widget.readOnly
+                                ? Center(
                                     child: Text(
                                       'No results.',
                                       style: TextStyle(
@@ -494,66 +529,66 @@ class _ActivityFeedState extends State<ActivityFeed> {
                                       ),
                                     ),
                                   )
-                              : _empty(cs),
-                        ],
-                      )
-                    : ListView.separated(
-                        controller: _scroll,
-                        padding: EdgeInsets.zero,
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        itemCount: posts.length,
-                        // Keep each card's Element (and so the state of any
-                        // playing video inside it) attached to its POST, not
-                        // its list slot — without this, a new post arriving
-                        // above shifts every index and Flutter rebuilds the
-                        // subtree from scratch, killing playback mid-video.
-                        findChildIndexCallback: (key) {
-                          final v = (key as ValueKey<String>).value;
-                          for (var i = 0; i < posts.length; i++) {
-                            if (_postKey(posts[i], i) == v) return i * 2;
-                          }
-                          return null;
-                        },
-                        separatorBuilder: (_, __) => Divider(
+                                : _empty(cs),
+                          ],
+                        )
+                      : ListView.separated(
+                          controller: _scroll,
+                          padding: EdgeInsets.zero,
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          itemCount: posts.length,
+                          // Keep each card's Element (and so the state of any
+                          // playing video inside it) attached to its POST, not
+                          // its list slot — without this, a new post arriving
+                          // above shifts every index and Flutter rebuilds the
+                          // subtree from scratch, killing playback mid-video.
+                          findChildIndexCallback: (key) {
+                            final v = (key as ValueKey<String>).value;
+                            for (var i = 0; i < posts.length; i++) {
+                              if (_postKey(posts[i], i) == v) return i * 2;
+                            }
+                            return null;
+                          },
+                          separatorBuilder: (_, __) => Divider(
                             height: 1,
                             color: cs.outlineVariant.withAlpha(45),
                           ),
-                        itemBuilder: (_, i) => ActivityPostCard(
-                          key: ValueKey(_postKey(posts[i], i)),
-                          post: posts[i],
-                          profileFor: widget.profileFor,
-                          npubFor: widget.npubFor,
-                          onSenderTap: widget.onSenderTap,
-                          likeInfo: widget.likeInfo,
-                          onLike: widget.onLike,
-                          onVote: widget.onVote,
-                          voteInfo: widget.voteInfo,
-                          isSaved: widget.isSaved,
-                          onSave: widget.onSave,
-                          isReposted: widget.isReposted,
-                          onRepost: widget.onRepost,
-                          replyCount: widget.replyCount,
-                          onBlock: widget.onBlock,
-                          onMute: widget.onMute,
-                          onFollow: widget.onFollow,
-                          isFollowing: _isFollowed,
-                          onTap: () => widget.onOpenThread?.call(posts[i]),
-                          onReply: () => widget.onOpenThread?.call(posts[i]),
-                          mentionResolver: widget.mentionResolver,
-                          onMentionTap: widget.onMentionTap,
+                          itemBuilder: (_, i) => ActivityPostCard(
+                            key: ValueKey(_postKey(posts[i], i)),
+                            post: posts[i],
+                            profileFor: widget.profileFor,
+                            npubFor: widget.npubFor,
+                            onSenderTap: widget.onSenderTap,
+                            likeInfo: widget.likeInfo,
+                            onLike: widget.onLike,
+                            onVote: widget.onVote,
+                            voteInfo: widget.voteInfo,
+                            isSaved: widget.isSaved,
+                            onSave: widget.onSave,
+                            isReposted: widget.isReposted,
+                            onRepost: widget.onRepost,
+                            replyCount: widget.replyCount,
+                            onBlock: widget.onBlock,
+                            onMute: widget.onMute,
+                            onFollow: widget.onFollow,
+                            isFollowing: _isFollowed,
+                            onTap: () => widget.onOpenThread?.call(posts[i]),
+                            onReply: () => widget.onOpenThread?.call(posts[i]),
+                            mentionResolver: widget.mentionResolver,
+                            onMentionTap: widget.onMentionTap,
+                          ),
                         ),
-                      ),
+                ),
               ),
-            ),
-            // Composer last: it sits on the bottom edge, above the keyboard,
-            // exactly where Chat's is. The "N new posts" pill rides just above
-            // it so the two live together instead of straddling the stream.
-            if (!widget.readOnly) ...[
-              if (_newCount > 0) _newPostsPill(cs),
-              _composer(cs),
+              // Composer last: it sits on the bottom edge, above the keyboard,
+              // exactly where Chat's is. The "N new posts" pill rides just above
+              // it so the two live together instead of straddling the stream.
+              if (!widget.readOnly) ...[
+                if (_newCount > 0) _newPostsPill(cs),
+                _composer(cs),
+              ],
             ],
-          ],
-        ),
+          ),
         ),
       ),
     );
@@ -571,37 +606,37 @@ class _ActivityFeedState extends State<ActivityFeed> {
   /// posts in and scrolls to the top — new posts never move the screen on their
   /// own while the user is reading below.
   Widget _newPostsPill(ColorScheme cs) => Padding(
-        padding: const EdgeInsets.only(top: 4, bottom: 2),
-        child: Center(
-          child: Material(
-            color: ChatPalette.accent,
-            borderRadius: BorderRadius.circular(20),
-            elevation: 2,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(20),
-              onTap: () => _pullNew(),
-              child: Padding(
+    padding: const EdgeInsets.only(top: 4, bottom: 2),
+    child: Center(
+      child: Material(
+        color: ChatPalette.accent,
+        borderRadius: BorderRadius.circular(20),
+        elevation: 2,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: () => _pullNew(),
+          child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                  const Icon(Icons.arrow_upward, size: 15, color: Colors.white),
-                  const SizedBox(width: 6),
+                const Icon(Icons.arrow_upward, size: 15, color: Colors.white),
+                const SizedBox(width: 6),
                 Text(
                   '$_newCount new post${_newCount == 1 ? '' : 's'}',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
               ],
             ),
-              ),
-            ),
           ),
         ),
-      );
+      ),
+    ),
+  );
 
   /// Filter the noise: everything, only people you follow, or your bookmarks.
   Widget _filterBar(ColorScheme cs) {
@@ -622,9 +657,9 @@ class _ActivityFeedState extends State<ActivityFeed> {
               const SizedBox(width: 5),
               Text(
                 label,
-                  style: TextStyle(
-                      color: color,
-                      fontSize: 13,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 13,
                   fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                 ),
               ),
@@ -661,7 +696,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
         padding: const EdgeInsets.all(24),
         child: Text(
           msg,
-            textAlign: TextAlign.center,
+          textAlign: TextAlign.center,
           style: const TextStyle(color: ChatPalette.secondary, fontSize: 13),
         ),
       ),
@@ -696,13 +731,13 @@ class _ActivityFeedState extends State<ActivityFeed> {
                 Expanded(
                   child: Text(
                     widget.hint,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
                       color: Colors.white.withAlpha(110),
                       fontSize: 15,
                     ),
-                ),
+                  ),
                 ),
                 Icon(Icons.send, size: 18, color: ChatPalette.accent),
               ],
@@ -822,8 +857,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
         color: Colors.black54,
         child: Center(
           child: Icon(
-              ref.kind == MediaKind.video ? Icons.movie : Icons.insert_drive_file,
-              color: Colors.white,
+            ref.kind == MediaKind.video ? Icons.movie : Icons.insert_drive_file,
+            color: Colors.white,
             size: 22,
           ),
         ),
@@ -835,18 +870,18 @@ class _ActivityFeedState extends State<ActivityFeed> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-        ClipRRect(borderRadius: BorderRadius.circular(8), child: inner),
-        Positioned(
-          top: -6,
-          right: -6,
-          child: IconButton(
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-            iconSize: 18,
-            icon: const Icon(Icons.cancel, color: Colors.white),
-            onPressed: () => setState(() => _pending.removeAt(index)),
+          ClipRRect(borderRadius: BorderRadius.circular(8), child: inner),
+          Positioned(
+            top: -6,
+            right: -6,
+            child: IconButton(
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              iconSize: 18,
+              icon: const Icon(Icons.cancel, color: Colors.white),
+              onPressed: () => setState(() => _pending.removeAt(index)),
+            ),
           ),
-        ),
         ],
       ),
     );
@@ -973,7 +1008,7 @@ Widget _activityViaChip(String via) {
 class ActivityPostCard extends StatelessWidget {
   final Map<String, dynamic> post;
   final ({String? name, ImageProvider? avatar}) Function(String callsign)?
-      profileFor;
+  profileFor;
   final String? Function(String callsign)? npubFor;
   final void Function(String from)? onSenderTap;
   final ({int count, bool mine}) Function(String mid)? likeInfo;
@@ -1043,29 +1078,29 @@ class ActivityPostCard extends StatelessWidget {
 
   /// Per-post "…" menu: mute or block the author (only for others' posts).
   Widget _menu(String from) => PopupMenuButton<String>(
-        icon: const Icon(Icons.more_horiz, size: 18, color: Colors.white54),
-        tooltip: 'Options',
-        padding: EdgeInsets.zero,
-        onSelected: (v) {
-          if (v == 'mute') onMute?.call(from);
-          if (v == 'block') onBlock?.call(from);
-          if (v == 'follow') {
-            onFollow?.call(from, !(isFollowing?.call(from) ?? false));
-          }
-        },
-        itemBuilder: (_) => [
-          if (onFollow != null)
-            PopupMenuItem(
-              value: 'follow',
+    icon: const Icon(Icons.more_horiz, size: 18, color: Colors.white54),
+    tooltip: 'Options',
+    padding: EdgeInsets.zero,
+    onSelected: (v) {
+      if (v == 'mute') onMute?.call(from);
+      if (v == 'block') onBlock?.call(from);
+      if (v == 'follow') {
+        onFollow?.call(from, !(isFollowing?.call(from) ?? false));
+      }
+    },
+    itemBuilder: (_) => [
+      if (onFollow != null)
+        PopupMenuItem(
+          value: 'follow',
           child: Row(
             children: [
-                Icon(
-                  (isFollowing?.call(from) ?? false)
-                      ? Icons.person_remove_alt_1
-                      : Icons.person_add_alt_1,
-                  size: 18,
-                ),
-                const SizedBox(width: 10),
+              Icon(
+                (isFollowing?.call(from) ?? false)
+                    ? Icons.person_remove_alt_1
+                    : Icons.person_add_alt_1,
+                size: 18,
+              ),
+              const SizedBox(width: 10),
               Text(
                 (isFollowing?.call(from) ?? false)
                     ? 'Unfollow $from'
@@ -1073,31 +1108,31 @@ class ActivityPostCard extends StatelessWidget {
               ),
             ],
           ),
-            ),
-          if (onMute != null)
-            PopupMenuItem(
-              value: 'mute',
+        ),
+      if (onMute != null)
+        PopupMenuItem(
+          value: 'mute',
           child: Row(
             children: [
-                const Icon(Icons.notifications_off_outlined, size: 18),
-                const SizedBox(width: 10),
-                Text('Mute $from'),
+              const Icon(Icons.notifications_off_outlined, size: 18),
+              const SizedBox(width: 10),
+              Text('Mute $from'),
             ],
           ),
-            ),
-          if (onBlock != null)
-            PopupMenuItem(
-              value: 'block',
+        ),
+      if (onBlock != null)
+        PopupMenuItem(
+          value: 'block',
           child: Row(
             children: [
-                const Icon(Icons.block, size: 18, color: Colors.red),
-                const SizedBox(width: 10),
-                Text('Block $from'),
+              const Icon(Icons.block, size: 18, color: Colors.red),
+              const SizedBox(width: 10),
+              Text('Block $from'),
             ],
           ),
-            ),
-        ],
-      );
+        ),
+    ],
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -1176,11 +1211,11 @@ class ActivityPostCard extends StatelessWidget {
                                     : null,
                                 child: Text(
                                   displayName,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
                                     fontSize: 14,
                                   ),
                                 ),
@@ -1190,8 +1225,8 @@ class ActivityPostCard extends StatelessWidget {
                               const SizedBox(width: 6),
                               Text(
                                 '· $time',
-                                  style: TextStyle(
-                                      color: Colors.white.withAlpha(120),
+                                style: TextStyle(
+                                  color: Colors.white.withAlpha(120),
                                   fontSize: 12,
                                 ),
                               ),
@@ -1232,11 +1267,11 @@ class ActivityPostCard extends StatelessWidget {
                         children: [
                           for (int i = 0; i < refs.length; i++)
                             MediaThumbnail(
-                                key: ValueKey('media-${refs[i].sha256}'),
-                                ref: refs[i],
-                                size: mediaSizeHint(raw),
-                                from: from,
-                                tapOnly: true,
+                              key: ValueKey('media-${refs[i].sha256}'),
+                              ref: refs[i],
+                              size: mediaSizeHint(raw),
+                              from: from,
+                              tapOnly: true,
                               inlineThumb: i == 0
                                   ? activityInlineThumb(raw)
                                   : null,
@@ -1386,7 +1421,7 @@ class ActivityThreadPage extends StatefulWidget {
 
   final void Function(String from)? onSenderTap;
   final ({String? name, ImageProvider? avatar}) Function(String callsign)?
-      profileFor;
+  profileFor;
   final String? Function(String callsign)? npubFor;
 
   /// Attach a file to the reply composer (returns a `file:` token).
@@ -1752,15 +1787,15 @@ class _ExpandableTextState extends State<_ExpandableText> {
           _recognizers.add(rec);
           return TextSpan(
             children: [
-            TextSpan(
-              text: url,
-              recognizer: rec,
-              style: const TextStyle(
+              TextSpan(
+                text: url,
+                recognizer: rec,
+                style: const TextStyle(
                   color: ChatPalette.accent,
                   decoration: TextDecoration.underline,
                 ),
-            ),
-            if (tail.isNotEmpty) TextSpan(text: tail),
+              ),
+              if (tail.isNotEmpty) TextSpan(text: tail),
             ],
           );
         },
@@ -1777,9 +1812,9 @@ class _ExpandableTextState extends State<_ExpandableText> {
         end: mention.end,
         span: () {
           final label = mentionLabel(
-              mention,
-              mention.isPerson
-                  ? widget.mentionResolver?.call(mention.token)
+            mention,
+            mention.isPerson
+                ? widget.mentionResolver?.call(mention.token)
                 : null,
           );
           final hex = mention.pubkeyHex;
@@ -1788,7 +1823,7 @@ class _ExpandableTextState extends State<_ExpandableText> {
             // A note reference, or nowhere to go: readable, but not a lie about
             // being tappable.
             return TextSpan(
-                text: label,
+              text: label,
               style: const TextStyle(color: ChatPalette.secondary),
             );
           }
@@ -1832,8 +1867,8 @@ class _ExpandableTextState extends State<_ExpandableText> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text.rich(
-            TextSpan(children: _linkified(shown)),
-            style: const TextStyle(
+          TextSpan(children: _linkified(shown)),
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 14,
             height: 1.3,
@@ -1847,9 +1882,9 @@ class _ExpandableTextState extends State<_ExpandableText> {
               padding: const EdgeInsets.only(top: 4),
               child: Text(
                 _expanded ? 'Less' : 'More',
-                  style: const TextStyle(
-                      color: ChatPalette.accent,
-                      fontSize: 13,
+                style: const TextStyle(
+                  color: ChatPalette.accent,
+                  fontSize: 13,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -1863,7 +1898,7 @@ class _ExpandableTextState extends State<_ExpandableText> {
 // ── Inline remote media (plain http image/video links in post text) ──────────
 
 final _activityMediaRe = RegExp(
-    r'https?://[^\s]+?\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|mov|webm|m4v)(?:\?[^\s]*)?',
+  r'https?://[^\s]+?\.(?:jpg|jpeg|png|gif|webp|bmp|mp4|mov|webm|m4v)(?:\?[^\s]*)?',
   caseSensitive: false,
 );
 
@@ -1879,7 +1914,7 @@ List<String> activityMediaUrls(String body) {
 }
 
 final _activityMentionRe = RegExp(
-    r'nostr:((?:npub1|nprofile1|nevent1|note1|naddr1)[023456789acdefghjklmnpqrstuvwxyz]{20,})',
+  r'nostr:((?:npub1|nprofile1|nevent1|note1|naddr1)[023456789acdefghjklmnpqrstuvwxyz]{20,})',
   caseSensitive: false,
 );
 
@@ -2161,14 +2196,14 @@ class _RemoteMediaState extends State<_RemoteMedia>
   }
 
   Widget _box(ColorScheme cs, Widget child) => ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          height: _mediaHeight,
-          width: double.infinity,
-          color: cs.surfaceContainerHighest.withAlpha(35),
-          child: child,
-        ),
-      );
+    borderRadius: BorderRadius.circular(10),
+    child: Container(
+      height: _mediaHeight,
+      width: double.infinity,
+      color: cs.surfaceContainerHighest.withAlpha(35),
+      child: child,
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -2204,7 +2239,7 @@ class _RemoteMediaState extends State<_RemoteMedia>
                 Flexible(
                   child: Text(
                     'Image — tap to load',
-                      style: TextStyle(color: cs.onSurface, fontSize: 13),
+                    style: TextStyle(color: cs.onSurface, fontSize: 13),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -2214,31 +2249,31 @@ class _RemoteMediaState extends State<_RemoteMedia>
         );
       case _RmState.error:
         return _box(
-            cs,
-            Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                      _isVid
-                          ? Icons.videocam_off_outlined
-                          : Icons.broken_image_outlined,
-                      color: cs.onSurfaceVariant.withAlpha(120),
+          cs,
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _isVid
+                      ? Icons.videocam_off_outlined
+                      : Icons.broken_image_outlined,
+                  color: cs.onSurfaceVariant.withAlpha(120),
                   size: 30,
                 ),
-                  if (_isVid)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
+                if (_isVid)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
                     child: Text(
                       'Video unavailable (removed from the host)',
-                          style: TextStyle(
-                              color: cs.onSurfaceVariant.withAlpha(160),
+                      style: TextStyle(
+                        color: cs.onSurfaceVariant.withAlpha(160),
                         fontSize: 12,
                       ),
                     ),
-                    ),
-                ],
-              ),
+                  ),
+              ],
+            ),
           ),
         );
       case _RmState.show:
@@ -2267,14 +2302,14 @@ class _RemoteMediaState extends State<_RemoteMedia>
                       if (_poster != null)
                         Image.memory(
                           _poster!,
-                            fit: BoxFit.cover,
-                            gaplessPlayback: true,
+                          fit: BoxFit.cover,
+                          gaplessPlayback: true,
                           errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                         )
                       else if (_blur != null)
                         RawImage(
-                            image: _blur,
-                            fit: BoxFit.cover,
+                          image: _blur,
+                          fit: BoxFit.cover,
                           filterQuality: FilterQuality.low,
                         ),
                       // Dim so the play affordance reads on bright posters.
@@ -2282,10 +2317,10 @@ class _RemoteMediaState extends State<_RemoteMedia>
                         Container(color: Colors.black26),
                       Center(
                         child: Icon(
-                            _gone
-                                ? Icons.videocam_off_outlined
-                                : Icons.play_circle_fill,
-                            size: 64,
+                          _gone
+                              ? Icons.videocam_off_outlined
+                              : Icons.play_circle_fill,
+                          size: 64,
                           color: Colors.white70,
                         ),
                       ),
@@ -2305,7 +2340,7 @@ class _RemoteMediaState extends State<_RemoteMedia>
                             ),
                             child: Text(
                               chip,
-                                style: const TextStyle(
+                              style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 11,
                               ),
@@ -2380,18 +2415,18 @@ class _FullscreenImage extends StatelessWidget {
   const _FullscreenImage(this.bytes);
   @override
   Widget build(BuildContext context) => Scaffold(
-        backgroundColor: Colors.black,
-        appBar: AppBar(
-          backgroundColor: Colors.black,
-          foregroundColor: Colors.white,
-          elevation: 0,
-        ),
-        body: Center(
-          child: InteractiveViewer(
-            minScale: 0.5,
-            maxScale: 6,
-            child: Image.memory(bytes, fit: BoxFit.contain),
-          ),
-        ),
-      );
+    backgroundColor: Colors.black,
+    appBar: AppBar(
+      backgroundColor: Colors.black,
+      foregroundColor: Colors.white,
+      elevation: 0,
+    ),
+    body: Center(
+      child: InteractiveViewer(
+        minScale: 0.5,
+        maxScale: 6,
+        child: Image.memory(bytes, fit: BoxFit.contain),
+      ),
+    ),
+  );
 }

@@ -410,6 +410,16 @@ class _WappPageState extends State<WappPage>
   /// received while the app was closed appear when the user opens Activity.
   ActivityArchive? _activityArchive;
 
+  /// Social deliberately keeps public curation and direct follows apart: the
+  /// former is disposable discovery history, while the latter is the durable
+  /// background inbox used by notifications and the Following filter.
+  ActivityArchive? _followingArchive;
+
+  /// The selected Social timeline. Kept by the host as well as the widget so
+  /// archive queries never build one mixed list and hope a display filter can
+  /// reconstruct database provenance afterwards.
+  String _socialFeedFilter = 'all';
+
   /// Callsigns to hide from the Activity feed (blocked + muted), pushed by the
   /// wapp via ui.activity.filter. Uppercased.
   Set<String> _activityHidden = const {};
@@ -1074,6 +1084,29 @@ class _WappPageState extends State<WappPage>
     _wappData = wappData;
     _geoArchive = GeoChatArchive.forStorage(wappData);
     _activityArchive = ActivityArchive.forStorage(wappData);
+    if (_wappName == 'social') {
+      final legacyArchive = _activityArchive!;
+      _activityArchive = ActivityArchive.forStorage(
+        wappData,
+        fileName: 'social_all.sqlite3',
+      );
+      _followingArchive = ActivityArchive.forStorage(
+        wappData,
+        fileName: 'social_following.sqlite3',
+      );
+      _socialFeedFilter =
+          PreferencesService.instanceSync?.getWappUiPref(
+            _wappName,
+            'feedFilter',
+          ) ??
+          'all';
+      legacyArchive.copyRoutedTo(
+        all: _activityArchive!,
+        following: _followingArchive!,
+        followedPubkeys: RnsService.instance.nostrFollowPubkeys(),
+      );
+      _activityArchive!.retainSources({'firehose', 'discovery'});
+    }
     // NOSTR web of trust: never firehose-evict posts from people the user
     // follows or who follow them. Harmless for other wapps (their callsign
     // authors never intersect the hex-pubkey trust set).
@@ -1539,7 +1572,6 @@ class _WappPageState extends State<WappPage>
                   _lastFireBatch[fieldName] != batch) {
                 _lastFireBatch[fieldName] = batch;
                 buf.removeWhere((p) => (p['source'] ?? '') == 'firehose');
-                _activityArchive?.clearSource('firehose');
                 _feedIds[fieldName] = {
                   for (final p in buf)
                     if ((p['mid'] ?? '').toString().isNotEmpty)
@@ -1590,14 +1622,22 @@ class _WappPageState extends State<WappPage>
                       (e['from'] ?? '').toString() == from,
                 );
               }
+              // Persist before UI deduplication. The same event may arrive from
+              // both the curated and direct-follow subscriptions; each archive
+              // must make its own idempotent routing decision.
+              if (fieldName == 'activity') {
+                final target = _wappName == 'social' && source == 'following'
+                    ? _followingArchive
+                    : _activityArchive;
+                target?.add(msg);
+                _activityRev.value++;
+              }
               if (!dup) {
                 buf.add(row);
                 // Persist the Activity feed so background-received posts survive
                 // into the foreground (and across restarts). A duplicate is not
                 // archived either — it would come back as a duplicate.
                 if (fieldName == 'activity') {
-                  _activityArchive?.add(msg);
-                  _activityRev.value++; // refresh any open thread page
                   _archived++;
                   final nowMs = DateTime.now().millisecondsSinceEpoch;
                   if (nowMs - _archivedLogAt > 30000) {
@@ -1617,7 +1657,10 @@ class _WappPageState extends State<WappPage>
                       break;
                     }
                   }
-                  _activityArchive?.enrichAuthor(mid, author);
+                  final target = _wappName == 'social' && source == 'following'
+                      ? _followingArchive
+                      : _activityArchive;
+                  target?.enrichAuthor(mid, author);
                   _activityRev.value++;
                 }
               }
@@ -5314,6 +5357,25 @@ class _WappPageState extends State<WappPage>
     return null;
   }
 
+  List<Map<String, dynamic>> _socialActivityPosts() {
+    if (_wappName != 'social') {
+      return _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
+    }
+    if (_socialFeedFilter == 'following') {
+      return _followingArchive?.recent() ?? const <Map<String, dynamic>>[];
+    }
+    return _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
+  }
+
+  Future<List<Map<String, dynamic>>> _loadOlderSocialPosts(int beforeMs) async {
+    if (_socialFeedFilter == 'following') {
+      return _followingArchive?.olderBefore(beforeMs) ??
+          const <Map<String, dynamic>>[];
+    }
+    return _activityArchive?.olderBefore(beforeMs) ??
+        const <Map<String, dynamic>>[];
+  }
+
   bool _isFollowingNostr(String from) {
     final pubkey = _fullPubkeyFor(from);
     return pubkey != null &&
@@ -5331,6 +5393,10 @@ class _WappPageState extends State<WappPage>
     if (hex == null) return;
     if (follow) {
       RnsService.instance.followPubkey(hex);
+      _activityArchive?.copyAuthorTo(
+        hex,
+        _followingArchive ?? _activityArchive!,
+      );
     } else {
       RnsService.instance.unfollowPubkey(hex);
     }
@@ -5616,8 +5682,7 @@ class _WappPageState extends State<WappPage>
       // froze while we were backgrounded, or the feed shows its age instead of
       // the network. Throttled inside, so calling from build is fine.
       RnsService.instance.nostrResume();
-      final posts =
-          _activityArchive?.recent() ?? const <Map<String, dynamic>>[];
+      final posts = _socialActivityPosts();
       return ActivityFeed(
         posts: posts,
         replyCount: _replyCountFor,
@@ -5734,12 +5799,10 @@ class _WappPageState extends State<WappPage>
             LogService.instance.add('social refresh: filter=$filter reopened');
           }
         },
+        onLoadOlder: _wappName == 'social' ? _loadOlderSocialPosts : null,
         curatedAll: _wappName == 'social',
         // Remember the All/Following/Saved tab across restarts, per wapp.
-        initialFilter: PreferencesService.instanceSync?.getWappUiPref(
-          _wappName,
-          'feedFilter',
-        ),
+        initialFilter: _socialFeedFilter,
         onFilterChanged: (f) {
           PreferencesService.instanceSync?.setWappUiPref(
             _wappName,
@@ -5748,6 +5811,9 @@ class _WappPageState extends State<WappPage>
           );
           _fieldValues['activity_filter'] = f;
           _sendCommand('activity_filter_changed');
+          if (_wappName == 'social' && _socialFeedFilter != f) {
+            setState(() => _socialFeedFilter = f);
+          }
         },
         onSend: (text) {
           _fieldValues['${name}_input'] = text;

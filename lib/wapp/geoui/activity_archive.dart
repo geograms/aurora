@@ -22,11 +22,13 @@ class ActivityArchive {
   ActivityArchive._(this._dbPath);
 
   static final Map<String, ActivityArchive> _instances = {};
-  static ActivityArchive forStorage(ProfileStorage dataDir) =>
-      _instances.putIfAbsent(
-        dataDir.basePath,
-        () => ActivityArchive._(dataDir.getAbsolutePath(_fileName)),
-      );
+  static ActivityArchive forStorage(
+    ProfileStorage dataDir, {
+    String fileName = _fileName,
+  }) => _instances.putIfAbsent(
+    '${dataDir.basePath}/$fileName',
+    () => ActivityArchive._(dataDir.getAbsolutePath(fileName)),
+  );
 
   static const String _fileName = 'activity.sqlite3';
 
@@ -34,7 +36,7 @@ class ActivityArchive {
   Database? _db;
   bool _failed = false;
 
-  static const int _maxAgeMs = 60 * 24 * 60 * 60 * 1000; // 60 days
+  static const int _maxAgeMs = 183 * 24 * 60 * 60 * 1000; // 6 months
   static const int _maxRows = 200000; // firehose row ceiling
   static const int _maxBytes = 100 * 1024 * 1024; // firehose content ceiling
   bool _prunedThisSession = false;
@@ -133,7 +135,7 @@ class ActivityArchive {
       try {
         db.execute(
           "DELETE FROM activity WHERE mid IS NOT NULL AND mid != '' "
-            "AND id NOT IN (SELECT MIN(id) FROM activity "
+          "AND id NOT IN (SELECT MIN(id) FROM activity "
           "WHERE mid IS NOT NULL AND mid != '' GROUP BY mid);",
         );
       } catch (_) {}
@@ -208,7 +210,7 @@ class ActivityArchive {
       );
       if (twin.isNotEmpty) {
         LogService.instance.add(
-            'activity: SAME TEXT, other id — new=${mid.isEmpty ? "(none)" : mid.substring(0, 12)} '
+          'activity: SAME TEXT, other id — new=${mid.isEmpty ? "(none)" : mid.substring(0, 12)} '
           'have=${(twin.first['mid'] ?? '').toString().isEmpty ? "(none)" : (twin.first['mid'] as String).substring(0, 12)} from=$from',
         );
       }
@@ -245,6 +247,26 @@ class ActivityArchive {
       return;
     }
     _pruneOnce(db);
+  }
+
+  /// Persist a bounded delivery as one SQLite transaction. Relay decoding and
+  /// signature verification happen in the NOSTR isolate; this keeps the small
+  /// main-isolate handoff to one fsync instead of one fsync per publication.
+  void addAll(Iterable<Map<String, dynamic>> posts) {
+    final db = _ensureDb();
+    if (db == null) return;
+    db.execute('BEGIN IMMEDIATE;');
+    try {
+      for (final post in posts) {
+        add(post);
+      }
+      db.execute('COMMIT;');
+    } catch (_) {
+      try {
+        db.execute('ROLLBACK;');
+      } catch (_) {}
+      rethrow;
+    }
   }
 
   /// The most recent [limit] posts, oldest→newest (ready to render top→bottom).
@@ -289,6 +311,154 @@ class ActivityArchive {
       out.add(m);
     }
     return out.reversed.toList(); // oldest→newest
+  }
+
+  /// One older page, oldest→newest, strictly before [beforeMs].
+  List<Map<String, dynamic>> olderBefore(int beforeMs, {int limit = 100}) {
+    final db = _ensureDb();
+    if (db == null) return const [];
+    try {
+      final rows = db.select(
+        'SELECT t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch '
+        'FROM activity WHERE t < ? ORDER BY t DESC LIMIT ?',
+        [beforeMs, limit],
+      );
+      return _rowsToPosts(rows).reversed.toList();
+    } catch (e) {
+      debugPrint('ActivityArchive: older page failed: $e');
+      return const [];
+    }
+  }
+
+  List<Map<String, dynamic>> _rowsToPosts(ResultSet rows) {
+    final out = <Map<String, dynamic>>[];
+    for (final r in rows) {
+      final m = <String, dynamic>{
+        't': r['t'],
+        'dir': r['dir'] ?? 'in',
+        'from': r['from_call'] ?? '',
+        'author': r['author_pubkey'] ?? '',
+        'text': r['text'] ?? '',
+        'kind': r['kind'] ?? 'msg',
+        'mid': (r['mid'] ?? '').toString(),
+        'parent': (r['parent'] ?? '').toString(),
+        'time': (r['time'] ?? '').toString(),
+        'pop': (r['pop'] as int?) ?? 0,
+        'source': (r['source'] ?? '').toString(),
+        'batch': (r['batch'] as int?) ?? 0,
+      };
+      for (final f in const ['convo', 'via', 'meta']) {
+        final v = (r[f] ?? '').toString();
+        if (v.isNotEmpty) m[f] = v;
+      }
+      out.add(m);
+    }
+    return out;
+  }
+
+  /// Copy the complete local history for one exact NOSTR author into another
+  /// Social archive. Both databases deduplicate by event id, so this is safe to
+  /// run when a user follows an account more than once.
+  void copyAuthorTo(String authorPubkey, ActivityArchive destination) {
+    final db = _ensureDb();
+    if (db == null || authorPubkey.length != 64) return;
+    try {
+      final rows = db.select(
+        'SELECT t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch '
+        'FROM activity WHERE lower(author_pubkey) = ? ORDER BY t ASC',
+        [authorPubkey.toLowerCase()],
+      );
+      destination.addAll([
+        for (final row in rows)
+          {
+            't': row['t'],
+            'dir': row['dir'],
+            'from': row['from_call'],
+            'author': row['author_pubkey'],
+            'text': row['text'],
+            'convo': row['convo'],
+            'kind': row['kind'],
+            'via': row['via'],
+            'meta': row['meta'],
+            'lat': row['lat'],
+            'lon': row['lon'],
+            'time': row['time'],
+            'mid': row['mid'],
+            'parent': row['parent'],
+            'pop': row['pop'],
+            'source': 'following',
+            'batch': row['batch'],
+          },
+      ]);
+    } catch (e) {
+      debugPrint('ActivityArchive: follow copy failed: $e');
+    }
+  }
+
+  /// Route the legacy unified feed into the two Social stores. A curated event
+  /// can also belong to Following, but an unproven legacy row must never become
+  /// public discovery content merely because it existed in the old database.
+  /// Event-id uniqueness makes repeat startup calls harmless.
+  void copyRoutedTo({
+    required ActivityArchive all,
+    required ActivityArchive following,
+    required Set<String> followedPubkeys,
+  }) {
+    final db = _ensureDb();
+    if (db == null) return;
+    final follows = followedPubkeys.map((e) => e.toLowerCase()).toSet();
+    try {
+      final rows = db.select(
+        'SELECT t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch FROM activity',
+      );
+      for (final row in rows) {
+        final post = <String, dynamic>{
+          't': row['t'],
+          'dir': row['dir'],
+          'from': row['from_call'],
+          'author': row['author_pubkey'],
+          'text': row['text'],
+          'convo': row['convo'],
+          'kind': row['kind'],
+          'via': row['via'],
+          'meta': row['meta'],
+          'lat': row['lat'],
+          'lon': row['lon'],
+          'time': row['time'],
+          'mid': row['mid'],
+          'parent': row['parent'],
+          'pop': row['pop'],
+          'source': row['source'],
+          'batch': row['batch'],
+        };
+        final source = (row['source'] ?? '').toString();
+        final author = (row['author_pubkey'] ?? '').toString().toLowerCase();
+        if (source == 'firehose' || source == 'discovery') all.add(post);
+        if (source == 'following' || follows.contains(author)) {
+          following.add({...post, 'source': 'following'});
+        }
+      }
+    } catch (e) {
+      debugPrint('ActivityArchive: migration copy failed: $e');
+    }
+  }
+
+  /// Remove rows that do not belong to this archive's provenance. Used once
+  /// while repairing builds that copied the complete legacy mixed feed into
+  /// `social_all.sqlite3`.
+  void retainSources(Set<String> sources) {
+    final db = _ensureDb();
+    if (db == null || sources.isEmpty) return;
+    final marks = List.filled(sources.length, '?').join(',');
+    try {
+      db.execute(
+        'DELETE FROM activity WHERE source NOT IN ($marks)',
+        sources.toList(),
+      );
+      _seenMids.clear();
+    } catch (e) {
+      debugPrint('ActivityArchive: provenance cleanup failed: $e');
+    }
   }
 
   /// Replace one transient feed source without touching follows, replies,
@@ -455,7 +625,7 @@ class ActivityArchive {
     if (db == null || text.isEmpty) return false;
     try {
       return db.select(
-          'SELECT 1 FROM activity WHERE from_call = ? AND text = ? LIMIT 1',
+        'SELECT 1 FROM activity WHERE from_call = ? AND text = ? LIMIT 1',
         [from, text],
       ).isNotEmpty;
     } catch (_) {
@@ -524,7 +694,7 @@ class ActivityArchive {
     try {
       if (like) {
         db.execute(
-            'INSERT OR REPLACE INTO activity_likes(mid,liker,mine) VALUES(?,?,?)',
+          'INSERT OR REPLACE INTO activity_likes(mid,liker,mine) VALUES(?,?,?)',
           [mid, liker, mine ? 1 : 0],
         );
       } else {

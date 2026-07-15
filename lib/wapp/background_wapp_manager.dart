@@ -241,6 +241,11 @@ class _WappBackgroundService extends BackgroundService {
     wappDataStorageFor(prefs, name),
   );
 
+  late final ActivityArchive _followingArchive = ActivityArchive.forStorage(
+    wappDataStorageFor(prefs, name),
+    fileName: 'social_following.sqlite3',
+  );
+
   // Conversation stores shared with the foreground page via the SAME
   // messages/<field>.json files. Without this, a 1:1 received while running
   // headless fires its notification but never lands in the store the Messages
@@ -379,7 +384,19 @@ class _WappBackgroundService extends BackgroundService {
         if (field == 'geochat') {
           if (msg is Map) _geoArchive.add(msg);
         } else if (field == 'activity') {
-          if (msg is Map) _activityArchive.add(msg);
+          if (msg is Map) {
+            final source = (msg['source'] ?? '').toString();
+            if (name == 'social' && source == 'following') {
+              _followingArchive.add(msg);
+            } else if (name == 'social') {
+              ActivityArchive.forStorage(
+                wappDataStorageFor(prefs, name),
+                fileName: 'social_all.sqlite3',
+              ).add(msg);
+            } else {
+              _activityArchive.add(msg);
+            }
+          }
         }
         // Auto-fetch shared media even with no UI: an incoming message carrying
         // a file: token + ih:/pa: hints joins the swarm so the bytes land in the
@@ -434,11 +451,13 @@ class _WappBackgroundService extends BackgroundService {
         final topic = (data['topic'] ?? '').toString();
         final parent = (data['parent'] ?? '').toString();
         if (text.isNotEmpty) {
-          unawaited(RnsService.instance.publishNote(
-            text,
-            topic: topic.isEmpty ? null : topic,
-            parent: parent.isEmpty ? null : parent,
-          ));
+          unawaited(
+            RnsService.instance.publishNote(
+              text,
+              topic: topic.isEmpty ? null : topic,
+              parent: parent.isEmpty ? null : parent,
+            ),
+          );
         }
       } else if (type == 'ui.activity.react') {
         // Tally like votes received while headless so they show on next open.

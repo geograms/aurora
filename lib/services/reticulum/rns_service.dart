@@ -74,6 +74,7 @@ import '../folders/folder_meta.dart';
 import '../folders/nfolder.dart';
 import '../folders/piece_hashes.dart';
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
+import '../../wapp/geoui/activity_archive.dart';
 import 'package:reticulum/reticulum.dart'
     show MediaArchive, MediaRef, MediaKind;
 import 'package:reticulum/reticulum.dart' show BlossomServer;
@@ -82,6 +83,7 @@ import '../notification_service.dart';
 import '../notification_store.dart';
 import '../../profile/profile_db.dart';
 import '../../profile/profile_service.dart';
+import '../../profile/storage_paths.dart';
 import '../../profile/secure_file.dart';
 import '../preferences_service.dart';
 import '../../util/nostr_crypto.dart';
@@ -5735,7 +5737,7 @@ class RnsService {
     );
 
     _mirrorTimer ??= Timer.periodic(
-      const Duration(minutes: 2),
+      const Duration(seconds: 10),
       (_) => _drainFollowsMirror(),
     );
   }
@@ -5780,6 +5782,27 @@ class RnsService {
       // pattern that froze the app for hours (docs/performance.md §3.1).
       // One transaction, so a batch of 100 is one fsync, not 100.
       final stored = store.putAllVerified(batch, tier: Tier.followed.index);
+      final prefs = PreferencesService.instanceSync;
+      if (prefs != null) {
+        final archive = ActivityArchive.forStorage(
+          wappDataStorageFor(prefs, 'social'),
+          fileName: 'social_following.sqlite3',
+        );
+        archive.addAll([
+          for (final event in batch)
+            {
+              't': event.createdAt * 1000,
+              'dir': event.pubkey == selfPubHex ? 'out' : 'in',
+              'from': event.pubkey.substring(0, 12),
+              'author': event.pubkey,
+              'text': event.content,
+              'kind': 'msg',
+              'mid': event.id ?? '',
+              'parent': _rootEventTag(event.tags),
+              'source': 'following',
+            },
+        ]);
+      }
       final ms = DateTime.now().difference(started).inMilliseconds;
       if (stored > 0 || dropped > 0) {
         LogService.instance.add(
@@ -5789,6 +5812,13 @@ class RnsService {
     } catch (e) {
       LogService.instance.add('RNS/relay: follows mirror failed: $e');
     }
+  }
+
+  static String _rootEventTag(List<List<String>> tags) {
+    for (final tag in tags) {
+      if (tag.length >= 2 && tag[0] == 'e') return tag[1];
+    }
+    return '';
   }
 
   /// True if [pubHex] (64-char hex) is followed.
@@ -6008,10 +6038,12 @@ class RnsService {
     return id;
   }
 
-  /// Self + follows: they bypass the firehose gate. Re-pushed on follow change.
+  /// Only our own key bypasses public curation. Direct follows have their own
+  /// complete subscription and database; trusting them here duplicated their
+  /// notes into the curated archive and made All/Following indistinguishable.
   void pushTrustedAuthors() {
     final me = selfPubHex;
-    _nostrHub?.setTrustedAuthors({if (me != null) me, ..._mirroredAuthors});
+    _nostrHub?.setTrustedAuthors({if (me != null) me});
   }
 
   /// Pull-to-refresh: hand the feed the best N ranked posts, right now. The

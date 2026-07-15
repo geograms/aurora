@@ -1,12 +1,12 @@
-# APRX — APRS eXtended messaging protocol
+# APRS-XT — APRS eXtended messaging protocol
 
 > Part of the Geogram protocol docs — see [README](README.md) for the full set
 > ([Reticulum](../../reticulum-dart/doc/reticulum.md), [DHT](../../reticulum-dart/doc/dht.md), [APRS transport](aprs.md),
 > [BLE transport](ble.md), [file sharing](../../reticulum-dart/doc/file-sharing.md)).
 
-APRX is a thin set of **conventions layered on top of standard APRS**. Every
-APRX frame is a 100% valid APRS frame: a vanilla APRS client shows it as
-ordinary text and ignores the parts it doesn't understand. APRX adds, purely
+APRS-XT is a thin set of **conventions layered on top of standard APRS**. Every
+APRS-XT frame is a 100% valid APRS frame: a vanilla APRS client shows it as
+ordinary text and ignores the parts it doesn't understand. APRS-XT adds, purely
 through how the text/addressee fields are filled in:
 
 - multi‑line (long) messages,
@@ -17,7 +17,7 @@ through how the text/addressee fields are filled in:
 - **geo‑chat** (area broadcast text).
 
 There is **no new packet type, no binary framing, no handshake**. If you can
-send and receive APRS messages/bulletins/position reports, you can speak APRX.
+send and receive APRS messages/bulletins/position reports, you can speak APRS-XT.
 
 This document is the wire contract so other apps can interoperate. It describes
 the payload conventions for APRS/TNC2 packets and APRS‑over‑BLE; the
@@ -27,7 +27,7 @@ the payload conventions for APRS/TNC2 packets and APRS‑over‑BLE; the
 
 ## 1. Design principles
 
-1. **Backward compatible.** An APRX frame is a legal APRS frame. Non‑APRX
+1. **Backward compatible.** An APRS-XT frame is a legal APRS frame. Non‑APRS-XT
    clients still display the body; they just see markers like `+b9fb ` or
    `b9fb:like` as plain text.
 2. **Stateless & derivable.** A message's identity is *computed from its own
@@ -129,7 +129,7 @@ defined for **group** traffic (§5/§6); 1:1 messages don't use them.
 
 ## 4. Direct (1:1) messages
 
-Plain APRS messages addressed to a callsign. No APRX additions beyond §5
+Plain APRS messages addressed to a callsign. No APRS-XT additions beyond §5
 (multi‑line). Threads/likes/scope do **not** apply to 1:1.
 
 ```
@@ -202,7 +202,7 @@ chooses to pull or filter the group:
 - **Local** — filter by position/range. You see a group's bulletins only from
   senders inside your chosen radius; BLE is inherently in range.
 - **Global** — subscribe without the local range constraint, then file only the
-  groups the user actually joined. APRX adds no global marker to the wire.
+  groups the user actually joined. APRS-XT adds no global marker to the wire.
 
 A client may represent the two views as two subscriptions (e.g. `#NEWS` local,
 `#NEWS*` global). That `*` is a **local UI marker only** — it is stripped before
@@ -233,7 +233,7 @@ Receiver behaviour:
   (`SHA1("X1BOB|+b9fb agreed, see you there")[0:4]`), so replies can be
   replied to in turn.
 
-Non‑APRX clients simply show `+b9fb agreed, see you there` verbatim — still
+Non‑APRS-XT clients simply show `+b9fb agreed, see you there` verbatim — still
 readable. Threads are **group‑only**.
 
 ---
@@ -344,14 +344,14 @@ X1TX>APRS::BLN0NOSTR:flH3-_InWKh9SjUYCetLr5rBgozalyqyTiJA1fH4kHI
 ```
 
 A plain APRS client renders #1–#3 as readable bulletin text and #4 as a 43‑char
-string; an APRX client renders a threaded, likeable conversation and learns
+string; an APRS-XT client renders a threaded, likeable conversation and learns
 `X1TX`'s key.
 
 ---
 
 ## 13. Implementation checklist (for other apps)
 
-To receive APRX:
+To receive APRS-XT:
 1. Parse APRS messages, bulletins, and position reports as usual.
 2. For each **bulletin**: extract `GROUP` (chars after `BLN<id>`, trim padding)
    and `line_id`; merge multi‑line by line id.
@@ -369,7 +369,7 @@ To receive APRX:
     media reference** (§15): classify it by its extension and look the hash up
     in the local media archive.
 
-To send APRX: emit the same forms. Keep each frame within the limits in §1;
+To send APRS-XT: emit the same forms. Keep each frame within the limits in §1;
 split long bodies per §5.
 
 ---
@@ -391,12 +391,12 @@ classic Schnorr `(e, s)` form rather than BIP‑340's `(R, s)`:
 - **total = 48 bytes** = the smallest a secp256k1 signature can be.
 
 `m = sha256("<FROM>|<core>")` is the signed digest. Sign: nonce `k` from a tagged
-hash, `R = kG`, `e = first16( taggedHash("APRX/challenge", R.x ‖ P.x ‖ m) )`,
+hash, `R = kG`, `e = first16( taggedHash("APRS-XT/challenge", R.x ‖ P.x ‖ m) )`,
 `s = (k + e·d') mod n` (with `d'` the even‑y key, BIP‑340 convention). Verify:
-`R' = sG − eP`, check `first16(taggedHash("APRX/challenge", R'.x ‖ P.x ‖ m)) == e`.
+`R' = sG − eP`, check `first16(taggedHash("APRS-XT/challenge", R'.x ‖ P.x ‖ m)) == e`.
 
-This is an **APRX‑specific** scheme (NOT interoperable with BIP‑340/Nostr
-verifiers); only APRX clients verify it. It reuses the existing key, so the §10
+This is an **APRS-XT‑specific** scheme (NOT interoperable with BIP‑340/Nostr
+verifiers); only APRS-XT clients verify it. It reuses the existing key, so the §10
 beacon and callsign binding are unchanged.
 
 ### 14.2 Encoding — APRS‑safe base85
@@ -496,7 +496,7 @@ Status: **specified** (token grammar + local archive implemented host‑side;
 sending/rendering in the wapp is future work).
 
 An APRS text message cannot carry a picture — but it can carry a **name for
-one**. APRX references a file by its content: the SHA‑256 of the bytes plus
+one**. APRS-XT references a file by its content: the SHA‑256 of the bytes plus
 the original file extension, embedded as a single word anywhere in a normal
 message body:
 
@@ -594,13 +594,13 @@ WAL‑journalled) shared by all wapps on the device.
 *identifies* media; fetching the content for an unknown hash (peer query,
 BLE parcel transfer, internet gateway, …) is a separate, future layer. A
 station that cannot resolve a hash simply shows the token as text — which is
-also exactly what a non‑APRX client sees: retro‑compatible by construction.
+also exactly what a non‑APRS-XT client sees: retro‑compatible by construction.
 
 ---
 
 *This spec documents the Geogram APRS wapp implementation (`wapps/aprs`). The
 TNC2 framing helpers live in `aprs.c`/`aprs.h`; the BLE compact form in
-`BLE_PROTOCOL.md`; the host-side signing in `geogram/lib/util/aprx_sign.dart`
+`BLE_PROTOCOL.md`; the host-side signing in `geogram/lib/util/aprs-xt_sign.dart`
 (exposed via `hal_identity_sign`/`hal_verify`); the media token parser in
 `geogram/lib/util/media_ref.dart` and the media archive in
 `geogram/lib/util/media_archive.dart`. Signed messages (§14) ship in wapp

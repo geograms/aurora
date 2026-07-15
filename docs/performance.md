@@ -566,3 +566,200 @@ curl -s http://127.0.0.1:3456/api/log?n=800 | grep -aoE 'perf: [^"]*' | tail -20
 If `main isolate stalled` reappears, or `crypto-worker` shows a paired
 `xGen`/`edGen` count again, or `nostr-engine profileLookups` climbs — something
 regressed to a pattern documented above.
+
+---
+
+## 8. Adding new work without regressing any of this
+
+Everything above was paid for once. This section is how to not pay for it again.
+It is the design half of the file: §1–7 say what went wrong, §8 says how to add a
+new subsystem, background task, or wapp so it never joins that list.
+
+### 8.1 New CPU work goes off the UI isolate — decide it up front, not after a freeze
+
+The freeze in §3.1 and the pegged core in §3.2 were both **work on the wrong
+isolate that nobody chose to put there** — it landed on `main` because that is the
+default and moving it later is surgery. The isolate table in §1 is the shape to
+extend, not the shape to fight.
+
+The decision rule, before writing the work:
+
+- **Touches a Flutter plugin / MethodChannel (BLE, WiFi-Direct, path_provider,
+  shared_preferences, audio)?** It **must** stay on the root/main isolate — there
+  is no `BackgroundIsolateBinaryMessenger` in this tree (§1.2). Bridge raw bytes to
+  a worker if the *processing* is heavy, exactly as `RnsTransport` registers the
+  owner's sockets/radios as *external* interfaces and the worker only ever sends
+  `['tx', label, bytes]` back to main for the actual I/O.
+- **Pure CPU (crypto, parsing, sqlite, compression), no plugins?** It belongs on a
+  worker isolate. Two idioms already exist — copy one, don't invent a third:
+  - **One-shot heavy call inside an existing tick:** `BackgroundService.runOffThread(fn)`
+    (= `Isolate.run`) in `services/background_service.dart`. For a *single* offload,
+    not a hot path.
+  - **A stream of items on a hot path:** a **long-lived worker + bounded queue**.
+    This is the §3.1 rule made concrete: never `Isolate.run` per item — the
+    spawn/teardown cost lands on the caller and an unbounded backlog is a memory
+    leak with extra steps.
+
+> **The worker boilerplate (one shape for all of them).** `ReceivePort` in the
+> owner → `Isolate.spawn(entrypoint, port.sendPort, debugName: 'my-worker')` →
+> the entrypoint's **first** message back is its own `inbox.sendPort` (the
+> handshake) → the owner stores that as its command port and completes a `ready`
+> Completer → all later traffic is tagged `List`s, request/response correlated by an
+> incrementing int id + `Map<int, Completer>` → register `iso.addOnExitListener` so
+> a crash fails the backlog and allows a lazy respawn. Reference implementations:
+> `rns_crypto.dart` `_CryptoWorker` (request/response pool with `_shedCap`/`_hardCap`
+> back-pressure), `rns_transport_engine.dart` `RnsTransportClient.spawn` (long-lived
+> engine + external-interface radio bridge), `nostr_engine.dart` `NostrClient.spawn`.
+> All three live in the sibling `reticulum-dart` package.
+
+> **Rule: a worker at 100% is invisible to the main-isolate metrics (§1.1).** When
+> you add a worker, add its telemetry line to `TaskMonitorService.startCpuSummary`
+> the same day — a `perf: my-worker …/min` counter whose *composition* is a
+> diagnosis (the §3.4 win came entirely from reading paired counts). A worker with
+> no counter is a core you cannot see burning.
+
+> **Do not move work to an isolate on instinct.** §6.4 is a worked *rejection*:
+> moving the background wapp engine off main would route ~114 singleton touchpoints
+> through port bridges inside the messaging path to reclaim 0.2%. And §6.3 records
+> that `RnsService` keeps ~10 sqlite stores on a *now-idle* main isolate with **no
+> measured reason** to move them. Off-isolate is for measured hot CPU, not for tidiness.
+
+### 8.2 Continuous work must survive a suspended phone — the Android background stack
+
+A Dart `Timer` is throttled to near-nothing once Android backgrounds the app, and
+the process itself can be killed. Anything that must keep running with the screen
+off — a relay answering queries, a download, an APRS-IS mailbox — cannot rely on
+Dart timers or on the Activity being alive. The stack that already solves this:
+
+- **A foreground service holds the process up.** `BgService.kt` is a `START_STICKY`
+  foreground service (persistent `aurora_bg` notification, `NOTIF_ID=7001`,
+  `FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE`). It acquires a `PARTIAL_WAKE_LOCK`
+  (`aurora:bg`) **and** a `WIFI_MODE_FULL_HIGH_PERF` WifiLock (`aurora:wifi`) so an
+  asleep device keeps CPU cycles and stays reachable for inbound connections. Don't
+  add a second foreground service for a new task — hold the existing one.
+- **A native heartbeat drives Dart, because Dart timers can't drive themselves.**
+  `BgService` posts a `Handler` runnable every `TICK_MS = 2000` that calls
+  `onTick` over the `com.geogram.aurora/bg_service` MethodChannel. Dart side:
+  `AndroidForegroundService._onCall` → `BackgroundWappManager.tickAllFromNative()`
+  → every `BackgroundService.tickNow()`. **This is why `BackgroundService` has both
+  a Dart `Timer.periodic` and a `tickNow()`:** the timer runs foreground, the native
+  heartbeat runs background. New periodic work that must survive suspension has to
+  ride `onTick`/`tickNow` — a bare `Timer.periodic` you add yourself will silently
+  stop in a pocket.
+- **The service is ref-counted, not owned.** `AndroidForegroundService` keeps a
+  `Set<String>` of holders (`'wapps'`, `'reticulum'`, `'player'`, …); `hold(reason)`
+  / `release(reason)` bring the native service up and down. A new always-on
+  subsystem takes its own `hold('myThing')` and releases it when idle — it does not
+  start or stop the service directly.
+- **Headless from boot.** `BootReceiver` (gated on the `flutter.autoStartOnBoot`
+  pref, kept in sync by `syncBootAutostart()`) → `BgService.startFromBoot` →
+  `AuroraApplication.ensureFlutterEngine()` runs Dart `main()` with **no Activity**.
+  One cached engine (`ENGINE_ID = "aurora_engine"`) is reused by the Activity when
+  the UI opens (`MainActivity.provideFlutterEngine`, `shouldDestroyEngineWithHost() =
+  false`) so opening the app never spawns a second isolate / second BLE stack.
+  `NativeBridgeRegistry.attach` binds each native bridge exactly once per engine.
+
+> **Rule: background-survivable work rides the native heartbeat, never a Dart timer.**
+> If it must run screen-off, it is a `BackgroundService` (so `tickNow()` reaches it)
+> or it holds the foreground service and is driven off `onTick`. A `Timer.periodic`
+> is a foreground-only convenience.
+
+> **Rule: cost-per-hour-screen-off is the metric that matters (§4.2, §6.5).** A poll
+> interval is a battery setting, not a freshness setting: "every 3 s" runs ~8,640×/day
+> in a pocket where nobody is looking. Fire once immediately, then settle into a slow
+> interval; let `wss` push handle freshness for anything that *can* push. Before adding
+> any periodic work, answer: what does this cost per hour with the screen off, and who
+> is awake to see the result?
+
+### 8.3 Reuse the `BackgroundService` template — don't hand-roll a loop
+
+Every recurring task should be a subclass of `BackgroundService`
+(`lib/services/background_service.dart`). You get, for free, the four things a
+raw `Timer.periodic` does not have and §3–4 proves you need:
+
+1. **`tickNow()`** — so the Android native heartbeat keeps it alive screen-off (§8.2).
+2. **TaskMonitor registration** — it appears in `perf: cpu tasks total`, ranked,
+   every 60 s, and any tick over 48 ms logs `perf: <task> tick took Nms`. Invisible
+   work is unmeasurable work.
+3. **The governor** — `TaskMonitorService` tracks a per-task EMA of
+   `lastDuration/interval` and auto-pauses a non-critical task that overruns
+   `overrunThreshold=0.8` for `overrunWindow=3` consecutive ticks, firing your
+   `onPause`/`onResume`. Set `priority: TaskPriority.critical` only for work that
+   genuinely must never be paused (it then can't be governed — justify it).
+4. **`_runTick()` skips the body while paused but keeps the loop alive** — so a
+   paused task resumes cleanly instead of dying.
+
+Recipe: subclass, set `id` / `serviceName` / `priority` / `interval`, implement
+`onStart` / `onTick` / `onStop` (and `onPause` / `onResume` if it owns its own
+loops or an isolate), then `.start()`. For pure CPU inside the tick, offload with
+`runOffThread` (§8.1). Register a one-shot init step through
+`BootOrchestrator.instance.register(... mode: BootStart.parallel | sequential)` in
+`main.dart` rather than calling it inline — sequential entries run alone in order
+(use it only for true ordering constraints like profile-unlock-before-headless-boot);
+parallel entries run concurrently with failures isolated. `I2pBackgroundService`
+(`lib/services/i2p/i2p_worker.dart`) is the in-repo example of a `BackgroundService`
+that also owns a worker isolate — copy its `onPause`/`onResume` stop/restart shape.
+
+### 8.4 Wapps are *called on an interval*, they don't run services — the event-bus pattern
+
+A wapp is WASM sandboxed behind the HAL; it **cannot** register a native callback,
+open a socket, or hardcode itself into `BgService`. The host owns the schedule and
+the events; the wapp is polled. This is deliberate — it is what lets a wapp run
+identically foreground, headless, and from boot without the wapp knowing which.
+
+Two mechanisms, both already built:
+
+- **Cadence is the wapp's to declare, the host's to drive.** A wapp exports
+  `module_tick_interval_ms` (default 5000 ms if omitted; `wapp_engine.dart`), read
+  **once** at start. The host wraps the wapp in a `_WappBackgroundService` whose
+  `interval` is that value, and calls the wasm `module_tick` export each tick —
+  foreground via the Dart timer, background via `tickAllFromNative()` →
+  `tickNow()`. A headless wapp runs purely through `onTick(): engine.tick(); _drain();`
+  with **no UI page**; all `ui.*` outbox messages are ignored in that path, while
+  `notify` (forced `scope: both`), `social.note`, `hero.*`, geochat/activity
+  archival still happen. So a wapp's periodic work goes in `module_tick`, sized to
+  its declared interval — and per §4.2, that interval is a battery setting.
+
+- **Host events reach a wapp as `system.*` topics it subscribes to — the preferred
+  pattern for "call me when X happens".** A wapp cannot subscribe to a Dart
+  `EventBus` directly (it's WASM). Instead `HostEventBridge` (installed as a boot
+  task) subscribes to the host `EventBus` and **republishes** each `AppEvent` onto
+  the `WappEventBroker` as a JSON `system.*` topic: `system.app.started`,
+  `system.wapp.loaded`, `system.wapp.unloaded`, `system.wapp.crashed`,
+  `system.error`. The wapp calls `hal_event_subscribe("system.app.started")`, and on
+  its next `module_tick` drains the event from its private broker queue
+  (`hal_event_available` / `hal_event_recv`). The broker also fires a
+  `WappEventBridgeEvent` on the host `EventBus` so Dart observers can watch the same
+  traffic, and it fans wapp↔wapp `publish` out to every subscribed engine's queue
+  (cap 1024, drops oldest).
+
+> **Why this shape, not a service the wapp installs.** A wapp lives and dies with
+> its engine (which the page open/close cycle disposes and recreates — see the §4.1.1
+> subscription-leak that this same isolation caused and forced us to fix in
+> `WappEngine.dispose()`). Letting a wapp hold a native service or a live host
+> subscription would leak exactly like that, per open/close, forever. Polling on a
+> host-owned tick + draining a bounded broker queue means a dead engine leaks
+> nothing: the host stops ticking it and the queue is discarded. **Extending
+> host→wapp signalling = add a new `system.*` topic in `HostEventBridge`, never a new
+> callback into the wapp.**
+
+To make a new wapp run on a schedule in the background: it opts into autostart
+(`PreferencesService.setWappAutostart`, some ship autostart-by-default via
+`_defaultAutostartWappIds`), which `syncBootAutostart()` reflects into the native
+`flutter.autoStartOnBoot` flag; `BackgroundWappManager.startAutostart()` (the single
+idempotent entry `PermissionGate.startGatedServices()` calls) then starts a headless
+engine for it at boot. The wapp declares its cadence via `module_tick_interval_ms`,
+does its work in `module_tick`, and reacts to host events by subscribing to
+`system.*`. At no point does it touch the native service.
+
+### 8.5 The one-line checklist for any new periodic/background subsystem
+
+- Plugin-bound? → stays on main, bridge bytes to a worker if processing is heavy.
+- Pure heavy CPU? → long-lived worker + bounded queue (never `Isolate.run` per item),
+  and add a `perf:` counter for it the same day.
+- Must survive screen-off? → `BackgroundService` (rides `tickNow` off the native
+  heartbeat) or hold the existing foreground service; never a bare `Timer.periodic`.
+- Recurring? → subclass `BackgroundService` for TaskMonitor + governor, don't hand-roll.
+- It's a wapp? → cadence via `module_tick_interval_ms`, work in `module_tick`, host
+  events via `system.*` topics — the host calls it, it installs nothing.
+- Poll interval chosen? → justify it as cost-per-hour-screen-off, fire-once-then-settle.

@@ -165,3 +165,27 @@ Android:
 
 The bundled wapps live in `assets/wapps/`. To rebuild a wapp from source, see
 the [`geograms/wapps`](https://github.com/geograms/wapps) repository.
+
+---
+
+## Development
+
+These documents define how code is written and accepted in this repo. Read the
+relevant one before touching that area — they are the conventions, not just notes.
+
+- **[Validation](docs/validation.md)** — the acceptance bar: a task is done only
+  after it is driven end-to-end on a connected Android phone with real taps and a
+  screenshot proving it works from the user's perspective. Also: keep honest status
+  messages flowing, and investigate a reported issue through the *whole* workflow
+  rather than stopping at the first bug.
+- **[Performance](docs/performance.md)** — how Aurora burns CPU/memory, what was
+  fixed and how it was measured, and (§8) the rules for adding new work without
+  regressing it: keep heavy work off the UI isolate, survive a suspended Android
+  phone via the foreground service + native heartbeat, reuse the `BackgroundService`
+  template, and drive wapps on an interval via the event bus.
+- **[Notifications](docs/notifications.md)** — how any wapp or host code raises a
+  notification, the severity/scope types, and how they escalate to system
+  notifications on desktop and Android.
+- **[Reusable services](docs/reusable.md)** — the shared host services (event bus,
+  notifications, storage, …) a wapp or feature should build on instead of
+  reinventing.

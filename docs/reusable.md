@@ -267,16 +267,24 @@ go through — from host services AND from wapps. Wraps multiple
 Also subscribes to `ErrorEvent` on `EventBus` and auto-shows each
 error as an error-level in-app notification.
 
-**Backends shipped today:**
-- `InAppNotificationBackend` — Flutter `ScaffoldMessenger` snackbars
-  with level-coloured background + icon, 3s / 6s durations, floating.
-  Driven by a `GlobalKey<ScaffoldMessengerState>` held in
-  `main.dart:rootMessengerKey` and passed to `MaterialApp`, so the
-  service can post snackbars without a `BuildContext`.
-- `SystemTrayNotificationBackend` — `notify-send` on Linux (with
-  urgency derived from level), `osascript` on macOS. Windows is
-  intentionally not implemented yet — would need BurntToast which may
-  not be present.
+**In-app display + backends shipped today:**
+- In-app cards are drawn by `NotificationLayer` (in
+  `notification_service.dart`), a **stacking overlay** installed via
+  `MaterialApp.builder` (see `launcher/launcher_app.dart`) — *not* a
+  `ScaffoldMessenger` snackbar. It subscribes to `NotificationShownEvent`
+  on the EventBus and stacks up to 5 level-coloured cards top-right,
+  auto-dismiss 3s (info/success) / 6s (error). It deliberately skips
+  `scope == system` (those go only to the OS). There is **no**
+  `InAppNotificationBackend` — an earlier snackbar/`rootMessengerKey`
+  design was replaced by this overlay.
+- `SystemTrayNotificationBackend` — handles `scope` `system`/`both`;
+  delegates to `platform.showSystemNotification(...)`: `notify-send` on
+  Linux (`--urgency=critical` for errors), `osascript` on macOS, and on
+  Android a `MethodChannel` `com.geogram.aurora/bg_service` `notify` call
+  → `BgBridge` → `NotificationManager`. Windows is not implemented yet;
+  Web is a no-op.
+
+See `docs/notifications.md` for the full developer guide.
 
 **Wapp wire protocol** (messages the wapp sends via `hal_msg_send`):
 
@@ -310,9 +318,11 @@ NotificationService.instance.show(GeogramNotification(
 (`NotificationScope.app | system | both`). The service skips
 backends whose `handlesScope` returns false. Default scope is `app`.
 
-**History.** Rolling in-memory list capped at
-`NotificationService.maxHistory = 200`. Reserved for a future
-history / debug UI.
+**History.** `NotificationService` keeps a rolling in-memory list capped
+at 200. Persistence is a separate `NotificationStore` (writes
+`notifications/history.jsonl` in the active profile, cap 300) that drives
+the bell-badge `unreadCount` and the `NotificationsPage` notification
+center. See `docs/notifications.md`.
 
 **Don't forget:**
 - `NotificationService.init()` must be called exactly once, before

@@ -237,6 +237,13 @@ signal, not a claim of freshness.
       It is memoised on the archive revision. And remember the **poll decodes every
       collected event's JSON on the main isolate** (sockets can't be on the engine)
       — keep the reaction/fresh sample sizes modest or it janks the UI.
+    - **Poll-and-close has a socket-leak trap.** The poll fires `connect()`
+      unawaited then `close()`s a few seconds later. If a slow relay's handshake
+      completes AFTER close(), `connect()` will resurrect the socket (stream
+      listener + idle timer) on a "closed" client — leaked once per slow relay per
+      poll, native heap climbs to OOM. `NostrWsClient.connect()` guards this with a
+      `_closed`/status check right after `await ch.ready`. Any new poll-and-close
+      code must do the same.
 
 ---
 

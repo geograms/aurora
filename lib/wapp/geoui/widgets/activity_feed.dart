@@ -32,6 +32,22 @@ import 'chat_view_field.dart' show viaTagColor;
 import 'generated_avatar.dart';
 import 'media_view.dart';
 
+bool activityPostMatchesDirectFollows(
+  Map<String, dynamic> post,
+  Set<String> followedPubkeys,
+  String? selfPubkey, [
+  String? Function(String from)? resolveAuthor,
+]) {
+  var author = (post['author'] ?? '').toString().toLowerCase();
+  if (author.length != 64 && resolveAuthor != null) {
+    author = (resolveAuthor((post['from'] ?? '').toString()) ?? '')
+        .toLowerCase();
+  }
+  if (author.length != 64) return false;
+  return followedPubkeys.contains(author) ||
+      author == selfPubkey?.toLowerCase();
+}
+
 class ActivityFeed extends StatefulWidget {
   /// Posts oldest→newest. Each: {from, text, time, via?, convo?, kind?}.
   final List<Map<String, dynamic>> posts;
@@ -83,6 +99,12 @@ class ActivityFeed extends StatefulWidget {
 
   /// Callsigns we follow (for the Following filter).
   final Set<String> followedCalls;
+
+  /// Exact NOSTR author pubkeys for Social. When provided, Following uses only
+  /// full-key equality and never falls back to callsign/display identifiers.
+  final Set<String>? followedPubkeys;
+  final String? selfPubkey;
+  final String? Function(String from)? authorPubkeyFor;
 
   /// Callsigns to hide from the feed (blocked + muted), pushed by the wapp.
   final Set<String> hiddenCalls;
@@ -139,6 +161,9 @@ class ActivityFeed extends StatefulWidget {
     this.replyCount,
     this.onOpenThread,
     this.followedCalls = const {},
+    this.followedPubkeys,
+    this.selfPubkey,
+    this.authorPubkeyFor,
     this.hiddenCalls = const {},
     this.onBlock,
     this.onMute,
@@ -331,6 +356,15 @@ class _ActivityFeedState extends State<ActivityFeed> {
         // to accounts I follow (+ my own posts).
         posts = src.reversed.where((p) {
           if (!_isStreamPost(p)) return false;
+          final strict = widget.followedPubkeys;
+          if (strict != null) {
+            return activityPostMatchesDirectFollows(
+              p,
+              strict,
+              widget.selfPubkey,
+              widget.authorPubkeyFor,
+            );
+          }
           final from = (p['from'] ?? '').toString().toUpperCase();
           final out = (p['dir'] ?? '') == 'out';
           return out || _isFollowed(from);
@@ -346,7 +380,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
         // hour-old material. The like gate was standing in for spam filtering and
         // doing it badly; the host's quality gate (feed_quality.dart) does that
         // job properly now, upstream, before a post ever reaches this widget.
-        final curated = widget.curatedAll ||
+        final curated =
+            widget.curatedAll ||
             src.any((p) => (p['source'] ?? '') == 'firehose');
         posts = src.reversed.where((p) {
           if (!_isStreamPost(p) || !_isRoot(p)) return false;

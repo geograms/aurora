@@ -108,6 +108,11 @@ class ActivityArchive {
       if (!cols.contains('batch')) {
         db.execute('ALTER TABLE activity ADD COLUMN batch INTEGER DEFAULT 0;');
       }
+      if (!cols.contains('author_pubkey')) {
+        db.execute(
+          "ALTER TABLE activity ADD COLUMN author_pubkey TEXT DEFAULT '';",
+        );
+      }
       db.execute(
         'CREATE INDEX IF NOT EXISTS idx_activity_source ON activity(source);',
       );
@@ -116,6 +121,10 @@ class ActivityArchive {
       );
       db.execute(
         'CREATE INDEX IF NOT EXISTS idx_activity_parent ON activity(parent);',
+      );
+      db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_activity_author_pubkey '
+        'ON activity(author_pubkey);',
       );
       // A NOSTR event id (mid) is globally unique and byte-identical no matter
       // which relay served it, so a post must never be stored twice. Purge any
@@ -207,14 +216,15 @@ class ActivityArchive {
 
     try {
       db.execute(
-        'INSERT OR IGNORE INTO activity(t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch) '
-        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'INSERT OR IGNORE INTO activity(t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch) '
+        'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [
           // Backfilled notes carry their real time so they sort correctly;
           // live posts default to now.
           (raw['t'] as num?)?.toInt() ?? now,
           (raw['dir'] ?? 'in').toString(),
           from,
+          (raw['author'] ?? '').toString().toLowerCase(),
           text,
           (raw['convo'] ?? '').toString(),
           (raw['kind'] ?? 'msg').toString(),
@@ -244,7 +254,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch '
+        'SELECT t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop,source,batch '
         'FROM activity ORDER BY t DESC LIMIT ?',
         [limit],
       );
@@ -258,6 +268,7 @@ class ActivityArchive {
         't': r['t'],
         'dir': r['dir'] ?? 'in',
         'from': r['from_call'] ?? '',
+        'author': r['author_pubkey'] ?? '',
         'text': r['text'] ?? '',
         'kind': r['kind'] ?? 'msg',
         'mid': (r['mid'] ?? '').toString(),
@@ -300,7 +311,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
+        'SELECT t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
         'FROM activity WHERE parent = ? ORDER BY t ASC LIMIT ?',
         [mid, limit],
       );
@@ -314,6 +325,7 @@ class ActivityArchive {
         't': r['t'],
         'dir': r['dir'] ?? 'in',
         'from': r['from_call'] ?? '',
+        'author': r['author_pubkey'] ?? '',
         'text': r['text'] ?? '',
         'kind': r['kind'] ?? 'msg',
         'mid': (r['mid'] ?? '').toString(),
@@ -374,7 +386,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
+        'SELECT t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
         'FROM activity WHERE mid = ? LIMIT 1',
         [mid],
       );
@@ -387,6 +399,7 @@ class ActivityArchive {
       't': r['t'],
       'dir': r['dir'] ?? 'in',
       'from': r['from_call'] ?? '',
+      'author': r['author_pubkey'] ?? '',
       'text': r['text'] ?? '',
       'kind': r['kind'] ?? 'msg',
       'mid': (r['mid'] ?? '').toString(),
@@ -416,6 +429,22 @@ class ActivityArchive {
       ]).isNotEmpty;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// Add authoritative identity metadata to a row created by an older Wapp.
+  void enrichAuthor(String mid, String author) {
+    final db = _ensureDb();
+    final normalized = author.toLowerCase();
+    if (db == null || mid.isEmpty || normalized.length != 64) return;
+    try {
+      db.execute(
+        'UPDATE activity SET author_pubkey = ? WHERE mid = ? '
+        "AND IFNULL(author_pubkey, '') = ''",
+        [normalized, mid],
+      );
+    } catch (e) {
+      debugPrint('ActivityArchive: author enrichment failed: $e');
     }
   }
 
@@ -455,7 +484,7 @@ class ActivityArchive {
     ResultSet rows;
     try {
       rows = db.select(
-        'SELECT t,dir,from_call,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
+        'SELECT t,dir,from_call,author_pubkey,text,convo,kind,via,meta,lat,lon,time,mid,parent,pop '
         'FROM activity WHERE from_call = ? ORDER BY t DESC LIMIT ?',
         [callsign, limit],
       );
@@ -469,6 +498,7 @@ class ActivityArchive {
         't': r['t'],
         'dir': r['dir'] ?? 'in',
         'from': r['from_call'] ?? '',
+        'author': r['author_pubkey'] ?? '',
         'text': r['text'] ?? '',
         'kind': r['kind'] ?? 'msg',
         'mid': (r['mid'] ?? '').toString(),

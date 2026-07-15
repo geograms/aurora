@@ -50,6 +50,7 @@ import '../social/relay_role.dart';
 import '../social/spam.dart';
 import '../social/store_forward.dart';
 import '../social/follow_set.dart';
+import '../social/direct_follow_resolver.dart';
 import '../social/keep_policy.dart' show Touch;
 import '../social/keep_service.dart';
 import '../social/archiver_policy.dart';
@@ -4781,6 +4782,11 @@ class RnsService {
   void addNostrListener(void Function() cb) => _nostrListeners.add(cb);
   void removeNostrListener(void Function() cb) => _nostrListeners.remove(cb);
   void _notifyNostrListeners() {
+    final followVersion = _nostrHub?.myFollowsVersion ?? 0;
+    if (followVersion != _resolvedFollowSnapshotVersion) {
+      _resolvedFollowSnapshotVersion = followVersion;
+      _mergeMyFollows();
+    }
     for (final c in List.of(_nostrListeners)) {
       try {
         c();
@@ -6472,97 +6478,43 @@ class RnsService {
   void nostrFollow(String key) => followPubkey(key);
   void nostrUnfollow(String key) => unfollowPubkey(key);
 
-  /// MIRROR my kind-3 contact list into the follow set — do not accumulate it.
-  ///
-  /// This used to be an additive fold: every p-tag of the kind-3 found on the
-  /// relays was added to a persistent set and NOTHING ever removed one. So the
-  /// Following tab showed accounts the user had never followed in this app and
-  /// could not get rid of — unfollow them, and the next rebuild folded them
-  /// straight back in from the relay. That is the "Nostr News" the user kept
-  /// seeing under Following.
-  ///
-  /// The truth is now assembled from three sources, every time:
-  ///
-  ///   follows = (relay kind-3 ∪ followed-here) − unfollowed-here
-  ///
-  /// An account that leaves the contact list leaves Following. An account the
-  /// user unfollows here stays gone, even though we deliberately do NOT rewrite
-  /// their kind-3 on the relays — overwriting somebody's real contact list from
-  /// a mirror we cannot prove is complete is not a risk worth taking for a tab.
+  int _resolvedFollowSnapshotVersion = -1;
+
+  /// Resolve the exact direct-follow set. The latest kind-3 snapshot and local
+  /// follows are authoritative; archive tiers and legacy web-of-trust state are
+  /// deliberately excluded because neither proves that the user followed an
+  /// author.
   void _mergeMyFollows() {
     final prefs = PreferencesService.instanceSync;
-    final mine = _nostrHub?.myFollows() ?? const <String>[];
+    final hub = _nostrHub;
+    final liveLoaded = hub?.myFollowsLoaded ?? false;
+    if (liveLoaded && prefs != null) {
+      final snapshot =
+          hub!
+              .myFollows()
+              .where((h) => h.length == 64)
+              .map((h) => h.toLowerCase())
+              .toSet()
+              .toList()
+            ..sort();
+      prefs.followsContactSnapshot = snapshot;
+      prefs.followsContactSnapshotLoaded = true;
+    }
+    final contact = liveLoaded
+        ? hub!.myFollows()
+        : (prefs?.followsContactSnapshotLoaded ?? false)
+        ? prefs!.followsContactSnapshot
+        : const <String>[];
     final local = prefs?.followsLocal ?? const <String>[];
-    final unfollowed = {
-      for (final h in prefs?.followsUnfollowed ?? const <String>[])
-        h.toLowerCase(),
-    };
-
-    // RECOVERY. If we hold no follows at all and the relays have no contact list
-    // for this account, rebuild from what the device KEPT: the follows mirror
-    // stores a followed author's posts at tier 1, so the distinct tier-1 authors
-    // in the relay store ARE the people the user followed. This exists because
-    // an earlier version of this very function mirrored against an absent
-    // contact list and emptied the persisted follow file — a list the user built
-    // by hand deserves to be rebuilt from evidence, not from their memory.
-    if (_follows.asSet.isEmpty && mine.isEmpty && local.isEmpty) {
-      final kept =
-          _relayStore?.authorsAtTier(1, limit: 500) ?? const <String>[];
-      final recovered = kept
-          .where((h) => h.length == 64 && !unfollowed.contains(h))
-          .toList();
-      if (recovered.isNotEmpty) {
-        for (final h in recovered) {
-          _follows.add(h);
-        }
-        LogService.instance.add(
-          'follows: recovered ${recovered.length} from kept posts (tier 1)',
+    final unfollowed = prefs?.followsUnfollowed ?? const <String>[];
+    final desired = resolveDirectFollows(
+      contactSnapshot: contact,
+      localFollows: local,
+      explicitUnfollows: unfollowed,
         );
-        pushTrustedAuthors();
-        refreshFollowedProfiles();
-        return;
-      }
-    }
-
-    // AN ABSENT CONTACT LIST IS NOT AN EMPTY ONE.
-    //
-    // The kind-3 is fetched from the relays and takes a while (or never comes, on
-    // a bad network). Treating "not fetched yet" as "you follow nobody" would
-    // mirror the follow set down to nothing — and that set is PERSISTED, so it
-    // would silently destroy the user's follows, empty the Following tab, drop
-    // everyone out of the trusted set and unsubscribe the web-of-trust feed. It
-    // did exactly that the first time I ran this, which is why the guard is here
-    // and why removals are driven ONLY by a contact list we have actually seen.
-    final haveContactList = mine.isNotEmpty;
-
-    final desired = <String>{
-      for (final h in [...mine, ...local])
-        if (h.length == 64) h.toLowerCase(),
-    }..removeAll(unfollowed);
-
-    final current = {..._follows.asSet};
-    var changed = false;
-
-    for (final h in desired.difference(current)) {
-      if (_follows.add(h)) changed = true;
-    }
-    if (haveContactList) {
-      // Now — and only now — an account that has left the contact list (or that
-      // the user unfollowed here) leaves Following.
-      for (final h in current.difference(desired)) {
-        if (_follows.remove(h)) changed = true;
-      }
-    } else {
-      // No snapshot: we can still honour an explicit unfollow, because that is a
-      // decision the USER made and it does not depend on the relays.
-      for (final h in current.intersection(unfollowed)) {
-        if (_follows.remove(h)) changed = true;
-      }
-    }
-
-    if (changed) {
+    if (_follows.replaceAll(desired)) {
       LogService.instance.add(
-        'follows: contactList=${mine.length} '
+        'follows: contactList=${contact.length} loaded=$liveLoaded '
           'local=${local.length} unfollowed=${unfollowed.length} '
         '-> ${_follows.asSet.length}',
       );
@@ -6576,6 +6528,7 @@ class RnsService {
   /// "Following is empty" must be answerable without guessing.
   Map<String, int> followsDebug() => {
         'contactList': _nostrHub?.myFollows().length ?? -1,
+    'contactLoaded': (_nostrHub?.myFollowsLoaded ?? false) ? 1 : 0,
         'local': PreferencesService.instanceSync?.followsLocal.length ?? -1,
         'unfollowed':
             PreferencesService.instanceSync?.followsUnfollowed.length ?? -1,
@@ -6591,6 +6544,9 @@ class RnsService {
         if (h.length >= 12) h.substring(0, 12).toUpperCase(),
     };
   }
+
+  /// Exact full pubkeys used by the Social Following filter.
+  Set<String> nostrFollowPubkeys() => nostrFollows().toSet();
 
   /// Our own x-only pubkey (hex) — the Messages tab filters kind-4 by `#p`=this.
   String? nostrSelfHex() => selfPubHex;
@@ -6657,7 +6613,7 @@ class RnsService {
   /// Feed author set — the people we follow. The wapp subscribes kind-1 from
   /// THIS (empty → the wapp falls back to the reaction-gated discovery feed).
   List<String> nostrWot() {
-    final s = _follows.asSet.toList();
+    final s = nostrFollows();
     return s.length > 500 ? s.take(500).toList() : s;
   }
 

@@ -1608,6 +1608,18 @@ class _WappPageState extends State<WappPage>
                     _archived = 0;
                   }
                 }
+              } else if (fieldName == 'activity' && mid.isNotEmpty) {
+                final author = (row['author'] ?? '').toString().toLowerCase();
+                if (author.length == 64) {
+                  for (final existing in buf) {
+                    if ((existing['mid'] ?? '').toString() == mid) {
+                      existing['author'] = author;
+                      break;
+                    }
+                  }
+                  _activityArchive?.enrichAuthor(mid, author);
+                  _activityRev.value++;
+                }
               }
             }
             changed = true;
@@ -5558,6 +5570,13 @@ class _WappPageState extends State<WappPage>
           ..._followedCalls,
           ...RnsService.instance.nostrFollowShort12(),
         },
+        followedPubkeys: _wappName == 'social'
+            ? RnsService.instance.nostrFollowPubkeys()
+            : null,
+        selfPubkey: _wappName == 'social'
+            ? RnsService.instance.nostrSelfHex()
+            : null,
+        authorPubkeyFor: _wappName == 'social' ? _fullPubkeyFor : null,
         hiddenCalls: {
           ..._activityHidden,
           ...RnsService.instance.mutedCallsigns,
@@ -5647,9 +5666,7 @@ class _WappPageState extends State<WappPage>
           await Future<void>.delayed(const Duration(milliseconds: 250));
           if (filter == 'all') {
             final count = await RnsService.instance.nostrRefreshBurst(n: 100);
-            LogService.instance.add(
-              'social refresh: filter=all batch=$count',
-            );
+            LogService.instance.add('social refresh: filter=all batch=$count');
           } else {
             RnsService.instance.nostrResume();
             LogService.instance.add('social refresh: filter=$filter reopened');

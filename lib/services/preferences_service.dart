@@ -164,6 +164,18 @@ class PreferencesService {
   set followsUnfollowed(List<String> v) =>
       _prefs.setStringList('social.followsUnfollowed', v);
 
+  // Last authoritative kind-3 contact-list snapshot. Persisting it keeps the
+  // Following feed correct and populated while relays reconnect on startup.
+  List<String> get followsContactSnapshot =>
+      _prefs.getStringList('social.followsContactSnapshot') ?? const [];
+  set followsContactSnapshot(List<String> v) =>
+      _prefs.setStringList('social.followsContactSnapshot', v);
+
+  bool get followsContactSnapshotLoaded =>
+      _prefs.getBool('social.followsContactSnapshotLoaded') ?? false;
+  set followsContactSnapshotLoaded(bool v) =>
+      _prefs.setBool('social.followsContactSnapshotLoaded', v);
+
   // Social notifications. Two high-water marks, both persisted, because both
   // were in-memory and that is the whole bug: on every restart the standing
   // "#p = me" subscription replays the stored notifications out of SQLite, and
@@ -278,7 +290,8 @@ class PreferencesService {
 
   List<String> get archiveTopics =>
       _prefs.getStringList('archive.topics') ?? const [];
-  set archiveTopics(List<String> v) => _prefs.setStringList('archive.topics', v);
+  set archiveTopics(List<String> v) =>
+      _prefs.setStringList('archive.topics', v);
 
   bool get archiveFromLan => _prefs.getBool('archive.fromLan') ?? true;
   set archiveFromLan(bool v) => _prefs.setBool('archive.fromLan', v);

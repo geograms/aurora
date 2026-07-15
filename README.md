@@ -101,7 +101,7 @@ your own key.
 ### 🛰️ Reticulum — see the mesh
 
 <p align="center">
-  <img src="docs/screenshots/reticulum-graph.png" width="260" alt="Reticulum: native node radar with peers, hubs, LoRa/Radio">
+  <img src="docs/screenshots/reticulum-graph.gif" width="260" alt="Reticulum: live animated node graph">
 </p>
 
 A native, off-thread visualization of the Reticulum network as your device hears
@@ -115,9 +115,8 @@ what announces have reached this node.
 ### ⬇️ Torrents — folders that live on the mesh
 
 <p align="center">
-  <img src="docs/screenshots/torrents-list.png" width="240" alt="Torrents: library list">
-  <img src="docs/screenshots/torrents-info.png" width="240" alt="Torrents: listing / info page">
-  <img src="docs/screenshots/torrents-popularity.png" width="240" alt="Torrents: popularity over months">
+  <img src="docs/screenshots/torrents-list.png" width="260" alt="Torrents: library list">
+  <img src="docs/screenshots/torrents-info.png" width="260" alt="Torrents: listing / info page">
 </p>
 
 A torrent client whose unit of sharing is a **folder**, addressed by a key

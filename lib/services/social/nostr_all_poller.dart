@@ -1,31 +1,29 @@
 /*
- * NostrAllPoller — the Social "All" firehose as a ONE-SHOT poll-and-close on the
- * MAIN isolate. This is how modern NOSTR clients work, and the model the app
- * must use off-grid.
+ * NostrAllPoller — a CURATED Social "All" feed built with one-shot poll-and-close
+ * requests on the MAIN isolate (the nostr-engine isolate freezes reopening a
+ * WebSocket, so it cannot own this).
  *
- * Hard rules (learned the hard way on real hardware):
- *   - Never assume permanent internet, and never assume a busy public relay will
- *     let our socket linger — they cut idle clients constantly.
- *   - So open a socket only as briefly as it takes to pull what is new, then
- *     DISCONNECT. No persistent firehose sockets.
+ * The feed is NOT a raw firehose. A raw firehose of the newest posts is useless
+ * because seconds-old posts have no likes yet — the feed looks dead. Instead this
+ * finds what is actually POPULAR and shows a short, ranked list:
  *
- * Why the main isolate: the nostr-engine isolate FREEZES whenever it tries to
- * (re)open a WebSocket on this hardware, so the moment the relays cut its
- * persistent sockets the whole feed died and could not recover. The main isolate
- * opens WebSockets reliably, so the poll lives here. Signature verification and
- * the spam gate run in a throwaway `compute` isolate (pure Dart, no sockets, so
- * none of the engine-isolate freeze applies).
+ *   phase 1 — sample recent reactions/reposts (kinds 6,7) and a little fresh
+ *             content (kind 1). The reactions point at whatever posts people are
+ *             actually engaging with, of any age.
+ *   phase 2 — fetch those popular posts by id, plus replies to them.
+ *   phase 3 — fetch kind-0 profiles for the authors so names/avatars show
+ *             instead of hex keys.
+ *   then    — DISCONNECT; verify + gate + score off-thread; keep the top ~20 by
+ *             real engagement (likes×3 + replies×4 + reposts×2, with a freshness
+ *             nudge); write them, their reactions and their replies into the feed
+ *             archive; hand the profiles to the host cache.
  *
- * Each poll, on ONE set of short-lived sockets:
- *   phase 1 — REQ kind-1 since the last window; collect a few seconds; gate +
- *             verify off-thread; write survivors into the feed archive.
- *   phase 2 — REQ reactions/replies (#e) for the recently-shown posts; count
- *             them into the archive so likes/reply badges fill in and keep
- *             growing as fresh posts gather engagement.
- * Then DISCONNECT. Runs on a timer while Social is open, on open, and on
- * pull-to-refresh.
+ * Off-grid rules: never assume permanent internet or that a busy relay keeps our
+ * socket; open briefly, take what is needed, disconnect. Runs every 10 minutes
+ * while Social is open, on open, and on pull-to-refresh.
  */
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:reticulum/reticulum.dart'
@@ -42,15 +40,21 @@ import '../reticulum/rns_service.dart';
 import '../../wapp/geoui/activity_archive.dart';
 
 class NostrAllPoller {
-  NostrAllPoller({required this.archive, required this.onChanged});
+  NostrAllPoller({
+    required this.archive,
+    required this.onChanged,
+    required this.onProfiles,
+  });
 
-  /// The Social "All" archive the feed renders from. Survivors are written here;
-  /// it dedups by event id, so re-fetching the same post is a no-op.
+  /// The Social "All" archive the feed renders from (dedups by event id).
   final ActivityArchive archive;
 
-  /// Bumped when new posts (or new engagement) were written, so the feed
-  /// rebuilds.
+  /// Bumped when new curated posts or engagement were written.
   final void Function() onChanged;
+
+  /// Fresh kind-0 profiles: {64-hex pubkey: {name, pic}} for the host to cache so
+  /// author names/avatars render instead of hex keys.
+  final void Function(Map<String, Map<String, String>>) onProfiles;
 
   /// True while a poll is in flight — the UI shows "Getting fresh posts…".
   final ValueNotifier<bool> polling = ValueNotifier<bool>(false);
@@ -58,26 +62,28 @@ class NostrAllPoller {
   Timer? _timer;
   bool _busy = false;
 
-  /// Newest created_at (unix seconds) we have already written, so the next poll
-  /// asks only for what is newer — a cheap window, not the whole backlog.
-  int _newestSec = 0;
+  // ── Tuning ────────────────────────────────────────────────────────────────
+  /// ~20 curated posts per cycle, as requested.
+  static const int _keepPerCycle = 22;
 
-  /// How long phase 1 (posts) holds the sockets. Brief on purpose.
-  static const Duration _collectPosts = Duration(seconds: 6);
+  /// Refresh cadence while Social is open.
+  static const Duration _cadence = Duration(minutes: 10);
 
-  /// How long phase 2 (reactions/replies) holds them.
-  static const Duration _collectStats = Duration(seconds: 5);
+  /// Reactions/reposts sample window — wide enough that genuinely popular posts
+  /// (which take time to gather likes) are found.
+  static const int _reactWindowSec = 120 * 60; // 2h
+  static const int _reactLimit = 500; // per relay
 
-  /// How far back the FIRST poll of a session looks (later polls use [_newestSec]).
-  static const Duration _coldWindow = Duration(minutes: 30);
+  /// A little fresh content so brand-new-but-already-liked posts can appear.
+  static const int _freshWindowSec = 20 * 60;
+  static const int _freshLimit = 150;
 
-  /// Cadence while Social is open. Fresh short-lived client each time.
-  static const Duration _cadence = Duration(minutes: 3);
+  /// How many popular post ids to actually fetch + rank.
+  static const int _topPopular = 80;
 
-  /// Fetch engagement for at most this many posts per poll (relay filters cannot
-  /// be unbounded). Wide enough to cover the aging posts that actually have
-  /// reactions, not just the seconds-old top of the feed.
-  static const int _statsFanout = 150;
+  static const Duration _collect1 = Duration(seconds: 8); // react + fresh
+  static const Duration _collect2 = Duration(seconds: 6); // posts + replies
+  static const Duration _collect3 = Duration(seconds: 5); // profiles
 
   bool get isPolling => _busy;
 
@@ -97,185 +103,219 @@ class NostrAllPoller {
     polling.dispose();
   }
 
-  /// Fetch what is new + refresh engagement, then disconnect. Concurrency-safe:
-  /// a poll already in flight wins and a second caller is a no-op (returns 0).
+  /// One curated poll. Concurrency-safe: a poll in flight wins.
   Future<int> pollOnce() async {
     if (_busy) return 0;
     _busy = true;
     polling.value = true;
     final clients = <NostrWsClient>[];
-    final posts = <String, NostrEvent>{};
-    final stats = <NostrEvent>[];
+
+    // Collected, routed by subscription id.
+    final reactions = <NostrEvent>[]; // kind 6/7 (sub 'r')
+    final fresh = <String, NostrEvent>{}; // kind 1 fresh (sub 'f')
+    final popular = <String, NostrEvent>{}; // kind 1 by id (sub 'p')
+    final replies = <NostrEvent>[]; // kind 1 #e (sub 'e')
+    final profiles = <String, NostrEvent>{}; // kind 0 (sub 'k'), by pubkey
+
     try {
       final relays = _relays();
       if (relays.isEmpty) return 0;
       final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      final since = _newestSec > 0
-          ? (_newestSec - 60) // small overlap for relay clock skew
-          : (nowSec - _coldWindow.inSeconds);
 
-      // Route events by subscription id: 'p' = new posts, 's' = engagement.
       for (final uri in relays) {
         final c = NostrWsClient(uri);
         c.onEvent = (sub, ev) {
-          if (sub == 'p') {
-            final id = ev.id;
-            if (id != null) posts[id] = ev;
-          } else if (sub == 's') {
-            stats.add(ev);
+          switch (sub) {
+            case 'r':
+              reactions.add(ev);
+            case 'f':
+              final id = ev.id;
+              if (id != null) fresh[id] = ev;
+            case 'p':
+              final id = ev.id;
+              if (id != null) popular[id] = ev;
+            case 'e':
+              replies.add(ev);
+            case 'k':
+              profiles[ev.pubkey] = ev; // newest wins within a poll
           }
         };
         clients.add(c);
-        // Fire the connect; don't await the handshake serially — the collect
-        // window is the wait, and a dead relay must not hold up the others.
         unawaited(
-          c
-              .connect()
-              .then((_) => c.subscribe('p', [
-                    NostrFilter(kinds: const [1], since: since, limit: 300),
-                  ]))
-              .catchError((_) {}),
+          c.connect().then((_) {
+            c.subscribe('r', [
+              NostrFilter(
+                kinds: const [6, 7],
+                since: nowSec - _reactWindowSec,
+                limit: _reactLimit,
+              ),
+            ]);
+            c.subscribe('f', [
+              NostrFilter(
+                kinds: const [1],
+                since: nowSec - _freshWindowSec,
+                limit: _freshLimit,
+              ),
+            ]);
+          }).catchError((_) {}),
         );
       }
-      await Future<void>.delayed(_collectPosts);
+      await Future<void>.delayed(_collect1);
 
-      // Gate + verify the posts off-thread, then persist. Do this while the
-      // sockets are still open so phase 2 can reuse them.
+      // Tally reactions/reposts to find the popular posts.
+      final likers = <String, Set<String>>{};
+      final reposters = <String, Set<String>>{};
+      for (final ev in reactions) {
+        final target = _lastETag(ev);
+        if (target == null) continue;
+        if (ev.kind == 7) {
+          if (ev.content.trim() == '-') continue; // downvote
+          (likers[target] ??= <String>{}).add(ev.pubkey);
+        } else if (ev.kind == 6) {
+          (reposters[target] ??= <String>{}).add(ev.pubkey);
+        }
+      }
+      // Most-liked post ids (also include fresh ids so fresh-but-liked show).
+      final popIds =
+          (likers.keys.toList()
+            ..sort(
+              (a, b) => (likers[b]?.length ?? 0).compareTo(likers[a]?.length ?? 0),
+            ))
+              .take(_topPopular)
+              .toList();
+
+      // Phase 2: fetch the popular posts + replies. Phase 3: profiles for every
+      // author we might show (fresh authors are known now; popular authors are
+      // fetched here and their profiles asked in phase 3).
+      if (popIds.isNotEmpty) {
+        for (final c in clients) {
+          try {
+            c.subscribe('p', [NostrFilter(ids: popIds)]);
+            c.subscribe('e', [
+              NostrFilter(kinds: const [1], tags: {'e': popIds}, limit: 400),
+            ]);
+          } catch (_) {}
+        }
+        await Future<void>.delayed(_collect2);
+      }
+
+      // Author set for profiles: fresh + popular.
+      final authors = <String>{
+        for (final e in fresh.values) e.pubkey,
+        for (final e in popular.values) e.pubkey,
+      };
+      if (authors.isNotEmpty) {
+        final list = authors.take(150).toList();
+        for (final c in clients) {
+          try {
+            c.subscribe('k', [
+              NostrFilter(kinds: const [0], authors: list, limit: list.length),
+            ]);
+          } catch (_) {}
+        }
+        await Future<void>.delayed(_collect3);
+      }
+
+      // ── Build ────────────────────────────────────────────────────────────
       final muted = RnsService.instance.mutedCallsigns
           .map((c) => c.toLowerCase())
           .toList();
-      var added = 0;
-      if (posts.isNotEmpty) {
-        final raw = [for (final e in posts.values) e.toJson()];
-        final rows = await compute(
-          _verifyGateBuild,
-          {'events': raw, 'muted': muted},
-        );
-        for (final row in rows) {
-          archive.add(row);
-          final sec = ((row['t'] as int?) ?? 0) ~/ 1000;
-          if (sec > _newestSec) _newestSec = sec;
-          added++;
-        }
-        if (added > 0) onChanged();
+
+      // Reply counts per post id (distinct reply ids).
+      final replyIds = <String, Set<String>>{};
+      final replyRows = <Map<String, dynamic>>[];
+      for (final ev in replies) {
+        final target = _lastETag(ev);
+        final id = ev.id;
+        if (target == null || id == null) continue;
+        if (!popIds.contains(target)) continue;
+        (replyIds[target] ??= <String>{}).add(id);
+        final row = _replyRow(ev, target);
+        if (row != null) replyRows.add(row);
       }
 
-      // Phase 2: refresh engagement for the posts on screen. Ask every relay for
-      // reactions (7), reposts (6) and replies (1) that reference them.
-      final ids = _recentPostIds();
-      if (ids.isNotEmpty) {
-        final statsFilter = NostrFilter(
-          kinds: const [1, 6, 7],
-          tags: {'e': ids},
-          limit: 500,
-        );
-        for (final c in clients) {
-          try {
-            c.subscribe('s', [statsFilter]);
-          } catch (_) {}
-        }
-        await Future<void>.delayed(_collectStats);
+      // Engagement summary for scoring.
+      final engagement = <String, Map<String, int>>{};
+      for (final id in {...fresh.keys, ...popular.keys}) {
+        engagement[id] = {
+          'likes': likers[id]?.length ?? 0,
+          'replies': replyIds[id]?.length ?? 0,
+          'reposts': reposters[id]?.length ?? 0,
+        };
       }
 
+      final candidates = <Map<String, dynamic>>[
+        for (final e in fresh.values) e.toJson(),
+        for (final e in popular.values) e.toJson(),
+      ];
+
+      var kept = <Map<String, dynamic>>[];
+      if (candidates.isNotEmpty) {
+        kept = await compute(_verifyGateScore, {
+          'events': candidates,
+          'engagement': engagement,
+          'muted': muted,
+          'keep': _keepPerCycle,
+          'nowSec': nowSec,
+        });
+      }
+
+      // Persist curated posts, their likes and their replies.
+      final keptIds = <String>{};
+      for (final row in kept) {
+        archive.add(row);
+        final mid = (row['mid'] ?? '').toString();
+        keptIds.add(mid);
+        for (final liker in likers[mid] ?? const <String>{}) {
+          archive.setReaction(mid, liker.toLowerCase(), true, false);
+        }
+      }
+      for (final r in replyRows) {
+        if (keptIds.contains((r['parent'] ?? '').toString())) archive.add(r);
+      }
+
+      // Hand profiles to the host cache (names instead of hex).
+      if (profiles.isNotEmpty) {
+        final out = <String, Map<String, String>>{};
+        for (final ev in profiles.values) {
+          final p = _parseProfile(ev.content);
+          if (p != null) out[ev.pubkey.toLowerCase()] = p;
+        }
+        if (out.isNotEmpty) onProfiles(out);
+      }
+
+      if (kept.isNotEmpty || replyRows.isNotEmpty || profiles.isNotEmpty) {
+        onChanged();
+      }
       LogService.instance.add(
-        'all-poll: ${posts.length} fetched, $added kept, '
-        '${stats.length} engagement '
-        '(newest ${_newestSec == 0 ? "-" : "${nowAgeSec()}s"} ago)',
+        'all-poll: ${reactions.length} reactions, ${fresh.length} fresh, '
+        '${popular.length} popular, ${kept.length} curated, '
+        '${profiles.length} profiles',
       );
     } catch (e) {
       LogService.instance.add('all-poll: FAILED $e');
     } finally {
-      // ALWAYS let the sockets go — the whole point. close() (not just
-      // disconnect) marks the client done so it never tries to reconnect.
       for (final c in clients) {
-        try {
-          c.unsubscribe('p');
-        } catch (_) {}
-        try {
-          c.unsubscribe('s');
-        } catch (_) {}
+        for (final s in const ['r', 'f', 'p', 'e', 'k']) {
+          try {
+            c.unsubscribe(s);
+          } catch (_) {}
+        }
         unawaited(c.close());
       }
       _busy = false;
       polling.value = false;
     }
-
-    // Fold engagement into the archive (off the sockets, on main — cheap: no
-    // crypto, just counting). Reaction verification is not worth ~100ms a
-    // signature for a like badge on a stranger's post.
-    if (stats.isNotEmpty) {
-      final known = _recentPostIdSet();
-      var changed = false;
-      for (final ev in stats) {
-        final target = _referencedEventId(ev, known);
-        if (target == null) continue;
-        if (ev.kind == 7) {
-          // A reaction. '-' is a downvote; everything else counts as a like.
-          final positive = ev.content.trim() != '-';
-          if (positive) {
-            archive.setReaction(target, ev.pubkey.toLowerCase(), true, false);
-            changed = true;
-          }
-        } else if (ev.kind == 1) {
-          // A reply — store it (parent set) so replyCount(target) sees it. It is
-          // filtered out of the top-level All list (roots only) by the feed.
-          final row = _replyRow(ev, target);
-          if (row != null) {
-            archive.add(row);
-            changed = true;
-          }
-        }
-        // kind 6 (repost) is collected but not yet surfaced as a badge.
-      }
-      if (changed) onChanged();
-    }
-
     return 0;
   }
 
-  int nowAgeSec() => _newestSec == 0
-      ? -1
-      : (DateTime.now().millisecondsSinceEpoch ~/ 1000) - _newestSec;
-
-  /// Post ids to fetch engagement for. Deliberately targets AGING posts (older
-  /// than [_minEngageAgeMs], up to a few hours) rather than the seconds-old top
-  /// of the feed: a brand-new post has no reactions yet, so querying it is
-  /// wasted; a 5–60-minute-old post is where likes actually accrue. Re-run every
-  /// poll, so each post's reactions are refreshed as it ages.
-  static const int _minEngageAgeMs = 90 * 1000; // skip the too-fresh
-  static const int _maxEngageAgeMs = 6 * 60 * 60 * 1000; // and the stale
-
-  List<String> _recentPostIds() {
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final out = <String>[];
-    // recent() returns a wide, newest-last window; scan more than the fanout so
-    // the age filter still yields a full batch of engage-worthy posts.
-    for (final r in archive.recent(limit: _statsFanout * 4)) {
-      final mid = (r['mid'] ?? '').toString();
-      final parent = (r['parent'] ?? '').toString();
-      if (mid.length != 64 || parent.isNotEmpty) continue; // roots only
-      final age = nowMs - (((r['t'] as int?) ?? 0));
-      if (age < _minEngageAgeMs || age > _maxEngageAgeMs) continue;
-      out.add(mid);
-      if (out.length >= _statsFanout) break;
-    }
-    return out;
-  }
-
-  Set<String> _recentPostIdSet() => _recentPostIds().toSet();
-
-  /// The event id this reaction/reply is about, if it targets one of [known].
-  /// For NIP-25 reactions the last 'e' tag is the reacted-to event; for replies
-  /// any referenced 'e' that we know about is good enough for a count.
-  String? _referencedEventId(NostrEvent ev, Set<String> known) {
-    String? last;
+  /// The last 'e' tag of an event (NIP-25: the reacted-to event id).
+  String? _lastETag(NostrEvent ev) {
+    String? id;
     for (final t in ev.tags) {
-      if (t.isNotEmpty && t[0] == 'e' && t.length > 1) {
-        final id = t[1];
-        if (known.contains(id)) last = id;
-      }
+      if (t.isNotEmpty && t[0] == 'e' && t.length > 1) id = t[1];
     }
-    return last;
+    return id;
   }
 
   Map<String, dynamic>? _replyRow(NostrEvent ev, String parent) {
@@ -302,9 +342,22 @@ class NostrAllPoller {
     };
   }
 
-  /// Enabled wss relays the user configured, falling back to the well-known
-  /// public set. Read via the host's main-side cache (never the possibly-frozen
-  /// engine's sockets).
+  /// Extract {name, pic} from a kind-0 content JSON, if any.
+  Map<String, String>? _parseProfile(String content) {
+    try {
+      final m = jsonDecodeSafe(content);
+      if (m == null) return null;
+      final name = (m['display_name'] ?? m['displayName'] ?? m['name'] ?? '')
+          .toString()
+          .trim();
+      final pic = (m['picture'] ?? '').toString().trim();
+      if (name.isEmpty && pic.isEmpty) return null;
+      return {if (name.isNotEmpty) 'name': name, if (pic.isNotEmpty) 'pic': pic};
+    } catch (_) {
+      return null;
+    }
+  }
+
   List<String> _relays() {
     final list = <String>[];
     try {
@@ -323,14 +376,29 @@ class NostrAllPoller {
   }
 }
 
-/// Top-level so it can run in a `compute` isolate. Verify each event's Schnorr
-/// signature, drop spam/muted/machine-junk, de-flood per author, and build feed
-/// rows. Input: `{'events': [nip01 json...], 'muted': [lowercased pubkeys]}`.
-List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
-  final events = (arg['events'] as List).cast<Map<String, dynamic>>();
-  final muted = (arg['muted'] as List).map((e) => e.toString()).toSet();
+Map<String, dynamic>? jsonDecodeSafe(String s) {
+  try {
+    final v = jsonDecode(s);
+    return v is Map ? v.map((k, val) => MapEntry(k.toString(), val)) : null;
+  } catch (_) {
+    return null;
+  }
+}
 
-  final kept = <_Cand>[];
+/// Verify signatures, gate spam, score by real engagement, keep the top N.
+/// Runs in a `compute` isolate. Input:
+/// `{events, engagement:{id:{likes,replies,reposts}}, muted, keep, nowSec}`.
+List<Map<String, dynamic>> _verifyGateScore(Map<String, dynamic> arg) {
+  final events = (arg['events'] as List).cast<Map<String, dynamic>>();
+  final engagement = (arg['engagement'] as Map).map(
+    (k, v) => MapEntry(k.toString(), (v as Map).map((a, b) => MapEntry(a.toString(), (b as num).toInt()))),
+  );
+  final muted = (arg['muted'] as List).map((e) => e.toString()).toSet();
+  final keep = (arg['keep'] as num).toInt();
+  final nowSec = (arg['nowSec'] as num).toInt();
+
+  final seen = <String>{};
+  final scored = <({Map<String, dynamic> row, double s})>[];
   for (final j in events) {
     final NostrEvent ev;
     try {
@@ -341,8 +409,8 @@ List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
     if (ev.kind != 1) continue;
     final content = ev.content.trim();
     if (content.isEmpty) continue;
-    if (contentVerdict(content) is! FeedKeep) continue; // spam gate
-    if (_looksMachineJunk(content)) continue; // encoded-blob flood
+    if (contentVerdict(content) is! FeedKeep) continue;
+    if (_looksMachineJunk(content)) continue;
     final pub = ev.pubkey.toLowerCase();
     if (pub.isEmpty) continue;
     if (muted.contains(pub) ||
@@ -350,64 +418,49 @@ List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
       continue;
     }
     final id = ev.id ?? '';
-    if (id.isEmpty) continue;
-    if (!ev.verify()) continue; // forged signature → drop
-    kept.add(_Cand(ev, content, pub, id));
-  }
+    if (id.isEmpty || !seen.add(id)) continue;
+    if (!ev.verify()) continue;
 
-  // Newest first, then cap per author so no single flooder dominates.
-  kept.sort((a, b) => b.ev.createdAt.compareTo(a.ev.createdAt));
-  const perAuthorCap = 2;
-  // The global firehose runs ~90 posts/min. Keeping every one floods the feed so
-  // fast that nothing survives on screen long enough to gather (or show) likes.
-  // Keep a bounded, newest slice per poll so posts persist, age, and accrue the
-  // engagement the poll's phase 2 then fills in.
-  const perPollCap = 50;
-  final perAuthor = <String, int>{};
-  final out = <Map<String, dynamic>>[];
-  for (final c in kept) {
-    if (out.length >= perPollCap) break;
-    final n = perAuthor[c.pub] ?? 0;
-    if (n >= perAuthorCap) continue;
-    perAuthor[c.pub] = n + 1;
+    final eng = engagement[id] ?? const {};
+    final likes = eng['likes'] ?? 0;
+    final replies = eng['replies'] ?? 0;
+    final reposts = eng['reposts'] ?? 0;
+    final ageMin = (nowSec - ev.createdAt) / 60.0;
+    // Engagement dominates; freshness only nudges among similar posts.
+    final score =
+        likes * 3.0 + replies * 4.0 + reposts * 2.0 + (ageMin < 60 ? 3 : 0);
+
     var parent = '';
-    for (final t in c.ev.tags) {
+    for (final t in ev.tags) {
       if (t.isNotEmpty && t[0] == 'e' && t.length > 1) {
         parent = t[1];
         break;
       }
     }
-    final created = c.ev.createdAt;
-    final dt = DateTime.fromMillisecondsSinceEpoch(created * 1000);
+    if (parent.isNotEmpty) continue; // roots only in the curated list
+    final dt = DateTime.fromMillisecondsSinceEpoch(ev.createdAt * 1000);
     final hhmm =
         '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    out.add(<String, dynamic>{
-      'dir': 'in',
-      'from': c.pub.length >= 12 ? c.pub.substring(0, 12) : c.pub,
-      'author': c.pub,
-      'text': c.content,
-      'mid': c.id,
-      'parent': parent,
-      'pop': 0,
-      'source': 'firehose',
-      't': created * 1000,
-      'time': hhmm,
-    });
+    scored.add((
+      row: <String, dynamic>{
+        'dir': 'in',
+        'from': pub.length >= 12 ? pub.substring(0, 12) : pub,
+        'author': pub,
+        'text': content,
+        'mid': id,
+        'parent': '',
+        'pop': likes >= 2 ? 1 : 0,
+        'source': 'firehose',
+        't': ev.createdAt * 1000,
+        'time': hhmm,
+      },
+      s: score,
+    ));
   }
-  return out;
+  scored.sort((a, b) => b.s.compareTo(a.s)); // most engaging first
+  return [for (final e in scored.take(keep)) e.row];
 }
 
-class _Cand {
-  _Cand(this.ev, this.content, this.pub, this.id);
-  final NostrEvent ev;
-  final String content;
-  final String pub;
-  final String id;
-}
-
-/// A post that is really a machine payload, not prose — long unbroken
-/// base32/base58-looking runs, or a bare `token.token.host` blob. Conservative
-/// so real posts with a link or an address are not caught.
 bool _looksMachineJunk(String content) {
   final s = content.trim();
   if (s.contains(' ')) {

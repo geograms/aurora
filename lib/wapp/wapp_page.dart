@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show File;
+import 'dart:io' show File, Platform;
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -20,6 +20,8 @@ import 'package:flutter/services.dart'
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:graph3d/graph3d.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:vector_math/vector_math_64.dart' show Quaternion, Vector3;
 
 import '../connections/internet/http_transport.dart';
@@ -1132,6 +1134,17 @@ class _WappPageState extends State<WappPage>
             setState(() {});
           }
         },
+        onProfiles: (profs) {
+          // Cache kind-0 profiles keyed by the 12-char prefix the feed resolves
+          // by, so author names/avatars show instead of hex keys.
+          for (final e in profs.entries) {
+            final short = e.key.length >= 12 ? e.key.substring(0, 12) : e.key;
+            _wappProfiles[short] = e.value;
+          }
+          if (_wappProfiles.length > 4000) {
+            _wappProfiles.remove(_wappProfiles.keys.first);
+          }
+        },
       )..start();
     }
     // NOSTR web of trust: never firehose-evict posts from people the user
@@ -2106,6 +2119,10 @@ class _WappPageState extends State<WappPage>
           // wapp "Add / Share"). Show the file/folder navigator; deliver the
           // result back as fs.picked {path, dir}.
           unawaited(_handleFsPick(data));
+        } else if (type == 'qr.scan') {
+          // Open the camera QR scanner and deliver the decoded text back as
+          // qr.scanned {text}. Android only — desktop has no easy webcam grab.
+          unawaited(_handleQrScan());
         } else if (type == 'video.load') {
           _handleVideoLoad(data);
           changed = true;
@@ -2846,6 +2863,30 @@ class _WappPageState extends State<WappPage>
     } catch (_) {}
   }
 
+  /// Open the camera QR scanner and deliver the decoded text back to the wapp as
+  /// `qr.scanned {text}`. Android only — on other platforms we reply with an
+  /// empty text + `error:"nocamera"` so the wapp can say so. (Generation works
+  /// everywhere; it is only reading that needs a camera.)
+  Future<void> _handleQrScan() async {
+    String result = '';
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        result = await Navigator.of(context).push<String>(
+              MaterialPageRoute(builder: (_) => const _QrScanPage()),
+            ) ??
+            '';
+      } catch (_) {
+        result = '';
+      }
+    }
+    final msg = (result.isEmpty && !(!kIsWeb && Platform.isAndroid))
+        ? {'type': 'qr.scanned', 'text': '', 'error': 'nocamera'}
+        : {'type': 'qr.scanned', 'text': result};
+    _engine.sendMessage(jsonEncode(msg));
+    _engine.handleEvent();
+    _drainOutbox();
+  }
+
   /// Render a `$type:"video"` screen: the media_kit surface fills the
   /// body; everything else on the screen (the header-actions menu) is
   /// laid over the top-right so the user can still pick a video.
@@ -3217,6 +3258,9 @@ class _WappPageState extends State<WappPage>
     // sha). Renders a Copy button under the body — the only way to grab a
     // reference on a touch device.
     final copyText = (data['copy'] ?? '').toString();
+    // Optional: render the value as a scannable QR code (share a link by showing
+    // a code). Generation works on every platform.
+    final qrText = (data['qr'] ?? '').toString();
     final chips =
         (data['chips'] as List?)
             ?.whereType<Map>()
@@ -3288,6 +3332,24 @@ class _WappPageState extends State<WappPage>
               child: SelectableText(
                 body,
                 style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12.5),
+              ),
+            ),
+          if (qrText.isNotEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: QrImageView(
+                    data: qrText,
+                    size: 200,
+                    backgroundColor: Colors.white,
+                  ),
+                ),
               ),
             ),
           if (copyText.isNotEmpty)
@@ -5428,28 +5490,32 @@ class _WappPageState extends State<WappPage>
         if ((p['parent'] ?? '').toString().isEmpty) p,
     ];
     if (arch == null) return roots;
-    // CURATE: a pure freshest-first firehose only ever shows seconds-old posts,
-    // which by definition have no likes yet — so the feed looked engagement-dead.
-    // Rank by a recency-DOMINATED score with an engagement boost: a like is worth
-    // ~10 minutes of freshness, a reply ~15. Fresh posts still ride high, but a
-    // slightly-older post that people actually liked surfaces near the top
-    // instead of being buried, so likes/replies are visible without deep
-    // scrolling. Returned oldest/worst-first to match the feed's newest-last
-    // convention (it reverses for display, so best ends up on top).
+    // CURATE by REAL engagement, decayed by age. The poller already writes only
+    // the ~20 most-engaged posts per cycle; here we rank the accumulated set so
+    // the most-liked/active float to the top and yesterday's popular post fades
+    // below today's. Engagement dominates (a like ~3pts, a reply ~4); freshness
+    // is a decay multiplier, not a base — a fresh no-engagement post ranks low,
+    // which is honest. Ascending sort: best LAST → the feed reverses for display,
+    // so best ends up on top. Capped to a clean curated list.
     final now = DateTime.now().millisecondsSinceEpoch;
     double score(Map<String, dynamic> p) {
       final t = (p['t'] as int?) ?? now;
-      final ageMin = (now - t) / 60000.0;
+      final ageHours = (now - t) / 3600000.0;
       final mid = (p['mid'] ?? '').toString();
       final likes = mid.isEmpty ? 0 : arch.likeInfo(mid).count;
       final replies = mid.isEmpty ? 0 : arch.replyCount(mid);
-      return -ageMin + likes * 10.0 + replies * 15.0;
+      final engagement = 1 + likes * 3.0 + replies * 4.0;
+      final decay = 1.0 / (1.0 + (ageHours < 0 ? 0 : ageHours) / 1.5);
+      return engagement * decay;
     }
 
     final scored = [
       for (final p in roots) (p: p, s: score(p)),
     ]..sort((a, b) => a.s.compareTo(b.s)); // ascending: best last → top
-    return [for (final e in scored) e.p];
+    // Keep a bounded, curated list (a few cycles' worth), best last.
+    const maxShown = 60;
+    final start = scored.length > maxShown ? scored.length - maxShown : 0;
+    return [for (final e in scored.sublist(start)) e.p];
   }
 
   Future<List<Map<String, dynamic>>> _loadOlderSocialPosts(int beforeMs) async {
@@ -10306,3 +10372,57 @@ class _ForwardPanelState extends State<_ForwardPanel> {
 }
 
 // ── Slippy tile map widget ───────────────────────────────────────────
+
+/// Full-screen camera QR scanner. Pops with the first decoded string (empty on
+/// cancel). Android-only path (see _handleQrScan).
+class _QrScanPage extends StatefulWidget {
+  const _QrScanPage();
+  @override
+  State<_QrScanPage> createState() => _QrScanPageState();
+}
+
+class _QrScanPageState extends State<_QrScanPage> {
+  final MobileScannerController _controller = MobileScannerController();
+  bool _done = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_done) return;
+    for (final b in capture.barcodes) {
+      final v = b.rawValue;
+      if (v != null && v.isNotEmpty) {
+        _done = true;
+        Navigator.of(context).pop(v);
+        return;
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan a QR code')),
+      body: Stack(
+        children: [
+          MobileScanner(controller: _controller, onDetect: _onDetect),
+          const Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text(
+                'Point the camera at a torrent QR code',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white, fontSize: 14),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

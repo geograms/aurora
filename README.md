@@ -196,7 +196,8 @@ relevant one before touching that area — they are the conventions, not just no
   fixed and how it was measured, and (§8) the rules for adding new work without
   regressing it: keep heavy work off the UI isolate, survive a suspended Android
   phone via the foreground service + native heartbeat, reuse the `BackgroundService`
-  template, and drive wapps on an interval via the event bus.
+  template, drive wapps on an interval via the event bus, and never trust the network
+  — transfers must be resumable, idle links closed, and liveness swept on a tick.
 - **[Notifications](docs/notifications.md)** — how any wapp or host code raises a
   notification, the severity/scope types, and how they escalate to system
   notifications on desktop and Android.

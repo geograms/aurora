@@ -763,3 +763,56 @@ does its work in `module_tick`, and reacts to host events by subscribing to
 - It's a wapp? → cadence via `module_tick_interval_ms`, work in `module_tick`, host
   events via `system.*` topics — the host calls it, it installs nothing.
 - Poll interval chosen? → justify it as cost-per-hour-screen-off, fire-once-then-settle.
+- Network transfer? → resumable by checkpoint + hash, close idle links, sweep liveness
+  on a tick — assume it breaks mid-flight (§8.6).
+
+### 8.6 Never trust the network — resilient transfers and connection hygiene
+
+The network is not a resource you *have*; it is one you *keep re-earning*. A phone
+walks between cells, a hub drops you, a peer's socket dies mid-transfer, a Wi-Fi
+network vanishes when the screen locks. Any code that assumes a connection stays up
+for the length of an operation is a bug that only shows up in the field — never at
+your desk on a stable LAN. Design for the connection dying at the worst moment,
+because it will.
+
+**Downloads and transfers must be resumable — never restart from zero.**
+
+- **Content-address everything and checkpoint at a fine grain.** A break must cost
+  the *chunk* in flight, not the whole file. Reticulum file transfer already works
+  this way: `sha256`-addressed, per-segment, with the adaptive window reset per
+  segment (see the rock-solid-transfer work) — a dropped link resumes at the last
+  completed segment, and the final hash is the integrity proof. New transfer code
+  follows the same shape: sized chunks, persisted "have" set, verify-by-hash on
+  completion. **Keep what was already downloaded**; re-fetch only the gap.
+- **A partial file is state to preserve, not garbage to delete.** On failure, hold the
+  bytes and the have-set so the next attempt continues. Deleting a half-download on
+  the first error throws away exactly the work the retry needs.
+- **Retry with backoff, and treat a stalled transfer as a failure.** A socket that
+  stops delivering bytes but never closes ("half-open") is the common real-world
+  case — a WiFi-Direct fetch that hangs ~90s while the sender reports done, or a
+  BitTorrent peer behind symmetric CGNAT. Bound every read with a stall timeout, tear
+  the connection down, and resume from the checkpoint over whatever path is now up.
+
+**Cut connections you are not using — an idle link is not free.**
+
+- **Answer without holding a link where you can.** The §6.2 NPD work is the model:
+  strangers' relay queries are answered with a *connectionless* probe and "I have
+  nothing" is answered with *silence* — no link opened, nothing to keep alive or tear
+  down. Prefer connectionless request/response over a standing connection whenever the
+  exchange is short.
+- **Close on idle.** A link kept open "in case" costs keepalives, holds crypto/session
+  state, and — worse — becomes a **stale path** the transport will keep routing at
+  (§6.2.1: a pin to a medium the peer already left made it unreachable by *every*
+  transport until restart). When a transfer finishes or a peer goes quiet, close the
+  link and drop the path; do not let a dead connection outrank a live one.
+- **Every long-lived connection needs a liveness check on a periodic tick.** Ride the
+  existing tick (`BackgroundService.onTick` / the native heartbeat, §8.2) to sweep open
+  connections: is this link still delivering? last activity within the window? path
+  still valid? Cut anything that fails — a periodic "prove you're alive or I close you"
+  is cheaper than discovering a black-holed link mid-transfer. This is the same
+  TTL+miss-counter discipline that fixed the stale pin: treat reachability as
+  *evidence with an expiry*, not a fact.
+
+> **Rule: assume the transfer will break and the peer will vanish.** Resumable by
+> checkpoint, integrity-checked by hash, idle links closed, liveness swept on a tick.
+> Code that only works while the network stays up doesn't work.

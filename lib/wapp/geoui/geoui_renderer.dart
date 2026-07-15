@@ -478,7 +478,9 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
                   fontWeight: FontWeight.w600)),
         );
 
-    // The identity block: category + adult, then the title, then the tags.
+    // The identity block: category + adult, then the tags. The TITLE is NOT
+    // repeated here — whoever shows this hero (the torrent's Info screen) already
+    // carries the name in its app bar, so a title line would say it twice.
     final meta = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -494,11 +496,6 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
                 chip('18+', bg: cs.errorContainer, fg: cs.onErrorContainer),
             ]),
           ),
-        if (title.isNotEmpty)
-          Text(title,
-              style: tt.titleLarge?.copyWith(fontWeight: FontWeight.w700),
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis),
         if (tags.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
@@ -562,11 +559,10 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
             style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
           ),
         ],
+        // No "Screenshots" heading — a horizontal strip of thumbnails is
+        // self-evidently a gallery.
         if (strip.isNotEmpty) ...[
           const SizedBox(height: 16),
-          Text('Screenshots',
-              style: tt.titleSmall?.copyWith(color: cs.onSurfaceVariant)),
-          const SizedBox(height: 8),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(

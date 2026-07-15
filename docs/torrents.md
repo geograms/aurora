@@ -9,8 +9,16 @@ Nothing here is a new network. The pieces already exist: mutable folders
 (`lib/services/folders/`, [folders.md](folders.md)), the content-addressed file
 layer and DHT (`lib/services/files/`), the Indexer role and provider records
 (NOSTR.md). The **Torrents wapp** (`wapps/torrents`) is the torrent-client
-face on top of them, plus one genuinely new storage backend: a **per-folder
-SQLite database** so a shared folder need not exist as files on disk.
+face on top of them.
+
+> **State as of 2026-07-15 (wapp v0.5.8).** The swarm, the `nfolder1…` link, the
+> **piece engine** (§8 step 2), the **listing** (§12, `data/meta.json` + artwork),
+> the **on-disk download library** (§13), **search / browse by category** (§14)
+> and the **favicon-style per-torrent icon** (§15) are **built and on-device
+> validated**. The still-unbuilt piece is the **database-backed folder source**
+> (§2). §9 tracks what is proven versus pending in detail. New here since the
+> first draft: **§12–§15**, and in particular the folder/file structure that
+> carries a torrent's metadata.
 
 ---
 
@@ -239,18 +247,21 @@ generic host HALs).
 
 | Screen | Shows |
 |---|---|
-| **Torrents** | one row per folder: name, size, files, ▲ seeders / ▼ leechers from the Indexer, our state (owner · pinned · downloading 43% · seeding), the transport that is serving us |
-| **Detail** | file list from the reduced op-log, per-file progress, the swarm — each holder with its profile (mains/battery, WiFi/cellular/LoRa, last heard and *how* we know), and which peers our pieces are coming from right now |
-| **Create** | pick a disk directory *or* a new database folder, name it, mint the key, hash, publish. Copy/QR the npub |
-| **Open by id** | paste an npub → resolve → listing → download |
-| **Settings** | pin list, disk ceiling, stranger bandwidth budget, serve-on-cellular, piece size, max parallel peers per file |
+| **Torrents** | ONE navigable list (no Downloaded/Mine tabs) over the download-folder tree (§13): the organizing subfolders, then the torrents filed at that level. Each row: its icon (§15), name (the listing title, else the folder name), category, our state (mine · pinned · following), files, size. An **All / Mine** filter and **New folder**. Tap a torrent → its Info screen; tap a folder → go in; the app-bar back arrow goes up |
+| **Info** (per torrent) | the listing hero (§12) — banner, cover, category + tags, description, a horizontal gallery — then a compact file browser with a **Browse** to the full-screen file view. **Move to folder** files it under a subfolder; **Edit listing** (owner) edits the metadata. The app-bar title is the torrent's own name |
+| **Search** | a full panel: text search over title / description / tags, **browse by category** (only non-empty categories), a **sort** toggle (seeders · recently updated · size). Tap a category to list it, a result to open it. Backed by the generic `hal_folder_search` |
+| **Add** (＋) | Open a link (paste an `nfolder1…`) · Share a folder (turn a disk directory into a torrent) |
+| **Settings** | the **download folder** (where downloads land as real files; §13) + change it; pin-what-I-download; rescan interval; what this device is holding |
 
-HAL: the folder HALs already exist (`hal.folder_create/list/edit/browse/stats/
-remove/opendir/add_disk/rescan/download/autosync/owned/subs`) plus the generic
-`hal_sqlite`. What is missing is generic and belongs in the host: a **piece-level
-parallel fetch** (`folder/download` today pulls a file from one provider), a
-**swarm/peer-status** read so the wapp can render who is serving us, and a
-**database-backed folder source** alongside the disk one.
+HAL, all generic (the HAL rule — no torrent logic in `lib/`): `hal.folder_*`
+(`create/list/edit/browse/stats/remove/opendir/add_disk/rescan/download/autosync/
+owned/subs`), plus the ones added for the work above —
+`folder_media` (listing artwork as media tokens), `folder_search`,
+`folder_download_root` / `folder_set_download_root`, `folder_library`,
+`folder_mkdir`, `folder_move`, `folder_set_media`, `folder_meta_get/set`. Still
+missing and still generic: a **swarm/peer-status** read so the wapp can render
+who is serving us, and the **database-backed folder source** alongside the disk
+one.
 
 ---
 
@@ -314,13 +325,19 @@ public hub.
 
 The publisher's phone is no longer the only copy — which is what a pin is for.
 
-- **The wapp itself** (`wapps/torrents`, id `tools.geogram.torrents`): **built**.
-  The five screens, the disk-backed create path, open-by-link, download, pin, and
-  the swarm view. It autostarts in the background (aurora's
-  `_defaultAutostartWappIds`), because a seeder that only serves while its page is
-  open is not a seeder. Live-checked on Linux: the wapp installs, starts, ticks,
-  and a directory turned into a torrent produced a signed op-log with per-file
-  sha256s.
+- **The wapp itself** (`wapps/torrents`, id `tools.geogram.torrents`): **built**,
+  and well past the original five screens — see §7 for the current UI (one
+  navigable library list, the Info screen, Search, the download-folder setting).
+  It autostarts in the background (aurora's `_defaultAutostartWappIds`), because a
+  seeder that only serves while its page is open is not a seeder.
+- **The piece engine (§8 step 2): built.** Signed piece hashes on the `addFile`
+  op, a HAVE bitfield so partial holders seed, rarest-first with endgame, per-piece
+  verify. At **parity with reference RNS 1.3.5** on this machine, both directions,
+  45 MB sha-exact; LINK MTU discovery brought throughput to path-limited (RTT), not
+  code-limited. Cross-network folder pull (C61↔TANK2) validated end to end.
+- **The listing (§12), the on-disk download library (§13), search/browse (§14) and
+  the per-torrent favicon-style icon (§15): built and on-device validated** (TANK2,
+  v0.5.8).
 - **`nfolder1…`** (§11): **built and unit-tested** (`lib/services/folders/nfolder.dart`,
   `test/nfolder_test.dart`) — round-trip, hints, author, a bare npub still
   opening a folder, and a mangled link failing closed rather than resolving
@@ -335,12 +352,11 @@ The publisher's phone is no longer the only copy — which is what a pin is for.
   tested**.
 - The DHT, provider records, Indexer selection, node profiles, quotas: **built**,
   and the DHT is live-validated across networks.
-- File transfer over RNS: **at parity with reference RNS** for a single-provider
-  fetch (45 MB sha-exact, both directions). **Multi-provider parallel fetch does
-  not exist yet** — that is item 2, and it is the heart of this wapp.
-- The known device-to-device folder-byte gap in [folders.md](folders.md) §6 is on
-  the same path this wapp depends on. It must be closed, or a torrent between two
-  phones will list and never transfer.
+- File transfer over RNS: **at parity with reference RNS** both for a
+  single-provider fetch and, now, the **piece engine's multi-provider path**.
+- The device-to-device folder-byte path in [folders.md](folders.md) §6 is
+  exercised by the cross-network torrent test above — a torrent between two phones
+  on different networks lists AND transfers.
 
 ---
 
@@ -459,3 +475,174 @@ key — never a name it cannot prove.
 - `geogram://folder/<nfolder|npub>` → the same, from the OS.
 - An `nfolder` with an unknown TLV type is **not** an error: unknown types are
   skipped, so the encoding can grow without breaking old clients.
+
+---
+
+## 12. The listing: metadata as files in `data/`
+
+A bare torrent is a list of file names. You cannot tell a film from a game from a
+book without downloading it, and there is nothing to look at. The **listing** is
+what a torrent site would call the page: a title, a description, one category, a
+few tags, and artwork. Two rules shape all of it, and they are the whole idea:
+
+1. **The metadata lives INSIDE the folder, as ordinary files.** It is scanned,
+   hashed, published and re-seeded exactly like the content, so a description can
+   never be separated from the thing it describes.
+2. **A human can write it** with a text editor and a file manager. Drop a
+   `meta.json` and a `cover.jpg` into the folder, rescan, and the listing appears.
+   That is what "it is just a folder" buys.
+
+### The shape on disk
+
+Everything the listing needs sits in a `data/` subdirectory. Fixed names, so a
+client knows what a file is without being told:
+
+```
+<the shared folder>/
+  data/
+    meta.json         the authored listing (below)
+    favicon.png       the icon — the row/list icon, and a website tab icon (§15)
+    cover.jpg|png     poster / box art (portrait-ish)
+    banner.jpg|png    wide header image
+    trailer.webm      optional short clip
+    media1.png        gallery, media1..media10, in order
+    media2.jpg
+    media3.webm       a gallery item may be a still or a short clip
+  <the actual shared content, e.g. movie.bin>
+```
+
+**It must be `data/`, not `.data/`.** The scanner skips every path segment
+starting with `.` — that is how the master key file `.folder.json` stays
+unshared — so a dot-prefixed directory would never be published at all.
+
+The client treats `data/` as chrome: it is hidden from the top of the file
+browser (there is nothing there the viewer chose to download), while still
+travelling with the torrent.
+
+### `data/meta.json`
+
+```json
+{
+  "title":   "Big Buck Bunny",                  // ≤ 50 chars
+  "desc":    "A giant but gentle rabbit …",     // ≤ 200 chars
+  "cat":     "film",                             // exactly one, from the fixed list
+  "tags":    ["1080p", "animation", "open"],     // ≤ 10, free-form
+  "adult":   false,                              // +18 is a FLAG, not a category
+  "icon":    "favicon.png",                      // optional; = <link rel="icon">
+  "cover":   "cover.jpg",                        // optional; names are relative to data/
+  "banner":  "banner.jpg",                       // optional
+  "trailer": "trailer.webm",                     // optional
+  "gallery": ["media1.png", "media3.webm"]       // optional, ≤ 10, ordered
+}
+```
+
+Model: `lib/services/folders/folder_meta.dart` (`FolderMeta`). Every field is
+**untrusted input** — it comes from a stranger's folder — so `parse()` clamps
+every limit and never throws, and every media reference is a bare file name
+inside `data/` (no path, no `..`, no absolute path, no dot-leading): the security
+boundary of the whole feature. Unknown keys are preserved on rewrite, so a newer
+publisher's field is not destroyed by an older client.
+
+**Categories** (`cat`, exactly one, mandatory), modelled on what torrent sites
+actually list: `film` · `series` · `anime` · `documentary` · `music` ·
+`audiobook` · `book` · `comic` · `manga` · `magazine` · `game` · `software` ·
+`course` · `podcast` · `photo` · `dataset` · `other`. Anything else falls back to
+`other`. **`+18` is a separate boolean (`adult`)**, not a category — an adult film
+is still a film, and a content filter must work across every category rather than
+hoping the publisher chose an `+18` bucket.
+
+**Media caps.** Each media file (cover, banner, trailer, icon, each gallery item)
+is capped at **30 MB**. `data/` is what a browsing client pulls *before* it
+decides to download the torrent, so the artwork has to stay cheap.
+
+### meta.json is the truth; the op-log is a mirror
+
+`data/meta.json` is the authored source. On every rescan, `disk_folder_manager`'s
+`_syncListing` reads it and, if the reduced state differs, emits **one signed
+`setMeta` op** (title, desc, cat, tags, adult) into the op-log — the same op-log
+that already carries `addFile`. A human edits JSON; the network sees signed
+metadata. Two consequences:
+
+- A stranger reading the `nfolder1…` link sees the **title, category and tags
+  without downloading a byte** — the op-log arrives before any content.
+- The **artwork** (cover/banner/gallery/icon) is not mirrored into the op-log —
+  it does not need to be. Each is a published file, resolved by its fixed name to
+  its sha256 and fetched on demand (it is small). So even a torrent you have not
+  downloaded shows its cover and icon: the host copies the disk bytes into the
+  content-addressed archive on demand, or fetches them from the swarm, and hands
+  the UI a media token (`file:<sha>.<ext>`). See `folderMediaTokens` /
+  `folderIconToken` in `rns_service.dart`.
+
+Rescanning an unchanged listing publishes nothing (the `setMeta` is emitted only
+on a real difference; the timestamp is strictly-later to avoid a same-second tie).
+Covered by `test/folder_listing_sync_test.dart` and `test/folder_meta_test.dart`.
+
+---
+
+## 13. The download library: real files, organized
+
+Downloaded torrents are **real files on disk** under a **download folder** the
+user picks (default `<external storage>/Aurora/Torrents`), indexed
+content-addressed and served straight from those files — the same
+`DiskFolderSource` that backs owned folders, with **no second copy** in the
+archive. So a download is browsable in a file manager, survives an uninstall, and
+an existing folder from a previous install is re-adopted by pointing the setting
+at it.
+
+- **Owned vs downloaded on disk.** An owned folder carries its master key in
+  `.folder.json`. A downloaded folder is keyless: a `.torrent.json` sidecar
+  records its `folderId` (no key — it is read-only here). `adoptRoot()` walks the
+  download root and re-adopts both.
+- **Materialize on pin.** Pinning a torrent creates its directory under the root
+  and writes its files there as they arrive (`addDownloaded` /
+  `writeDownloadedFile`). An un-pinned download stays archive-only until pinned.
+- **Organizing subfolders.** Plain directories under the root group torrents. The
+  Torrents screen navigates that tree: subfolders first, then the torrents filed
+  at that level. "New folder" is `mkdir`; "Move to folder" is `mv` of a torrent's
+  directory (keeping its identity). A torrent that lives outside the root still
+  shows, ungrouped, at the top level, so nothing is ever hidden.
+- **One list, two filters.** No Downloaded/Mine tabs — a single list with an
+  **All / Mine** toggle (Mine = folders this device created).
+
+Generic host HALs, no torrent logic in the engine: `folder_download_root` /
+`folder_set_download_root`, `folder_library`, `folder_mkdir`, `folder_move`.
+`DiskFolderManager` + `test/folder_library_test.dart`. The unbuilt
+database-backed source (§2) would slot in beside this as a second `FolderSource`.
+
+---
+
+## 14. Search and browse
+
+A torrent list is only useful if you can find things in it. The **Search** panel
+(generic host `folder_search`) searches the listings this node knows — owned and
+subscribed — by **title / description / tags**, optionally restricted to one
+**category**, sorted by **seeders**, **recently updated**, or **size**. It also
+returns the categories that actually have listings (with counts), so the category
+browser hides empty buckets. Everything is resolvable from the op-log, so a
+torrent that is only a listing (not downloaded) is fully searchable.
+
+This is per-node today (what this device knows). Search ACROSS the network is the
+next layer: the Indexers already answer "who has this folder"; a category/keyword
+query over their listing mirror is a natural extension and wants its own design.
+
+---
+
+## 15. The per-torrent icon (a favicon)
+
+A torrent can carry a small square **icon**, shown next to it in the list. It is
+deliberately shaped as a **web favicon**, so a torrent can one day be served as
+its own website with no rework:
+
+- `meta.json` `"icon"` names the file = `<link rel="icon" href="…">`; when absent
+  the well-known `data/favicon.*` / `data/icon.*` is used = the `/favicon.ico`
+  convention. `svg` and `ico` are accepted alongside the raster formats.
+- Resolved to a media token even for a torrent not downloaded (the icon is a
+  small published file); shown as the list row's avatar. Others keep a generated
+  key-sigil.
+- Setting it (Edit listing → Icon) writes `data/favicon.<ext>` and records it in
+  the listing.
+
+The plan for hosting torrents as their own websites — where this same file is the
+browser-tab icon and `data/index.html` is the site root — is
+[torrents-as-websites.md](torrents-as-websites.md). Not implemented; the icon was
+designed to fit it.

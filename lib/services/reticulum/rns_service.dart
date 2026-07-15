@@ -37,6 +37,7 @@ import '../files/composite_file_source.dart';
 import '../files/disk_index.dart';
 import '../files/file_node.dart';
 import '../files/file_transfer.dart';
+import '../files/folder_popularity.dart';
 import '../files/media_file_source.dart';
 import '../files/open_path.dart';
 import '../files/partial_store.dart';
@@ -264,12 +265,22 @@ class RnsService {
   // 64-byte private key is stored at [identityPath]; ephemeral if unset.
   String? identityPath;
   ServeStats? _serveStats;
+  // Device-local torrent-folder popularity over time (per-month seeders and
+  // unique leechers). Kept ON THIS DEVICE, never in the folder. Persisted at
+  // [popularityPath]; in-memory if unset.
+  String? popularityPath;
+  FolderPopularity? _popularity;
   // Memoized local reductions: re-running reduceFolder (which Ed25519-verifies
   // every op) on each browse — and the tick browses every few seconds — would
   // burn the UI isolate. The op-log is append-only, so the op count is a safe
   // validity key: reuse the cached reduction until a new op appears.
   final Map<String, FolderState> _localReduceCache = {};
   final Map<String, int> _localReduceCount = {};
+  // Reverse index sha256(hex) -> folderIds we share it in, for the popularity
+  // metric (which folder(s) a just-served file belongs to). Rebuilt lazily with
+  // a short TTL — serves are infrequent and this only feeds a best-effort count.
+  final Map<String, Set<String>> _shaFolderIndex = {};
+  int _shaFolderIndexAt = 0;
 
   // Disk-backed owner folders + consumer subscriptions. Serve source is a
   // composite so disk-folder bytes are served straight from disk (no sqlite
@@ -1977,15 +1988,22 @@ class RnsService {
                 // Count a download whenever we serve a file's manifest to another node.
                 // Both the media-archive metric (for archived files) and the serve-stats
                 // store (works for disk-folder files too — they're never in the archive).
-                onServed: (h) {
+                onServed: (h, requesterId) {
                   final hex = _hex(h);
+                  final now = DateTime.now().millisecondsSinceEpoch;
                   final src = fileServeSource;
                   if (src is MediaFileSource)
                     src.archive.incrementDownloads(hex);
-                  _serveStats?.record(
-                    hex,
-                    DateTime.now().millisecondsSinceEpoch,
-                  );
+                  _serveStats?.record(hex, now);
+                  // Popularity: this served file belongs to zero or more folders
+                  // we share; count the requester as a leecher of each. The
+                  // requester key (serve link id) is a session-unique proxy for a
+                  // downloader — good enough to gauge reach.
+                  if (_popularity != null && requesterId.isNotEmpty) {
+                    for (final fid in _foldersContainingSha(hex)) {
+                      _popularity!.recordLeecher(fid, requesterId, now);
+                    }
+                  }
                 },
                 // Store-and-forward Blossom hosting: a peer asks us to keep a blob.
                 onDepositOffer: (sha, size, ext, pubHex, sigHex, linkIdHex) {
@@ -2140,6 +2158,14 @@ class RnsService {
         } catch (e) {
           LogService.instance.add('RNS/stats: disabled ($e)');
           _serveStats = null;
+        }
+
+        // Per-folder popularity over months (best-effort).
+        try {
+          _popularity = FolderPopularity.open(popularityPath ?? ':memory:');
+        } catch (e) {
+          LogService.instance.add('RNS/popularity: disabled ($e)');
+          _popularity = null;
         }
 
         // Store-and-forward follow set (who we host with "followed" treatment).
@@ -6231,6 +6257,31 @@ class RnsService {
     hub.publish(ev); // fire-and-forget to the engine
   }
 
+  /// Build a signed kind-7 reaction so the MAIN isolate can publish it (the
+  /// engine's sockets freeze and cannot be trusted to actually send). Returns
+  /// null if we have no key to sign with.
+  NostrEvent? buildSignedReaction(String eventId, String authorHex) {
+    final pub = selfPubHex;
+    final priv = _profilePrivHex();
+    if (pub == null || priv == null || eventId.isEmpty) return null;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: NostrEventKind.reaction,
+      tags: [
+        ['e', eventId],
+        if (authorHex.isNotEmpty) ['p', authorHex],
+      ],
+      content: '❤️',
+    );
+    try {
+      ev.sign(priv);
+    } catch (_) {
+      return null;
+    }
+    return ev;
+  }
+
   // ── Notifications: what other people did to MY posts ────────────────────
   //
   // NOSTR carries this for free: every reaction, reply and repost p-tags the
@@ -7483,6 +7534,74 @@ class RnsService {
     return name;
   }
 
+  /// Which folders we share contain the file [shaHex] — the leecher metric maps a
+  /// just-served file back to its folder(s). Backed by a lazily rebuilt reverse
+  /// index (owned folders' cached reductions + subscriptions' downloaded shas).
+  Set<String> _foldersContainingSha(String shaHex) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_shaFolderIndex.isEmpty || now - _shaFolderIndexAt > 30000) {
+      _rebuildShaFolderIndex();
+      _shaFolderIndexAt = now;
+    }
+    return _shaFolderIndex[shaHex.toLowerCase()] ?? const {};
+  }
+
+  void _rebuildShaFolderIndex() {
+    final idx = <String, Set<String>>{};
+    void add(String sha, String fid) {
+      if (sha.isEmpty) return;
+      (idx[sha.toLowerCase()] ??= <String>{}).add(fid);
+    }
+
+    final f = _folders;
+    if (f != null) {
+      for (final k in f.ownedFolders()) {
+        final st = _localReduceCache[k.folderId];
+        if (st != null) for (final e in st.fileList) add(e.sha, k.folderId);
+      }
+    }
+    final subs = _subs;
+    if (subs != null) {
+      for (final fid in subs.folderIds()) {
+        for (final sha in subs.downloadedOf(fid).values) add(sha, fid);
+        final st = _localReduceCache[fid];
+        if (st != null) for (final e in st.fileList) add(e.sha, fid);
+      }
+    }
+    _shaFolderIndex
+      ..clear()
+      ..addAll(idx);
+  }
+
+  /// Device-local popularity of a folder over recent months: for each month, how
+  /// many distinct seeders held it and how many unique leechers downloaded from
+  /// us. Kept on THIS device only (never in the folder). Sampling the live swarm
+  /// on read keeps the current month current when the panel opens.
+  Map<String, dynamic> folderPopularity(String folderIdOrNpub, {int months = 12}) {
+    final folderId = _normFolderId(folderIdOrNpub);
+    final p = _popularity;
+    if (p == null || folderId.isEmpty) {
+      return {'folderId': folderId, 'months': const []};
+    }
+    final swarm = folderSwarm(folderId);
+    final selfDest = _files?.filesDestHash;
+    final seederIds = <String>[];
+    for (final e in swarm) {
+      final destHex = '${e['dest'] ?? ''}';
+      if (destHex.isEmpty) continue;
+      final d = _hexToBytes(destHex);
+      if (selfDest != null && d != null && _bytesEq(d, selfDest)) continue;
+      seederIds.add(destHex.toLowerCase());
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    p.sampleSeeders(folderId, seederIds, now);
+    final series = p.series(folderId, now, months: months);
+    return {
+      'folderId': folderId,
+      'months': [for (final m in series) m.toJson()],
+    };
+  }
+
   /// The listing's artwork as MEDIA TOKENS the UI can render.
   ///
   /// A wapp cannot touch bytes (there is no HAL that hands media into wasm), and
@@ -7638,12 +7757,30 @@ class RnsService {
       if (f['size'] is int) totalBytes += f['size'] as int;
     }
 
+    // Seeders: how many OTHER holders the Indexers know of. Read from the cached
+    // swarm snapshot (returned instantly; refreshed in the background), so opening
+    // the info page costs no network round-trip. Also feeds the popularity store.
+    final swarm = folderSwarm(folderId);
+    final selfDest = _files?.filesDestHash;
+    final seederIds = <String>[];
+    for (final p in swarm) {
+      final destHex = '${p['dest'] ?? ''}';
+      if (destHex.isEmpty) continue;
+      final d = _hexToBytes(destHex);
+      if (selfDest != null && d != null && _bytesEq(d, selfDest)) continue;
+      seederIds.add(destHex.toLowerCase());
+    }
+    final seeders = seederIds.length;
+    _popularity?.sampleSeeders(
+        folderId, seederIds, DateTime.now().millisecondsSinceEpoch);
+
     return {
       'folderId': folderId,
       'path': path,
       'files': browse,
       'fileCount': totalFiles,
       'totalBytes': totalBytes,
+      'seeders': seeders,
       // The listing text rides along, from the SIGNED op-log (so it is here even
       // for a torrent we have not downloaded) — the gallery field draws one hero
       // card: banner, poster, title, category, tags, description, screenshots.
@@ -8054,6 +8191,16 @@ class RnsService {
   void setFolderAutoSync(String folderId, bool on) =>
       _subs?.setAutoSync(_normFolderId(folderId), on);
 
+  /// Enable/disable pulling owner updates for a folder. `on == false` freezes the
+  /// folder at the held version (no re-downloads); `true` resumes following.
+  void folderSetUpdates(String folderIdOrNpub, bool on) =>
+      _subs?.setFrozen(_normFolderId(folderIdOrNpub), !on);
+
+  /// Whether this folder currently follows owner updates (the default). False
+  /// means the user froze it.
+  bool folderGetUpdates(String folderIdOrNpub) =>
+      !(_subs?.frozenOf(_normFolderId(folderIdOrNpub)) ?? false);
+
   List<Map<String, dynamic>> folderSubscriptions() {
     final s = _subs;
     if (s == null) return const [];
@@ -8088,6 +8235,11 @@ class RnsService {
         // ignore: discarded_futures
         _folderRelay?.publish(fid);
       }
+      // Frozen: the user pinned a static version — keep serving what we hold but
+      // pull NO owner updates (the bandwidth they opted out of). We still
+      // re-cached/re-advertised above, so we stay a discoverable seeder of the
+      // version we have.
+      if (s.frozenOf(fid)) continue;
       final cur = <String, String>{
         for (final e in st.fileList) (e.name ?? e.sha): e.sha,
       };
@@ -8146,6 +8298,8 @@ class RnsService {
     _relayStore = null;
     _serveStats?.close();
     _serveStats = null;
+    _popularity?.close();
+    _popularity = null;
     _folders = null;
     _folderRelay = null;
     _folderCache.clear();

@@ -441,6 +441,10 @@ class _WappPageState extends State<WappPage>
   /// that and writes survivors into [_activityArchive]. See NostrAllPoller.
   NostrAllPoller? _allPoller;
 
+  /// Newest engagement time (ms) per curated post id, from the poller. A post
+  /// whose latest like/reply is well after it was posted is shown "(updated)".
+  final Map<String, int> _postActivityMs = {};
+
   /// Absolute like/reply counts a wapp pushes for its posts via
   /// `ui.activity.stats` (keyed by post mid). Generic: any wapp can report
   /// engagement it tracks itself (e.g. NOSTR relay reactions).
@@ -480,6 +484,28 @@ class _WappPageState extends State<WappPage>
       return '';
     }
     return '';
+  }
+
+  /// The ONE place a like is handled (feed, thread and profile all call this).
+  /// The engine's sockets freeze, so the old wapp→engine path never published;
+  /// this records the like locally (the curated feed reads [_activityArchive])
+  /// and publishes the signed kind-7 through the main-isolate poller — the same
+  /// open/send/close path that actually reaches relays.
+  void _likePost(String mid, bool like) {
+    if (mid.isEmpty) return;
+    final self = RnsService.instance.nostrSelfHex()?.toLowerCase();
+    if (self != null) {
+      _activityArchive?.setReaction(mid, self, like, true);
+      _followingArchive?.setReaction(mid, self, like, true);
+    }
+    _activityRev.value++;
+    setState(() {});
+    if (like) {
+      final author = (_activityArchive?.byMid(mid)?['author'] ?? '').toString();
+      final ev = RnsService.instance.buildSignedReaction(mid, author);
+      final poller = _allPoller;
+      if (ev != null && poller != null) unawaited(poller.publishEvent(ev));
+    }
   }
 
   /// Repost a publication (kind-6): tell the wapp + reflect it immediately.
@@ -1143,6 +1169,15 @@ class _WappPageState extends State<WappPage>
           }
           if (_wappProfiles.length > 4000) {
             _wappProfiles.remove(_wappProfiles.keys.first);
+          }
+        },
+        onActivity: (act) {
+          for (final e in act.entries) {
+            final prev = _postActivityMs[e.key] ?? 0;
+            if (e.value > prev) _postActivityMs[e.key] = e.value;
+          }
+          if (_postActivityMs.length > 4000) {
+            _postActivityMs.remove(_postActivityMs.keys.first);
           }
         },
       )..start();
@@ -5515,7 +5550,19 @@ class _WappPageState extends State<WappPage>
     // Keep a bounded, curated list (a few cycles' worth), best last.
     const maxShown = 60;
     final start = scored.length > maxShown ? scored.length - maxShown : 0;
-    return [for (final e in scored.sublist(start)) e.p];
+    return [
+      for (final e in scored.sublist(start))
+        () {
+          // Flag "(updated)": an old post whose newest like/reply landed well
+          // after it was posted is on screen because of that activity, not
+          // recency — say so instead of implying it is fresh.
+          final mid = (e.p['mid'] ?? '').toString();
+          final t = (e.p['t'] as int?) ?? now;
+          final la = _postActivityMs[mid] ?? 0;
+          final updated = la > t + 5 * 60 * 1000 && now - la < 6 * 3600 * 1000;
+          return updated ? ({...e.p, 'updated': true}) : e.p;
+        }(),
+    ];
   }
 
   Future<List<Map<String, dynamic>>> _loadOlderSocialPosts(int beforeMs) async {
@@ -5620,12 +5667,7 @@ class _WappPageState extends State<WappPage>
               mentionResolver: RnsService.instance.nostrMentionName,
               onMentionTap: _openNostrProfileByHex,
               likeInfo: _likeInfoFor,
-              onLike: (m, like) {
-                _fieldValues['activity_mid'] = m;
-                _fieldValues['activity_unlike'] = !like;
-                _sendCommand('activity_like');
-                setState(() {});
-              },
+              onLike: _likePost,
               replyCount: _replyCountFor,
               onReplyPost: (post) {
                 Navigator.of(context).pop();
@@ -5902,13 +5944,7 @@ class _WappPageState extends State<WappPage>
         isSaved: (mid) => _activityArchive?.isSaved(mid) ?? false,
         savedPosts: () =>
             _activityArchive?.savedPosts() ?? const <Map<String, dynamic>>[],
-        onLike: (mid, like) {
-          // Generic: hand the like to the wapp (it decides what a "like" means —
-          // APRS group vote, NOSTR kind-7 reaction, …).
-          _fieldValues['activity_mid'] = mid;
-          _fieldValues['activity_unlike'] = !like;
-          _sendCommand('activity_like');
-        },
+        onLike: _likePost,
         onSave: (post) {
           _activityArchive?.toggleSaved(post);
           _keepPostMedia(post); // pinned/saved — keep its media
@@ -6340,11 +6376,7 @@ class _WappPageState extends State<WappPage>
                   const <Map<String, dynamic>>[],
               replyCount: _replyCountFor,
               likeInfo: _likeInfoFor,
-              onLike: (m, like) {
-                _fieldValues['activity_mid'] = m;
-                _fieldValues['activity_unlike'] = !like;
-                _sendCommand('activity_like');
-              },
+              onLike: _likePost,
               // The thread shows the SAME votes as the stream — without these
               // an upvote cast in the feed vanished the moment you opened the
               // post, which reads as a vote that was lost.

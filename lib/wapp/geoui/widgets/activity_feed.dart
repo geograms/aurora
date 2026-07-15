@@ -1145,7 +1145,11 @@ class ActivityPostCard extends StatelessWidget {
       mid = activityMid(from, raw);
       p['mid'] = mid;
     }
-    final time = activityTimeShort(p);
+    // "48m (updated)" when an OLD post is on screen because it recently gathered
+    // a like/reply — so its position is explained (it bubbled up on activity, it
+    // is not brand new).
+    final baseTime = activityTimeShort(p);
+    final time = p['updated'] == true ? '$baseTime (updated)' : baseTime;
     final via = (p['via'] ?? '').toString();
     // RAW (mentions not substituted): _ExpandableText decodes them itself, and
     // needs the keys to build a tap target. Substituting here is what made a

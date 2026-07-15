@@ -44,6 +44,7 @@ class NostrAllPoller {
     required this.archive,
     required this.onChanged,
     required this.onProfiles,
+    required this.onActivity,
   });
 
   /// The Social "All" archive the feed renders from (dedups by event id).
@@ -55,6 +56,11 @@ class NostrAllPoller {
   /// Fresh kind-0 profiles: {64-hex pubkey: {name, pic}} for the host to cache so
   /// author names/avatars render instead of hex keys.
   final void Function(Map<String, Map<String, String>>) onProfiles;
+
+  /// Latest engagement time per curated post id (ms) — the newest reaction/reply
+  /// timestamp. Lets the feed mark an old post that just gathered activity as
+  /// "(updated)" so its high position is explained.
+  final void Function(Map<String, int>) onActivity;
 
   /// True while a poll is in flight — the UI shows "Getting fresh posts…".
   final ValueNotifier<bool> polling = ValueNotifier<bool>(false);
@@ -165,14 +171,22 @@ class NostrAllPoller {
       // Tally reactions/reposts to find the popular posts.
       final likers = <String, Set<String>>{};
       final reposters = <String, Set<String>>{};
+      final lastActivity = <String, int>{}; // post id -> newest engagement ms
+      void touch(String id, int createdSec) {
+        final ms = createdSec * 1000;
+        if (ms > (lastActivity[id] ?? 0)) lastActivity[id] = ms;
+      }
+
       for (final ev in reactions) {
         final target = _lastETag(ev);
         if (target == null) continue;
         if (ev.kind == 7) {
           if (ev.content.trim() == '-') continue; // downvote
           (likers[target] ??= <String>{}).add(ev.pubkey);
+          touch(target, ev.createdAt);
         } else if (ev.kind == 6) {
           (reposters[target] ??= <String>{}).add(ev.pubkey);
+          touch(target, ev.createdAt);
         }
       }
       // Most-liked post ids (also include fresh ids so fresh-but-liked show).
@@ -230,6 +244,7 @@ class NostrAllPoller {
         if (target == null || id == null) continue;
         if (!popIds.contains(target)) continue;
         (replyIds[target] ??= <String>{}).add(id);
+        touch(target, ev.createdAt);
         final row = _replyRow(ev, target);
         if (row != null) replyRows.add(row);
       }
@@ -274,6 +289,16 @@ class NostrAllPoller {
         if (keptIds.contains((r['parent'] ?? '').toString())) archive.add(r);
       }
 
+      // Report last-activity for the curated posts, so the feed can mark an old
+      // post that just gathered engagement as "(updated)".
+      if (keptIds.isNotEmpty) {
+        final act = <String, int>{
+          for (final id in keptIds)
+            if (lastActivity[id] != null) id: lastActivity[id]!,
+        };
+        if (act.isNotEmpty) onActivity(act);
+      }
+
       // Hand profiles to the host cache (names instead of hex).
       if (profiles.isNotEmpty) {
         final out = <String, Map<String, String>>{};
@@ -307,6 +332,30 @@ class NostrAllPoller {
       polling.value = false;
     }
     return 0;
+  }
+
+  /// Publish a pre-signed event (e.g. a like) via short-lived main-isolate
+  /// sockets — the same open/send/close discipline as polling, and the only path
+  /// that actually reaches relays (the engine's sockets freeze). Best-effort.
+  Future<void> publishEvent(NostrEvent ev) async {
+    final relays = _relays();
+    if (relays.isEmpty) return;
+    final clients = <NostrWsClient>[];
+    try {
+      for (final uri in relays) {
+        final c = NostrWsClient(uri);
+        clients.add(c);
+        unawaited(
+          c.connect().then((_) => c.publish(ev)).catchError((_) => false),
+        );
+      }
+      await Future<void>.delayed(const Duration(seconds: 5));
+    } finally {
+      for (final c in clients) {
+        unawaited(c.close());
+      }
+    }
+    LogService.instance.add('all-poll: published kind-${ev.kind}');
   }
 
   /// The last 'e' tag of an event (NIP-25: the reacted-to event id).

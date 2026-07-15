@@ -1036,7 +1036,7 @@ class WappEngine {
       params: [],
       results: [ValueTy.i32],
     );
-    // The folder's shareable pointer: nfolder1… (docs/torrents.md §11) — the
+    // The folder's shareable pointer: ntorrent1… (docs/torrents.md §11) — the
     // folder key plus a few provider hints and the publisher.
     final halFolderLink = WasmFunction(
       (int idPtr, int idLen, int outPtr, int outCap) {

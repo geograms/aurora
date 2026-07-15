@@ -7,7 +7,7 @@
 
 ## The idea
 
-A torrent here is already a **folder** with a stable key (`nfolder1…`), signed
+A torrent here is already a **folder** with a stable key (`ntorrent1…`), signed
 contents, and a `data/` directory that carries its listing. That is most of a
 static website. If a torrent folder can hold `data/index.html`, then the same
 thing that is a torrent is also a **site**: a stable address, content that can be
@@ -60,8 +60,8 @@ Two layers, both generic, neither implemented yet:
 
 2. **A gateway**, one of:
    - **in-app viewer** — a native/webview surface pointed at the resolver,
-     `nfolder1…` in the address bar, links resolved inside the folder;
-   - **local HTTP gateway** — `http://127.0.0.1:PORT/<nfolder1…>/` maps to the
+     `ntorrent1…` in the address bar, links resolved inside the folder;
+   - **local HTTP gateway** — `http://127.0.0.1:PORT/<ntorrent1…>/` maps to the
      folder so any browser can open it (the extension of the NomadNet-style page
      browser already in the Reticulum wapp);
    - **`.onion`/I2P-style** long-lived address derived from the folder key, for
@@ -76,7 +76,7 @@ un-takedownable.
 - **No script trust by default.** HTML/CSS render; JavaScript is off unless the
   viewer explicitly opts a folder in. A signed folder proves *who published*,
   not *that the content is safe to run*.
-- **Sandbox the origin.** Each `nfolder1…` is its own origin; no ambient access
+- **Sandbox the origin.** Each `ntorrent1…` is its own origin; no ambient access
   to the app, the mesh identity, other folders, or the file system. A gateway
   must not let a page read `.folder.json` or anything outside `data/`/the folder.
 - **Path safety.** Every in-page path resolves against the folder root and is

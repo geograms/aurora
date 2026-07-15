@@ -762,7 +762,7 @@ class RemoteApiService {
         return _json(res, {'owned': RnsService.instance.ownedDiskFolders()});
       }
       // ── Torrents (docs/torrents.md) ────────────────────────────────────────
-      // The folder's shareable pointer: nfolder1… (key + provider hints + author).
+      // The folder's shareable pointer: ntorrent1… (key + provider hints + author).
       if (req.method == 'GET' && path == '/api/rns/folder/link') {
         final fid = '${req.uri.queryParameters['folderId'] ?? ''}'.trim();
         if (fid.isEmpty) {

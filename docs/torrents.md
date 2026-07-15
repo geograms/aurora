@@ -11,7 +11,7 @@ layer and DHT (`lib/services/files/`), the Indexer role and provider records
 (NOSTR.md). The **Torrents wapp** (`wapps/torrents`) is the torrent-client
 face on top of them.
 
-> **State as of 2026-07-15 (wapp v0.5.8).** The swarm, the `nfolder1…` link, the
+> **State as of 2026-07-15 (wapp v0.5.8).** The swarm, the `ntorrent1…` link, the
 > **piece engine** (§8 step 2), the **listing** (§12, `data/meta.json` + artwork),
 > the **on-disk download library** (§13), **search / browse by category** (§14)
 > and the **favicon-style per-torrent icon** (§15) are **built and on-device
@@ -130,9 +130,9 @@ this device.
    under **each file sha256**, to the DHT and to the Indexers we know
    (`publishKey`). Those two keys are what the tracker answers on: *who has this
    folder* and *who has this file*.
-6. **Share the `nfolder1…`.** Chat message, QR, copy button. It is the magnet
+6. **Share the `ntorrent1…`.** Chat message, QR, copy button. It is the magnet
    link: the folder key plus a few swarm hints and the author, bech32-encoded
-   under its own `nfolder` prefix so any parser — the chat wapp, the OS, another
+   under its own `ntorrent` prefix so any parser — the chat wapp, the OS, another
    client — knows on sight that this is a torrent folder and not a person. See
    §11. A bare `npub1…` is still accepted, it is just slower to cold-start.
 
@@ -250,7 +250,7 @@ generic host HALs).
 | **Torrents** | ONE navigable list (no Downloaded/Mine tabs) over the download-folder tree (§13): the organizing subfolders, then the torrents filed at that level. Each row: its icon (§15), name (the listing title, else the folder name), category, our state (mine · pinned · following), files, size. An **All / Mine** filter and **New folder**. Tap a torrent → its Info screen; tap a folder → go in; the app-bar back arrow goes up |
 | **Info** (per torrent) | the listing hero (§12) — banner, cover, category + tags, description, a horizontal gallery — then a compact file browser with a **Browse** to the full-screen file view. **Move to folder** files it under a subfolder; **Edit listing** (owner) edits the metadata. The app-bar title is the torrent's own name |
 | **Search** | a full panel: text search over title / description / tags, **browse by category** (only non-empty categories), a **sort** toggle (seeders · recently updated · size). Tap a category to list it, a result to open it. Backed by the generic `hal_folder_search` |
-| **Add** (＋) | Open a link (paste an `nfolder1…`) · Share a folder (turn a disk directory into a torrent) |
+| **Add** (＋) | Open a link (paste an `ntorrent1…`) · Share a folder (turn a disk directory into a torrent) |
 | **Settings** | the **download folder** (where downloads land as real files; §13) + change it; pin-what-I-download; rescan interval; what this device is holding |
 
 HAL, all generic (the HAL rule — no torrent logic in `lib/`): `hal.folder_*`
@@ -314,7 +314,7 @@ public hub.
    sha256 per file, signed op-log, key minted. Its hashes matched the ones computed
    on the host, byte for byte.
 2. **C61 pinned it** → provider record announced.
-3. **TANK2 opened the `nfolder1…` link cold** — never having seen the folder. It
+3. **TANK2 opened the `ntorrent1…` link cold** — never having seen the folder. It
    decoded to the right key, and the **signed op-log arrived over the mesh in ~36 s**:
    3 files, the folder name, and the owner npub (C61's).
 4. **TANK2 pinned it** → all 3 files downloaded. Its content-addressed store holds
@@ -338,8 +338,8 @@ The publisher's phone is no longer the only copy — which is what a pin is for.
 - **The listing (§12), the on-disk download library (§13), search/browse (§14) and
   the per-torrent favicon-style icon (§15): built and on-device validated** (TANK2,
   v0.5.8).
-- **`nfolder1…`** (§11): **built and unit-tested** (`lib/services/folders/nfolder.dart`,
-  `test/nfolder_test.dart`) — round-trip, hints, author, a bare npub still
+- **`ntorrent1…`** (§11): **built and unit-tested** (`lib/services/folders/ntorrent.dart`,
+  `test/ntorrent_test.dart`) — round-trip, hints, author, a bare npub still
   opening a folder, and a mangled link failing closed rather than resolving
   somewhere else.
 - **The three new host HALs** — `folder_link`, `folder_swarm`, `folder_pin`:
@@ -395,7 +395,7 @@ with extra steps.
 | **Storage** | incomplete-dir vs completed-dir, move storage, "delete torrent" vs "delete torrent **and** data", and a real disk-full path that pauses rather than corrupts |
 | **Watch folder / auto-add** | drop an npub in a list (or a file in a directory) and it downloads |
 | **Labels** | categories, filters, sort. Free, and the difference between 6 torrents and 600 |
-| **Deep links** | `geogram://folder/<npub>` (and a bare `npub1…`) handled as a magnet link from chat, QR, or the OS |
+| **Deep links** | `geogram://torrent/<npub>` (and a bare `npub1…`) handled as a magnet link from chat, QR, or the OS |
 | **Creation params** | piece size, exclude patterns, follow-symlinks, file ordering |
 
 ### Deliberately absent
@@ -409,15 +409,15 @@ with extra steps.
 
 ---
 
-## 11. The link: `nfolder1…`
+## 11. The link: `ntorrent1…`
 
 The magnet link. A NIP-19-style TLV bech32 string with its own human-readable
 prefix, so a link parser knows what it is holding **before** it knows anything
 about the network.
 
 ```
-nfolder1qqsrq…               ← paste anywhere: chat, QR, a note, the clipboard
-geogram://folder/nfolder1qqsrq…   ← the OS deep link
+ntorrent1qqsrq…               ← paste anywhere: chat, QR, a note, the clipboard
+geogram://torrent/ntorrent1qqsrq…   ← the OS deep link
 ```
 
 ### Why not just the npub
@@ -439,7 +439,7 @@ A bare public key is 32 bytes and nothing else, and that costs three things:
 
 ### Encoding
 
-HRP `nfolder`, bech32, NIP-19 TLV body:
+HRP `ntorrent`, bech32, NIP-19 TLV body:
 
 | T | V | |
 |---|---|---|
@@ -468,12 +468,12 @@ key — never a name it cannot prove.
 
 ### Parsing rules
 
-- `nfolder1…` → folder pointer. Hints and author used as given.
+- `ntorrent1…` → folder pointer. Hints and author used as given.
 - `npub1…` → still accepted as a folder pointer with **zero hints and no author**.
   It works; it is just the slow cold start. This keeps every link ever shared
   before this section valid.
-- `geogram://folder/<nfolder|npub>` → the same, from the OS.
-- An `nfolder` with an unknown TLV type is **not** an error: unknown types are
+- `geogram://torrent/<ntorrent|npub>` → the same, from the OS.
+- An `ntorrent` with an unknown TLV type is **not** an error: unknown types are
   skipped, so the encoding can grow without breaking old clients.
 
 ---
@@ -563,7 +563,7 @@ decides to download the torrent, so the artwork has to stay cheap.
 that already carries `addFile`. A human edits JSON; the network sees signed
 metadata. Two consequences:
 
-- A stranger reading the `nfolder1…` link sees the **title, category and tags
+- A stranger reading the `ntorrent1…` link sees the **title, category and tags
   without downloading a byte** — the op-log arrives before any content.
 - The **artwork** (cover/banner/gallery/icon) is not mirrored into the op-log —
   it does not need to be. Each is a published file, resolved by its fixed name to
@@ -646,3 +646,13 @@ The plan for hosting torrents as their own websites — where this same file is 
 browser-tab icon and `data/index.html` is the site root — is
 [torrents-as-websites.md](torrents-as-websites.md). Not implemented; the icon was
 designed to fit it.
+
+---
+
+## Related plans
+
+- **[torrent-import.md](torrent-import.md)** — download an ordinary internet
+  BitTorrent and convert it into an ntorrent re-shared on Reticulum (download-only;
+  reuses `TorrentService` + `folderAddFromDisk`). Not built.
+- **[torrents-as-websites.md](torrents-as-websites.md)** — serve a torrent folder
+  as its own website (the favicon-style icon is the first built piece). Not built.

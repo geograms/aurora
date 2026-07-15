@@ -4,6 +4,9 @@
          API server, APRS-IS sockets, and all http(s) traffic. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Camera: scanning a torrent's QR code to open it (mobile_scanner). -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <!-- Broad file access so an owner can add a real on-disk folder and serve
          its files straight from disk (granted at runtime via the system
          "All files access" screen; requested only when the user adds a disk folder). -->

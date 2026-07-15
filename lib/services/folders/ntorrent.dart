@@ -2,15 +2,15 @@
  * Copyright (c) geogram
  * License: Apache-2.0
  *
- * `nfolder1…` — the shareable address of a folder (docs/torrents.md §11).
+ * `ntorrent1…` — the shareable address of a torrent folder (docs/torrents.md §11).
  *
  * A NIP-19-style TLV bech32 pointer with its own human-readable prefix, so a
- * parser knows it is holding a FOLDER and not a person before it knows anything
+ * parser knows it is holding a TORRENT and not a person before it knows anything
  * about the network:
  *
  *   T=0 special : 32-byte folder public key        (required, exactly one)
  *   T=1 hint    : 16-byte RNS destination hash of a provider/indexer (0..n)
- *   T=2 author  : 32-byte pubkey of the publisher  (optional)
+ *   T=2 author  : 32-byte pubkey of the publisher  (optional, off by default)
  *   T=3 kind    : uint32 big-endian                (optional, reserved)
  *
  * The hints and the author are UNSIGNED and are only a hint: a hostile sharer
@@ -27,10 +27,10 @@ import 'dart:typed_data';
 import 'package:bech32/bech32.dart';
 import 'package:hex/hex.dart';
 
-const String kNfolderHrp = 'nfolder';
+const String kNtorrentHrp = 'ntorrent';
 
-/// A decoded folder pointer.
-class NfolderRef {
+/// A decoded torrent pointer.
+class NtorrentRef {
   /// 64-hex folder public key (the folder id).
   final String folderId;
 
@@ -38,20 +38,21 @@ class NfolderRef {
   /// first, before walking the DHT. May be stale — they are a hint, not a fact.
   final List<Uint8List> hints;
 
-  /// 64-hex pubkey of the publisher, when the sharer included it.
+  /// 64-hex pubkey of the publisher, when the sharer chose to include it (it is
+  /// off by default, so most links carry none — see RnsService.folderLink).
   final String? author;
 
-  const NfolderRef({
+  const NtorrentRef({
     required this.folderId,
     this.hints = const [],
     this.author,
   });
 }
 
-class Nfolder {
-  Nfolder._();
+class Ntorrent {
+  Ntorrent._();
 
-  /// Encode a folder pointer. [hints] are 16-byte RNS destination hashes;
+  /// Encode a torrent pointer. [hints] are 16-byte RNS destination hashes;
   /// anything of another length is dropped rather than silently truncated.
   static String encode(
     String folderIdHex, {
@@ -73,23 +74,22 @@ class Nfolder {
 
     final data = _convertBits(Uint8List.fromList(tlv), 8, 5, true);
     return const Bech32Codec()
-        .encode(Bech32(kNfolderHrp, List<int>.from(data)), 4096);
+        .encode(Bech32(kNtorrentHrp, List<int>.from(data)), 4096);
   }
 
-  /// Decode any address a user might paste: `nfolder1…`, a bare `npub1…`, or
+  /// Decode any address a user might paste: `ntorrent1…`, a bare `npub1…`, or
   /// 64 hex characters. Returns null when it is none of those.
   ///
   /// A bare npub decodes to a pointer with no hints and no author — it works,
-  /// it is just the slow cold start (every link shared before `nfolder` existed
-  /// stays valid).
-  static NfolderRef? decode(String input) {
+  /// it is just the slow cold start.
+  static NtorrentRef? decode(String input) {
     var s = input.trim();
     if (s.startsWith('nostr:')) s = s.substring(6);
-    if (s.startsWith('geogram://folder/')) s = s.substring(17);
+    if (s.startsWith('geogram://torrent/')) s = s.substring(18);
     if (s.isEmpty) return null;
 
     if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(s)) {
-      return NfolderRef(folderId: s.toLowerCase());
+      return NtorrentRef(folderId: s.toLowerCase());
     }
 
     try {
@@ -102,9 +102,9 @@ class Nfolder {
 
       if (hrp == 'npub') {
         if (bytes.length != 32) return null;
-        return NfolderRef(folderId: HEX.encode(bytes));
+        return NtorrentRef(folderId: HEX.encode(bytes));
       }
-      if (hrp != kNfolderHrp) return null;
+      if (hrp != kNtorrentHrp) return null;
 
       final tlv = _decodeTlv(bytes);
       final special = tlv[0];
@@ -112,7 +112,7 @@ class Nfolder {
         return null;
       }
       final author = tlv[2];
-      return NfolderRef(
+      return NtorrentRef(
         folderId: HEX.encode(special.first),
         hints: [
           for (final h in tlv[1] ?? const <Uint8List>[])
@@ -129,8 +129,8 @@ class Nfolder {
     }
   }
 
-  /// True when [s] looks like a folder pointer of any accepted form.
-  static bool looksLikeFolder(String s) => decode(s) != null;
+  /// True when [s] looks like a torrent pointer of any accepted form.
+  static bool looksLikeTorrent(String s) => decode(s) != null;
 
   static void _put(List<int> out, int type, Uint8List value) {
     if (value.length > 255) return;

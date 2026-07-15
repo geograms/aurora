@@ -71,7 +71,7 @@ import '../folders/folder_state.dart';
 import '../folders/folder_export.dart';
 import '../folders/folder_subscriptions.dart';
 import '../folders/folder_meta.dart';
-import '../folders/nfolder.dart';
+import '../folders/ntorrent.dart';
 import '../folders/piece_hashes.dart';
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../../wapp/geoui/activity_archive.dart';
@@ -6699,12 +6699,12 @@ class RnsService {
   }
 
   /// Normalize a folderId to hex: accepts hex, an `npub1...` address, or an
-  /// `nfolder1...` pointer (docs/torrents.md §11) — whose provider hints are
+  /// `ntorrent1...` pointer (docs/torrents.md §11) — whose provider hints are
   /// handed to the DHT so a cold open tries a known holder before walking it.
   String _normFolderId(String id) {
     final s = id.trim();
     if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(s)) return s.toLowerCase();
-    final ref = Nfolder.decode(s);
+    final ref = Ntorrent.decode(s);
     if (ref != null) {
       if (ref.hints.isNotEmpty) _seedSwarmHints(ref.folderId, ref.hints);
       return ref.folderId;
@@ -7064,7 +7064,7 @@ class RnsService {
   final Map<String, int> _swarmAt = {};
   static const int _swarmTtlMs = 60 * 1000;
 
-  /// Provider hints carried in an `nfolder1…` link: destination hashes worth
+  /// Provider hints carried in an `ntorrent1…` link: destination hashes worth
   /// asking before the DHT walk. Unsigned, so they are a hint and nothing more —
   /// a bad hint costs one failed link and can never alter a signed op-log.
   final Map<String, List<Uint8List>> _swarmHints = {};
@@ -7087,11 +7087,20 @@ class RnsService {
     return true;
   }
 
-  /// The folder's shareable pointer: `nfolder1…` (docs/torrents.md §11) — the
-  /// folder key, up to 3 provider hints, and the publisher when we are them.
-  /// Falls back to the npub if the key is not encodable (never, in practice).
-  String folderLink(String folderIdOrNpub) {
-    final folderId = _normFolderId(folderIdOrNpub);
+  /// The folder's shareable pointer: `ntorrent1…` (docs/torrents.md §11) — the
+  /// folder key and up to 3 provider hints. Falls back to the npub if the key is
+  /// not encodable (never, in practice).
+  ///
+  /// The publisher's npub (TLV 2) identifies WHO shared it, so it is **off by
+  /// default** — a shared link should not name a person unless they opt in. Pass
+  /// `"<folderId>\t1"` to include it (the torrents wapp gates this behind a
+  /// Settings toggle, default off).
+  String folderLink(String folderIdOrNpubMaybeFlag) {
+    final tab = folderIdOrNpubMaybeFlag.indexOf('\t');
+    final includeAuthor =
+        tab >= 0 && folderIdOrNpubMaybeFlag.substring(tab + 1) == '1';
+    final folderId = _normFolderId(
+        tab >= 0 ? folderIdOrNpubMaybeFlag.substring(0, tab) : folderIdOrNpubMaybeFlag);
     final hints = <Uint8List>[];
     // Our own destination first when we hold the bytes: the person we are
     // sharing with should try us before anyone else.
@@ -7108,10 +7117,10 @@ class RnsService {
       hints.add(h);
     }
     try {
-      return Nfolder.encode(
+      return Ntorrent.encode(
         folderId,
         hints: hints,
-        authorHex: own ? selfPubHex : null,
+        authorHex: (own && includeAuthor) ? selfPubHex : null,
       );
     } catch (_) {
       return NostrCrypto.encodeNpub(folderId);

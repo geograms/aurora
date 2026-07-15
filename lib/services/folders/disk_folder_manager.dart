@@ -269,7 +269,7 @@ class DiskFolderManager {
     // The listing: data/meta.json is what a HUMAN edits, and the signed op-log
     // is a mirror of it. Emitting setMeta here is what lets a stranger read this
     // torrent's title and filter it by category WITHOUT downloading anything —
-    // the op-log is what they fetch from the nfolder link, before any bytes.
+    // the op-log is what they fetch from the ntorrent link, before any bytes.
     // meta.json wins on every rescan; nothing else writes these fields.
     await _syncListing(folderId, state);
 

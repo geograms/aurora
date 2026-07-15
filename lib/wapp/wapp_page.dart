@@ -2871,7 +2871,7 @@ class _WappPageState extends State<WappPage>
     String result = '';
     if (!kIsWeb && Platform.isAndroid) {
       try {
-        result = await Navigator.of(context).push<String>(
+        result = await Navigator.of(context, rootNavigator: true).push<String>(
               MaterialPageRoute(builder: (_) => const _QrScanPage()),
             ) ??
             '';
@@ -10382,17 +10382,10 @@ class _QrScanPage extends StatefulWidget {
 }
 
 class _QrScanPageState extends State<_QrScanPage> {
-  final MobileScannerController _controller = MobileScannerController();
   bool _done = false;
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
   void _onDetect(BarcodeCapture capture) {
-    if (_done) return;
+    if (_done || !mounted) return;
     for (final b in capture.barcodes) {
       final v = b.rawValue;
       if (v != null && v.isNotEmpty) {
@@ -10405,11 +10398,13 @@ class _QrScanPageState extends State<_QrScanPage> {
 
   @override
   Widget build(BuildContext context) {
+    // No explicit controller: MobileScanner manages its own and auto-starts the
+    // camera (and requests the permission) on first build.
     return Scaffold(
       appBar: AppBar(title: const Text('Scan a QR code')),
       body: Stack(
         children: [
-          MobileScanner(controller: _controller, onDetect: _onDetect),
+          Positioned.fill(child: MobileScanner(onDetect: _onDetect)),
           const Align(
             alignment: Alignment.bottomCenter,
             child: Padding(

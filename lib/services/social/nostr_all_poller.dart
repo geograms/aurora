@@ -66,7 +66,7 @@ class NostrAllPoller {
   static const Duration _collectPosts = Duration(seconds: 6);
 
   /// How long phase 2 (reactions/replies) holds them.
-  static const Duration _collectStats = Duration(seconds: 4);
+  static const Duration _collectStats = Duration(seconds: 5);
 
   /// How far back the FIRST poll of a session looks (later polls use [_newestSec]).
   static const Duration _coldWindow = Duration(minutes: 30);
@@ -74,10 +74,10 @@ class NostrAllPoller {
   /// Cadence while Social is open. Fresh short-lived client each time.
   static const Duration _cadence = Duration(minutes: 3);
 
-  /// Fetch engagement for at most this many recently-shown posts per poll (relay
-  /// filters cannot be unbounded, and this is enough to keep the visible feed's
-  /// badges current).
-  static const int _statsFanout = 60;
+  /// Fetch engagement for at most this many posts per poll (relay filters cannot
+  /// be unbounded). Wide enough to cover the aging posts that actually have
+  /// reactions, not just the seconds-old top of the feed.
+  static const int _statsFanout = 150;
 
   bool get isPolling => _busy;
 
@@ -237,13 +237,27 @@ class NostrAllPoller {
       ? -1
       : (DateTime.now().millisecondsSinceEpoch ~/ 1000) - _newestSec;
 
-  /// The most-recent post ids currently in the feed, for the engagement query.
+  /// Post ids to fetch engagement for. Deliberately targets AGING posts (older
+  /// than [_minEngageAgeMs], up to a few hours) rather than the seconds-old top
+  /// of the feed: a brand-new post has no reactions yet, so querying it is
+  /// wasted; a 5–60-minute-old post is where likes actually accrue. Re-run every
+  /// poll, so each post's reactions are refreshed as it ages.
+  static const int _minEngageAgeMs = 90 * 1000; // skip the too-fresh
+  static const int _maxEngageAgeMs = 6 * 60 * 60 * 1000; // and the stale
+
   List<String> _recentPostIds() {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     final out = <String>[];
-    for (final r in archive.recent(limit: _statsFanout)) {
+    // recent() returns a wide, newest-last window; scan more than the fanout so
+    // the age filter still yields a full batch of engage-worthy posts.
+    for (final r in archive.recent(limit: _statsFanout * 4)) {
       final mid = (r['mid'] ?? '').toString();
       final parent = (r['parent'] ?? '').toString();
-      if (mid.length == 64 && parent.isEmpty) out.add(mid); // roots only
+      if (mid.length != 64 || parent.isNotEmpty) continue; // roots only
+      final age = nowMs - (((r['t'] as int?) ?? 0));
+      if (age < _minEngageAgeMs || age > _maxEngageAgeMs) continue;
+      out.add(mid);
+      if (out.length >= _statsFanout) break;
     }
     return out;
   }
@@ -344,9 +358,15 @@ List<Map<String, dynamic>> _verifyGateBuild(Map<String, dynamic> arg) {
   // Newest first, then cap per author so no single flooder dominates.
   kept.sort((a, b) => b.ev.createdAt.compareTo(a.ev.createdAt));
   const perAuthorCap = 2;
+  // The global firehose runs ~90 posts/min. Keeping every one floods the feed so
+  // fast that nothing survives on screen long enough to gather (or show) likes.
+  // Keep a bounded, newest slice per poll so posts persist, age, and accrue the
+  // engagement the poll's phase 2 then fills in.
+  const perPollCap = 50;
   final perAuthor = <String, int>{};
   final out = <Map<String, dynamic>>[];
   for (final c in kept) {
+    if (out.length >= perPollCap) break;
     final n = perAuthor[c.pub] ?? 0;
     if (n >= perAuthorCap) continue;
     perAuthor[c.pub] = n + 1;

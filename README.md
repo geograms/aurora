@@ -15,7 +15,7 @@ four main ones: Chat, Social, Reticulum, and Torrents.
 <p align="center">
   <img src="docs/screenshots/launcher.png" width="240" alt="Geogram launcher">
   <img src="docs/screenshots/social-feed.png" width="240" alt="Social feed">
-  <img src="docs/screenshots/reticulum-graph.png" width="240" alt="Reticulum node graph">
+  <img src="docs/screenshots/reticulum-graph.gif" width="240" alt="Live Reticulum node graph">
 </p>
 
 ## Download

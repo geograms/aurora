@@ -6622,15 +6622,17 @@ class _WappPageState extends State<WappPage>
     return hub.likes > 0 ? (count: hub.likes, mine: hub.mine) : a;
   }
 
-  /// Reply tally, same source order as [_likeInfoFor].
+  /// Reply tally, same source order as [_likeInfoFor]. Counts the WHOLE thread
+  /// (nested replies included) so the badge matches the messages the thread view
+  /// expands — a reply-to-reply shouldn't be invisible in the count.
   int _replyCountFor(String mid) {
     if (_wappName == 'social' && _socialFeedFilter == 'nomadnet') {
-      return _nomadnetArchive?.replyCount(mid) ?? 0;
+      return _nomadnetArchive?.threadReplyCount(mid) ?? 0;
     }
+    final archived = _activityArchive?.threadReplyCount(mid) ?? 0;
+    if (archived > 0) return archived;
     final live = _wappPostStats[mid]?.replies;
     if (live != null && live > 0) return live;
-    final archived = _activityArchive?.replyCount(mid) ?? 0;
-    if (archived > 0) return archived;
     return RnsService.instance.nostrStats(mid).replies;
   }
 

@@ -661,6 +661,31 @@ class ActivityArchive {
     }
   }
 
+  /// Total replies in the thread rooted at [mid] — direct replies AND their
+  /// nested descendants — matching what the thread view expands. The post card's
+  /// reply badge uses this so "3 replies" agrees with the three messages shown,
+  /// instead of only counting the direct children (which read as "2" when one of
+  /// those replies had a reply of its own). `UNION` (not `UNION ALL`) dedups by
+  /// mid so a malformed parent cycle can't loop forever.
+  int threadReplyCount(String mid) {
+    final db = _ensureDb();
+    if (db == null || mid.isEmpty) return 0;
+    try {
+      return db.select(
+            'WITH RECURSIVE sub(mid) AS ('
+            '  SELECT mid FROM activity WHERE parent = ?1'
+            '  UNION'
+            '  SELECT a.mid FROM activity a JOIN sub ON a.parent = sub.mid'
+            ') SELECT COUNT(*) c FROM sub',
+            [mid],
+          ).first['c']
+          as int;
+    } catch (_) {
+      // Fall back to the direct count if the recursive query is unavailable.
+      return replyCount(mid);
+    }
+  }
+
   /// Posts authored by [callsign], oldest→newest (for a profile page).
   List<Map<String, dynamic>> byAuthor(String callsign, {int limit = 200}) {
     final db = _ensureDb();

@@ -1522,6 +1522,119 @@ the transport: two hub-connected clients hearing each other's announces but not
 yet forming an answered link for content. Nothing in the NOSTR or sync layers
 fixes that — it is path-request / link-establishment through the hubs.
 
+## What actually works — validated cross-device findings
+
+The "current wall" above was written when links between two NAT'd phones returned
+`0 answered` and nothing crossed. That wall has since been **cleared in
+practice**: with the transport routed over the chat destination (see below),
+publications, replies, reply-to-replies, and likes all propagate between two
+phones **on different internet networks, through public hubs only, with no static
+paths**. This section records what was proven on real devices (C61 `X1A67X` ↔
+TANK2 `X1RD89`) and *why* it works, so the mechanics are not mistaken for luck.
+
+### Finding 1 — the link answers once it rides the chat destination
+
+The relay REQ/EVENT/SYNC links were dialing the peer's `geogram/relay`
+destination, which the hubs rate-limit and **drop** — so there was never a path
+and the link timed out (`0 answered`). The fix that made everything cross: route
+relay links over the **chat destination** (the announce that always propagates),
+exactly as the DHT already does, and demux the two RPC protocols sharing that
+destination with a 1-byte frame tag (`DHT=0x01`, `relay=0x02`). After this, REQ
+and EVENT frames are answered and content moves. **This is the single change that
+turned "nothing crosses" into "everything crosses."**
+
+### Finding 2 — delivery does NOT require a direct A↔B link; a shared Indexer is enough
+
+The two phones rarely form a *direct* answered link (asymmetric NAT — see
+Finding 3). They don't need one. Delivery converges through a **mutually-reachable
+Indexer**:
+
+```
+  C61 posts/likes ──fan-out push──▶  Indexer 95432b8d  ◀──incremental pull── TANK2
+      (author fans to its                (both phones                (weak leg pulls
+       announced indexers)                heard this hash)             from the shared one)
+```
+
+The operational signature to look for: the SAME `relay: heard indexer <hash>`
+line on BOTH devices. Once a common hash appears, the weakly-connected phone pulls
+the content from it even though it can't reach the author directly. In the live
+run the shared hash was `95432b8d`; C61 had fanned the reply+like there, TANK2
+pulled it from there. **A shared Indexer is the reliable path; a direct link is
+the fast bonus when it happens.**
+
+### Finding 3 — reachability is asymmetric, and that is normal
+
+The two legs are not symmetric. C61 reported `1 geogram device · 4 hubs · 8 other
+peers`; TANK2 reported `On the network … 1 hub`, no direct geograms. The
+better-connected node reaches the other directly and its own posts push straight
+across; the weak node cannot pull from the author and must go through the shared
+Indexer. Consequence for testing: **check the "On the network" card on BOTH
+phones.** If one shows only hubs and no geograms, expect its inbound to arrive by
+pull-through-indexer (minutes), not by direct push (sub-second) — and do not read
+the delay as breakage.
+
+### Finding 4 — timing: sub-second on a warm direct link, ~minutes via an Indexer
+
+- **Direct push** (author→peer link exists): the peer's `onNomadnetInbound` fires
+  and the feed refreshes in **under a second** (`fan-out EVENT <id> -> <peer>` on
+  the sender, `nomadnet-inbound: kind=N <id> PUSHED in` on the receiver).
+- **Via shared Indexer** (weak leg): bounded by the 90s pull cadence plus NAT link
+  warmup — several `0 answered` cycles are normal before one `1 answered
+  [<hash>:<n>]` lands. Observed convergence for a reply-to-reply and a like:
+  **~20 min** on the weak leg. **Restarting the app re-runs discovery**
+  (`announceRelayNow` + immediate pull) and noticeably speeds convergence.
+
+### Finding 5 — everything is a plain signed NOSTR event; id-dedup makes multi-path safe
+
+Post, reply, reply-to-reply = kind-1 (reply carries an `e` tag to its parent);
+like = kind-7; repost = kind-6. Every one is tagged **`z=rns`** at publish so the
+Nomadnet feed filters mesh-native events in and the internet firehose out. Because
+each event is immutable and identified by its NOSTR id, the same event arriving by
+push AND by pull AND by a later sync is deduped for free (`byId` in the pull,
+`seen` in verify, `INSERT OR IGNORE` by mid in the archive). This is what lets
+delivery take **any** available path without coordination — and lets the same
+account run on several devices and merge by id with no conflict logic.
+
+### Finding 6 — two cursor/counter correctness rules the live test exposed
+
+- **Pull cursor must not skip the boundary second.** Advancing the per-target
+  cursor to `maxSec + 1` permanently skipped an event that shared its `created_at`
+  second (a reply-to-reply typed seconds after its parent, or a clock-lagged peer).
+  Store `maxSec` and re-include the boundary second; id-dedup makes the re-fetch
+  free.
+- **The reply badge must count the whole thread.** Counting only direct children
+  showed "2" on a starter whose thread expanded 3 messages. A recursive count over
+  parent links (nested descendants included) makes the badge agree with the thread.
+
+### Finding 7 — notifications ride the same events, and must show a callsign
+
+An interaction directed at us (kind-1/6/7 that `#p`-tags self, authored by someone
+else) becomes an in-app notification via `maybeNotifyInbound` on the inbound event
+— no bespoke notification channel, no wss. The name shown must resolve through
+**profile name → `callsignForHex(pubkey)` (observed callsign, else derived
+`X1<short>`) → raw hex only as a last resort**; showing the 12-char hex prefix
+(e.g. `1b4e5d3686a0`) is a bug, and it must be fixed in every place a notification
+name is rendered — the push notification AND the in-app Notifications panel.
+
+### The corrected dependency picture
+
+```
+   role=indexer (capacity) ──piggyback announce──▶ each hears the other's role
+                                    │
+        ┌───────────────────────────┴───────────────────────────┐
+        ▼                                                        ▼
+   direct link EXISTS (often only one direction)        NO direct link (weak NAT leg)
+        │ fan-out EVENT push, sub-second                        │ converge via a
+        ▼                                                        ▼ SHARED indexer both reach
+   note bytes cross ◀───────────── z=rns signed event ─────────▶ pull-through, ~minutes
+        └───────────────────────────┬───────────────────────────┘
+                                     ▼
+                    id-dedup absorbs the duplicate → feed shows it once
+```
+
+The transport is no longer the wall it once was: chat-dest routing gives the links
+a path, and a shared Indexer removes the need for a direct A↔B link entirely.
+
 ## The one-sentence version
 
 Users keep what they value, Archivers hold the redundant copies, Indexers

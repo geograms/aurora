@@ -5006,9 +5006,16 @@ class _WappPageState extends State<WappPage>
         final pubkey = (e['pubkey'] ?? '').toString();
         final short = pubkey.length >= 12 ? pubkey.substring(0, 12) : pubkey;
         final prof = RnsService.instance.nostrProfileByShort12(short);
+        // Name resolution order: a known profile name, else the callsign for the
+        // pubkey (observed one, else the derived X1<short>), and only as a last
+        // resort the raw hex prefix — a 12-char hex string like "1b4e5d3686a0"
+        // is unreadable and was showing verbatim in the notifications panel.
+        final call = pubkey.length == 64
+            ? RnsService.instance.callsignForHex(pubkey)
+            : '';
         final who = (prof['name'] ?? '').isNotEmpty
             ? prof['name']!
-            : (short.isEmpty ? 'someone' : short);
+            : (call.isNotEmpty ? call : (short.isEmpty ? 'someone' : short));
         final content = (e['content'] ?? '').toString();
 
         // What happened, in the user's words.

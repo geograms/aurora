@@ -159,44 +159,66 @@ List<Map<String, dynamic>> _verifyBuild(List<Map<String, dynamic>> events) {
       continue;
     }
     if (ev.kind != 1) continue;
-    final content = ev.content.trim();
-    if (content.isEmpty) continue;
+    if (ev.content.trim().isEmpty) continue;
     final id = ev.id ?? '';
     if (id.isEmpty || !seen.add(id)) continue;
     if (!ev.verify()) continue; // forged → drop
-    final pub = ev.pubkey.toLowerCase();
-    // Reply parent: aurora uses a 'parent' tag; standard NOSTR uses 'e'.
-    var parent = '';
+    out.add(nomadnetRow(ev));
+  }
+  return out;
+}
+
+/// Build a Nomadnet archive row from a kind-1 event. Shared by the poll path
+/// (after signature verification) and the instant local-echo of our OWN just-
+/// published note (no verify needed — we just signed it), so the author sees
+/// their post the moment it lands in the relay store, with the REAL event id as
+/// `mid` so the later poll dedups against it instead of duplicating.
+Map<String, dynamic> nomadnetRow(NostrEvent ev) {
+  final pub = ev.pubkey.toLowerCase();
+  // Reply parent: aurora uses a 'parent' tag; standard NOSTR uses 'e'.
+  var parent = '';
+  for (final t in ev.tags) {
+    if (t.length >= 2 && t[0] == 'parent') {
+      parent = t[1];
+      break;
+    }
+  }
+  if (parent.isEmpty) {
     for (final t in ev.tags) {
-      if (t.length >= 2 && t[0] == 'parent') {
+      if (t.length >= 2 && t[0] == 'e') {
         parent = t[1];
         break;
       }
     }
-    if (parent.isEmpty) {
-      for (final t in ev.tags) {
-        if (t.length >= 2 && t[0] == 'e') {
-          parent = t[1];
-          break;
-        }
-      }
-    }
-    final created = ev.createdAt;
-    final dt = DateTime.fromMillisecondsSinceEpoch(created * 1000);
-    final hhmm =
-        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    out.add(<String, dynamic>{
-      'dir': 'in',
-      'from': pub.length >= 12 ? pub.substring(0, 12) : pub,
-      'author': pub,
-      'text': content,
-      'mid': id,
-      'parent': parent,
-      'pop': 0,
-      'source': 'nomadnet',
-      't': created * 1000,
-      'time': hhmm,
-    });
   }
-  return out;
+  final created = ev.createdAt;
+  final dt = DateTime.fromMillisecondsSinceEpoch(created * 1000);
+  final hhmm =
+      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  return <String, dynamic>{
+    'dir': 'in',
+    'from': pub.length >= 12 ? pub.substring(0, 12) : pub,
+    'author': pub,
+    'text': ev.content.trim(),
+    'mid': ev.id ?? '',
+    'parent': parent,
+    'pop': 0,
+    'source': 'nomadnet',
+    't': created * 1000,
+    'time': hhmm,
+  };
+}
+
+/// Build a Nomadnet row from raw event JSON (our own freshly-signed kind-1),
+/// or null if it is not a usable kind-1 note. Used by the publish→archive echo.
+Map<String, dynamic>? nomadnetRowFromJson(Map<String, dynamic> json) {
+  try {
+    final ev = NostrEvent.fromJson(json);
+    if (ev.kind != 1) return null;
+    if (ev.content.trim().isEmpty) return null;
+    if ((ev.id ?? '').isEmpty) return null;
+    return nomadnetRow(ev);
+  } catch (_) {
+    return null;
+  }
 }

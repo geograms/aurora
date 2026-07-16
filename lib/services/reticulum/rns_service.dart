@@ -192,6 +192,13 @@ class RnsService {
   // (persistent); if unset we fall back to an in-memory store.
   String? relayStorePath;
 
+  /// Fired the instant one of OUR OWN kind-1 notes is signed + stored in the
+  /// relay store (before any network round-trip). The Social wapp uses it to
+  /// echo the author's just-published post straight into the Nomadnet archive —
+  /// no poll, no fire-and-forget race — carrying the real event id so the later
+  /// mesh poll dedups against it. Argument is the signed event JSON.
+  void Function(Map<String, dynamic> eventJson)? onSelfNotePublished;
+
   /// JSON sidecar persisting the discovered callsign->identity map across
   /// restarts (set by the app before start). Without it, a joining/returning node
   /// re-pays minutes of announce-discovery before it can query peers for their
@@ -4476,6 +4483,8 @@ class RnsService {
       return null;
     }
     await relayPublish(ev.toJson());
+    // Instant local echo of our own note (Nomadnet), same as nostrPost.
+    onSelfNotePublished?.call(ev.toJson());
     return ev.id;
   }
 
@@ -6646,6 +6655,8 @@ class RnsService {
       'NOSTR: post ${ev.id == null ? "?" : ev.id!.substring(0, 8)} '
       'relayPublish=$relayed',
     );
+    // Echo our own note to any live listener (Nomadnet) the moment it is stored.
+    if (kind == 1) onSelfNotePublished?.call(ev.toJson());
     // Then the internet relays (wss) via the engine — best-effort, never blocks,
     // and only when a hub exists (it may be null; the reticulum publish above is
     // what makes the post visible to the mesh + Nomadnet regardless).

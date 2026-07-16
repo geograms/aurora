@@ -6598,6 +6598,16 @@ class _WappPageState extends State<WappPage>
   /// the wapp's own archive, then the NOSTR engine — whose tallies are now
   /// seeded from persisted reaction receipts, so a hero-opened thread shows
   /// its counts instantly instead of waiting for a relay round trip.
+  /// The archive backing the feed currently on screen. Nomadnet is its OWN
+  /// sqlite (posts/replies/likes fetched over Reticulum); every other Social
+  /// tab uses the Internet archive. Thread view, save toggles, etc. must read
+  /// the SAME archive the stream does — otherwise a Nomadnet thread queries the
+  /// Internet DB and shows no replies.
+  ActivityArchive? get _activeActivityArchive =>
+      (_wappName == 'social' && _socialFeedFilter == 'nomadnet')
+          ? _nomadnetArchive
+          : _activityArchive;
+
   ({int count, bool mine}) _likeInfoFor(String mid) {
     // Nomadnet likes live in the Nomadnet archive (fetched/pushed over Reticulum
     // as kind-7), separate from the Internet archive.
@@ -6655,7 +6665,7 @@ class _WappPageState extends State<WappPage>
               root: post,
               revision: _activityRev,
               loadThread: (rootMid) =>
-                  _activityArchive?.threadReplies(rootMid) ??
+                  _activeActivityArchive?.threadReplies(rootMid) ??
                   const <Map<String, dynamic>>[],
               replyCount: _replyCountFor,
               likeInfo: _likeInfoFor,
@@ -6669,9 +6679,9 @@ class _WappPageState extends State<WappPage>
                 _activityRev.value++;
                 setState(() {});
               },
-              isSaved: (m) => _activityArchive?.isSaved(m) ?? false,
+              isSaved: (m) => _activeActivityArchive?.isSaved(m) ?? false,
               onSave: (p) {
-                _activityArchive?.toggleSaved(p);
+                _activeActivityArchive?.toggleSaved(p);
                 _activityRev.value++;
               },
               isReposted: (m) => _wappReposted.contains(m),

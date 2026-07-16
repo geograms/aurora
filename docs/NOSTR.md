@@ -1393,6 +1393,135 @@ Dependency order. Each step is small and independently useful.
    exactly as it does today, and it keeps working after the relays we use today
    are gone.
 
+## How Nomadnet propagation should work (the intended picture)
+
+The Social "Nomadnet" feed carries NOSTR publications over Reticulum. The
+mechanism has three moving parts — **discovery**, **content fan-out**, and
+**pointer sync + content-pull** — and they must not be conflated. Announces are
+flooded by the hubs and arrive reliably; point-to-point *links* between two
+hub-connected clients are what actually carry event content, and they are the
+fragile part. The pictures below are how it is meant to hang together.
+
+### 0. Two devices, both charger+WiFi → both Indexers
+
+```
+        C61 (X1A67X)                              TANK2 (X1RD89)
+     charger + WiFi = INDEXER                 charger + WiFi = INDEXER
+     serve=true (answers whole store)         serve=true (answers whole store)
+        │                                        │
+        └──────────── public RNS hubs ───────────┘
+              (rns.beleth / inertia / wisco …)
+        announces FLOOD through here reliably;
+        client↔client LINKS must be established through here (the fragile bit)
+```
+
+A phone plugged in but sitting at 100% reports `NOT_CHARGING`
+(`connectedNotCharging`) — that still counts as **on power**, so it is an
+Indexer, not a Publisher-only leaf.
+
+### 1. Discovery — role rides the announce that survives
+
+The dedicated `geogram/relay` announce is dropped by the hubs' announce
+rate-limiting. So the RelayAnnouncement (role, services, capacity, pubkey,
+optional coords) is **piggybacked onto the callsign/chat announce** — the one
+that always gets through:
+
+```
+  C61 announce  ─▶  app_data = "X1A67X" 0x00 <RelayAnnouncement: indexer,
+                                                caps=search|firehose|…, npub, hw>
+                         │  flooded by hubs
+                         ▼
+  TANK2 receiver: split on NUL
+        ├─ "X1A67X"           → callsign → _callIdentity (reachable peer)
+        └─ <RelayAnnouncement> → _relayDir.observe → "heard indexer 3b02bb89"
+```
+
+Result: each phone lists the other as a searchable Indexer → the precondition
+for both fan-out and pointer sync.
+
+### 2. Content fan-out — the fast path when a link exists
+
+On publish, the note (and any kind-6/7 reaction) is stored locally and PUSHED as
+a signed EVENT to every announced Indexer. The receiver's `onEvent` refreshes the
+open feed instantly — no poll:
+
+```
+  C61: user posts "hello"
+     │ relayPublish
+     ├─▶ local store (self tier)                    [visible on C61 instantly]
+     └─▶ _relay.publish(TANK2, EVENT "hello") ─────▶ TANK2 store.put
+                                                        │ onEvent (z=rns)
+                                                        ▼
+                                                 onNomadnetInbound
+                                                        ▼
+                                          TANK2 Nomadnet refreshes NOW
+```
+
+Requires a working C61→TANK2 link. When that link forms, this is the sub-second
+path.
+
+### 3. Pointer sync + content-pull — the catch-up / no-shared-indexer path
+
+Pointer sync trades **who-has**, never bytes. So after sync learns a location,
+the content must be pulled in a second step over the same (already-warm) link:
+
+```
+  C61                                         TANK2
+  publishAuthorProvider(self)
+    → pointer log: {key=npub_C61, provider=C61}
+        │  SYNC_REQ / SYNC_RES (epoch,seq)
+        └──────────────────────────────────▶  acceptSyncedPointer
+                                                 "C61 holds notes from npub_C61"
+                                                        │ _pullAuthorNotesFrom(C61, npub_C61)
+                                                        ▼
+                              REQ kind[1,6,7] authors=[npub_C61] z=rns since=cursor
+        answer: the actual notes  ◀───────────────────┤
+                                                        ▼
+                                       verify → store → onNomadnetInbound
+                                                        ▼
+                                          TANK2 Nomadnet shows them
+```
+
+Same link requirement — the content-pull REQ has to be answered.
+
+### 4. The incremental pull — the steady-state backstop
+
+While the Nomadnet tab is open, each Indexer/peer is asked **only for what is new
+since our last contact with IT** (a persisted per-target cursor), so bandwidth is
+spent on new content and a newly-met Indexer still gets its backlog:
+
+```
+  every 90s while viewing Nomadnet:
+    for each target T in {best indexer, heard relays, callsign peers}:
+        since = cursor[T] ?? now-6h
+        REQ kind[1,6,7] z=rns since  ─▶ T
+        answer ─▶ verify → archive; cursor[T] = newest_created_at + 1
+```
+
+### The dependency, stated plainly
+
+```
+   role=indexer (capacity)         announce piggyback
+          └────────────┬───────────────────┘
+                       ▼
+             each sees the other Indexer
+                       │
+        ┌──────────────┴───────────────┐
+        ▼                              ▼
+   fan-out EVENT push          pointer sync → content-pull
+        └──────────────┬───────────────┘
+                       ▼
+        ***a point-to-point RNS link that ANSWERS***   ← the current wall:
+                       │                                   REQ/sync return
+                       ▼                                   "0 answered" between
+             note bytes cross → feed shows it             two NAT'd phones
+```
+
+Everything above the wall is built and, through discovery, verified. The wall is
+the transport: two hub-connected clients hearing each other's announces but not
+yet forming an answered link for content. Nothing in the NOSTR or sync layers
+fixes that — it is path-request / link-establishment through the hubs.
+
 ## The one-sentence version
 
 Users keep what they value, Archivers hold the redundant copies, Indexers

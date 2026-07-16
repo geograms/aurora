@@ -17,6 +17,7 @@ file/line pointers into the code), not an idealised spec.
 | [ble.md](ble.md) | The Bluetooth transport: the size‑routed split between connectionless APRS broadcast and GATT Reticulum links, the compact frame format, the digipeater, and the store‑and‑forward iGate. |
 | [aprs-xt.md](aprs-xt.md) | APRS-XT — the message‑level conventions layered on plain APRS (groups, threads, reactions, signed/encrypted messages, public‑key beacons, embedded media references). |
 | [mesh.md](mesh.md) | The BLE street mesh: gossip route beacons, distance‑vector routing, GATT custody transfer, store‑and‑forward, politeness backoff. |
+| [chat-rooms.md](chat-rooms.md) | Chat rooms as NIP‑72 communities + a signed moderation op‑log: subtree‑scoped admin/mod authority, kick/suspend/ban/points, and a client‑side 1‑10 reputation. Federates to any standard NOSTR relay. |
 | [folders.md](folders.md) | Mutable shared folders over Reticulum: key‑addressed directories backed by a signed, append‑only op‑log. |
 | [sync.md](sync.md) | Collab (multi‑writer) folders and cross‑device sync built on top of mutable folders. |
 | [NOSTR.md](NOSTR.md) | **The vision**: every user a relay, self‑nominated indexers that answer *where* (not *what*), and one account living on the internet and on Reticulum at once. Marks what is built and what is not. |

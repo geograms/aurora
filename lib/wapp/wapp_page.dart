@@ -56,6 +56,7 @@ import 'geoui/geo_chat_archive.dart';
 import 'geoui/activity_archive.dart';
 import 'geoui/widgets/conversations_field.dart';
 import 'geoui/widgets/people_view_field.dart';
+import 'geoui/widgets/rooms_field.dart';
 import 'shared_media_fetch.dart';
 import 'geoui/tile_cache.dart';
 import 'background_wapp_manager.dart';
@@ -566,6 +567,9 @@ class _WappPageState extends State<WappPage>
   /// The conversation open in the conversations widget (host-owned so the
   /// AppBar can show the thread title + the single back arrow in portrait).
   String? _convOpenId;
+
+  /// The room open in the Discord-like rooms widget ($type:"rooms").
+  String? _roomsOpenId;
 
   /// People-search open on the conversation list. Host-owned because the search
   /// icon sits in the AppBar (next to the ☰) while the search field renders in
@@ -1236,6 +1240,22 @@ class _WappPageState extends State<WappPage>
       );
       // Start it now only if the restored tab IS Nomadnet.
       if (_socialFeedFilter == 'nomadnet') _nomadPoller!.start();
+      // Instant own-post echo: the moment WE publish a note it is stored in the
+      // relay store (with the reticulum-native marker), so drop it straight into
+      // the Nomadnet archive by its real event id — no poll, no fire-and-forget
+      // race. The later mesh poll dedups by mid. Fires regardless of the open
+      // tab, so the post is already cached when the user visits Nomadnet.
+      RnsService.instance.onSelfNotePublished = (json) {
+        final arch = _nomadnetArchive;
+        if (arch == null) return;
+        final row = nomadnetRowFromJson(json);
+        if (row == null) return;
+        arch.add(row);
+        if (mounted) {
+          _activityRev.value++;
+          setState(() {});
+        }
+      };
     }
     // NOSTR web of trust: never firehose-evict posts from people the user
     // follows or who follow them. Harmless for other wapps (their callsign
@@ -1795,6 +1815,17 @@ class _WappPageState extends State<WappPage>
                 }
               }
             }
+            changed = true;
+          }
+        } else if (type == 'ui.rooms.set') {
+          // Replace the $type:"rooms" rail list (the Discord-like room tree).
+          final fieldName = data['field'] as String? ?? 'rooms';
+          final rooms = data['rooms'];
+          if (rooms is List) {
+            _fieldValues[fieldName] = rooms
+                .whereType<Map>()
+                .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+                .toList();
             changed = true;
           }
         } else if (type == 'ui.people.set') {
@@ -3133,6 +3164,61 @@ class _WappPageState extends State<WappPage>
   // Renders the wapp-owned ConversationStore. Carries no app knowledge:
   // titles/badges/icons/pinned are supplied by the wapp via ui.convo.*, and
   // user intent is forwarded as generic, field-name-derived commands.
+  /// `$type:"rooms"` — the Discord-like layout (icon rail + chat + members).
+  /// Reuses the conversations store for the open room's messages and the people
+  /// list for members. All room/moderation meaning stays in the wapp.
+  Widget _buildRoomsScreen(GeoUiBlock screen, GeoUiBlock group) {
+    final field = group.name ?? 'rooms';
+    final store = _convStore('conversations'); // room messages arrive as ui.convo.*
+    final rooms = (_fieldValues[field] is List)
+        ? (_fieldValues[field] as List)
+            .whereType<Map>()
+            .map((m) => m.cast<String, dynamic>())
+            .toList()
+        : const <Map<String, dynamic>>[];
+    final members = (_fieldValues['room_members'] is List)
+        ? (_fieldValues['room_members'] as List)
+            .whereType<Map>()
+            .map((m) => m.cast<String, dynamic>())
+            .toList()
+        : const <Map<String, dynamic>>[];
+    // Default the open room to the one the wapp marked selected, else the first.
+    var openId = _roomsOpenId;
+    if (openId == null && rooms.isNotEmpty) {
+      final sel = rooms.firstWhere((r) => r['selected'] == true,
+          orElse: () => rooms.first);
+      openId = '${sel['id'] ?? ''}';
+      if (openId.isEmpty) openId = null;
+    }
+    return RoomsField(
+      rooms: rooms,
+      store: store,
+      openId: openId,
+      memberSections: members,
+      onOpenRoom: (id) {
+        setState(() => _roomsOpenId = id);
+        store.clearUnread(id);
+        _fieldValues['${field}_convo'] = id;
+        _sendCommand('${field}_open');
+      },
+      onSend: (id, text) {
+        _fieldValues['${field}_convo'] = id;
+        _fieldValues['${field}_input'] = text;
+        _sendCommand('${field}_send');
+      },
+      onNewRoom: (parent) {
+        _fieldValues['${field}_convo'] = parent;
+        _sendCommand('${field}_new');
+      },
+      onSettings: () => _sendCommand('${field}_settings'),
+      onMemberTap: (id) {
+        _fieldValues['room_members_id'] = id;
+        _sendCommand('room_members_tap');
+      },
+      onSenderTap: _showProfile,
+    );
+  }
+
   Widget _buildConversationsScreen(GeoUiBlock screen, GeoUiBlock group) {
     final field = group.name ?? 'conversations';
     final store = _convStore(field);
@@ -3597,6 +3683,8 @@ class _WappPageState extends State<WappPage>
     _allPoller = null;
     _nomadPoller?.dispose();
     _nomadPoller = null;
+    // Drop the own-post echo so a disposed page's archive/setState isn't touched.
+    if (_wappName == 'social') RnsService.instance.onSelfNotePublished = null;
     _tickTimer?.cancel();
     // Flush any pending conversation writes so the latest messages aren't lost.
     _convSaveTimer?.cancel();
@@ -4370,6 +4458,13 @@ class _WappPageState extends State<WappPage>
 
     // Conversations (generic, data-driven messenger primitive) — host renders
     // the contact list + chat view from the wapp-pushed ConversationStore.
+    // Rooms view — a `$type:"rooms"` group renders the Discord-like layout
+    // (icon rail + chat + members). Checked before conversations.
+    final roomsGroup = screen.children
+        .where((c) => c.keyword == 'group' && c.type == 'rooms')
+        .firstOrNull;
+    if (roomsGroup != null) return _buildRoomsScreen(screen, roomsGroup);
+
     final convoGroup = screen.children
         .where((c) => c.keyword == 'group' && c.type == 'conversations')
         .firstOrNull;
@@ -6102,15 +6197,10 @@ class _WappPageState extends State<WappPage>
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');
-          // Surface the author's own post on Nomadnet without waiting for the
-          // 90s timer. The wapp publishes via hal_nostr_post (fire-and-forget),
-          // so give it a moment to sign + land in the local relay store, then
-          // poll — the local (tag-filtered) leg picks it straight up.
-          if (_wappName == 'social' && _socialFeedFilter == 'nomadnet') {
-            Future.delayed(const Duration(milliseconds: 1200), () {
-              _nomadPoller?.pollOnce();
-            });
-          }
+          // Own post shows instantly via RnsService.onSelfNotePublished (set in
+          // the Social setup) — the publish echoes it into the Nomadnet archive
+          // by real event id. No poll here; that raced the fire-and-forget
+          // publish and left the author staring at an empty feed.
         },
       );
     }

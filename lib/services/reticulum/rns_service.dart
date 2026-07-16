@@ -5036,13 +5036,21 @@ class RnsService {
   }
 
   /// Advance a per-target cursor to the newest `created_at` we just received from
-  /// it (+1), so the next pull to that target asks only for strictly newer events.
+  /// it, so the next pull to that target asks only for events from that second on.
+  ///
+  /// Deliberately NOT `maxSec + 1`: two events can share a created_at second (a
+  /// reply-to-reply typed seconds after its parent, or a peer whose clock runs a
+  /// touch behind ours — exactly the "same account on several devices" case).
+  /// `since = maxSec` re-includes that boundary second on the next pull; the
+  /// event-id dedup (byId here, `seen` in _verifyPull, INSERT-OR-IGNORE by mid in
+  /// the archive) makes the re-fetch free, whereas `+1` would skip the straggler
+  /// PERMANENTLY once the cursor stepped past its second.
   void _advanceRelayCursor(String key, Iterable<NostrEvent> evs) {
     var maxSec = _relayCursor[key] ?? 0;
     for (final e in evs) {
       if (e.createdAt > maxSec) maxSec = e.createdAt;
     }
-    if (maxSec > 0) _relayCursor[key] = maxSec + 1;
+    if (maxSec > 0) _relayCursor[key] = maxSec;
   }
 
   void _scheduleRelayCursorSave() {

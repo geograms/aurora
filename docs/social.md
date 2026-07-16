@@ -13,13 +13,20 @@
 
 ## 1. What it is
 
-Social is a NOSTR client shipped as a wapp. Three tabs:
+Social is a NOSTR client shipped as a wapp. Four tabs:
 
-- **All** — a *curated* feed of interesting public posts from strangers. NOT a raw
+- **Internet** (enum `all`, string `'all'` — kept for pref compat) — a *curated*
+  feed of interesting public posts from strangers over wss relays. NOT a raw
   firehose (see §4). This is the tab that caused all the pain.
+- **Nomadnet** (enum/string `nomadnet`) — NOSTR publications fetched over
+  **Reticulum** (indexers + callsign peers) + this device's own posts. NO
+  curation, newest-first. See §11.
 - **Following** — kind-1 notes from the accounts the user follows (their own
   archive, `social_following.sqlite3`).
 - **Saved** — posts the user bookmarked.
+
+Each of the three feeds has its OWN sqlite DB: `social_all.sqlite3` (Internet),
+`social_following.sqlite3` (Following), `social_nomadnet.sqlite3` (Nomadnet).
 
 The protocol is NOSTR (kinds 0/1/6/7, NIP-01 wire, NIP-19 mentions, Schnorr). The
 wapp id/title are "social"; the protocol keeps the "nostr" name. A "publication" =
@@ -246,6 +253,40 @@ signal, not a claim of freshness.
       code must do the same.
 
 ---
+
+## 11. Nomadnet — NOSTR over Reticulum
+
+The Nomadnet tab is a feed of NOSTR publications carried over the **Reticulum
+mesh**, not the internet. Unlike Internet (wss, frozen engine → main-isolate
+poller), Reticulum NOSTR is already isolate-safe and lives on the MAIN isolate.
+
+- **Transport**: `RnsService._relay` (`RelayNode.query` over an RNS Link),
+  `RnsService._relayDir` (reachable relays/indexers via announces), and
+  `RnsService._relayStore` (the local NOSTR relay store). `nomadnetFetch` uses the
+  shared `_fanOutQuery` (also used by `fetchFeedBackfill`): local store + best
+  indexer + all reachable relays + callsign peers, parallel, deduped.
+- **Poller**: `nomadnet_poller.dart` (`NomadnetPoller`) — main isolate, NO
+  sockets. Verifies signatures in a `compute` isolate, writes newest-first into
+  `social_nomadnet.sqlite3`, fetches kind-0 profiles. Starts/stops ONLY while the
+  Nomadnet tab is viewed (`onFilterChanged`), with a `_disposed` guard so an
+  in-flight poll can't write after teardown. The archive is **cleared on open**
+  so it is always a live view of what the mesh currently holds.
+- **Publishing**: `nostrPost` now also `relayPublish()`es our note (local store
+  self-tier + replicate to indexers), done FIRST and independent of the engine
+  publish — else the post lives only in the internet store, invisible to the mesh.
+- **No internet contamination**: the local `_relayStore` ALSO holds internet
+  posts. So Nomadnet scopes the **local** query to OUR authored posts only
+  (`localAuthors: [self]`); remote peers are already self-scoped by the relay
+  responder (`relay_node.dart` leaf branch — a leaf answers only its own posts).
+  Net: Nomadnet shows only reticulum-native posts (self + peers' own).
+
+**Validation is CROSS-DEVICE, over Reticulum only.** In this initial
+implementation only the phones publish NOSTR over Reticulum, so the ONLY valid
+proof is: publish a unique status on device A's Social, and it appears on device
+B's Nomadnet — with the two devices on **different internet networks**, fetched
+purely over Reticulum (the marker exists on no public relay). RNS link queries
+between NAT'd phones are slow to warm up (~one poll cycle; a link that times out
+on the first poll answers on the next), so allow a cycle or use pull-to-refresh.
 
 ## 10. History
 

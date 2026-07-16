@@ -2226,6 +2226,17 @@ class RnsService {
             identity: _id!,
             store: _relayStore!,
             send: (raw) => _transport?.sendLinkAware(raw),
+            // Run relay RPC links (REQ/EVENT/COUNT/SYNC) over the CHAT
+            // destination, not the dedicated geogram/relay dest. Public hubs
+            // rate-limit and DROP the geogram/relay announce, so peers have no
+            // transport path to each other's relay dest and every REQ/sync link
+            // times out ("0 answered"). The chat announce is the one that
+            // reliably propagates (and now carries the piggybacked relay role),
+            // so routing links there makes any chat-reachable peer relay-
+            // reachable. Same fix already applied to DHT RPC (FileTransferNode).
+            // The relay identity/role classification is unaffected.
+            rpcApp: _app,
+            rpcAspects: _aspects,
             // Query peers WITHOUT a link where they support it: a probe costs
             // neither side a handshake, and a peer holding nothing answers with
             // silence. Falls back to a link automatically for older nodes.

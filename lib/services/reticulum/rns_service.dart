@@ -6822,13 +6822,52 @@ class RnsService {
   /// Also raise it on the launcher's bell — a reaction the user never learns
   /// about might as well not have happened. Same event, two places: the wapp's
   /// own panel and the host's notification list.
+  /// Raise a notification for an interaction that reached us over RETICULUM (a
+  /// kind-7 like / kind-6 repost / kind-1 reply that p-tags us), so
+  /// notifications work on the mesh and don't depend on a wss relay. Deduped
+  /// against the wss path by the shared [_notifAnnounced] guard (same event id).
+  void maybeNotifyInbound(Map<String, dynamic> e) {
+    final me = selfPubHex?.toLowerCase();
+    if (me == null) return;
+    final kind = (e['kind'] as num?)?.toInt() ?? 0;
+    if (kind != 1 && kind != 6 && kind != 7) return;
+    if ((e['pubkey'] ?? '').toString().toLowerCase() == me) return; // ours
+    // Must p-tag us (an interaction directed at our posts/us).
+    final tags = e['tags'];
+    var forMe = false;
+    if (tags is List) {
+      for (final t in tags) {
+        if (t is List &&
+            t.length >= 2 &&
+            t[0] == 'p' &&
+            '${t[1]}'.toLowerCase() == me) {
+          forMe = true;
+          break;
+        }
+      }
+    }
+    if (!forMe) return;
+    final id = (e['id'] ?? '').toString();
+    if (id.isEmpty || !_notifAnnounced.add(id)) return; // already announced
+    if (_notifAnnounced.length > 500) {
+      _notifAnnounced.remove(_notifAnnounced.first);
+    }
+    _announceNotification(e);
+  }
+
   void _announceNotification(Map<String, dynamic> e) {
     final kind = (e['kind'] as num?)?.toInt() ?? 0;
     final content = (e['content'] ?? '').toString().trim();
     final pubkey = (e['pubkey'] ?? '').toString();
     final short = pubkey.length >= 12 ? pubkey.substring(0, 12) : pubkey;
     final prof = nostrProfileByShort12(short);
-    final who = (prof['name'] ?? '').isNotEmpty ? prof['name']! : short;
+    // Name resolution, best first: kind-0 nickname → a real callsign (observed or
+    // derived from the key) → the 12-char key only as a last resort. Showing a
+    // hex prefix in a notification was the "weird name" the user saw.
+    final cs = pubkey.length == 64 ? callsignForHex(pubkey) : '';
+    final who = (prof['name'] ?? '').isNotEmpty
+        ? prof['name']!
+        : (cs.isNotEmpty ? cs : short);
     final what = switch (kind) {
       7 =>
         content == '-'

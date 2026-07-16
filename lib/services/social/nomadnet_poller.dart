@@ -155,6 +155,9 @@ class NomadnetPoller {
         'nomadnet-inbound: kind=${ev.kind} '
         '${(ev.id ?? '').padRight(8).substring(0, 8)} PUSHED in',
       );
+      // Notify over Reticulum for interactions directed at us (like/repost/reply
+      // p-tagging us) — no wss relay needed.
+      RnsService.instance.maybeNotifyInbound(json);
       final self = RnsService.instance.nostrSelfHex()?.toLowerCase();
       if (ev.kind == 1) {
         if (ev.content.trim().isEmpty || (ev.id ?? '').isEmpty) return;

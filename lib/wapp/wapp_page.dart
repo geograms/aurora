@@ -6680,10 +6680,17 @@ class _WappPageState extends State<WappPage>
                 _activityRev.value++;
               },
               onReply: (parentMid, text) {
-                if (text.trim().isEmpty) return;
+                final body = text.trim();
+                if (body.isEmpty) return;
                 _fieldValues['activity_target_mid'] = parentMid;
-                _fieldValues['activity_input'] = text.trim();
+                _fieldValues['activity_input'] = body;
                 _sendCommand('activity_reply');
+                // Publish the reply HOST-SIDE (kind-1 e-tagged to the parent),
+                // same as posts — the wapp's reply round-trip has the same
+                // hal_nostr_* gap, so a reply otherwise never reached the mesh.
+                if (_wappName == 'social') {
+                  unawaited(RnsService.instance.nostrReply(parentMid, body));
+                }
               },
               onSenderTap: _feedSenderTap,
               profileFor: _feedProfileFor,

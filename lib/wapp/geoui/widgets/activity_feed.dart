@@ -186,7 +186,7 @@ class ActivityFeed extends StatefulWidget {
 
 /// Activity feed view filter: everything, only people we follow, or the posts
 /// we've bookmarked.
-enum _ActivityFilter { all, following, favorites }
+enum _ActivityFilter { all, following, favorites, nomadnet }
 
 class _ActivityFeedState extends State<ActivityFeed> {
   final _input = TextEditingController();
@@ -254,11 +254,13 @@ class _ActivityFeedState extends State<ActivityFeed> {
   static _ActivityFilter _filterFromString(String? s) => switch (s) {
     'following' => _ActivityFilter.following,
     'favorites' => _ActivityFilter.favorites,
+    'nomadnet' => _ActivityFilter.nomadnet,
     _ => _ActivityFilter.all,
   };
   static String _filterToString(_ActivityFilter f) => switch (f) {
     _ActivityFilter.following => 'following',
     _ActivityFilter.favorites => 'favorites',
+    _ActivityFilter.nomadnet => 'nomadnet',
     _ActivityFilter.all => 'all',
   };
 
@@ -423,6 +425,14 @@ class _ActivityFeedState extends State<ActivityFeed> {
               source == 'following' ||
               p['dir'] == 'out';
         }).toList();
+        break;
+      case _ActivityFilter.nomadnet:
+        // Publications fetched over Reticulum: root posts, newest-first, from
+        // anyone. NO curation — the host already verified signatures; just show
+        // what the mesh returned.
+        posts = src.reversed
+            .where((p) => _isStreamPost(p) && _isRoot(p))
+            .toList();
         break;
     }
     // Hide posts from blocked/muted callsigns (the wapp pushes the set).
@@ -669,12 +679,14 @@ class _ActivityFeedState extends State<ActivityFeed> {
       );
     }
 
-    return Align(
-      alignment: Alignment.centerLeft,
+    // Four tabs overflow narrow phones — make the bar horizontally scrollable.
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          tab(Icons.public, 'All', _ActivityFilter.all),
+          tab(Icons.public, 'Internet', _ActivityFilter.all),
+          tab(Icons.hub, 'Nomadnet', _ActivityFilter.nomadnet),
           tab(Icons.people, 'Following', _ActivityFilter.following),
           tab(Icons.bookmark, 'Saved', _ActivityFilter.favorites),
         ],
@@ -690,6 +702,8 @@ class _ActivityFeedState extends State<ActivityFeed> {
         'Nothing from people you follow yet.\nFollow callsigns to see their posts here.',
       _ActivityFilter.all =>
         'No activity yet.\nPosts from groups and people you follow show here.',
+      _ActivityFilter.nomadnet =>
+        'No Nomadnet posts yet.\nPublications from the Reticulum network appear here while this tab is open.',
     };
     return Center(
       child: Padding(

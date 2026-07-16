@@ -42,6 +42,7 @@ import 'geoui/widgets/log_view_field.dart';
 import 'geoui/widgets/chat_palette.dart';
 import 'geoui/widgets/chat_view_field.dart';
 import '../services/social/nostr_all_poller.dart';
+import '../services/social/nomadnet_poller.dart';
 import 'geoui/widgets/activity_feed.dart';
 import 'geoui/widgets/micron_view.dart';
 import 'geoui/widgets/profile_route.dart';
@@ -441,6 +442,13 @@ class _WappPageState extends State<WappPage>
   /// as briefly as needed, pull what is new, disconnect. This poller does exactly
   /// that and writes survivors into [_activityArchive]. See NostrAllPoller.
   NostrAllPoller? _allPoller;
+
+  /// The Social "Nomadnet" feed: NOSTR publications fetched over RETICULUM
+  /// (indexers + peers across the hubs) + this device's local store, into its
+  /// OWN separate archive (social_nomadnet.sqlite3). Runs only while the Nomadnet
+  /// tab is viewed (started/stopped in onFilterChanged) to save battery.
+  ActivityArchive? _nomadnetArchive;
+  NomadnetPoller? _nomadPoller;
 
   /// Newest engagement time (ms) per curated post id, from the poller. A post
   /// whose latest like/reply is well after it was posted is shown "(updated)".
@@ -888,6 +896,19 @@ class _WappPageState extends State<WappPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Restore the selected feed tab SYNCHRONOUSLY, before the first build, so
+    // ActivityFeed seeds its filter from the right value. If we waited for the
+    // async _loadWapp to read it, build 1 would pass the default 'all', the
+    // widget's mount-time onFilterChanged would write 'all' back to prefs, and
+    // the saved tab would be clobbered on every open.
+    if (_wappName == 'social') {
+      _socialFeedFilter =
+          PreferencesService.instanceSync?.getWappUiPref(
+            _wappName,
+            'feedFilter',
+          ) ??
+          _socialFeedFilter;
+    }
     // Deep-linked post (launcher hero tap): open its thread on the FIRST frame
     // with the row the caller already holds — before the engine even boots, so
     // the feed never flashes underneath. Replies fill in as the wapp's
@@ -1182,6 +1203,38 @@ class _WappPageState extends State<WappPage>
           }
         },
       )..start();
+
+      // Nomadnet: its OWN separate archive + a poller that runs ONLY while the
+      // Nomadnet tab is viewed (started/stopped in onFilterChanged) — battery.
+      _nomadnetArchive = ActivityArchive.forStorage(
+        wappData,
+        fileName: 'social_nomadnet.sqlite3',
+      );
+      // Nomadnet is a LIVE "while viewing" feed of what the Reticulum network
+      // currently holds — start each session empty so it never shows stale rows
+      // (and drops any internet posts an earlier build wrongly cached here). It
+      // repopulates from clean, self/peer-scoped polls within a cycle.
+      _nomadnetArchive!.clearAll();
+      _nomadPoller = NomadnetPoller(
+        archive: _nomadnetArchive!,
+        onChanged: () {
+          if (mounted) {
+            _activityRev.value++;
+            setState(() {});
+          }
+        },
+        onProfiles: (profs) {
+          for (final e in profs.entries) {
+            final short = e.key.length >= 12 ? e.key.substring(0, 12) : e.key;
+            _wappProfiles[short] = e.value;
+          }
+          if (_wappProfiles.length > 4000) {
+            _wappProfiles.remove(_wappProfiles.keys.first);
+          }
+        },
+      );
+      // Start it now only if the restored tab IS Nomadnet.
+      if (_socialFeedFilter == 'nomadnet') _nomadPoller!.start();
     }
     // NOSTR web of trust: never firehose-evict posts from people the user
     // follows or who follow them. Harmless for other wapps (their callsign
@@ -3534,6 +3587,8 @@ class _WappPageState extends State<WappPage>
     // Stop the one-shot firehose poller: no more polls once nobody is looking.
     _allPoller?.dispose();
     _allPoller = null;
+    _nomadPoller?.dispose();
+    _nomadPoller = null;
     _tickTimer?.cancel();
     // Flush any pending conversation writes so the latest messages aren't lost.
     _convSaveTimer?.cancel();
@@ -5519,6 +5574,12 @@ class _WappPageState extends State<WappPage>
     if (_socialFeedFilter == 'following') {
       return _followingArchive?.recent() ?? const <Map<String, dynamic>>[];
     }
+    if (_socialFeedFilter == 'nomadnet') {
+      // Reticulum feed: raw newest-first, NO curation/ranking (the widget does
+      // the roots-only display filter).
+      return _nomadnetArchive?.recent(limit: 200) ??
+          const <Map<String, dynamic>>[];
+    }
     if (_rankedCache != null &&
         _rankedCacheRev == _activityRev.value &&
         _rankedCacheFilter == _socialFeedFilter) {
@@ -5580,6 +5641,10 @@ class _WappPageState extends State<WappPage>
   Future<List<Map<String, dynamic>>> _loadOlderSocialPosts(int beforeMs) async {
     if (_socialFeedFilter == 'following') {
       return _followingArchive?.olderBefore(beforeMs) ??
+          const <Map<String, dynamic>>[];
+    }
+    if (_socialFeedFilter == 'nomadnet') {
+      return _nomadnetArchive?.olderBefore(beforeMs) ??
           const <Map<String, dynamic>>[];
     }
     return _activityArchive?.olderBefore(beforeMs) ??
@@ -5994,6 +6059,9 @@ class _WappPageState extends State<WappPage>
             LogService.instance.add(
               'social refresh: filter=all poll=$fresh burst=$count',
             );
+          } else if (filter == 'nomadnet') {
+            final n = await _nomadPoller?.pollOnce() ?? 0;
+            LogService.instance.add('social refresh: filter=nomadnet poll=$n');
           } else {
             RnsService.instance.nostrResume();
             LogService.instance.add('social refresh: filter=$filter reopened');
@@ -6013,6 +6081,14 @@ class _WappPageState extends State<WappPage>
           _sendCommand('activity_filter_changed');
           if (_wappName == 'social' && _socialFeedFilter != f) {
             setState(() => _socialFeedFilter = f);
+          }
+          // Battery: the Nomadnet poller runs ONLY while its tab is viewed.
+          if (_wappName == 'social') {
+            if (f == 'nomadnet') {
+              _nomadPoller?.start();
+            } else {
+              _nomadPoller?.stop();
+            }
           }
         },
         onSend: (text) {

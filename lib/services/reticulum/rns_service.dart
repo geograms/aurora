@@ -4564,9 +4564,7 @@ class RnsService {
     String topic = 'activity',
     int limit = 300,
   }) async {
-    final relay = _relay;
     final store = _relayStore;
-    if (relay == null) return const [];
     final filter = NostrFilter(
       kinds: const [1],
       tags: {
@@ -4575,66 +4573,7 @@ class RnsService {
       since: sinceSec,
       limit: limit,
     );
-    final byId = <String, NostrEvent>{};
-    void take(Iterable<NostrEvent> evs) {
-      for (final e in evs) {
-        if (e.id != null) byId.putIfAbsent(e.id!, () => e);
-      }
-    }
-
-    // Local store first (cheap), then every reachable Aurora node we know.
-    if (store != null) take(store.query(filter));
-    final targets = <RnsIdentity>[];
-    final best = _relayDir.bestIndexer(topic: topic);
-    if (best != null) targets.add(best.identity);
-    for (final e in _relayDir.entries()) {
-      targets.add(e.identity);
-    }
-    // ALSO query every Aurora peer we discovered by its callsign announce, even
-    // if it isn't a hosting indexer: each node answers at least its OWN posts,
-    // so a joiner pulls what others published directly from the posters — the
-    // decentralised path that doesn't depend on anyone hosting the network.
-    for (final id in _callIdentity.values) {
-      targets.add(id);
-    }
-    // Dedup, cap, and query peers in PARALLEL with a short timeout, so one
-    // slow/unreachable peer can't stall the sweep and the queries don't pile up.
-    final seen = <String>{};
-    final unique = <RnsIdentity>[];
-    for (final id in targets) {
-      if (seen.add(_hex(id.hash))) unique.add(id);
-    }
-    const maxPeers = 12;
-    final pick = unique.length <= maxPeers
-        ? unique
-        : unique.sublist(0, maxPeers);
-    // Generous per-query timeout: a relay link to a peer through a busy public
-    // hub is several round-trips and can take 20s+. Queries run in parallel, so
-    // a long timeout doesn't serialise the sweep.
-    final results = await Future.wait(
-      pick.map((id) async {
-        try {
-          return await relay.query(
-            id,
-            filter,
-            timeout: const Duration(seconds: 40),
-          );
-        } catch (_) {
-          return const <NostrEvent>[];
-        }
-      }),
-    );
-    var hostsAnswered = 0;
-    for (final r in results) {
-      if (r.isNotEmpty) hostsAnswered++;
-      take(r);
-    }
-    if (pick.isNotEmpty) {
-      LogService.instance.add(
-        'RNS/relay: FEED backfill queried ${pick.length} peer(s) '
-        '($hostsAnswered answered)',
-      );
-    }
+    final byId = await _fanOutQuery(filter, topic: topic);
 
     final out = <Map<String, dynamic>>[];
     final tierFollows = _follows.asSet;
@@ -4669,6 +4608,120 @@ class RnsService {
       );
     }
     return out;
+  }
+
+  /// Query the RETICULUM mesh for events matching [filter]: our local relay
+  /// store first, then every reachable relay/indexer + callsign peer, in
+  /// parallel, deduped by event id. All over RNS Links on the main isolate — no
+  /// WebSocket, so none of the engine-isolate socket freeze applies. Shared by
+  /// [fetchFeedBackfill] and the Nomadnet feed.
+  Future<Map<String, NostrEvent>> _fanOutQuery(
+    NostrFilter filter, {
+    String? topic,
+    List<String>? localAuthors,
+    int maxPeers = 12,
+    Duration timeout = const Duration(seconds: 40),
+  }) async {
+    final relay = _relay;
+    final store = _relayStore;
+    final byId = <String, NostrEvent>{};
+    void take(Iterable<NostrEvent> evs) {
+      for (final e in evs) {
+        if (e.id != null) byId.putIfAbsent(e.id!, () => e);
+      }
+    }
+
+    if (store != null) {
+      // The local store also holds internet-fetched posts. When [localAuthors]
+      // is given (Nomadnet: just us), scope the LOCAL query to those authors so
+      // only OUR own publications come from here — remote peers are already
+      // self-scoped by the relay responder, so the mesh stays internet-free.
+      final localFilter = localAuthors == null
+          ? filter
+          : NostrFilter(
+              authors: localAuthors,
+              kinds: filter.kinds,
+              tags: filter.tags,
+              since: filter.since,
+              until: filter.until,
+              limit: filter.limit,
+            );
+      take(store.query(localFilter));
+    }
+    if (relay == null) return byId;
+
+    final targets = <RnsIdentity>[];
+    final best = _relayDir.bestIndexer(topic: topic);
+    if (best != null) targets.add(best.identity);
+    for (final e in _relayDir.entries()) {
+      targets.add(e.identity);
+    }
+    // Every callsign peer answers at least its OWN posts — the decentralised
+    // path that does not depend on anyone hosting the network.
+    for (final id in _callIdentity.values) {
+      targets.add(id);
+    }
+    final seen = <String>{};
+    final unique = <RnsIdentity>[];
+    for (final id in targets) {
+      if (seen.add(_hex(id.hash))) unique.add(id);
+    }
+    final pick = unique.length <= maxPeers
+        ? unique
+        : unique.sublist(0, maxPeers);
+    final results = await Future.wait(
+      pick.map((id) async {
+        try {
+          return await relay.query(id, filter, timeout: timeout);
+        } catch (_) {
+          return const <NostrEvent>[];
+        }
+      }),
+    );
+    var answered = 0;
+    for (final r in results) {
+      if (r.isNotEmpty) answered++;
+      take(r);
+    }
+    if (pick.isNotEmpty) {
+      LogService.instance.add(
+        'RNS/relay: fan-out queried ${pick.length} peer(s) ($answered answered)',
+      );
+    }
+    return byId;
+  }
+
+  /// NOMADNET feed: fresh kind-1 notes from the Reticulum mesh (indexers +
+  /// callsign peers) AND this device's local store. No topic tag — ALL posts.
+  /// Returns raw NIP-01 event JSON so the caller can verify/build off-thread.
+  Future<List<Map<String, dynamic>>> nomadnetFetch(
+    int sinceSec, {
+    int limit = 150,
+  }) async {
+    final self = selfPubHex?.toLowerCase();
+    final byId = await _fanOutQuery(
+      NostrFilter(kinds: const [1], since: sinceSec, limit: limit),
+      // Local store scoped to OUR posts only (it also holds internet posts);
+      // reticulum peers self-scope their own posts. Result: reticulum-native.
+      localAuthors: self == null ? const [] : [self],
+    );
+    return [for (final e in byId.values) e.toJson()];
+  }
+
+  /// Fetch kind-0 profiles for [authorsHex] over the Reticulum mesh + local
+  /// store, so Nomadnet posts show names/avatars instead of hex keys.
+  Future<List<Map<String, dynamic>>> nomadnetProfiles(
+    List<String> authorsHex,
+  ) async {
+    if (authorsHex.isEmpty) return const [];
+    final byId = await _fanOutQuery(
+      NostrFilter(
+        kinds: const [0],
+        authors: authorsHex,
+        limit: authorsHex.length,
+      ),
+    );
+    return [for (final e in byId.values) e.toJson()];
   }
 
   /// Publish OUR profile as a NOSTR kind-0 (set_metadata) event, so peers can
@@ -6558,7 +6611,18 @@ class RnsService {
       LogService.instance.add('NOSTR: sign failed: $e');
       return null;
     }
-    await hub.publish(ev);
+    // FIRST: put it in the Reticulum relay store (self-tier) and replicate it to
+    // the reticulum indexers, so the post is served over Reticulum and shows up
+    // in other devices' Nomadnet feed. Done first + awaited so an engine publish
+    // that throws/stalls (frozen sockets) can never skip it — without this a
+    // Social post lived only in the engine's internet store, invisible to the mesh.
+    final relayed = await relayPublish(ev.toJson());
+    LogService.instance.add(
+      'NOSTR: post ${ev.id == null ? "?" : ev.id!.substring(0, 8)} '
+      'relayPublish=$relayed',
+    );
+    // Then the internet relays (wss) via the engine — best-effort, never blocks.
+    unawaited(hub.publish(ev));
     return ev.id;
   }
 

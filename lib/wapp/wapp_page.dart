@@ -1206,15 +1206,16 @@ class _WappPageState extends State<WappPage>
 
       // Nomadnet: its OWN separate archive + a poller that runs ONLY while the
       // Nomadnet tab is viewed (started/stopped in onFilterChanged) — battery.
+      // v2 filename: the old social_nomadnet.sqlite3 was written by earlier
+      // builds that leaked internet posts in; abandon it wholesale rather than
+      // migrate. This DB is now fed ONLY by tag-filtered (reticulum-native)
+      // polls, so it is safe to KEEP across sessions — we show its cached posts
+      // instantly on open, then lazily refresh. (No clear-on-open: an empty tab
+      // on every open is the bug the user hit.)
       _nomadnetArchive = ActivityArchive.forStorage(
         wappData,
-        fileName: 'social_nomadnet.sqlite3',
+        fileName: 'social_nomadnet2.sqlite3',
       );
-      // Nomadnet is a LIVE "while viewing" feed of what the Reticulum network
-      // currently holds — start each session empty so it never shows stale rows
-      // (and drops any internet posts an earlier build wrongly cached here). It
-      // repopulates from clean, self/peer-scoped polls within a cycle.
-      _nomadnetArchive!.clearAll();
       _nomadPoller = NomadnetPoller(
         archive: _nomadnetArchive!,
         onChanged: () {
@@ -2093,6 +2094,13 @@ class _WappPageState extends State<WappPage>
                 topic: topic.isEmpty ? null : topic,
                 parent: parent.isEmpty ? null : parent,
               );
+              // If the author is looking at Nomadnet, surface their own post
+              // right away: it is now in the local relay store carrying the
+              // reticulum-native marker, so a poll picks it up from the local
+              // leg without waiting for the 90s timer.
+              if (_wappName == 'social' && _socialFeedFilter == 'nomadnet') {
+                await _nomadPoller?.pollOnce();
+              }
             }());
           }
         } else if (type == 'ui.toast') {
@@ -6094,6 +6102,15 @@ class _WappPageState extends State<WappPage>
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');
+          // Surface the author's own post on Nomadnet without waiting for the
+          // 90s timer. The wapp publishes via hal_nostr_post (fire-and-forget),
+          // so give it a moment to sign + land in the local relay store, then
+          // poll — the local (tag-filtered) leg picks it straight up.
+          if (_wappName == 'social' && _socialFeedFilter == 'nomadnet') {
+            Future.delayed(const Duration(milliseconds: 1200), () {
+              _nomadPoller?.pollOnce();
+            });
+          }
         },
       );
     }

@@ -26,7 +26,7 @@ Social is a NOSTR client shipped as a wapp. Four tabs:
 - **Saved** — posts the user bookmarked.
 
 Each of the three feeds has its OWN sqlite DB: `social_all.sqlite3` (Internet),
-`social_following.sqlite3` (Following), `social_nomadnet.sqlite3` (Nomadnet).
+`social_following.sqlite3` (Following), `social_nomadnet2.sqlite3` (Nomadnet).
 
 The protocol is NOSTR (kinds 0/1/6/7, NIP-01 wire, NIP-19 mentions, Schnorr). The
 wapp id/title are "social"; the protocol keeps the "nostr" name. A "publication" =
@@ -267,18 +267,31 @@ poller), Reticulum NOSTR is already isolate-safe and lives on the MAIN isolate.
   indexer + all reachable relays + callsign peers, parallel, deduped.
 - **Poller**: `nomadnet_poller.dart` (`NomadnetPoller`) — main isolate, NO
   sockets. Verifies signatures in a `compute` isolate, writes newest-first into
-  `social_nomadnet.sqlite3`, fetches kind-0 profiles. Starts/stops ONLY while the
+  `social_nomadnet2.sqlite3`, fetches kind-0 profiles. Starts/stops ONLY while the
   Nomadnet tab is viewed (`onFilterChanged`), with a `_disposed` guard so an
-  in-flight poll can't write after teardown. The archive is **cleared on open**
-  so it is always a live view of what the mesh currently holds.
-- **Publishing**: `nostrPost` now also `relayPublish()`es our note (local store
-  self-tier + replicate to indexers), done FIRST and independent of the engine
-  publish — else the post lives only in the internet store, invisible to the mesh.
-- **No internet contamination**: the local `_relayStore` ALSO holds internet
-  posts. So Nomadnet scopes the **local** query to OUR authored posts only
-  (`localAuthors: [self]`); remote peers are already self-scoped by the relay
-  responder (`relay_node.dart` leaf branch — a leaf answers only its own posts).
-  Net: Nomadnet shows only reticulum-native posts (self + peers' own).
+  in-flight poll can't write after teardown. The archive is **KEPT across
+  sessions** (not cleared): on open we show its cached posts instantly, then
+  lazily refresh — an empty tab on every open was a bug. Safe to keep because the
+  DB is now fed ONLY by tag-filtered (reticulum-native) polls; the old
+  `social_nomadnet.sqlite3` (written by earlier builds that leaked internet posts)
+  is abandoned by the `2` filename rather than migrated. Dedup by `mid` (unique
+  index + in-memory set) means re-polls never duplicate cached rows.
+- **Publishing**: `publishNote`/`nostrPost` tag every kind-1 note we publish with
+  the single-letter marker **`["z","rns"]`** (added before signing) and
+  `relayPublish()` it (local store self-tier + replicate to indexers), done FIRST
+  and independent of the engine publish — else the post lives only in the internet
+  store, invisible to the mesh. After composing while on Nomadnet, `wapp_page`
+  calls `pollOnce()` so the author's own post surfaces from the local leg
+  immediately (no 90s wait).
+- **No internet contamination — the real fix is the marker tag, not author
+  scoping.** The local `_relayStore` AND any *host* peer (default `serve=true`)
+  both also hold internet-mirrored posts, and a host answers its WHOLE store — so
+  an `authors:[self]` scope alone can NOT keep the internet out of what remote
+  peers return. Instead `nomadnetFetch` filters on `tags:{z:[rns]}`. Every leg
+  honours it in its NIP-01 filter — the local `store.query`, a host responder
+  (`relay_node.dart` keeps the querier's `tags`), and a self-scoped leaf. Public
+  wss posts never carry `z=rns`, so the feed is strictly Aurora-over-Reticulum:
+  our own native notes + peers' own native notes, zero internet firehose.
 
 **Validation is CROSS-DEVICE, over Reticulum only.** In this initial
 implementation only the phones publish NOSTR over Reticulum, so the ONLY valid

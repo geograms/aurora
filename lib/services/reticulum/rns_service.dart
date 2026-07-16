@@ -4452,6 +4452,12 @@ class RnsService {
     final priv = _profilePrivHex();
     if (t.isEmpty || pub == null || priv == null) return null;
     final tags = <List<String>>[];
+    // Reticulum-native marker (§Nomadnet): a single-letter indexed tag so a
+    // relay REQ can filter to ONLY posts an Aurora device published over the
+    // mesh. Internet posts fetched from public wss relays never carry it, so
+    // the Nomadnet feed stays strictly free of the internet firehose regardless
+    // of whether the answering peer serves as a host or a self-scoped leaf.
+    tags.add(const ['z', 'rns']);
     if (topic != null && topic.isNotEmpty) tags.add(['t', topic]);
     // Carry the reply parent (the APRS thread id) so a backfilled reply threads
     // under the right post instead of polluting the top-level feed.
@@ -4698,12 +4704,19 @@ class RnsService {
     int sinceSec, {
     int limit = 150,
   }) async {
-    final self = selfPubHex?.toLowerCase();
+    // Filter on the reticulum-native marker tag (`z=rns`) — NOT authors. This is
+    // the real separation: the shared local store AND any host peer both also
+    // hold internet-mirrored posts, and a host answers the WHOLE store, so an
+    // author scope alone can't keep the internet out. Every leg (local, host,
+    // self-scoped leaf) honours the tag in its NIP-01 filter, so the result is
+    // strictly Aurora-over-Reticulum posts: our own + peers' own native notes.
     final byId = await _fanOutQuery(
-      NostrFilter(kinds: const [1], since: sinceSec, limit: limit),
-      // Local store scoped to OUR posts only (it also holds internet posts);
-      // reticulum peers self-scope their own posts. Result: reticulum-native.
-      localAuthors: self == null ? const [] : [self],
+      NostrFilter(
+        kinds: const [1],
+        tags: const {'z': ['rns']},
+        since: sinceSec,
+        limit: limit,
+      ),
     );
     return [for (final e in byId.values) e.toJson()];
   }
@@ -6596,13 +6609,25 @@ class RnsService {
   ) async {
     final pub = selfPubHex;
     final priv = _profilePrivHex();
-    final hub = _nostrHub;
-    if (pub == null || priv == null || hub == null) return null;
+    // Only pub+priv are required to sign and serve a post over Reticulum. The
+    // wss engine hub is OPTIONAL: in the main-isolate architecture (and whenever
+    // the internet relays are unreachable) `_nostrHub` is null, and gating the
+    // whole publish on it silently dropped every composed post — so it never
+    // reached the relay store and never showed on Nomadnet. Reticulum first,
+    // wss best-effort only if a hub exists.
+    if (pub == null || priv == null) return null;
+    // Mark our own kind-1 publications (notes + replies) reticulum-native so the
+    // Nomadnet feed can filter them in and the internet firehose out — see the
+    // matching tag in publishNote. Only for kind-1; reactions/follows/etc. are
+    // never surfaced in Nomadnet.
+    final outTags = (kind == 1 && !tags.any((t) => t.isNotEmpty && t[0] == 'z'))
+        ? [...tags, const ['z', 'rns']]
+        : tags;
     final ev = NostrEvent(
       pubkey: pub,
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       kind: kind,
-      tags: tags,
+      tags: outTags,
       content: content,
     );
     try {
@@ -6621,8 +6646,11 @@ class RnsService {
       'NOSTR: post ${ev.id == null ? "?" : ev.id!.substring(0, 8)} '
       'relayPublish=$relayed',
     );
-    // Then the internet relays (wss) via the engine — best-effort, never blocks.
-    unawaited(hub.publish(ev));
+    // Then the internet relays (wss) via the engine — best-effort, never blocks,
+    // and only when a hub exists (it may be null; the reticulum publish above is
+    // what makes the post visible to the mesh + Nomadnet regardless).
+    final hub = _nostrHub;
+    if (hub != null) unawaited(hub.publish(ev));
     return ev.id;
   }
 

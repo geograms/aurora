@@ -352,6 +352,23 @@ class RnsService {
     }
   }
 
+  /// A human callsign for a NOSTR pubkey [hex] — the OBSERVED callsign if we've
+  /// seen one (APRS/beacon → [_callPub]), otherwise the one DERIVED from the key
+  /// (`X1<short>`). Never returns raw hex: a feed should show a callsign, not a
+  /// key. Empty only if [hex] is not a 64-char key.
+  String callsignForHex(String hex) {
+    final h = hex.toLowerCase();
+    if (h.length != 64) return '';
+    for (final e in _callPub.entries) {
+      if (e.value.toLowerCase() == h) return e.key;
+    }
+    try {
+      return 'X1${NostrCrypto.deriveCallsign(h)}';
+    } catch (_) {
+      return '';
+    }
+  }
+
   /// The people this device knows, as pickable contacts — those seen on APRS
   /// (callsign↔pubkey, from [_callPub]) and those followed ([_follows]), each
   /// {npub, callsign, nick}. [query] filters case-insensitively across all three

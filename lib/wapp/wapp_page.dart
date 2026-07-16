@@ -1250,6 +1250,12 @@ class _WappPageState extends State<WappPage>
         if (arch == null) return;
         final row = nomadnetRowFromJson(json);
         if (row == null) return;
+        // Replace the optimistic placeholder (added on Post) with the real-id
+        // row so likes/threading work and it doesn't show twice.
+        arch.removePending(
+          (row['author'] ?? '').toString(),
+          (row['text'] ?? '').toString(),
+        );
         arch.add(row);
         if (mounted) {
           _activityRev.value++;
@@ -5628,6 +5634,16 @@ class _WappPageState extends State<WappPage>
       if ((self.name != null && self.name!.isNotEmpty) || self.avatar != null) {
         return (name: self.name, avatar: self.avatar);
       }
+      // No display name set → show MY callsign, never a hex prefix.
+      final cs = ProfileService.instance.activeProfile?.callsign;
+      if (cs != null && cs.isNotEmpty) return (name: cs, avatar: self.avatar);
+    }
+    // A NOSTR author (reticulum pubkey) with no kind-0 nickname: show a real
+    // callsign (observed or derived from the key), NOT a raw hex string.
+    final fullHex = _fullPubkeyFor(from);
+    if (fullHex != null && fullHex.length == 64) {
+      final cs = RnsService.instance.callsignForHex(fullHex);
+      if (cs.isNotEmpty) return (name: cs, avatar: null);
     }
     return _streamProfileFor(from);
   }
@@ -5659,6 +5675,13 @@ class _WappPageState extends State<WappPage>
       final hex = RnsService.instance.nostrHexFromNpub(npub);
       if (hex != null && hex.length == 64) return hex;
     }
+    // Last resort: any feed archive that holds a row by this author keeps the
+    // full pubkey — resolves reticulum (Nomadnet) authors we have no profile
+    // for, so their card shows a callsign instead of a hex prefix.
+    final fromArch = _nomadnetArchive?.authorForShort(short) ??
+        _activityArchive?.authorForShort(short) ??
+        _followingArchive?.authorForShort(short);
+    if (fromArch != null && fromArch.length == 64) return fromArch;
     return null;
   }
 
@@ -6197,10 +6220,35 @@ class _WappPageState extends State<WappPage>
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');
-          // Own post shows instantly via RnsService.onSelfNotePublished (set in
-          // the Social setup) — the publish echoes it into the Nomadnet archive
-          // by real event id. No poll here; that raced the fire-and-forget
-          // publish and left the author staring at an empty feed.
+          // Show MY post the instant I hit Post — don't wait for the publish
+          // round-trip. Drop an optimistic row into the Nomadnet archive now;
+          // when the real signed event lands, onSelfNotePublished replaces this
+          // placeholder (matched by author+text) with the real-id row.
+          final body = text.trim();
+          if (_wappName == 'social' &&
+              _socialFeedFilter == 'nomadnet' &&
+              body.isNotEmpty &&
+              _nomadnetArchive != null) {
+            final selfHex =
+                RnsService.instance.selfPubHex?.toLowerCase() ?? '';
+            final now = DateTime.now();
+            final hh = now.hour.toString().padLeft(2, '0');
+            final mm = now.minute.toString().padLeft(2, '0');
+            _nomadnetArchive!.add(<String, dynamic>{
+              'dir': 'in',
+              'from': selfHex.length >= 12 ? selfHex.substring(0, 12) : selfHex,
+              'author': selfHex,
+              'text': body,
+              'mid': '', // pending — no event id yet
+              'parent': '',
+              'pop': 0,
+              'source': 'nomadnet',
+              't': now.millisecondsSinceEpoch,
+              'time': '$hh:$mm',
+            });
+            _activityRev.value++;
+            setState(() {});
+          }
         },
       );
     }

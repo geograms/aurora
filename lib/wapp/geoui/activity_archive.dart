@@ -898,6 +898,40 @@ class ActivityArchive {
 
   /// Wipe every archived post (the "Clear feed" action). Likes/saved rows are
   /// kept — a user's bookmarks shouldn't vanish with a feed clear.
+  /// The full 64-char author pubkey behind a 12-char feed key, from any row we
+  /// hold. Lets the host turn a feed's short author key into a real callsign.
+  String? authorForShort(String short12) {
+    if (short12.isEmpty) return null;
+    final db = _ensureDb();
+    if (db == null) return null;
+    try {
+      final r = db.select(
+        "SELECT author_pubkey FROM activity WHERE author_pubkey LIKE ? "
+        "AND length(author_pubkey) = 64 LIMIT 1",
+        ['$short12%'],
+      );
+      if (r.isNotEmpty) {
+        return (r.first['author_pubkey'] as String?)?.toLowerCase();
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Drop optimistic ("pending", mid-less) rows for [authorHex] whose text
+  /// matches [text] — called when the real signed event arrives so the
+  /// placeholder is replaced by the real-id row instead of duplicating it.
+  void removePending(String authorHex, String text) {
+    final db = _ensureDb();
+    if (db == null) return;
+    try {
+      db.execute(
+        "DELETE FROM activity WHERE IFNULL(mid,'') = '' "
+        "AND author_pubkey = ? AND text = ?",
+        [authorHex.toLowerCase(), text],
+      );
+    } catch (_) {}
+  }
+
   void clearAll() {
     final db = _ensureDb();
     if (db == null) return;

@@ -199,6 +199,22 @@ class RnsService {
   /// mesh poll dedups against it. Argument is the signed event JSON.
   void Function(Map<String, dynamic> eventJson)? onSelfNotePublished;
 
+  /// Fired when a reticulum-native (`z=rns`) event is PUSHED to us by a peer
+  /// indexer — the fan-out EVENT lands in our store via [RelayNode.onEvent].
+  /// The Nomadnet feed uses it as a push trigger: a peer's new post/reaction
+  /// refreshes the open feed instantly, no poll, no socket. kind-1 → a new row;
+  /// kind-6/7 → a reaction on an existing post. Argument is the signed event
+  /// JSON.
+  void Function(Map<String, dynamic> eventJson)? onNomadnetInbound;
+
+  /// Persisted per-target pull cursor: target relay identity `hexHash` → the
+  /// newest `created_at` (sec) we have received FROM it. Lets the Nomadnet pull
+  /// ask each indexer only for what is new since our last contact with THAT
+  /// indexer, instead of one global `since` that re-requests or skips.
+  final Map<String, int> _relayCursor = {};
+  String? relayCursorsPath;
+  Timer? _relayCursorSaveTimer;
+
   /// JSON sidecar persisting the discovered callsign->identity map across
   /// restarts (set by the app before start). Without it, a joining/returning node
   /// re-pays minutes of announce-discovery before it can query peers for their
@@ -2259,6 +2275,18 @@ class RnsService {
               );
               return d.ok ? null : d.reason;
             },
+            // A peer indexer just PUSHED an event into our store (fan-out). If
+            // it is reticulum-native (z=rns), hand it to the Nomadnet feed as a
+            // live push trigger — the open feed updates immediately, no poll.
+            onEvent: (ev) {
+              try {
+                if (ev.tags.any(
+                  (t) => t.length >= 2 && t[0] == 'z' && t[1] == 'rns',
+                )) {
+                  onNomadnetInbound?.call(ev.toJson());
+                }
+              } catch (_) {}
+            },
           );
           // A relay role is advertised whenever hosting is enabled; the capacity
           // profile decides leaf vs indexer + which caps (storeForward, archive).
@@ -2386,6 +2414,9 @@ class RnsService {
         // Restore discovered peers (callsign->identity) so backfill can query
         // known posters immediately instead of re-waiting for their announces.
         _loadCallPeers();
+        // Restore per-indexer Nomadnet pull cursors so we resume asking each
+        // indexer from where we left off (incremental), not the cold window.
+        _loadRelayCursors();
 
         // Mutable folders: owned-key store + service. Discovery is peer-to-peer via
         // the DHT (no indexer): any holder advertises itself under the folder key
@@ -2856,11 +2887,36 @@ class RnsService {
   Future<void> announce(String text) async {
     if (!_up || _id == null) return;
     _announceText = text; /* remember for the periodic re-announce */
+    // Piggyback our relay/indexer announcement (role, services, hardware
+    // capacity, pubkey, optional coords) onto the CHAT announce — the one that
+    // reliably survives the public hubs' announce rate-limiting. The dedicated
+    // relay-dest announce is frequently dropped, so peers never learned each
+    // other were indexers (sync had no partner). Format: callsign, a NUL, then
+    // the msgpack RelayAnnouncement. A node with no relay role sends the plain
+    // callsign, unchanged.
+    final csBytes = utf8.encode(text);
+    final relayData = _relayRole?.announcementAppData();
+    final Uint8List appData;
+    // Guard the announce MTU: the callsign announce MUST keep propagating even
+    // if the relay payload is large. If the combined app_data would risk the
+    // packet budget, send the callsign alone (the dedicated relay-dest announce
+    // still carries the role separately).
+    if (relayData != null &&
+        relayData.isNotEmpty &&
+        csBytes.length + 1 + relayData.length <= 380) {
+      appData = Uint8List(csBytes.length + 1 + relayData.length)
+        ..setRange(0, csBytes.length, csBytes)
+        ..[csBytes.length] = 0
+        ..setRange(csBytes.length + 1, csBytes.length + 1 + relayData.length,
+            relayData);
+    } else {
+      appData = Uint8List.fromList(csBytes);
+    }
     final pkt = await RnsAnnounceBuilder.build(
       _id!,
       _app,
       _aspects,
-      appData: Uint8List.fromList(utf8.encode(text)),
+      appData: appData,
     );
     _transport!.sendOnAll(pkt.pack());
     LogService.instance.add('RNS: announced "$text"');
@@ -2917,6 +2973,37 @@ class RnsService {
 
   /// Announce the relay destination carrying our role/capacity/interest summary
   /// (RelayAnnouncement). Peers collect these into their RelayDirectory.
+  /// Record a peer's relay/indexer role from a RelayAnnouncement [appData],
+  /// whether it arrived on the dedicated relay dest OR piggybacked on the chat
+  /// announce. Shared so both paths converge the indexer directory identically.
+  void _observeRelayAnnouncement(
+    RnsIdentity identity,
+    Uint8List appData,
+    int hops,
+  ) {
+    final e = _relayDir.observe(identity, appData, hops: hops);
+    // Being able to SEE the other indexers is the precondition for syncing with
+    // them. Logged once per peer per role change, not per announce — a hub flood
+    // must not become a log flood.
+    if (e != null) {
+      final id = _hex(identity.hash).substring(0, 8);
+      final role = e.announcement.isIndexer ? 'indexer' : 'leaf';
+      if (_relaySeenRole[id] != role) {
+        _relaySeenRole[id] = role;
+        LogService.instance.add(
+          'relay: heard $role $id '
+          '(${_relayDir.indexers().length} indexer(s) known)',
+        );
+      }
+    }
+    // If this relay belongs to a followed author we couldn't reach before, its
+    // npub→identity is now known — try fetching its profile.
+    final pk = e?.announcement.pubkey;
+    if (pk != null && _follows.contains(pk.toLowerCase())) {
+      _maybeFetchFollowedProfileByPub(pk.toLowerCase());
+    }
+  }
+
   Future<void> _announceRelayDest() async {
     if (!_up || _id == null || _relayRole == null) return;
     _relayRole!.selfPubkey = selfPubHex; // advertise our npub for profile fetch
@@ -3164,27 +3251,7 @@ class RnsService {
       kRelayAspects,
     );
     if (RnsCrypto.constantTimeEquals(ann.destHash, relayHash)) {
-      final e = _relayDir.observe(ann.identity, ann.appData, hops: hops + 1);
-      // Being able to SEE the other indexers is the precondition for syncing
-      // with them, and it is invisible without this line. Logged once per peer
-      // per role change, not per announce — a hub flood must not become a log
-      // flood.
-      if (e != null) {
-        final id = _hex(ann.identity.hash).substring(0, 8);
-        final role = e.announcement.isIndexer ? 'indexer' : 'leaf';
-        if (_relaySeenRole[id] != role) {
-          _relaySeenRole[id] = role;
-          LogService.instance.add(
-            'relay: heard $role $id (${_relayDir.indexers().length} indexer(s) known)',
-          );
-        }
-      }
-      // If this relay belongs to a followed author we couldn't reach before,
-      // its npub→identity is now known — try fetching its profile.
-      final pk = e?.announcement.pubkey;
-      if (pk != null && _follows.contains(pk.toLowerCase())) {
-        _maybeFetchFollowedProfileByPub(pk.toLowerCase());
-      }
+      _observeRelayAnnouncement(ann.identity, ann.appData, hops + 1);
     }
     // Store-and-forward: a recipient's LXMF dest came online — flush its mail.
     final lxHash = RnsDestination.hash(
@@ -3196,7 +3263,18 @@ class RnsService {
         (_relay?.hasMailFor(ann.identity) ?? false)) {
       _storeForward?.onRecipientOnline(ann.identity);
     }
-    final text = utf8.decode(ann.appData, allowMalformed: true);
+    // The CHAT announce appData is `callsign`, optionally followed by a NUL and a
+    // piggybacked RelayAnnouncement (see [announce]). Split on the first NUL so
+    // callsign + log stay clean and the relay bytes can be parsed out.
+    final rawAppData = ann.appData;
+    final nulIdx = rawAppData.indexOf(0);
+    final relayPiggyback = (nulIdx >= 0 && nulIdx + 1 < rawAppData.length)
+        ? rawAppData.sublist(nulIdx + 1)
+        : null;
+    final text = utf8.decode(
+      nulIdx < 0 ? rawAppData : rawAppData.sublist(0, nulIdx),
+      allowMalformed: true,
+    );
     // Map a peer's callsign (the appData of its CHAT announce) -> that peer's
     // chat dest, so media referenced in its messages can be fetched DIRECTLY
     // from it over Reticulum. Direct fetch from the known sender is far more
@@ -3220,6 +3298,13 @@ class RnsService {
         // Now that we can reach this peer directly, fetch its profile if we
         // follow it and don't have it yet.
         _maybeFetchFollowedProfile(cs);
+      }
+      // Piggybacked relay/indexer announcement rides the chat announce, so a
+      // peer's indexer role is learned from the announce that survives the hubs
+      // — the fix for "indexers seen=0". Feed the relay directory just like a
+      // dedicated relay-dest announce would.
+      if (relayPiggyback != null) {
+        _observeRelayAnnouncement(ann.identity, relayPiggyback, hops + 1);
       }
     }
     _inbox.add({
@@ -3408,8 +3493,77 @@ class RnsService {
     final dht = files.dht;
     if (dht == null) return false;
     final stored = await dht.storeLocal(rec);
-    if (stored) _pointerLog?.add(rec);
+    if (stored) {
+      _pointerLog?.add(rec);
+      // CONTENT-PULL AFTER POINTER SYNC. Pointer sync only tells us "provider P
+      // holds key K" — it never carries the note bytes. So the moment we learn a
+      // new provider for a key, fetch that author's reticulum-native notes from
+      // P over the link that just synced (which reliably forms, unlike the cold
+      // fan-out/REQ paths). This is what actually makes a post cross between two
+      // indexers over Reticulum.
+      unawaited(_pullAuthorNotesFrom(rec.providerIdentity, rec.sha256));
+    }
     return stored;
+  }
+
+  final Set<String> _authorPullInFlight = {};
+
+  /// Fetch a synced author's reticulum-native notes (kind-1/6/7, `z=rns`) from
+  /// [provider] and feed them into the Nomadnet feed. Called right after a
+  /// pointer sync tells us [provider] holds notes from [authorKey] (a 32B x-only
+  /// pubkey). Deduped in-flight; incremental via the per-author cursor. A key
+  /// that is actually a file/other pointer simply yields no author matches.
+  Future<void> _pullAuthorNotesFrom(
+    RnsIdentity provider,
+    Uint8List authorKey,
+  ) async {
+    final relay = _relay;
+    if (relay == null || authorKey.length != 32) return;
+    final authorHex = _hex(authorKey);
+    if (authorHex == selfPubHex?.toLowerCase()) return; // our own notes
+    final cursorKey = 'author:$authorHex';
+    final flightKey = '${_hex(provider.hash)}:$authorHex';
+    if (!_authorPullInFlight.add(flightKey)) return;
+    try {
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final since = _relayCursor[cursorKey] ?? (nowSec - 6 * 60 * 60);
+      final evs = await relay.query(
+        provider,
+        NostrFilter(
+          kinds: const [1, 6, 7],
+          authors: [authorHex],
+          tags: const {'z': ['rns']},
+          since: since,
+          limit: 100,
+        ),
+        timeout: const Duration(seconds: 40),
+      );
+      if (evs.isEmpty) return;
+      // Verify + store (so we can re-serve/re-sync them), then surface each on
+      // the open Nomadnet feed via the inbound sink.
+      final store = _relayStore;
+      var maxSec = since;
+      var kept = 0;
+      for (final e in evs) {
+        if (!e.verify()) continue;
+        if (e.createdAt > maxSec) maxSec = e.createdAt;
+        onNomadnetInbound?.call(e.toJson());
+        kept++;
+      }
+      if (store != null) store.putAllVerified(evs, tier: Tier.stranger.index);
+      _relayCursor[cursorKey] = maxSec + 1;
+      _scheduleRelayCursorSave();
+      if (kept > 0) {
+        LogService.instance.add(
+          'sync-pull: $kept note(s) for ${authorHex.substring(0, 12)} '
+          'from provider ${_hex(provider.hash).substring(0, 8)}',
+        );
+      }
+    } catch (_) {
+      // link cold / no answer — the next sync round retries
+    } finally {
+      _authorPullInFlight.remove(flightKey);
+    }
   }
 
   /// "This provider no longer holds that key." A removal travels like an
@@ -4502,6 +4656,10 @@ class RnsService {
     await relayPublish(ev.toJson());
     // Instant local echo of our own note (Nomadnet), same as nostrPost.
     onSelfNotePublished?.call(ev.toJson());
+    // Advertise that WE hold notes from this author (self) so a synced indexer
+    // learns to content-pull our posts from us (self-dedups after the first).
+    final selfPub = selfPubHex;
+    if (selfPub != null) unawaited(publishAuthorProvider(selfPub));
     return ev.id;
   }
 
@@ -4761,6 +4919,150 @@ class RnsService {
       ),
     );
     return [for (final e in byId.values) e.toJson()];
+  }
+
+  /// NOMADNET incremental pull. Asks EACH reachable indexer/peer only for events
+  /// newer than the last one we received FROM it (a persisted per-target cursor),
+  /// so bandwidth is spent on new content, and a newly-discovered indexer still
+  /// gets its full backlog (from the cold window). Fetches kind-1 notes AND
+  /// kind-6/7 reactions (all `z=rns`), so likes propagate over the mesh with the
+  /// posts. Returns raw event JSON (mixed kinds); the caller splits + verifies.
+  Future<List<Map<String, dynamic>>> nomadnetPull({
+    int coldWindowSec = 6 * 60 * 60,
+    int limit = 200,
+    Duration timeout = const Duration(seconds: 40),
+  }) async {
+    final relay = _relay;
+    final store = _relayStore;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final byId = <String, NostrEvent>{};
+    void take(Iterable<NostrEvent> evs) {
+      for (final e in evs) {
+        if (e.id != null) byId.putIfAbsent(e.id!, () => e);
+      }
+    }
+
+    NostrFilter filterSince(int since) => NostrFilter(
+          kinds: const [1, 6, 7],
+          tags: const {'z': ['rns']},
+          since: since,
+          limit: limit,
+        );
+
+    // Local store leg — its own cursor key.
+    if (store != null) {
+      final since = _relayCursor['local'] ?? (nowSec - coldWindowSec);
+      final evs = store.query(filterSince(since));
+      take(evs);
+      _advanceRelayCursor('local', evs);
+    }
+    if (relay == null) {
+      _scheduleRelayCursorSave();
+      return [for (final e in byId.values) e.toJson()];
+    }
+
+    // Targets: best indexer + every heard relay + every callsign peer, deduped.
+    final targets = <RnsIdentity>[];
+    final best = _relayDir.bestIndexer();
+    if (best != null) targets.add(best.identity);
+    for (final e in _relayDir.entries()) {
+      targets.add(e.identity);
+    }
+    for (final id in _callIdentity.values) {
+      targets.add(id);
+    }
+    final seen = <String>{};
+    final unique = <RnsIdentity>[];
+    for (final id in targets) {
+      if (seen.add(_hex(id.hash))) unique.add(id);
+    }
+
+    // Per-target since: each indexer is asked only for what is new since our
+    // last contact with IT.
+    final results = await Future.wait(
+      unique.map((id) async {
+        final hash = _hex(id.hash);
+        final since = _relayCursor[hash] ?? (nowSec - coldWindowSec);
+        try {
+          final evs = await relay.query(id, filterSince(since), timeout: timeout);
+          return MapEntry(hash, evs);
+        } catch (_) {
+          return MapEntry(hash, const <NostrEvent>[]);
+        }
+      }),
+    );
+    var answered = 0;
+    for (final r in results) {
+      if (r.value.isNotEmpty) {
+        answered++;
+        _advanceRelayCursor(r.key, r.value);
+      }
+      take(r.value);
+    }
+    LogService.instance.add(
+      'nomadnet-pull: ${unique.length} target(s) ($answered answered), '
+      '${byId.length} event(s)',
+    );
+    _scheduleRelayCursorSave();
+    return [for (final e in byId.values) e.toJson()];
+  }
+
+  /// Advance a per-target cursor to the newest `created_at` we just received from
+  /// it (+1), so the next pull to that target asks only for strictly newer events.
+  void _advanceRelayCursor(String key, Iterable<NostrEvent> evs) {
+    var maxSec = _relayCursor[key] ?? 0;
+    for (final e in evs) {
+      if (e.createdAt > maxSec) maxSec = e.createdAt;
+    }
+    if (maxSec > 0) _relayCursor[key] = maxSec + 1;
+  }
+
+  void _scheduleRelayCursorSave() {
+    _relayCursorSaveTimer?.cancel();
+    _relayCursorSaveTimer = Timer(const Duration(seconds: 5), _saveRelayCursors);
+  }
+
+  Future<void> _saveRelayCursors() async {
+    final path = relayCursorsPath;
+    if (path == null || path.isEmpty) return;
+    try {
+      await File(path).writeAsString(jsonEncode(_relayCursor), flush: true);
+    } catch (_) {
+      // best-effort cache
+    }
+  }
+
+  void _loadRelayCursors() {
+    final path = relayCursorsPath;
+    if (path == null || path.isEmpty) return;
+    try {
+      final f = File(path);
+      if (!f.existsSync()) return;
+      final m = jsonDecode(f.readAsStringSync());
+      if (m is! Map) return;
+      m.forEach((k, v) {
+        if (k is String && v is int) _relayCursor[k] = v;
+      });
+    } catch (_) {
+      // corrupt cache — start clean
+    }
+  }
+
+  /// Fire our announces right now so a peer adds us to its indexer directory
+  /// within seconds instead of waiting out the re-announce cadence — used when
+  /// the user opens Nomadnet to speed discovery. Sends BOTH the callsign announce
+  /// (reliably propagated) AND the relay/indexer + service announces (which carry
+  /// our indexer role; the public hubs rate-limit these, so re-sending on demand
+  /// improves the odds a peer hears we are an indexer).
+  void announceRelayNow() {
+    try {
+      // ignore: discarded_futures
+      announce(_announceText);
+      // ignore: discarded_futures
+      _announceServiceDests();
+      // ignore: discarded_futures
+      _announceRelayDest();
+    } catch (_) {}
   }
 
   /// Publish OUR profile as a NOSTR kind-0 (set_metadata) event, so peers can
@@ -6308,13 +6610,11 @@ class RnsService {
   void nostrReact(String eventId, String authorHex) {
     final pub = selfPubHex;
     final priv = _profilePrivHex();
-    final hub = _nostrHub;
-    // A like that silently does nothing is worse than one that fails loudly:
-    // the heart simply never fills and there is no way to tell why.
-    if (pub == null || priv == null || hub == null) {
+    // pub+priv is enough to sign + serve the like over Reticulum; the wss hub is
+    // optional (see nostrVote/nostrPost — gating on it dropped the reaction).
+    if (pub == null || priv == null) {
       LogService.instance.add(
-        'NOSTR: react DROPPED — pub=${pub != null} '
-        'priv=${priv != null} hub=${hub != null}',
+        'NOSTR: react DROPPED — pub=${pub != null} priv=${priv != null}',
       );
       return;
     }
@@ -6333,6 +6633,8 @@ class RnsService {
       tags: [
         ['e', eventId],
         if (authorHex.isNotEmpty) ['p', authorHex],
+        // Reticulum-native marker — the like fans out to peer indexers.
+        const ['z', 'rns'],
       ],
       // A heart, not "+". NIP-25 reads "+" as an upvote, and the post card now
       // has a real upvote next to the like — publishing "+" for both lit the
@@ -6344,9 +6646,16 @@ class RnsService {
     } catch (_) {
       return;
     }
-    hub.recordReaction(eventId, pub); // optimistic, synchronous
+    // Reticulum first (local store + fan-out to peer indexers), wss best-effort.
     // ignore: discarded_futures
-    hub.publish(ev); // fire-and-forget to the engine
+    relayPublish(ev.toJson());
+    final hub = _nostrHub;
+    if (hub != null) {
+      hub.recordReaction(eventId, pub); // optimistic, synchronous
+      // ignore: discarded_futures
+      hub.publish(ev);
+    }
+    KeepService.instance.keep(Touch.react, eventId, authorHex: authorHex);
   }
 
   /// Build a signed kind-7 reaction so the MAIN isolate can publish it (the
@@ -6363,6 +6672,10 @@ class RnsService {
       tags: [
         ['e', eventId],
         if (authorHex.isNotEmpty) ['p', authorHex],
+        // Reticulum-native marker so the like rides the Nomadnet content plane
+        // (relayPublish → store + fan-out to peer indexers), reaching the post's
+        // author over the mesh — not just wss.
+        const ['z', 'rns'],
       ],
       content: '❤️',
     );
@@ -6559,11 +6872,13 @@ class RnsService {
   void nostrVote(String eventId, String authorHex, int vote) {
     final pub = selfPubHex;
     final priv = _profilePrivHex();
-    final hub = _nostrHub;
-    if (pub == null || priv == null || hub == null || eventId.isEmpty) {
+    // Only pub+priv are required to sign + serve the vote over Reticulum; the
+    // wss engine hub is OPTIONAL (null in the main-isolate architecture). Gating
+    // the whole vote on it silently dropped every reaction — the same bug fixed
+    // in nostrPost.
+    if (pub == null || priv == null || eventId.isEmpty) {
       LogService.instance.add(
-        'NOSTR: vote DROPPED — pub=${pub != null} '
-        'priv=${priv != null} hub=${hub != null}',
+        'NOSTR: vote DROPPED — pub=${pub != null} priv=${priv != null}',
       );
       return;
     }
@@ -6574,6 +6889,9 @@ class RnsService {
       tags: [
         ['e', eventId],
         if (authorHex.isNotEmpty) ['p', authorHex],
+        // Reticulum-native marker: the vote fans out to peer indexers and
+        // reaches the post author over the mesh (see relayPublish below).
+        const ['z', 'rns'],
       ],
       content: vote < 0 ? '-' : '+',
     );
@@ -6582,16 +6900,23 @@ class RnsService {
     } catch (_) {
       return;
     }
-    hub.recordVote(eventId, pub, vote); // optimistic, synchronous
+    // Serve it over Reticulum FIRST (local store + fan-out to peer indexers),
+    // then the wss engine best-effort.
     // ignore: discarded_futures
-    hub.publish(ev);
+    relayPublish(ev.toJson());
+    final hub = _nostrHub;
+    if (hub != null) {
+      hub.recordVote(eventId, pub, vote); // optimistic, synchronous
+      // ignore: discarded_futures
+      hub.publish(ev);
+    }
     // To touch it is to keep it: the note I voted on is now MINE to hold, and
     // it is served from this device over Reticulum whether or not the relay it
     // came from is still alive tomorrow (docs/NOSTR.md, the touch rule).
     KeepService.instance.keep(Touch.react, eventId, authorHex: authorHex);
     LogService.instance.add(
       'NOSTR: vote ${vote < 0 ? '-' : '+'} on '
-      '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)}',
+      '${eventId.substring(0, eventId.length < 8 ? eventId.length : 8)} (relayPublish)',
     );
   }
 
@@ -6601,8 +6926,7 @@ class RnsService {
   void nostrRepost(String eventId, String authorHex) {
     final pub = selfPubHex;
     final priv = _profilePrivHex();
-    final hub = _nostrHub;
-    if (pub == null || priv == null || hub == null) return;
+    if (pub == null || priv == null) return;
     final ev = NostrEvent(
       pubkey: pub,
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -6610,6 +6934,8 @@ class RnsService {
       tags: [
         ['e', eventId],
         if (authorHex.length == 64) ['p', authorHex],
+        // Reticulum-native marker so the repost fans out over the mesh.
+        const ['z', 'rns'],
       ],
       content: '',
     );
@@ -6618,8 +6944,12 @@ class RnsService {
     } catch (_) {
       return;
     }
+    // Reticulum first (store + fan-out to peer indexers), wss best-effort.
     // ignore: discarded_futures
-    hub.publish(ev);
+    relayPublish(ev.toJson());
+    final hub = _nostrHub;
+    // ignore: discarded_futures
+    if (hub != null) hub.publish(ev);
     // You put your name on it; you keep it.
     KeepService.instance.keep(Touch.repost, eventId, authorHex: authorHex);
   }
@@ -6674,6 +7004,9 @@ class RnsService {
     );
     // Echo our own note to any live listener (Nomadnet) the moment it is stored.
     if (kind == 1) onSelfNotePublished?.call(ev.toJson());
+    // Advertise our authorship so a synced indexer content-pulls our posts from
+    // us (self-dedups after the first advertise).
+    if (kind == 1 && pub != null) unawaited(publishAuthorProvider(pub));
     // Then the internet relays (wss) via the engine — best-effort, never blocks,
     // and only when a hub exists (it may be null; the reticulum publish above is
     // what makes the post visible to the mesh + Nomadnet regardless).

@@ -78,8 +78,14 @@ class CapacityGovernor {
       // throw on Linux when there's no battery) — treat it as on mains power so
       // always-on machines qualify as unlimited providers/indexers. Only a real
       // battery that is discharging keeps charging=false.
+      // "On power" means PLUGGED IN, not necessarily actively charging. A phone
+      // sitting at 100% on a charger reports `connectedNotCharging` (or `full`) —
+      // it is still mains-powered and should qualify as an indexer, per the role
+      // design ("plugged to electricity + WiFi"). Only a real battery that is
+      // discharging keeps charging=false.
       charging = s == BatteryState.charging ||
           s == BatteryState.full ||
+          s == BatteryState.connectedNotCharging ||
           s == BatteryState.unknown;
     } catch (_) {
       charging = true; // no battery (desktop/server) — treat as on power

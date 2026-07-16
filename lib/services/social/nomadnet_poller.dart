@@ -39,17 +39,19 @@ class NomadnetPoller {
   Timer? _timer;
   bool _busy = false;
   bool _disposed = false;
-  int _lastSeenSec = 0;
   final Set<String> _knownAuthors = {};
 
   /// Reticulum queries are slow (~40s worst case, run in parallel), so poll
-  /// gently while the tab is open.
+  /// gently while the tab is open. The main path is now the push trigger
+  /// (RnsService.onNomadnetInbound) — this pull is the incremental backstop.
   static const Duration _cadence = Duration(seconds: 90);
-  static const int _coldWindowSec = 6 * 60 * 60; // first poll looks back 6h
 
   void start() {
     if (_disposed) return;
     stop();
+    // Announce ourselves so a peer adds us to its indexer directory within
+    // seconds (both directions of fan-out + our REQ pull), then pull now.
+    RnsService.instance.announceRelayNow();
     unawaited(pollOnce());
     _timer = Timer.periodic(_cadence, (_) => unawaited(pollOnce()));
   }
@@ -68,19 +70,21 @@ class NomadnetPoller {
     if (_busy || _disposed) return 0;
     _busy = true;
     try {
-      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      final since =
-          _lastSeenSec > 0 ? _lastSeenSec - 60 : nowSec - _coldWindowSec;
-      final events = await RnsService.instance.nomadnetFetch(since);
+      // Per-target incremental pull: each indexer is asked only for what is new
+      // since our last contact with it (persisted cursor in RnsService).
+      final events = await RnsService.instance.nomadnetPull();
       if (_disposed) return 0;
-      if (events.isEmpty) {
-        LogService.instance.add('nomadnet-poll: 0 fetched (since ${nowSec - since}s)');
-        return 0;
-      }
+      if (events.isEmpty) return 0;
 
-      // Verify signatures + build rows off the UI thread (secp256k1 is heavy).
-      final rows = await compute(_verifyBuild, events);
+      // Verify signatures + split kind-1 posts vs kind-6/7 reactions off the UI
+      // thread (secp256k1 is heavy).
+      final result = await compute(_verifyPull, events);
       if (_disposed) return 0;
+      final rows =
+          (result['rows'] as List).cast<Map<String, dynamic>>();
+      final reactions =
+          (result['reactions'] as List).cast<Map<String, dynamic>>();
+      final self = RnsService.instance.nostrSelfHex()?.toLowerCase();
 
       var added = 0;
       final newAuthors = <String>[];
@@ -88,15 +92,25 @@ class NomadnetPoller {
         for (final row in rows) {
           archive.add(row);
           added++;
-          final sec = ((row['t'] as int?) ?? 0) ~/ 1000;
-          if (sec > _lastSeenSec) _lastSeenSec = sec;
           final author = (row['author'] ?? '').toString();
           if (author.isNotEmpty && _knownAuthors.add(author)) {
             newAuthors.add(author);
           }
         }
+        // Apply reactions so like counts propagate over the mesh with the posts.
+        for (final rx in reactions) {
+          final mid = (rx['mid'] ?? '').toString();
+          final liker = (rx['liker'] ?? '').toString();
+          if (mid.isEmpty || liker.isEmpty) continue;
+          archive.setReaction(
+            mid,
+            liker,
+            rx['like'] == true,
+            self != null && liker == self,
+          );
+        }
       });
-      if (added > 0 && !_disposed) onChanged();
+      if ((added > 0 || reactions.isNotEmpty) && !_disposed) onChanged();
 
       // Resolve names/avatars for authors we have not seen before.
       var gotProfiles = 0;
@@ -118,7 +132,7 @@ class NomadnetPoller {
       }
 
       LogService.instance.add(
-        'nomadnet-poll: fetched ${events.length}, kept $added, '
+        'nomadnet-poll: kept $added post(s), ${reactions.length} reaction(s), '
         'profiles $gotProfiles',
       );
       return added;
@@ -128,6 +142,33 @@ class NomadnetPoller {
     } finally {
       _busy = false;
     }
+  }
+
+  /// Apply a single event pushed to us by a peer indexer (RnsService.
+  /// onNomadnetInbound) — the live push path. Runs on the main isolate; the
+  /// event is already signature-verified by the relay before storage.
+  void ingestPushed(Map<String, dynamic> json) {
+    if (_disposed) return;
+    try {
+      final ev = NostrEvent.fromJson(json);
+      final self = RnsService.instance.nostrSelfHex()?.toLowerCase();
+      if (ev.kind == 1) {
+        if (ev.content.trim().isEmpty || (ev.id ?? '').isEmpty) return;
+        archive.add(nomadnetRow(ev));
+        onChanged();
+      } else if (ev.kind == 7 || ev.kind == 6) {
+        final r = _reactionOf(ev);
+        if (r == null) return;
+        final liker = (r['liker'] ?? '').toString();
+        archive.setReaction(
+          (r['mid'] ?? '').toString(),
+          liker,
+          r['like'] == true,
+          self != null && liker == self,
+        );
+        onChanged();
+      }
+    } catch (_) {}
   }
 
   Map<String, String>? _parseProfile(String content) {
@@ -146,10 +187,12 @@ class NomadnetPoller {
   }
 }
 
-/// compute() isolate: verify signatures, drop non-kind-1/empty/forged, build
-/// archive rows. NO curation — every valid kind-1 note is kept.
-List<Map<String, dynamic>> _verifyBuild(List<Map<String, dynamic>> events) {
-  final out = <Map<String, dynamic>>[];
+/// compute() isolate: verify signatures, split kind-1 posts (→ archive rows)
+/// from kind-6/7 reactions (→ {mid, liker, like}). NO curation. Returns
+/// `{'rows': [...], 'reactions': [...]}`.
+Map<String, dynamic> _verifyPull(List<Map<String, dynamic>> events) {
+  final rows = <Map<String, dynamic>>[];
+  final reactions = <Map<String, dynamic>>[];
   final seen = <String>{};
   for (final j in events) {
     final NostrEvent ev;
@@ -158,14 +201,36 @@ List<Map<String, dynamic>> _verifyBuild(List<Map<String, dynamic>> events) {
     } catch (_) {
       continue;
     }
-    if (ev.kind != 1) continue;
-    if (ev.content.trim().isEmpty) continue;
     final id = ev.id ?? '';
     if (id.isEmpty || !seen.add(id)) continue;
     if (!ev.verify()) continue; // forged → drop
-    out.add(nomadnetRow(ev));
+    if (ev.kind == 1) {
+      if (ev.content.trim().isEmpty) continue;
+      rows.add(nomadnetRow(ev));
+    } else if (ev.kind == 7 || ev.kind == 6) {
+      final r = _reactionOf(ev);
+      if (r != null) reactions.add(r);
+    }
   }
-  return out;
+  return {'rows': rows, 'reactions': reactions};
+}
+
+/// Extract {mid (the liked post id, from the #e tag), liker (pubkey), like}
+/// from a kind-7 reaction or kind-6 repost, or null if it has no target.
+Map<String, dynamic>? _reactionOf(NostrEvent ev) {
+  String mid = '';
+  for (final t in ev.tags) {
+    if (t.length >= 2 && t[0] == 'e') {
+      mid = t[1];
+      break;
+    }
+  }
+  if (mid.isEmpty) return null;
+  final c = ev.content.trim();
+  // kind-6 repost, or kind-7 positive ('+'/'❤️'/emoji) counts as a like; '-' is
+  // a downvote.
+  final like = ev.kind == 6 || c != '-';
+  return {'mid': mid, 'liker': ev.pubkey.toLowerCase(), 'like': like};
 }
 
 /// Build a Nomadnet archive row from a kind-1 event. Shared by the poll path

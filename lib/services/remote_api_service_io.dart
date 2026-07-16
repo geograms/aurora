@@ -485,6 +485,8 @@ class RemoteApiService {
               wappsDataStorage(prefs).getAbsolutePath('social.sqlite3');
           RnsService.instance.callPeersPath =
               wappsDataStorage(prefs).getAbsolutePath('call_peers.json');
+          RnsService.instance.relayCursorsPath =
+              wappsDataStorage(prefs).getAbsolutePath('relay_cursors.json');
           RnsService.instance.partialStoreDir =
               wappsDataStorage(prefs).getAbsolutePath('partials');
           RnsService.instance.folderStorePath =

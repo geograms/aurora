@@ -507,14 +507,25 @@ class _WappPageState extends State<WappPage>
     if (self != null) {
       _activityArchive?.setReaction(mid, self, like, true);
       _followingArchive?.setReaction(mid, self, like, true);
+      _nomadnetArchive?.setReaction(mid, self, like, true);
     }
     _activityRev.value++;
     setState(() {});
     if (like) {
-      final author = (_activityArchive?.byMid(mid)?['author'] ?? '').toString();
+      // Look the author up in whichever archive holds the post (Nomadnet posts
+      // are only in the Nomadnet archive).
+      final author = (_activityArchive?.byMid(mid)?['author'] ??
+              _nomadnetArchive?.byMid(mid)?['author'] ??
+              '')
+          .toString();
       final ev = RnsService.instance.buildSignedReaction(mid, author);
-      final poller = _allPoller;
-      if (ev != null && poller != null) unawaited(poller.publishEvent(ev));
+      if (ev != null) {
+        // Reticulum FIRST (store + fan-out to peer indexers) so the like reaches
+        // the author over the mesh; wss engine best-effort.
+        unawaited(RnsService.instance.relayPublish(ev.toJson()));
+        final poller = _allPoller;
+        if (poller != null) unawaited(poller.publishEvent(ev));
+      }
     }
   }
 
@@ -1261,6 +1272,15 @@ class _WappPageState extends State<WappPage>
           _activityRev.value++;
           setState(() {});
         }
+      };
+      // Live push trigger: a peer indexer fanned a z=rns event (post or
+      // reaction) into our store — surface it on the open Nomadnet feed at once,
+      // no poll, no socket. Fires regardless of the current tab (cached for the
+      // next visit); refreshes live when Nomadnet is on screen.
+      RnsService.instance.onNomadnetInbound = (json) {
+        final poller = _nomadPoller;
+        if (poller == null || _nomadnetArchive == null) return;
+        poller.ingestPushed(json);
       };
     }
     // NOSTR web of trust: never firehose-evict posts from people the user
@@ -3689,8 +3709,12 @@ class _WappPageState extends State<WappPage>
     _allPoller = null;
     _nomadPoller?.dispose();
     _nomadPoller = null;
-    // Drop the own-post echo so a disposed page's archive/setState isn't touched.
-    if (_wappName == 'social') RnsService.instance.onSelfNotePublished = null;
+    // Drop the own-post echo + push trigger so a disposed page's archive/setState
+    // isn't touched.
+    if (_wappName == 'social') {
+      RnsService.instance.onSelfNotePublished = null;
+      RnsService.instance.onNomadnetInbound = null;
+    }
     _tickTimer?.cancel();
     // Flush any pending conversation writes so the latest messages aren't lost.
     _convSaveTimer?.cancel();
@@ -6565,6 +6589,11 @@ class _WappPageState extends State<WappPage>
   /// seeded from persisted reaction receipts, so a hero-opened thread shows
   /// its counts instantly instead of waiting for a relay round trip.
   ({int count, bool mine}) _likeInfoFor(String mid) {
+    // Nomadnet likes live in the Nomadnet archive (fetched/pushed over Reticulum
+    // as kind-7), separate from the Internet archive.
+    if (_wappName == 'social' && _socialFeedFilter == 'nomadnet') {
+      return _nomadnetArchive?.likeInfo(mid) ?? (count: 0, mine: false);
+    }
     final s = _wappPostStats[mid];
     if (s != null) return (count: s.likes, mine: s.mine);
     final a = _activityArchive?.likeInfo(mid) ?? (count: 0, mine: false);
@@ -6575,6 +6604,9 @@ class _WappPageState extends State<WappPage>
 
   /// Reply tally, same source order as [_likeInfoFor].
   int _replyCountFor(String mid) {
+    if (_wappName == 'social' && _socialFeedFilter == 'nomadnet') {
+      return _nomadnetArchive?.replyCount(mid) ?? 0;
+    }
     final live = _wappPostStats[mid]?.replies;
     if (live != null && live > 0) return live;
     final archived = _activityArchive?.replyCount(mid) ?? 0;

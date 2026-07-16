@@ -6244,11 +6244,21 @@ class _WappPageState extends State<WappPage>
         onSend: (text) {
           _fieldValues['${name}_input'] = text;
           _sendCommand('${name}_send');
+          final body = text.trim();
+          // Publish the post HOST-SIDE over Reticulum (+ wss best-effort), the
+          // same reliable path likes/reactions already use. The wapp's
+          // hal_nostr_post round-trip proved fragile (a wapp that doesn't invoke
+          // it drops the post to an optimistic-only ghost that never reaches the
+          // mesh); publishing here guarantees it lands in the relay store and
+          // fans out to peer indexers. nostrPost fires onSelfNotePublished, which
+          // reconciles the optimistic placeholder below with the real event id.
+          if (_wappName == 'social' && body.isNotEmpty) {
+            unawaited(RnsService.instance.nostrPost(1, body, const []));
+          }
           // Show MY post the instant I hit Post — don't wait for the publish
           // round-trip. Drop an optimistic row into the Nomadnet archive now;
           // when the real signed event lands, onSelfNotePublished replaces this
           // placeholder (matched by author+text) with the real-id row.
-          final body = text.trim();
           if (_wappName == 'social' &&
               _socialFeedFilter == 'nomadnet' &&
               body.isNotEmpty &&

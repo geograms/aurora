@@ -1963,6 +1963,12 @@ class RnsService {
                 // also dual-accept on the legacy dht dest for the mixed-fleet migration.
                 rpcApp: _app, // 'geogram'
                 rpcAspects: _aspects, // ['chat']
+                // The chat dest is shared: DHT accepts its links first, so relay
+                // RPC frames (tag 0x02) that arrive on a DHT-owned link are
+                // demuxed to the relay node here. Lazy: _relay is built after this
+                // node, but the closure runs only when a frame arrives.
+                onRelayFrame: (body) =>
+                    _relay?.answerRelayFrame(body) ?? Future.value(null),
                 // Persistence anchors: the always-on relay indexers. The DHT also STOREs
                 // provider records to them and queries them FIRST on resolve, so records
                 // survive churn of the ephemeral k-closest and stay findable regardless
@@ -2237,6 +2243,9 @@ class RnsService {
             // The relay identity/role classification is unaffected.
             rpcApp: _app,
             rpcAspects: _aspects,
+            // The chat dest is shared with the DHT (which accepts its links
+            // first), so tag our link frames so the host demuxes them to us.
+            rpcTag: kRelayRpcTag,
             // Query peers WITHOUT a link where they support it: a probe costs
             // neither side a handshake, and a peer holding nothing answers with
             // silence. Falls back to a link automatically for older nodes.
@@ -4695,12 +4704,18 @@ class RnsService {
     if (_relay != null) {
       final seen = <String>{};
       var fanned = 0;
+      final to = <String>[];
       for (final ix in _relayDir.indexers()) {
         if (!seen.add(ix.identity.hexHash)) continue;
         // ignore: discarded_futures
         _relay!.publish(ix.identity, ev);
+        to.add(ix.identity.hexHash.substring(0, 8));
         if (++fanned >= 5) break; // bound the fan-out
       }
+      LogService.instance.add(
+        'relay: fan-out EVENT ${(ev.id ?? '').padRight(8).substring(0, 8)} '
+        '-> ${to.isEmpty ? 'NO INDEXERS' : to.join(',')}',
+      );
     }
     return stored;
   }
@@ -5003,16 +5018,18 @@ class RnsService {
       }),
     );
     var answered = 0;
+    final hits = <String>[];
     for (final r in results) {
       if (r.value.isNotEmpty) {
         answered++;
+        hits.add('${r.key.substring(0, 8)}:${r.value.length}');
         _advanceRelayCursor(r.key, r.value);
       }
       take(r.value);
     }
     LogService.instance.add(
-      'nomadnet-pull: ${unique.length} target(s) ($answered answered), '
-      '${byId.length} event(s)',
+      'nomadnet-pull: ${unique.length} target(s) ($answered answered'
+      '${hits.isEmpty ? '' : ' [${hits.join(',')}]'}), ${byId.length} event(s)',
     );
     _scheduleRelayCursorSave();
     return [for (final e in byId.values) e.toJson()];
@@ -6982,7 +6999,12 @@ class RnsService {
     // whole publish on it silently dropped every composed post — so it never
     // reached the relay store and never showed on Nomadnet. Reticulum first,
     // wss best-effort only if a hub exists.
-    if (pub == null || priv == null) return null;
+    if (pub == null || priv == null) {
+      LogService.instance.add(
+        'NOSTR: post DROPPED — pub=${pub != null} priv=${priv != null}',
+      );
+      return null;
+    }
     // Mark our own kind-1 publications (notes + replies) reticulum-native so the
     // Nomadnet feed can filter them in and the internet firehose out — see the
     // matching tag in publishNote. Only for kind-1; reactions/follows/etc. are

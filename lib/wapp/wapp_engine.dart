@@ -3034,6 +3034,9 @@ class WappEngine {
         // Fire-and-forget: the host signs + publishes async. The event also
         // lands in the local store and matching subscriptions' inboxes, so the
         // feed shows it on the next drain — no id is returned here.
+        LogService.instance.add(
+          'hal_nostr_post: kind=$kind len=${content.length}',
+        );
         // ignore: discarded_futures
         RnsService.instance.nostrPost(kind, content, tags);
         return 1;

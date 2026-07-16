@@ -9,7 +9,6 @@ const _kDefaultSeedNames = {
   'messages',
   'chat',
   'mp4player',
-  'circles',
   'reticulum',
   'social',
 };
@@ -302,7 +301,7 @@ Future<int> _seedDefaultsFromFilesystem() async {
 /// the upgrade pass only touches already-installed wapps. So backfill each of
 /// these exactly ONCE per profile, recorded in `.seeded.json['offered']` so a
 /// wapp the user later uninstalls is never resurrected.
-const _kBackfillDefaults = {'mp4player', 'circles', 'reticulum'};
+const _kBackfillDefaults = {'mp4player', 'reticulum'};
 
 /// Install any [_kBackfillDefaults] not yet offered to this profile. Runs every
 /// launch (cheap: a marker read + a set check). Returns the count installed.

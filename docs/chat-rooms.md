@@ -9,7 +9,8 @@ the host stays generic (only its existing `hal_nostr_*`, `hal_sqlite_*`,
 `hal_crypto_*` HALs are used).
 
 Status: **Phase 1 shipped** (main room, roles, moderation, reputation, open
-rooms). Phase 2 (user-created sub-rooms with approval) and Phase 3 (members-only
+rooms). **Phase 2 shipped** (user-created sub-rooms with an approval flow, see
+below). Phase 3 (members-only
 rooms) are planned.
 
 ## Events
@@ -19,11 +20,13 @@ rooms) are planned.
 | Room definition | **34550** (NIP-72) | `d`=roomId, `name`, `description`, `p`=moderator (`["p",pub,"","moderator"]`), `a`=parent (`34550:<parentAdmin>:<parentId>`) for a sub-room, `access`=`open`\|`members` |
 | Room message | **1** | `a`=`34550:<admin>:<roomId>`, `h`=roomId |
 | Moderation op | **9078** (custom) | `h`=roomId (or `*` for a wapp-wide ban), `p`=target, `op`, `until`, `amount`, `client`=`geogram-chat` |
+| Sub-room proposal | **9079** (custom) | `h`=parentRoomId, `name`, `client`=`geogram-chat` |
+| Sub-room approval | **9080** (custom) | `e`=proposalId, `h`=parentRoomId, `client`=`geogram-chat` |
 
 `op` is one of `kick`, `suspend`, `unsuspend`, `ban`, `close`, `award`, `deduct`,
-`promote`, `demote`. Content of a 9078 is the optional reason. 9078 is a regular
-event (relays keep it, unknown clients ignore it); it sits above NIP-29's
-9000-9022 admin range to avoid colliding with relay-enforced groups.
+`promote`, `demote`. Content of a 9078 is the optional reason. 9078/9079/9080 are
+regular events (relays keep them, unknown clients ignore them); they sit above
+NIP-29's 9000-9022 admin range to avoid colliding with relay-enforced groups.
 
 The **main room** is the tree root; its `d`=`main` and its author is the
 **global admin**. That 34550 is published by whoever runs the project (its key is
@@ -51,6 +54,38 @@ their posts and blocks compose in that room; a wapp-wide `ban` (`h=*`, global
 authority only) hides them everywhere; `close` (global/ancestor authority) drops
 the sub-room and its descendants from the tree.
 
+## Sub-rooms with approval (Phase 2)
+
+Anyone may ask for a sub-room; a **parent authority** must sanction it. The flow
+keeps a sub-room from existing (visibly) unless a moderator of its parent — or an
+ancestor, or a global admin/mod — approved it, while staying pure NOSTR:
+
+1. **Propose.** `room_propose(parent, name)`: if the proposer already has
+   authority over the parent the room is created immediately (no round-trip);
+   otherwise a **9079** proposal is published (`h`=parent, `name`).
+2. **Prompt.** A node that ingests a 9079 and holds authority over the parent gets
+   `room_ingest → 3`, and the wapp surfaces an approve/dismiss prompt.
+3. **Approve.** `room_approve(proposalId)` publishes a **9080** (`e`=proposalId,
+   `h`=parent) — allowed only if the approver has parent authority.
+4. **Create.** The original proposer, on ingesting the 9080, publishes the
+   sub-room **34550** with **itself as admin** (it becomes the sub-admin) and the
+   **approver added as a `["p",pub,"","moderator"]`**, carrying an
+   `["approved",<9080 id>]` tag as the proof of sanction.
+
+**Validity gate.** A root room is always valid. A sub-room 34550 is *verified*
+only if its author already had authority over the parent, **or** it carries an
+`approved` tag whose 9080 was signed by a parent authority. An unverified room is
+stored `verified=0` and hidden from the rail. Because events can arrive in any
+order, the 9080 ingest **re-verifies** (`UPDATE rooms SET verified=1 WHERE
+approvedBy=<9080 id>`) independently of whether that node ever saw the 9079 — so a
+node holding only the room def and the approval still un-hides the room. A
+duplicate 9080 is idempotent (the proposal's `pending`→`published` status guards
+the one-time publish, and `verified` is already 1).
+
+Local state lives in two tables — `proposals(id, parentRoomId, proposerPub, name,
+description, ts, status)` and `approvals(id, proposalId, approverPub, ts)` — plus
+the `verified` column on `rooms`.
+
 ## Reputation (global, level 1-10)
 
 Computed client-side, deterministically, so anyone replaying the same public
@@ -69,21 +104,34 @@ term is reserved for a later phase.)
 ## Storage (device-local, `rooms.sqlite3`)
 
 `rooms(roomId, adminPub, name, description, parentRoomId, access, approvedBy,
-closed, createdTs)` (a tree), `room_mods(roomId, pub)`, `ops(id, roomId,
+closed, verified, createdTs)` (a tree), `room_mods(roomId, pub)`, `ops(id, roomId,
 authorPub, targetPub, op, amount, until, reason, ts)` (dedup by event id),
-`msgs(id, roomId, author, ts)` (for the reputation window). Kept on the device;
+`msgs(id, roomId, author, ts)` (for the reputation window),
+`proposals(id, parentRoomId, proposerPub, name, description, ts, status)` and
+`approvals(id, proposalId, approverPub, ts)` (Phase 2). Kept on the device;
 nothing about moderation state or reputation is a private secret — it is all a
 pure reduction of public events.
 
 ## Wapp integration
 
-`main.c` subscribes to `{kinds:[34550,9078]}` plus `{kinds:[1],#h:[rooms]}`, feeds
-each event to `room_ingest` (defs/ops) or renders it as a room message; a
-conversation whose id is a known room posts through `room_post` (kind-1 with the
-`a`/`h` tags) instead of the APRS/BLE path. The room list is the conversations
-widget (sub-rooms indented); the **Members** screen is a `people` list showing
-each member's status and reputation level, and an authority tapping a member gets
-a moderation prompt (award/deduct/suspend/kick/ban).
+`main.c` subscribes to `{kinds:[34550,9078,9079,9080]}` plus `{kinds:[1],#h:[rooms]}`,
+feeds each event to `room_ingest` (defs/ops/proposals/approvals) or renders it as a
+room message; a conversation whose id is a known room posts through `room_post`
+(kind-1 with the `a`/`h` tags) instead of the APRS/BLE path. `room_ingest` returns
+**2** when the tree changed (refresh the rail and re-subscribe so the new room's
+kind-1 is covered), **3** when a proposal this user can approve arrived (surface
+the approval prompt), **1** for any other consumed event, **0** for a non-room
+event. The room list is the Discord rail (`ui.rooms.set`, sub-rooms indented); the
+**Members** panel is a `people` list showing each member's status and reputation
+level, and an authority tapping a member gets a moderation prompt
+(award/deduct/suspend/kick/ban).
+
+> **The approval flow is dormant until a real `ROOM_MAIN_ADMIN` is pinned.** During
+> bring-up every device auto-adopts its own key as the global admin, so
+> `room_propose` always finds authority and creates rooms directly — the 9079/9080
+> handshake only engages once one designated project key is the global admin and
+> other participants are not. Configure `ROOM_MAIN_ADMIN` (and publish the main-room
+> 34550 from that key) to activate it.
 
 ## UI (Discord-like)
 

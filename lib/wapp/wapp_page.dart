@@ -3282,6 +3282,7 @@ class _WappPageState extends State<WappPage>
         _sendCommand('${field}_new');
       },
       onNewChat: () => _sendCommand('${field}_newchat'),
+      onSearch: () => _sendCommand('${field}_search'),
       onSettings: () => _sendCommand('${field}_settings'),
       onMemberTap: (id) {
         _fieldValues['room_members_id'] = id;

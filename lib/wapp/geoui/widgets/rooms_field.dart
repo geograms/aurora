@@ -37,6 +37,10 @@ class RoomsField extends StatefulWidget {
   /// a direct conversation. Distinct from onNewRoom, which creates a place.
   final VoidCallback? onNewChat;
 
+  /// Search across rooms, channels, conversations and people. The rail only
+  /// shows what you are already in; this finds everything else.
+  final VoidCallback? onSearch;
+
   final VoidCallback onSettings;
   final void Function(String id) onMemberTap;
   final void Function(String from)? onSenderTap;
@@ -58,6 +62,7 @@ class RoomsField extends StatefulWidget {
     required this.onSend,
     required this.onNewRoom,
     this.onNewChat,
+    this.onSearch,
     required this.onSettings,
     required this.onMemberTap,
     this.onSenderTap,
@@ -187,6 +192,9 @@ class _RoomsFieldState extends State<RoomsField> {
       right: false,
       child: Column(
         children: [
+          // Search sits at the TOP: it is how you reach anything not already
+          // on the rail, so it should not be below a list of arbitrary length.
+          if (widget.onSearch != null) _searchTile(cs, expanded),
           Expanded(
             child: ListView(
               padding: const EdgeInsets.symmetric(vertical: 6),
@@ -328,6 +336,41 @@ class _RoomsFieldState extends State<RoomsField> {
                           : 10.5,
               letterSpacing: label.length >= 3 ? -0.3 : 0)),
     );
+  }
+
+  Widget _searchTile(ColorScheme cs, bool expanded) {
+    final tile = InkWell(
+      onTap: widget.onSearch,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+        child: expanded
+            ? Container(
+                height: 38,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(19),
+                ),
+                child: Row(children: [
+                  Icon(Icons.search, size: 18, color: cs.onSurfaceVariant),
+                  const SizedBox(width: 8),
+                  Text('Search',
+                      style: TextStyle(color: cs.onSurfaceVariant)),
+                ]),
+              )
+            : Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                    color: cs.surfaceContainerHighest, shape: BoxShape.circle),
+                child: Icon(Icons.search, color: cs.onSurfaceVariant),
+              ),
+      ),
+    );
+    return expanded
+        ? tile
+        : Tooltip(message: 'Search rooms, chats and people', child: tile);
   }
 
   Widget _newChatTile(ColorScheme cs, bool expanded) {

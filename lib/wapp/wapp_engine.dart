@@ -1140,6 +1140,19 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Search folder listings across the MESH as well as the local index —
+    // same contract as folder_search, plus `busy` (the mesh fan-out is still
+    // in flight; poll again) and a per-row `where`: local | mesh | both.
+    final halFolderSearchGlobal = WasmFunction(
+      (int qPtr, int qLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final query = qLen > 0 ? _readStr(qPtr, qLen) : '{}';
+        return _writeStr(outPtr, outCap,
+            jsonEncode(RnsService.instance.folderSearchGlobal(query)));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
     // The download library: where files live on disk and how they are organized.
     final halFolderDownloadRoot = WasmFunction(
       (int outPtr, int outCap) {
@@ -3445,6 +3458,21 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // People search: contacts ∪ observed-announce registry, aggregated by
+    // callsign — the same search the Messages "find a user" flow runs, exposed
+    // so a wapp can offer "start a conversation with…" itself.
+    final halPeopleSearch = WasmFunction(
+      (int qPtr, int qLen, int outPtr, int outCap) {
+        if (outCap <= 0) return -1;
+        final q = qLen > 0 ? _readUtf8(qPtr, qLen) : '';
+        final bytes =
+            utf8.encode(jsonEncode(RnsService.instance.searchPeople(q)));
+        if (bytes.length > outCap) return -2;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
 
     final allImports = [
       // System
@@ -3488,6 +3516,7 @@ class WappEngine {
       WasmImport('hal', 'folder_set_media', halFolderSetMedia),
       WasmImport('hal', 'folder_media', halFolderMedia),
       WasmImport('hal', 'folder_search', halFolderSearch),
+      WasmImport('hal', 'folder_search_global', halFolderSearchGlobal),
       WasmImport('hal', 'folder_download_root', halFolderDownloadRoot),
       WasmImport('hal', 'folder_set_download_root', halFolderSetDownloadRoot),
       WasmImport('hal', 'folder_library', halFolderLibrary),
@@ -3695,6 +3724,7 @@ class WappEngine {
       WasmImport('hal', 'rns_nodes', halRnsNodes),
       // Contacts (reusable people picker source)
       WasmImport('hal', 'contacts_query', halContactsQuery),
+      WasmImport('hal', 'people_search', halPeopleSearch),
       // WASI
       WasmImport('wasi_snapshot_preview1', 'random_get', wasiRandomGet),
       WasmImport('wasi_snapshot_preview1', 'args_get', stubI32([ValueTy.i32, ValueTy.i32], 0)),

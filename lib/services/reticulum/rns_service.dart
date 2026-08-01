@@ -64,7 +64,7 @@ import '../social/host_retention_policy.dart';
 import '../social/retention_tier.dart';
 import '../folders/disk_folder_manager.dart';
 import '../folders/folder_event.dart'
-    show kKindFolderKeyset, kKindFolderOp, FolderShareType, FileEntry;
+    show kKindFolderKeyset, kKindFolderOp, kFolderTag, FolderShareType, FileEntry;
 import '../folders/folder_keystore.dart';
 import '../folders/folder_relay.dart';
 import '../folders/folder_service.dart';
@@ -1410,6 +1410,14 @@ class RnsService {
         if (cs.isNotEmpty && cs.length <= 20 && !cs.contains(' ')) {
           n.callsign = cs;
         }
+      } else if (svc == 'lxmf') {
+        // An lxmf.delivery announce carries the peer's DISPLAY NAME — the
+        // "FixedComp" a NomadNet/Sideband user goes by. Newer LXMF msgpacks
+        // [name, stampCost]; older stacks send the raw utf8 name. Dropping it
+        // (as this method used to) left every NomadNet peer an anonymous hex
+        // string in any UI that wants to offer "message this person".
+        final nm = _lxmfAnnounceName(ann.appData);
+        if (nm.isNotEmpty) n.lxmfName = nm;
       } else if (svc == 'relay') {
         // The relay announce carries the peer's advertised uptime (warm-start
         // ranking) and its NOSTR pubkey (for the npub shown per device).
@@ -1430,6 +1438,36 @@ class RnsService {
     }
     // Mark for the next periodic flush to disk.
     if (_obStore != null) _obDirty.add(key);
+  }
+
+  /// The display name inside an lxmf.delivery announce's app_data. LXMF wraps
+  /// it as msgpack `[name_bytes, stamp_cost]` (0x92 fixarray-2, 0xc4/0xd9 str
+  /// or bin); older senders ship the bare utf8 name. Tolerant of both; ''
+  /// when absent or garbage.
+  static String _lxmfAnnounceName(Uint8List d) {
+    if (d.isEmpty) return '';
+    Uint8List raw = d;
+    if (d[0] == 0x92 && d.length >= 3) {
+      final t = d[1];
+      int len = 0, off = 0;
+      if (t >= 0xa0 && t <= 0xbf) {
+        len = t & 0x1f;
+        off = 2;
+      } else if ((t == 0xc4 || t == 0xd9) && d.length >= 3) {
+        len = d[2];
+        off = 3;
+      }
+      if (off > 0 && off + len <= d.length) {
+        raw = Uint8List.sublistView(d, off, off + len);
+      } else {
+        return '';
+      }
+    }
+    var s = utf8.decode(raw, allowMalformed: true).trim();
+    // A name, not a payload: printable, short.
+    s = s.replaceAll(RegExp(r'[\x00-\x1f]'), '');
+    if (s.length > 32) s = s.substring(0, 32);
+    return s;
   }
 
   void _evictOldestObserved() {
@@ -1555,8 +1593,34 @@ class RnsService {
         'lastSeen': n.lastSeenMs,
         // Every relayer/hub this node is currently reachable through.
         'relayers': n.relayers.toList(),
+        // NomadNet/LXMF messaging handles: the announced display name and the
+        // 32-hex delivery destination (what hal_lxmf_send addresses). Present
+        // only for nodes announcing lxmf.delivery — this is what lets a UI
+        // offer "message FixedComp" instead of a bare identity hash.
+        if (n.lxmfName != null && n.lxmfName!.isNotEmpty) 'name': n.lxmfName,
+        if (n.services.contains('lxmf'))
+          'lxmfDest': _lxmfDestHexForPub(n.publicKeyHex),
       },
     };
+  }
+
+  /// 32-hex lxmf.delivery destination for a node's public key ('' on garbage).
+  /// Cached — the dest hash is a few hashes over immutable inputs, but the
+  /// graph snapshot calls this per node per render.
+  final Map<String, String> _lxmfDestCache = {};
+  String _lxmfDestHexForPub(String pubkeyHex) {
+    final hit = _lxmfDestCache[pubkeyHex];
+    if (hit != null) return hit;
+    var out = '';
+    try {
+      final pub = _hexToBytes(pubkeyHex);
+      if (pub != null) {
+        final id = RnsIdentity.fromPublicKey(pub);
+        out = _hex(RnsDestination.hash(id, kLxmfApp, kLxmfDeliveryAspects));
+      }
+    } catch (_) {}
+    _lxmfDestCache[pubkeyHex] = out;
+    return out;
   }
 
   /// Other Reticulum devices ALIVE right now — NOT our geogram devices and
@@ -1657,8 +1721,13 @@ class RnsService {
         return false;
       }
       if (q.isNotEmpty) {
+        // Searchable handles: callsign, identity hash, services, the LXMF
+        // display name ("FixedComp") AND the LXMF delivery address — the two
+        // things a NomadNet user actually knows about a peer.
         final hay =
-            '${n.callsign ?? ''} ${n.identityHex} ${n.services.join(' ')}'
+            '${n.callsign ?? ''} ${n.identityHex} ${n.services.join(' ')} '
+                    '${n.lxmfName ?? ''} '
+                    '${n.services.contains('lxmf') ? _lxmfDestHexForPub(n.publicKeyHex) : ''}'
                 .toLowerCase();
         if (!hay.contains(q)) return false;
       }
@@ -7637,6 +7706,181 @@ class RnsService {
     };
   }
 
+  // ── Global (mesh) listing search ───────────────────────────────────────────
+  //
+  // The local index only knows folders this device owns or follows. But every
+  // published listing already leaves the device: setMeta ops are kind-1064
+  // events replicated to the indexer mesh, and a REQ whose filter carries a
+  // `search` field is a NIP-50 full-text query any serve-node answers. So
+  // "search the network" is a fan-out of that REQ — no new protocol, the
+  // listings were already out there waiting to be asked for.
+  //
+  // The HAL is synchronous and the fan-out is seconds long, so this follows the
+  // swarm-cache shape: answer from the snapshot at once, refresh in the
+  // background, and say `busy` so the UI can show that the mesh is still being
+  // asked. The miss is cached too.
+  final Map<String, Map<String, dynamic>> _gSearchCache = {};
+  final Map<String, int> _gSearchAt = {};
+  final Set<String> _gSearchBusy = {};
+  static const int _gSearchTtlMs = 120 * 1000;
+
+  /// Search folder listings across the mesh AND the local index, merged.
+  /// [jsonQuery] = {q, cat, sort} — same contract as [folderSearch], same
+  /// result shape plus `busy` (a mesh refresh is still in flight) and a
+  /// per-row `where`: 'local' | 'mesh' | 'both'.
+  Map<String, dynamic> folderSearchGlobal(String jsonQuery) {
+    var q = '';
+    var cat = '';
+    try {
+      final m = jsonDecode(jsonQuery);
+      if (m is Map) {
+        q = '${m['q'] ?? ''}'.trim().toLowerCase();
+        cat = '${m['cat'] ?? ''}'.trim();
+      }
+    } catch (_) {}
+
+    // The local leg is cheap and synchronous — always fresh.
+    final local = folderSearch(jsonQuery);
+    final localRows = (local['results'] as List).cast<Map<String, dynamic>>();
+    final localIds = {for (final r in localRows) '${r['folderId']}'};
+
+    final key = '$q $cat';
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final stale = now - (_gSearchAt[key] ?? 0) > _gSearchTtlMs;
+    if (stale && !_gSearchBusy.contains(key)) {
+      _gSearchBusy.add(key);
+      // ignore: discarded_futures
+      _refreshGlobalSearch(key, q, cat).whenComplete(() {
+        _gSearchBusy.remove(key);
+        _gSearchAt[key] = DateTime.now().millisecondsSinceEpoch;
+      });
+    }
+
+    // Merge: local rows first (they carry seeders/size the mesh rows lack),
+    // then mesh-only rows.
+    final meshRows =
+        (_gSearchCache[key]?['results'] as List?)?.cast<Map<String, dynamic>>() ??
+        const [];
+    final merged = <Map<String, dynamic>>[
+      for (final r in localRows)
+        {
+          ...r,
+          'where': meshRows.any((m) => m['folderId'] == r['folderId'])
+              ? 'both'
+              : 'local',
+        },
+      for (final r in meshRows)
+        if (!localIds.contains('${r['folderId']}')) {...r, 'where': 'mesh'},
+    ];
+
+    // Category counts: the union of both worlds, so the browser shows every
+    // non-empty bucket the network knows about, not just this device's.
+    final catCount = <String, int>{};
+    for (final c in (local['cats'] as List)) {
+      if (c is Map) catCount['${c['cat']}'] = (c['count'] as int?) ?? 0;
+    }
+    for (final c in ((_gSearchCache[key]?['cats'] as List?) ?? const [])) {
+      if (c is Map) {
+        final k = '${c['cat']}';
+        final n = (c['count'] as int?) ?? 0;
+        if (n > (catCount[k] ?? 0)) catCount[k] = n;
+      }
+    }
+
+    return {
+      'q': q,
+      'cat': cat,
+      'busy': _gSearchBusy.contains(key),
+      'cats': [
+        for (final c in kFolderCategories)
+          if ((catCount[c] ?? 0) > 0) {'cat': c, 'count': catCount[c]},
+      ],
+      'results': merged,
+    };
+  }
+
+  Future<void> _refreshGlobalSearch(String key, String q, String cat) async {
+    // One filter, two modes: with `q` it is a NIP-50 FTS query the serve-nodes
+    // run against their whole index; without it, a plain kind-1064 pull —
+    // "what listings does the network hold" — capped so a big indexer cannot
+    // flood a phone.
+    final filter = NostrFilter(
+      kinds: const [kKindFolderOp],
+      search: q.isEmpty ? null : q,
+      limit: 300,
+    );
+    final events = await _fanOutQuery(
+      filter,
+      maxPeers: 8,
+      timeout: const Duration(seconds: 15),
+    );
+
+    // Reduce to one row per folder: only setMeta ops carry the listing (title,
+    // category, tags), and the newest one wins — the same rule the folder
+    // reducer applies, minus the signature pass (these rows link to a folder
+    // whose op-log is verified in full the moment it is opened).
+    final newest = <String, NostrEvent>{};
+    for (final e in events.values) {
+      String fid = '';
+      for (final t in e.tags) {
+        if (t.length >= 2 && t[0] == kFolderTag) {
+          fid = t[1];
+          break;
+        }
+      }
+      if (fid.isEmpty) continue;
+      Map<String, dynamic> op;
+      try {
+        final d = jsonDecode(e.content);
+        if (d is! Map<String, dynamic>) continue;
+        op = d;
+      } catch (_) {
+        continue;
+      }
+      if ('${op['op']}' != 'setMeta') continue;
+      final prev = newest[fid];
+      if (prev == null || (e.createdAt) > (prev.createdAt)) newest[fid] = e;
+    }
+
+    final catCount = <String, int>{};
+    final rows = <Map<String, dynamic>>[];
+    for (final entry in newest.entries) {
+      Map<String, dynamic> op;
+      try {
+        op = jsonDecode(entry.value.content) as Map<String, dynamic>;
+      } catch (_) {
+        continue;
+      }
+      final title = '${op['title'] ?? op['name'] ?? ''}';
+      final c = '${op['cat'] ?? ''}';
+      if (c.isNotEmpty) catCount[c] = (catCount[c] ?? 0) + 1;
+      if (cat.isNotEmpty && c != cat) continue;
+      // FTS ran remotely for `q`; the LOCAL store leg of the fan-out honours
+      // `search` too, so no re-filter is needed here — but a category browse
+      // (no q) still needs the cat cut above.
+      rows.add({
+        'folderId': entry.key,
+        'title': title.isEmpty ? entry.key : title,
+        'cat': c,
+        'adult': op['adult'] == true,
+        'seeders': 0, // unknown until someone opens it — a DHT walk per row
+        //             would turn one search into fifty
+        'size': 0,
+        'updated': entry.value.createdAt * 1000,
+      });
+    }
+    rows.sort(
+      (a, b) => (b['updated'] as int).compareTo(a['updated'] as int),
+    );
+
+    _gSearchCache[key] = {
+      'cats': [
+        for (final c in catCount.entries) {'cat': c.key, 'count': c.value},
+      ],
+      'results': rows,
+    };
+  }
+
   // ── Torrents: the link, the swarm, and pinning (docs/torrents.md) ──────────
 
   // Who-has snapshots, per folderId. The DHT resolve is async and the HAL is
@@ -8919,6 +9163,10 @@ class _ObservedNode {
   // an npub for display so peers with the same callsign/nickname are tellable
   // apart. Null until we hear a relay announce carrying it.
   String? nostrPubHex;
+  // The display name from this node's lxmf.delivery announce (a NomadNet /
+  // Sideband user's chosen name, e.g. "FixedComp"). Not persisted — announces
+  // repeat on their own cadence, so it refills within minutes of a boot.
+  String? lxmfName;
   // Liveness this run (NOT persisted): how many announces we've heard and when
   // the first arrived. Used to separate a genuine re-announcing peer from a
   // one-shot hub connect-flood replay. Reset every run (cache hydration removed).

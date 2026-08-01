@@ -4278,6 +4278,20 @@ class _WappPageState extends State<WappPage>
             .where((a) => (a.name ?? '').isNotEmpty)
             .toList();
         if (actions.isEmpty) continue;
+        // One action → the icon IS the action. A menu holding a single item
+        // asks for a second tap to say what the icon already said.
+        if (actions.length == 1) {
+          // A normal-sized IconButton: the shrunk app-bar constraints make the
+          // tappable box noticeably smaller than the glyph, and a primary
+          // action you reach for constantly must not need an accurate aim.
+          out.add(IconButton(
+            icon: Icon(_panelIcon(i)),
+            tooltip: _i18n.resolve(
+                actions.first.getString('label') ?? name),
+            onPressed: () => _onWappAction(actions.first.name!),
+          ));
+          continue;
+        }
         out.add(
           PopupMenuButton<String>(
             tooltip: _i18n.resolve(name),

@@ -200,8 +200,6 @@ class _RoomsFieldState extends State<RoomsField> {
               padding: const EdgeInsets.symmetric(vertical: 6),
               children: [
                 for (final r in _byRecency()) _roomTile(cs, r, expanded),
-                if (widget.onNewChat != null) _newChatTile(cs, expanded),
-                _addTile(cs, expanded),
               ],
             ),
           ),
@@ -489,53 +487,6 @@ class _RoomsFieldState extends State<RoomsField> {
     return expanded
         ? tile
         : Tooltip(message: 'Search rooms, chats and people', child: tile);
-  }
-
-  Widget _newChatTile(ColorScheme cs, bool expanded) {
-    final tile = InkWell(
-      onTap: widget.onNewChat,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        child: Row(children: [
-          Container(
-            width: 44,
-            height: 44,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-                color: cs.surfaceContainerHighest, shape: BoxShape.circle),
-            child: Icon(Icons.person_add_alt_1, color: cs.primary),
-          ),
-          if (expanded) ...[
-            const SizedBox(width: 10),
-            Text('New chat', style: TextStyle(color: cs.onSurfaceVariant)),
-          ],
-        ]),
-      ),
-    );
-    return expanded ? tile : Tooltip(message: 'New chat', child: tile);
-  }
-
-  Widget _addTile(ColorScheme cs, bool expanded) {
-    return InkWell(
-      onTap: () => widget.onNewRoom(widget.openId ?? ''),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        child: Row(children: [
-          Container(
-            width: 44,
-            height: 44,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-                color: cs.surfaceContainerHighest, shape: BoxShape.circle),
-            child: Icon(Icons.add, color: cs.primary),
-          ),
-          if (expanded) ...[
-            const SizedBox(width: 10),
-            Text('New room', style: TextStyle(color: cs.onSurfaceVariant)),
-          ],
-        ]),
-      ),
-    );
   }
 
   Widget _gearTile(ColorScheme cs, bool expanded) {

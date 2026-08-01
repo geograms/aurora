@@ -24,9 +24,40 @@ class _AllAppsSheetState extends State<_AllAppsSheet> {
   // drag frame was a measured build-time stall.
   final ValueNotifier<double> _expand = ValueNotifier<double>(0);
 
+  /// Lets something OTHER than a drag open the sheet. A swipe is the only way
+  /// up on a phone and needs nothing else; on a desktop there is no finger, and
+  /// dragging a sheet with a mouse is a discoverability dead end — so the dock
+  /// carries an all-apps button there, and this is what it drives.
+  final DraggableScrollableController _sheet = DraggableScrollableController();
+
+  /// True where the user has no touch gestures to reach the grid with.
+  bool get _needsAllAppsButton =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.linux ||
+          defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.macOS);
+
+  void _openAllApps() => _animateTo(1);
+
+  /// Tap the handle to toggle. Opening the grid on a desktop was only half the
+  /// problem: a mouse drag on the handle does not carry the sheet back down the
+  /// way a finger does, so without this the grid opens and never closes.
+  void _toggle(double peek) =>
+      _animateTo(_sheet.isAttached && _sheet.size > peek + 0.02 ? peek : 1);
+
+  void _animateTo(double extent) {
+    if (!_sheet.isAttached) return;
+    _sheet.animateTo(
+      extent,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
   @override
   void dispose() {
     _expand.dispose();
+    _sheet.dispose();
     super.dispose();
   }
 
@@ -51,6 +82,7 @@ class _AllAppsSheetState extends State<_AllAppsSheet> {
             return false;
           },
           child: DraggableScrollableSheet(
+            controller: _sheet,
             minChildSize: peek,
             initialChildSize: peek,
             maxChildSize: 1,
@@ -77,16 +109,27 @@ class _AllAppsSheetState extends State<_AllAppsSheet> {
                     SliverToBoxAdapter(
                       child: Column(
                         children: [
-                          const SizedBox(height: 10),
-                          Container(
-                            width: 42,
-                            height: 5,
-                            decoration: BoxDecoration(
-                              color: cs.outlineVariant,
-                              borderRadius: BorderRadius.circular(999),
+                          // 10 + 5 + 8 of the peek budget, spent as one
+                          // full-width tap target instead of three widgets —
+                          // the bare 42x5 pill was far too small to click.
+                          GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => _toggle(peek),
+                            child: SizedBox(
+                              height: 23,
+                              width: double.infinity,
+                              child: Center(
+                                child: Container(
+                                  width: 42,
+                                  height: 5,
+                                  decoration: BoxDecoration(
+                                    color: cs.outlineVariant,
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
-                          const SizedBox(height: 8),
                           // The dock collapses away as the sheet opens — its
                           // wapps are already in the grid below. Only this
                           // strip rebuilds while the sheet is dragged.
@@ -106,7 +149,11 @@ class _AllAppsSheetState extends State<_AllAppsSheet> {
                                 ),
                               );
                             },
-                            child: _QuickLaunchRow(entries: entries),
+                            child: _QuickLaunchRow(
+                              entries: entries,
+                              onOpenAll:
+                                  _needsAllAppsButton ? _openAllApps : null,
+                            ),
                           ),
                           // Clear of the system navigation bar (see above).
                           SizedBox(height: 8 + navBar),

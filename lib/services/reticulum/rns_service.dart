@@ -1508,6 +1508,36 @@ class RnsService {
     if (_obStore != null) _obDirty.add(key);
   }
 
+  /// An LXMF field map rendered JSON-safe for the wapp bridge: keys become
+  /// decimal strings (msgpack keys are ints — 0x0B group, 0x08 thread, …),
+  /// byte values become utf8 when they are text and hex when they are not, and
+  /// nesting is flattened one level. Unknown shapes stringify rather than
+  /// throw: a wapp reading an unfamiliar field is better than a dropped
+  /// message.
+  static Map<String, dynamic> _lxmfFieldsJson(Map<Object?, Object?> fields) {
+    Object? val(Object? v) {
+      if (v == null || v is num || v is bool || v is String) return v;
+      if (v is List<int> || v is Uint8List) {
+        final b = Uint8List.fromList(List<int>.from(v as Iterable));
+        // Printable ASCII/utf8 → text (a sender name); else hex (a hash).
+        final printable = b.every((c) => c == 9 || c == 10 || c >= 32);
+        if (printable) {
+          try {
+            return utf8.decode(b);
+          } catch (_) {}
+        }
+        return _hex(b);
+      }
+      if (v is List) return [for (final e in v) val(e)];
+      if (v is Map) {
+        return {for (final e in v.entries) '${e.key}': val(e.value)};
+      }
+      return v.toString();
+    }
+
+    return {for (final e in fields.entries) '${e.key}': val(e.value)};
+  }
+
   /// The display name inside an lxmf.delivery announce's app_data.
   ///
   /// LXMF wraps it as msgpack — usually `[name, stamp_cost]`, sometimes the
@@ -2324,6 +2354,12 @@ class RnsService {
               'content': m.contentString,
               'hash': _hex(m.hash),
               'ts': m.timestamp,
+              // The decoded LXMF field map, JSON-safe. Dropping it meant a wapp
+              // could not tell a distribution-group message from a direct one
+              // (both arrive with `from` = the sending NODE), nor recover who
+              // actually wrote it. Nothing new on the wire — the fields were
+              // already parsed and then discarded here.
+              if (m.fields.isNotEmpty) 'fields': _lxmfFieldsJson(m.fields),
             });
             // Surface it as a conversation (keyed by the sender's delivery dest —
             // the address we reply to). LXMF ts is epoch seconds → ms.

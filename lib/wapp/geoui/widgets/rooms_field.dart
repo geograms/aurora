@@ -199,7 +199,7 @@ class _RoomsFieldState extends State<RoomsField> {
             child: ListView(
               padding: const EdgeInsets.symmetric(vertical: 6),
               children: [
-                for (final r in widget.rooms) _roomTile(cs, r, expanded),
+                for (final r in _byRecency()) _roomTile(cs, r, expanded),
                 if (widget.onNewChat != null) _newChatTile(cs, expanded),
                 _addTile(cs, expanded),
               ],
@@ -210,6 +210,46 @@ class _RoomsFieldState extends State<RoomsField> {
         ],
       ),
     );
+  }
+
+  /// Rail rows, most recently active first — the rail's job is to lead with
+  /// what you actually use, and it used to render subscription order, so a
+  /// conversation you had never opened sat above the one you were in.
+  ///
+  /// The store is the authority within a session (it stamps `activityTs` on
+  /// every message and unread); the wapp's `seen` (epoch seconds, persisted)
+  /// carries the order across a restart, when the store's messages are
+  /// reloaded but its timestamps are older than the app itself.
+  List<Map<String, dynamic>> _byRecency() {
+    final rows = [...widget.rooms];
+    int rank(Map<String, dynamic> r) {
+      final id = '${r['id'] ?? ''}';
+      final ts = widget.store.items[id]?.activityTs ?? 0;
+      if (ts > 0) return ts;
+      final seen = (r['seen'] as num?)?.toInt() ?? 0;
+      return seen > 0 ? seen * 1000 : 0; // wapp reports epoch SECONDS
+    }
+
+    final idx = {for (var i = 0; i < rows.length; i++) '${rows[i]['id']}': i};
+    rows.sort((a, b) {
+      final ra = rank(a), rb = rank(b);
+      if (ra != rb) return rb.compareTo(ra);
+      // Never-touched rows keep their given order (the room tree's shape).
+      return (idx['${a['id']}'] ?? 0).compareTo(idx['${b['id']}'] ?? 0);
+    });
+    return rows;
+  }
+
+  /// "2m" / "4h" / "yd" / "3d" — a chat list wants an age, not a clock.
+  static String _ago(int ms) {
+    if (ms <= 0) return '';
+    final d = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));
+    if (d.inMinutes < 1) return 'now';
+    if (d.inMinutes < 60) return '${d.inMinutes}m';
+    if (d.inHours < 24) return '${d.inHours}h';
+    if (d.inDays == 1) return 'yd';
+    if (d.inDays < 7) return '${d.inDays}d';
+    return '${(d.inDays / 7).floor()}w';
   }
 
   Widget _roomTile(ColorScheme cs, Map<String, dynamic> r, bool expanded) {
@@ -224,6 +264,38 @@ class _RoomsFieldState extends State<RoomsField> {
         widget.store.items[id]?.unread ??
         0;
     final selected = r['selected'] == true || id == widget.openId;
+    final item = widget.store.items[id];
+    final live = r['live'] == true;
+
+    // The second line: what was last said here, else what this place IS.
+    // "N people seen" is the wapp's count of DISTINCT senders observed — never
+    // a membership roster, which neither rooms nor LXMF groups publish.
+    // Newest message that is actually a message. A like arrives as a
+    // "<mid>:like" vote and is filtered out of the timeline — quoting one as
+    // the preview would show a hex blob as the last thing anybody said.
+    var lastMsg = '';
+    for (final m in (item?.messages ?? const []).reversed) {
+      final text = (m['text'] ?? '').toString().trim();
+      if (text.isEmpty) continue;
+      if (RegExp(r'^[0-9a-f]{8,64}:(?:un)?like$').hasMatch(text)) continue;
+      if (m['sys'] == true) continue;
+      final from = (m['from'] ?? '').toString();
+      lastMsg = from.isEmpty ? text : '$from: $text';
+      break;
+    }
+    final people = (r['people'] as num?)?.toInt() ?? 0;
+    var sub = lastMsg.isNotEmpty
+        ? lastMsg
+        : (item?.subtitle.isNotEmpty ?? false ? item!.subtitle : '');
+    if (sub.isEmpty && people > 0) {
+      sub = people == 1 ? '1 person seen' : '$people people seen';
+    }
+    if (sub.startsWith(': ')) sub = sub.substring(2);
+
+    final ts = item?.activityTs ?? 0;
+    final seenSec = (r['seen'] as num?)?.toInt() ?? 0;
+    final age = _ago(ts > 0 ? ts : seenSec * 1000);
+
     var icon = _avatar(cs, id, name, selected);
     // Collapsed rail: there is no row space beside a 44px avatar in a 64px
     // rail, so the count rides ON the avatar as a corner chip (a badge in the
@@ -265,22 +337,68 @@ class _RoomsFieldState extends State<RoomsField> {
         padding: EdgeInsets.fromLTRB(
             expanded ? 8.0 + depth * 14 : 8, 4, 8, 4),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             icon,
             if (expanded) ...[
               const SizedBox(width: 10),
+              // Two lines: who, and what was last said. A list of bare names
+              // cannot tell an active conversation from a dead one.
               Expanded(
-                child: Text(name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: selected ? cs.primary : cs.onSurface,
-                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                    )),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      if (live) ...[
+                        Container(
+                          width: 7,
+                          height: 7,
+                          decoration: const BoxDecoration(
+                              color: Color(0xFF3FB950), shape: BoxShape.circle),
+                        ),
+                        const SizedBox(width: 5),
+                      ],
+                      Expanded(
+                        child: Text(name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: selected ? cs.primary : cs.onSurface,
+                              fontWeight: unread > 0 || selected
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                            )),
+                      ),
+                      if (age.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 6),
+                          child: Text(age,
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: unread > 0
+                                      ? cs.primary
+                                      : cs.onSurfaceVariant)),
+                        ),
+                    ]),
+                    if (sub.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 1),
+                        child: Text(sub,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 11.5,
+                                color: unread > 0
+                                    ? cs.onSurface
+                                    : cs.onSurfaceVariant)),
+                      ),
+                  ],
+                ),
               ),
               if (unread > 0)
                 Container(
-                  margin: const EdgeInsets.only(left: 4),
+                  margin: const EdgeInsets.only(left: 6),
                   padding:
                       const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                   decoration: BoxDecoration(

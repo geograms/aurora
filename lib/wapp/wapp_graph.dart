@@ -943,12 +943,21 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     );
   }
 
+  // The self node projects to the exact viewport centre (it sits at the world
+  // origin), so the message is dropped below it — a caption under the orb and
+  // its callsign, not a veil over them. The top inset matches the search bar,
+  // which overlays the graph instead of insetting it.
   Widget _buildEmpty() => const Positioned.fill(
         child: IgnorePointer(
-          child: Center(
-            child: Text('No nodes heard yet.\nWaiting for Reticulum announces…',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: _gMuted, fontSize: 14)),
+          child: Padding(
+            padding: EdgeInsets.only(top: 46),
+            child: Align(
+              alignment: Alignment(0, 0.42),
+              child: Text(
+                  'No nodes heard yet.\nWaiting for Reticulum announces…',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: _gMuted, fontSize: 14)),
+            ),
           ),
         ),
       );

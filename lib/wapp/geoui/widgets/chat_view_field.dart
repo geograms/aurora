@@ -405,10 +405,21 @@ class _ChatViewFieldState extends State<ChatViewField> {
     return from.isEmpty ? text : '$from: $text';
   }
 
+  /// A reaction vote that leaked into the timeline as text: "<hex id>:like" /
+  /// ":unlike" (8..64 hex chars — a message id, never something a person
+  /// types). Votes are tallied onto their target message; a bubble reading
+  /// "82ccbaec…:like" is a rendering bug, including ones already persisted in
+  /// history from before the vote paths filtered them.
+  static final RegExp _reactionText =
+      RegExp(r'^[0-9a-f]{8,64}:(?:un)?like$');
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final messages = widget.messages;
+    final messages = [
+      for (final m in widget.messages)
+        if (!_reactionText.hasMatch((m['text'] ?? '').toString().trim())) m,
+    ];
 
     if (messages.length != _lastCount) {
       final grew = messages.length > _lastCount;

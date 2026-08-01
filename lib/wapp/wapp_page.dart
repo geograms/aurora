@@ -39,6 +39,7 @@ import 'geoui/geoui_renderer.dart';
 import 'geoui/avatar_image.dart';
 import '../editor/code_editor_field.dart';
 import 'geoui/widgets/log_view_field.dart';
+import 'geoui/widgets/stats_grid_field.dart';
 import 'geoui/widgets/chat_palette.dart';
 import 'geoui/widgets/chat_view_field.dart';
 import '../services/social/nostr_all_poller.dart';
@@ -1692,6 +1693,21 @@ class _WappPageState extends State<WappPage>
               ),
             );
           }
+        } else if (type == 'messages.open') {
+          // Jump into the Messages wapp's 1:1 with a callsign/npub — the ONE
+          // kind-4 inbox. Chat's "New chat" panel routes NOSTR people here
+          // instead of growing a second, worse copy of the same conversation.
+          final target = (data['target'] as String? ?? '').trim();
+          if (target.isNotEmpty && mounted) {
+            final dir = '${installedAppsDirPath()}/messages';
+            // ignore: discarded_futures
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => WappPage(
+                    wappDir: dir, title: 'Messages', initialConvo: target),
+              ),
+            );
+          }
         } else if (type == 'ui.graph.set') {
           // The wapp pushes a {nodes,edges} snapshot for the native `$type:
           // "graph"` widget. We just hand it to the ValueNotifier the _GraphView
@@ -1930,6 +1946,9 @@ class _WappPageState extends State<WappPage>
             final id = (data['id'] ?? '').toString();
             if (id.isNotEmpty) {
               _convOpenId = id;
+              // The rooms layout keeps its own focus — honour select there
+              // too, so "start a conversation" actually lands the user in it.
+              _roomsOpenId = id;
               _convStore(field).clearUnread(id);
               _syncAppBadge();
             }
@@ -2012,6 +2031,14 @@ class _WappPageState extends State<WappPage>
           final f = data['field'] as String?;
           if (f != null && f.isNotEmpty) {
             _fieldValues[f] = data['value'];
+            // `<list>_query` is the host-built search bar's text. Its
+            // controller is host-side, so without this a wapp that resets its
+            // search state (e.g. "browse categories") leaves the old query
+            // sitting in the box, contradicting the results below it.
+            if (f.endsWith('_query')) {
+              _searchCtl[f.substring(0, f.length - 6)]?.text =
+                  '${data['value'] ?? ''}';
+            }
             changed = true;
           }
         } else if (type.startsWith('coin.') || type.startsWith('atm.')) {
@@ -3215,6 +3242,19 @@ class _WappPageState extends State<WappPage>
           orElse: () => rooms.first);
       openId = '${sel['id'] ?? ''}';
       if (openId.isEmpty) openId = null;
+      // Adopt the default as the REAL open room: its messages are on screen,
+      // so reading them must clear its unread exactly like a tap would —
+      // without this the open room kept its stale badge forever.
+      if (openId != null && store.items[openId]?.unread != 0) {
+        final adopted = openId;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _roomsOpenId != null) return;
+          setState(() => _roomsOpenId = adopted);
+          store.clearUnread(adopted);
+          _scheduleConvoSave('conversations');
+          _syncAppBadge();
+        });
+      }
     }
     return RoomsField(
       rooms: rooms,
@@ -3224,6 +3264,11 @@ class _WappPageState extends State<WappPage>
       onOpenRoom: (id) {
         setState(() => _roomsOpenId = id);
         store.clearUnread(id);
+        // Persist the cleared count NOW — the debounced save otherwise waits
+        // for the next message event, and a restart in between resurrects a
+        // badge the user already dismissed by reading.
+        _scheduleConvoSave('conversations');
+        _syncAppBadge();
         _fieldValues['${field}_convo'] = id;
         _sendCommand('${field}_open');
       },
@@ -3236,12 +3281,24 @@ class _WappPageState extends State<WappPage>
         _fieldValues['${field}_convo'] = parent;
         _sendCommand('${field}_new');
       },
+      onNewChat: () => _sendCommand('${field}_newchat'),
       onSettings: () => _sendCommand('${field}_settings'),
       onMemberTap: (id) {
         _fieldValues['room_members_id'] = id;
         _sendCommand('room_members_tap');
       },
       onSenderTap: _showProfile,
+      // Same wapp-side handlers the conversations layout uses — the store is
+      // shared, so the hide keys and block ids mean the same thing here.
+      onHide: (id, key) {
+        _fieldValues['conversations_convo'] = id;
+        _fieldValues['conversations_hidekey'] = key;
+        _sendCommand('conversations_hide');
+      },
+      onBlock: (from) {
+        _fieldValues['conversations_blockcall'] = from;
+        _sendCommand('conversations_block');
+      },
     );
   }
 
@@ -4256,6 +4313,10 @@ class _WappPageState extends State<WappPage>
           setState(() {
             _panelScreen = _menuScreens[i];
             _panelName = name;
+            // A title left behind by an earlier ui.screen.open belongs to THAT
+            // panel — without this, opening Search after a torrent's Listing
+            // shows the torrent's name over the search box.
+            _panelTitle = null;
           });
         },
       );
@@ -4403,6 +4464,7 @@ class _WappPageState extends State<WappPage>
             setState(() {
               _panelScreen = _menuScreens[i];
               _panelName = _menuNames[i];
+              _panelTitle = null; // same leak as the appbar route
             });
           }
         }
@@ -5271,10 +5333,37 @@ class _WappPageState extends State<WappPage>
               .where((c) => c.keyword == 'action' && (c.name ?? '').isNotEmpty)
               .toList()
         : const <GeoUiBlock>[];
+    // A `$type:"stats"` field on a people screen renders as a dashboard strip
+    // above the list — the people body used to swallow every sibling field, so
+    // a wapp could have a list OR a dashboard but never both on one screen.
+    final statsFields = screen.children
+        .where(
+          (c) =>
+              c.keyword == 'field' &&
+              c.type == 'stats' &&
+              (c.name ?? '').isNotEmpty,
+        )
+        .toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (playerGroup != null) _buildPlayerBar(),
+        for (final f in statsFields)
+          if (_fieldValues[f.name!] is List &&
+              (_fieldValues[f.name!] as List).isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+              child: StatsGridField(
+                tiles: (_fieldValues[f.name!] as List)
+                    .whereType<Map>()
+                    .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+                    .toList(),
+                onTap: (id) {
+                  _fieldValues['${f.name!}_id'] = id;
+                  _sendCommand('${f.name!}_tap');
+                },
+              ),
+            ),
         if (toolbarActions.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
@@ -6733,6 +6822,32 @@ class _WappPageState extends State<WappPage>
 
   void _openConvoById(String convo) {
     if (convo.isEmpty) return;
+    // The rooms layout (Chat) has no `conversations` group — its rail IS the
+    // conversation list, sharing the same store. Deep-linking a peer must land
+    // there too, or "message this device" from the graph opens the wapp on
+    // whatever room happened to be selected.
+    final roomsIdx = _tabScreens.indexWhere(
+      (s) => s.children.any((c) => c.keyword == 'group' && c.type == 'rooms'),
+    );
+    if (roomsIdx >= 0) {
+      final store = _convStore('conversations');
+      if (!store.items.containsKey(convo)) store.upsert({'id': convo});
+      // Tell the wapp as well: it owns the persisted subscription list, so a
+      // thread opened this way survives the next launch.
+      _fieldValues['rooms_convo'] = convo;
+      _sendCommand('rooms_open');
+      setState(() {
+        _panelScreen = null;
+        _roomsOpenId = convo;
+        store.clearUnread(convo);
+        if (_tabController != null && _tabController!.index != roomsIdx) {
+          _tabController!.animateTo(roomsIdx);
+        }
+      });
+      _scheduleConvoSave('conversations');
+      _syncAppBadge();
+      return;
+    }
     final idx = _tabScreens.indexWhere(
       (s) => s.children.any(
         (c) => c.keyword == 'group' && c.type == 'conversations',

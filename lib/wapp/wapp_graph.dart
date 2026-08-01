@@ -73,8 +73,7 @@ enum _Panel {
   geogramDevices,
   hubs,
   settings,
-  chats, // list of LXMF conversations
-  chat, // one open conversation thread
+  chats, // the People directory (messaging itself lives in the Chat wapp)
   page, // a NomadNet node page (browser)
 }
 
@@ -127,27 +126,21 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
       case _Panel.settings:
         return 'Settings';
       case _Panel.chats:
-        return 'Messages';
-      case _Panel.chat:
-        return _chatName.isNotEmpty ? _chatName : _shorten(_chatPeer ?? '');
+        return 'People';
       case _Panel.page:
         return _pageLabel.isNotEmpty ? _pageLabel : 'Page';
     }
   }
 
-  // Where a chat thread's back arrow returns to (the panel it was opened from —
-  // Devices, Geogram, People/chats, …). Defaults to the conversation list.
-  _Panel _chatReturn = _Panel.chats;
-
-  // The single back arrow (in the host app bar) closes the current panel: a chat
-  // thread returns to where it was opened from, every other panel to the graph.
+  // The single back arrow (in the host app bar) closes the current panel back
+  // to the graph.
   void _closePanel() {
     // Inside the page browser, back walks the page history first.
     if (_panel == _Panel.page && _pageHistory.isNotEmpty) {
       _loadPage(_pageHistory.removeLast());
       return;
     }
-    setState(() => _panel = _panel == _Panel.chat ? _chatReturn : _Panel.none);
+    setState(() => _panel = _Panel.none);
   }
 
   // Tell the host app bar which panel (if any) is open, deduped on the title so
@@ -171,12 +164,6 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   final TextEditingController _hubCtl = TextEditingController();
   List<Map<String, dynamic>> _hubList = const [];
 
-  // LXMF conversations (NomadNet / Sideband / group chats).
-  final TextEditingController _chatCtl = TextEditingController();
-  final ScrollController _chatScroll = ScrollController();
-  String? _chatPeer; // open thread's peer LXMF delivery-dest hex
-  String _chatName = '';
-  bool _peopleTab = false; // Messages panel: false = Chats, true = People
 
   // NomadNet page browser state.
   String _pagePub = ''; // the node's identity pubkey hex
@@ -205,15 +192,7 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
 
   void _onLxmf() {
     if (!mounted) return;
-    setState(() {});
-    // Keep the open thread pinned to the newest message.
-    if (_panel == _Panel.chat) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_chatScroll.hasClients) {
-          _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent);
-        }
-      });
-    }
+    setState(() {}); // peer freshness in the People panel
   }
 
   @override
@@ -224,43 +203,27 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     _searchDebounce?.cancel();
     _searchCtl.dispose();
     _hubCtl.dispose();
-    _chatCtl.dispose();
-    _chatScroll.dispose();
     _scene.removeListener(_onSceneChange);
     _scene.dispose();
     super.dispose();
   }
 
-  // Open a conversation thread with [peerHex] (an LXMF delivery-dest hash).
+  // Message [peerHex] (an LXMF delivery-dest hash): ALL chatting lives in the
+  // Chat wapp — this graph is a directory, not a messenger. Deep-link into the
+  // Chat wapp's LXMF conversation; it ensures/persists the thread and the same
+  // address receives the replies. (This used to open an in-graph chat panel —
+  // a second, worse copy of a conversation surface Chat already owns.)
   void _openChat(String peerHex, {String name = ''}) {
     if (peerHex.isEmpty) return;
     final k = peerHex.toLowerCase();
-    RnsService.instance.lxmfEnsureConversation(k, name: name);
-    RnsService.instance.lxmfMarkRead(k);
-    // Remember where we came from so the chat's back arrow returns there (the
-    // Devices list, a hub's devices, …) instead of always the conversation list.
-    if (_panel != _Panel.chat) _chatReturn = _panel;
-    setState(() {
-      _chatPeer = k;
-      _chatName = name;
-      _panel = _Panel.chat;
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_chatScroll.hasClients) {
-        _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent);
-      }
-    });
-  }
-
-  void _sendChat() {
-    final peer = _chatPeer;
-    final text = _chatCtl.text.trim();
-    if (peer == null || text.isEmpty) return;
-    _chatCtl.clear();
-    // Fire-and-forget LXMF (direct + store-and-forward). The host records the
-    // outgoing message into the conversation immediately.
-    RnsService.instance.sendLxmf(destHex: peer, content: text);
-    setState(() {});
+    final dir = '${installedAppsDirPath()}/chat';
+    // ignore: discarded_futures
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) =>
+            WappPage(wappDir: dir, title: 'Chat', initialConvo: 'lxmf:$k'),
+      ),
+    );
   }
 
   void _onHubs() {
@@ -666,34 +629,15 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     );
   }
 
-  // Messages icon with an unread-conversation badge → the conversations list.
-  Widget _messagesButton() {
-    final unread = RnsService.instance.lxmfUnreadCount;
-    final active = _panel == _Panel.chats || _panel == _Panel.chat;
-    return Stack(clipBehavior: Clip.none, children: [
-      _iconBtn(Icons.forum_outlined, 'Messages',
-          () => setState(() => _panel = _Panel.chats),
-          active: active),
-      if (unread > 0)
-        Positioned(
-          right: 4,
-          top: 4,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-            constraints: const BoxConstraints(minWidth: 15),
-            decoration: BoxDecoration(
-                color: const Color(0xFFDA3633),
-                borderRadius: BorderRadius.circular(8)),
-            child: Text('$unread',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w700)),
-          ),
-        ),
-    ]);
-  }
+  // People directory: who is reachable. Messaging opens the Chat wapp, so the
+  // unread badge belongs there too — a count here would point at an inbox this
+  // screen no longer owns.
+  Widget _messagesButton() => _iconBtn(
+        Icons.people_outline,
+        'People',
+        () => setState(() => _panel = _Panel.chats),
+        active: _panel == _Panel.chats,
+      );
 
   Widget _iconBtn(IconData icon, String tip, VoidCallback onTap,
       {bool active = false}) {
@@ -989,9 +933,6 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         break;
       case _Panel.chats:
         content = _chatsBody();
-        break;
-      case _Panel.chat:
-        content = _chatThreadBody();
         break;
       case _Panel.page:
         content = _pageBody();
@@ -1436,115 +1377,9 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   // The list of open conversations, plus a way to start a new one / join a group
   // by pasting an LXMF address. Peers can be geogram devices, NomadNet/Sideband
   // users, or LXMF distribution-group nodes — all interoperate over LXMF.
-  Widget _chatsBody() {
-    return Column(children: [
-      // Chats | People segmented control.
-      Padding(
-        padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-        child: Row(children: [
-          _seg('Chats', !_peopleTab, () => setState(() => _peopleTab = false)),
-          const SizedBox(width: 6),
-          _seg('People', _peopleTab, () => setState(() => _peopleTab = true)),
-        ]),
-      ),
-      Expanded(child: _peopleTab ? _peopleList() : _conversationsList()),
-      const Divider(height: 1, color: _gBorder),
-      Padding(
-        padding: const EdgeInsets.all(8),
-        child: SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            icon: const Icon(Icons.add, size: 16),
-            label: const Text('New chat / join group'),
-            onPressed: _newChatDialog,
-          ),
-        ),
-      ),
-    ]);
-  }
-
-  Widget _seg(String label, bool active, VoidCallback onTap) => Expanded(
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(8),
-          child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 7),
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: active ? const Color(0x3358A6FF) : _gBg,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: active ? _gSelf : _gBorder),
-            ),
-            child: Text(label,
-                style: TextStyle(
-                    color: active ? _gSelf : _gMuted,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600)),
-          ),
-        ),
-      );
-
-  Widget _conversationsList() {
-    final convos = RnsService.instance.lxmfConversations();
-    if (convos.isEmpty) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(22),
-          child: Text(
-              'No conversations yet.\n\nOpen the People tab to message a reachable device, or "New chat / join group" for an LXMF address.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: _gMuted, fontSize: 13)),
-        ),
-      );
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      itemCount: convos.length,
-      itemBuilder: (_, i) {
-        final c = convos[i];
-        final id = (c['id'] ?? '').toString();
-        final unread = c['unread'] == true;
-        return InkWell(
-          onTap: () => _openChat(id, name: (c['name'] ?? '').toString()),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(children: [
-              Icon(Icons.chat_bubble,
-                  size: 15, color: unread ? _gSelf : _gMuted),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text((c['name'] ?? '').toString(),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              color: _gFg,
-                              fontSize: 13.5,
-                              fontWeight:
-                                  unread ? FontWeight.w700 : FontWeight.w500)),
-                      if ((c['last'] ?? '').toString().isNotEmpty)
-                        Text((c['last'] ?? '').toString(),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style:
-                                const TextStyle(color: _gMuted, fontSize: 11.5)),
-                    ]),
-              ),
-              if (unread)
-                Container(
-                    width: 7,
-                    height: 7,
-                    decoration: const BoxDecoration(
-                        color: _gSelf, shape: BoxShape.circle)),
-            ]),
-          ),
-        );
-      },
-    );
-  }
+  // The People directory: who is out there and reachable. Messaging them
+  // deep-links into the Chat wapp — no conversation UI lives here any more.
+  Widget _chatsBody() => _peopleList();
 
   // Reachable, messageable peers (geogram / NomadNet / Sideband), newest network
   // heard. Tap a row → start messaging. Compact single-line rows.
@@ -1708,66 +1543,6 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     return 'hub ${_shorten(relayerId, head: 8, tail: 0)}';
   }
 
-  Future<void> _newChatDialog() async {
-    final addrCtl = TextEditingController();
-    final nameCtl = TextEditingController();
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    final res = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: _gPanel,
-        title: const Text('New chat / join group',
-            style: TextStyle(color: _gFg, fontSize: 16)),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-                'Paste a Reticulum LXMF address (32 hex chars) — a NomadNet or Sideband user, or an LXMF distribution-group node for group chat.',
-                style: TextStyle(color: _gMuted, fontSize: 12)),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: addrCtl,
-            autofocus: true,
-            style: const TextStyle(
-                color: _gFg, fontSize: 13, fontFamily: 'monospace'),
-            decoration: const InputDecoration(
-                labelText: 'LXMF address (hex)',
-                labelStyle: TextStyle(color: _gMuted)),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: nameCtl,
-            style: const TextStyle(color: _gFg, fontSize: 13),
-            decoration: const InputDecoration(
-                labelText: 'Name (optional)',
-                labelStyle: TextStyle(color: _gMuted)),
-          ),
-        ]),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Open')),
-        ],
-      ),
-    );
-    final addr = addrCtl.text.trim().toLowerCase().replaceAll(
-        RegExp('[^0-9a-f]'), '');
-    final name = nameCtl.text.trim();
-    addrCtl.dispose();
-    nameCtl.dispose();
-    if (res != true) return;
-    if (addr.length == 32) {
-      _openChat(addr, name: name);
-    } else {
-      messenger?.showSnackBar(const SnackBar(
-          content: Text('Not a valid LXMF address (need 32 hex characters)')));
-    }
-  }
-
   // ── NomadNet page browser ──
   // Open a node's page browser at its index (fresh history).
   void _openNodePage(String pubHex, String label,
@@ -1900,115 +1675,6 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     ]);
   }
 
-  Widget _chatThreadBody() {
-    final peer = _chatPeer;
-    if (peer == null) return const SizedBox.shrink();
-    final msgs = RnsService.instance.lxmfConversation(peer);
-    return Column(children: [
-      // Address bar: the full LXMF address (copyable) so a group address can be
-      // shared/verified. (Back is the panel header's arrow.)
-      Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-        color: _gPanel,
-        child: Row(children: [
-          const Icon(Icons.alternate_email, size: 13, color: _gMuted),
-          const SizedBox(width: 6),
-          Expanded(
-            child: SelectableText(peer,
-                maxLines: 1,
-                style: const TextStyle(
-                    color: _gMuted, fontSize: 11.5, fontFamily: 'monospace')),
-          ),
-        ]),
-      ),
-      Expanded(
-        child: msgs.isEmpty
-            ? const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(20),
-                  child: Text(
-                      'No messages yet. Say hello — for a group node, try sending "help" or "join" first.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: _gMuted, fontSize: 13)),
-                ),
-              )
-            : ListView.builder(
-                controller: _chatScroll,
-                padding: const EdgeInsets.all(10),
-                itemCount: msgs.length,
-                itemBuilder: (_, i) => _chatBubble(msgs[i]),
-              ),
-      ),
-      _chatComposer(),
-    ]);
-  }
-
-  Widget _chatBubble(Map<String, dynamic> m) {
-    final incoming = m['in'] == true;
-    final text = (m['text'] ?? '').toString();
-    final title = (m['title'] ?? '').toString();
-    return Align(
-      alignment: incoming ? Alignment.centerLeft : Alignment.centerRight,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3),
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-        constraints: const BoxConstraints(maxWidth: 250),
-        decoration: BoxDecoration(
-          color: incoming ? _gPanel : const Color(0xFF1F6FEB),
-          borderRadius: BorderRadius.circular(12),
-          border: incoming ? Border.all(color: _gBorder) : null,
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (title.isNotEmpty && title != text)
-            Text(title,
-                style: TextStyle(
-                    color: incoming ? _gFg : Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700)),
-          SelectableText(text,
-              style: TextStyle(
-                  color: incoming ? _gFg : Colors.white, fontSize: 13)),
-        ]),
-      ),
-    );
-  }
-
-  Widget _chatComposer() {
-    return Container(
-      padding: const EdgeInsets.all(8),
-      decoration:
-          const BoxDecoration(border: Border(top: BorderSide(color: _gBorder))),
-      child: Row(children: [
-        Expanded(
-          child: TextField(
-            controller: _chatCtl,
-            style: const TextStyle(color: _gFg, fontSize: 13),
-            minLines: 1,
-            maxLines: 4,
-            textInputAction: TextInputAction.send,
-            onSubmitted: (_) => _sendChat(),
-            decoration: const InputDecoration(
-              isDense: true,
-              hintText: 'Message…',
-              hintStyle: TextStyle(color: _gMuted, fontSize: 13),
-              filled: true,
-              fillColor: _gBg,
-              contentPadding:
-                  EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              border: OutlineInputBorder(borderSide: BorderSide.none),
-            ),
-          ),
-        ),
-        const SizedBox(width: 6),
-        IconButton(
-          icon: const Icon(Icons.send, size: 20),
-          color: _gSelf,
-          onPressed: _sendChat,
-        ),
-      ]),
-    );
-  }
 
   Widget _settingsBody() {
     final d = widget.data.value ?? const {};

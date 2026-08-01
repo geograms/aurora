@@ -355,6 +355,8 @@ class BleService {
   // the repetitive BlueZ failure / oversized-frame messages so they don't
   // flood the console.
   String? _bzRegisteredHex; // payload currently registered with BlueZ
+  String? _bzRejectedHex; // payload BlueZ refused, and how many times
+  int _bzRejectCount = 0;
   String? _pkgAdvertHex;    // payload currently latched via ble_peripheral
   String _lastWarn = '';
   int _lastWarnMs = 0;
@@ -770,7 +772,7 @@ class BleService {
       final frame =
           BleBroadcastReassembler.buildNack(r.srcTag, r.msgId, r.total, r.missing);
       if (frame == null) continue;
-      if (frame.length > (_useBlePeripheral ? 20 : 24)) {
+      if (frame.length > _legacyAdvertMax) {
         // Too many missing indices to fit one advert — request the lowest few
         // that do fit; subsequent ticks will request the rest.
         continue;
@@ -1048,7 +1050,7 @@ class BleService {
   /// (continuation) is always 0 and the per-chunk payload is bounded by the
   /// legacy advert size. [srcTag] lets a receiver address a NACK back to us.
   void _enqueueBroadcast(Object owner, Uint8List payload, Duration ttl) {
-    final cap = (_useBlePeripheral ? 20 : 24) - kBleBcastPrimaryHdr;
+    final cap = _legacyAdvertMax - kBleBcastPrimaryHdr;
     final tag = _srcTag;
     final msgId = _bcastTxMsgId = (_bcastTxMsgId + 1) & 0xFF;
     final total = payload.isEmpty ? 1 : ((payload.length + cap - 1) ~/ cap);
@@ -1099,6 +1101,21 @@ class BleService {
   // its drop timer).
   static const int _rotateIntervalMs = 900;
 
+  /// Largest manufacturer-data payload a LEGACY advert can carry on the current
+  /// backend. Both the chunker and the too-long drop filter read this — they
+  /// disagreed once, and the disagreement is silent: BlueZ takes the frame,
+  /// then the kernel refuses it with "Invalid Parameters (0x0d)" on every
+  /// rotation tick, forever, and nothing is ever broadcast.
+  ///
+  /// ble_peripheral (Android/iOS) also carries flags (3B) + the 0xFFE0 service
+  /// UUID (4B), leaving ~20B. On BlueZ the arithmetic says 24B —
+  /// 31 - 3(flags) - 2(AD len+type) - 2(company id) — but that is one byte
+  /// optimistic in practice: BlueZ reserves the remaining byte, and a 24B
+  /// payload is rejected while 23B registers (measured against BlueZ 5.x, an
+  /// adapter reporting 20 SupportedInstances). Take the measured value: one
+  /// unused byte costs nothing, one rejected byte costs the whole transport.
+  int get _legacyAdvertMax => _useBlePeripheral ? 20 : 23;
+
   void clearAdverts(Object owner) {
     // Drop this owner's BLE5 broadcast frames from the shared bus.
     final ble5Keys = _ble5Keys.remove(owner);
@@ -1143,14 +1160,7 @@ class BleService {
     // BlueZ because Android prepends a 3-byte flags AD to connectable adverts
     // (max manufacturer payload ~24B vs ~27B on BlueZ).
     {
-      // ble_peripheral advert also carries flags (3B) + the 0xFFE0 service
-      // UUID (4B), leaving ~20B of manufacturer payload in a legacy advert.
-      // BlueZ prepends only flags (3B) to a peripheral advert, so the usable
-      // manufacturer payload is 31 - 3(flags) - 2(AD len+type) - 2(company id)
-      // = 24B. A larger frame is rejected by the controller with
-      // "Invalid Parameters" and, left queued, forces BlueZ into a scan/advertise
-      // duty cycle that drops incoming frames — so drop it here instead.
-      final maxLen = _useBlePeripheral ? 20 : 24;
+      final maxLen = _legacyAdvertMax;
       int dropped = 0;
       _adverts.removeWhere((a) {
         if (a.payload.length > maxLen) { dropped++; return true; }
@@ -1265,6 +1275,11 @@ class BleService {
     // (re-registering the same advert every tick is what triggers BlueZ
     // "Failed to register advertisement").
     if (_bzAdvert != null && _bzRegisteredHex == hex) return;
+    // A frame BlueZ has already refused three times is not going to start
+    // working on the fourth rotation tick — it is malformed or over-length for
+    // this controller. Stop re-offering it (and stop logging it) instead of
+    // burning a duty cycle on it every ~3s for as long as it stays queued.
+    if (_bzRejectedHex == hex && _bzRejectCount >= 3) return;
     try {
       await _bzUnadvertise();
       _bzAdvert = await _bzAdapter!.advertisingManager.registerAdvertisement(
@@ -1274,8 +1289,16 @@ class BleService {
         },
       );
       _bzRegisteredHex = hex;
+      _bzRejectedHex = null;
+      _bzRejectCount = 0;
     } catch (e) {
-      _warnThrottled('advertise failed: $e');
+      if (_bzRejectedHex == hex) {
+        _bzRejectCount++;
+      } else {
+        _bzRejectedHex = hex;
+        _bzRejectCount = 1;
+      }
+      _warnThrottled('advertise failed (${payload.length}B frame): $e');
       final s = e.toString();
       if (s.contains('UnknownObject') || s.contains("doesn't exist")) {
         // The adapter/advertising object went away — drop refs so the next

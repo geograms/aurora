@@ -68,6 +68,12 @@ class NostrAllPoller {
   Timer? _timer;
   bool _busy = false;
 
+  /// Set by [dispose]. A poll already in flight keeps running for seconds after
+  /// the page is gone (it is waiting on relay sockets), and its `finally` used
+  /// to write [polling] — on a ValueNotifier that dispose() had already torn
+  /// down, which throws "used after being disposed" out of an async gap.
+  bool _disposed = false;
+
   // ── Tuning ────────────────────────────────────────────────────────────────
   /// ~20 curated posts per cycle, as requested.
   static const int _keepPerCycle = 22;
@@ -109,12 +115,13 @@ class NostrAllPoller {
 
   void dispose() {
     stop();
+    _disposed = true;
     polling.dispose();
   }
 
   /// One curated poll. Concurrency-safe: a poll in flight wins.
   Future<int> pollOnce() async {
-    if (_busy) return 0;
+    if (_busy || _disposed) return 0;
     _busy = true;
     polling.value = true;
     final clients = <NostrWsClient>[];
@@ -336,7 +343,7 @@ class NostrAllPoller {
         unawaited(c.close());
       }
       _busy = false;
-      polling.value = false;
+      if (!_disposed) polling.value = false;
     }
     return 0;
   }

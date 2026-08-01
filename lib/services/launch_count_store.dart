@@ -45,10 +45,21 @@ class LaunchCountStore {
 
   /// What the module bars show on a fresh install: the user has launched
   /// nothing yet, so "most used" is empty and the bars would fall back to
-  /// whatever the app list happens to order first. These three are the ones
-  /// a new user is meant to open. Overridden the moment they pin or launch
-  /// anything.
-  static const List<String> kDefaultModuleWapps = ['social', 'chat', 'mp4player'];
+  /// whatever the app list happens to order first. These are the ones a new
+  /// user is meant to open, most important first. Only the first three fit,
+  /// so this is a starting position, not a fixed layout — it is overridden the
+  /// moment the user pins or launches anything, and a wapp they actually use
+  /// takes the bar instead.
+  ///
+  /// Every id here must also be in `_kDefaultSeedNames` (launcher/seeding.dart)
+  /// or it is never installed on a fresh profile, and naming it here does
+  /// nothing at all: the resolver silently skips ids it cannot find.
+  static const List<String> kDefaultModuleWapps = [
+    'social',
+    'torrents',
+    'chat',
+    'mp4player',
+  ];
 
   /// Pinned module bars, or the most-used wapps when the user pinned none,
   /// topped up with [kDefaultModuleWapps] on a fresh profile.

@@ -11,6 +11,7 @@ const _kDefaultSeedNames = {
   'mp4player',
   'reticulum',
   'social',
+  'torrents',
 };
 
 /// One-time migration for the wapp rename aprs -> chat (folder name 'aprs' was

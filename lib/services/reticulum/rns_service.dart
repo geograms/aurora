@@ -856,6 +856,74 @@ class RnsService {
         n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
   }
 
+  /// Everyone this device could start a conversation with, in ONE list:
+  /// NomadNet/Sideband peers heard on the mesh (LXMF) and geogram people
+  /// (callsign / npub), newest-heard first, each row saying where it came from.
+  ///
+  /// Deliberately NOT gated by [_isFreshNode]. That gate answers "is this
+  /// device online right now" — it needs a second announce 25s after the
+  /// first, because a hub replays its cached announce table on connect and
+  /// every replayed device would otherwise look live. For a MESSAGING
+  /// directory the same rule is wrong twice over: LXMF stores and forwards, so
+  /// a peer heard once is still perfectly messageable, and the replayed table
+  /// is exactly the population a NomadNet client lists. Applying the liveness
+  /// gate here is what showed zero people while the mesh had hundreds.
+  ///
+  /// `live` still reports the strict answer, so the UI can say "online now"
+  /// versus "heard 12m ago" without hiding anybody.
+  List<Map<String, dynamic>> messagingDirectory(String query) {
+    sweepObserved();
+    final q = query.trim().toLowerCase();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final out = <Map<String, dynamic>>[];
+
+    // ── LXMF peers (NomadNet, Sideband, other geogram devices) ──
+    for (final n in _observed.values) {
+      if (!n.services.contains('lxmf')) continue;
+      final dest = _lxmfDestHexForPub(n.publicKeyHex);
+      if (dest.isEmpty) continue;
+      final name = n.lxmfName ?? '';
+      final call = n.callsign ?? '';
+      if (q.isNotEmpty) {
+        final hay = '$name $call ${n.identityHex} $dest'.toLowerCase();
+        if (!hay.contains(q)) continue;
+      }
+      out.add({
+        'kind': 'lxmf',
+        'dest': dest,
+        'name': name,
+        'callsign': call,
+        'identity': n.identityHex,
+        'geogram': _isGeogramNode(n),
+        'hops': n.hops,
+        'via': n.via,
+        'lastSeen': n.lastSeenMs,
+        'live': _isFreshNode(n, now),
+      });
+    }
+
+    // ── Geogram people (their 1:1 is NOSTR kind-4, handled by Messages) ──
+    for (final p in searchPeople(q)) {
+      out.add({
+        'kind': 'geogram',
+        'callsign': p['callsign'] ?? '',
+        'npub': p['npub'] ?? '',
+        'nick': p['nick'] ?? '',
+        'devices': p['devices'] ?? 0,
+        'live': p['online'] == true,
+        'lastSeen': 0,
+      });
+    }
+
+    out.sort((a, b) {
+      final al = a['live'] == true, bl = b['live'] == true;
+      if (al != bl) return al ? -1 : 1;
+      return ((b['lastSeen'] as int?) ?? 0)
+          .compareTo((a['lastSeen'] as int?) ?? 0);
+    });
+    return out;
+  }
+
   /// Geogram devices reachable right now — the number the launcher shows.
   int get reachableDevices => reachability().geogram;
 
@@ -1440,34 +1508,59 @@ class RnsService {
     if (_obStore != null) _obDirty.add(key);
   }
 
-  /// The display name inside an lxmf.delivery announce's app_data. LXMF wraps
-  /// it as msgpack `[name_bytes, stamp_cost]` (0x92 fixarray-2, 0xc4/0xd9 str
-  /// or bin); older senders ship the bare utf8 name. Tolerant of both; ''
-  /// when absent or garbage.
+  /// The display name inside an lxmf.delivery announce's app_data.
+  ///
+  /// LXMF wraps it as msgpack — usually `[name, stamp_cost]`, sometimes the
+  /// bare name — and the name itself may be any of msgpack's five string/bin
+  /// widths. Guessing at one width and slicing blindly is what produced
+  /// "��Anonymous Peer��" in the picker: the framing bytes
+  /// were decoded as text. So walk the encoding properly, and fall back to a
+  /// printable-run scan rather than to raw bytes.
   static String _lxmfAnnounceName(Uint8List d) {
     if (d.isEmpty) return '';
-    Uint8List raw = d;
-    if (d[0] == 0x92 && d.length >= 3) {
-      final t = d[1];
-      int len = 0, off = 0;
+    var i = 0;
+    // Unwrap an array header ([name, stampCost] and friends).
+    if (d[0] >= 0x90 && d[0] <= 0x9f) {
+      i = 1; // fixarray
+    } else if (d[0] == 0xdc && d.length > 3) {
+      i = 3; // array16
+    }
+    String? take(int off, int len) {
+      if (len < 0 || off + len > d.length) return null;
+      return utf8.decode(Uint8List.sublistView(d, off, off + len),
+          allowMalformed: true);
+    }
+
+    String? s;
+    if (i < d.length) {
+      final t = d[i];
       if (t >= 0xa0 && t <= 0xbf) {
-        len = t & 0x1f;
-        off = 2;
-      } else if ((t == 0xc4 || t == 0xd9) && d.length >= 3) {
-        len = d[2];
-        off = 3;
-      }
-      if (off > 0 && off + len <= d.length) {
-        raw = Uint8List.sublistView(d, off, off + len);
-      } else {
-        return '';
+        s = take(i + 1, t & 0x1f); // fixstr
+      } else if (t == 0xd9 || t == 0xc4) {
+        s = d.length > i + 1 ? take(i + 2, d[i + 1]) : null; // str8 / bin8
+      } else if (t == 0xda || t == 0xc5) {
+        s = d.length > i + 2
+            ? take(i + 3, (d[i + 1] << 8) | d[i + 2])
+            : null; // str16 / bin16
       }
     }
-    var s = utf8.decode(raw, allowMalformed: true).trim();
-    // A name, not a payload: printable, short.
-    s = s.replaceAll(RegExp(r'[\x00-\x1f]'), '');
-    if (s.length > 32) s = s.substring(0, 32);
-    return s;
+    // Not msgpack we recognise: keep the longest printable ASCII run, which is
+    // what a bare-utf8 sender gives us and what survives an unknown wrapper.
+    if (s == null || s.trim().isEmpty) {
+      final whole = utf8.decode(d, allowMalformed: true);
+      var best = '';
+      for (final run in whole.split(RegExp(r'[^\x20-\x7e -￿]+'))) {
+        if (run.trim().length > best.trim().length) best = run;
+      }
+      s = best;
+    }
+    // A name, not a payload: printable, trimmed, short. Replacement chars mean
+    // we mis-sliced — never show them.
+    var out = s
+        .replaceAll(RegExp(r'[\x00-\x1f\x7f�]'), '')
+        .trim();
+    if (out.length > 32) out = out.substring(0, 32);
+    return out;
   }
 
   void _evictOldestObserved() {

@@ -3974,11 +3974,22 @@ class _WappPageState extends State<WappPage>
     // depth; back drills up one level until it reports back:false at its root.
     final navBack = thread == null && _wappNavBack;
 
+    // An open room/conversation in the rooms layout is a place the user
+    // navigated INTO, so back must leave it before it leaves the wapp —
+    // otherwise reading one message and pressing back drops you at the
+    // launcher, losing the whole app. Only when the rail is hidden behind the
+    // chat (narrow) does this matter; a wide window shows both at once.
+    final roomsOpen = _roomsOpenId != null &&
+        MediaQuery.of(context).size.width < 900 &&
+        _tabScreens[idx].children
+            .any((c) => c.keyword == 'group' && c.type == 'rooms');
+
     return PopScope(
       // Intercept system-back to close an open reticulum-graph panel, a
       // conversation thread, or to drill up one in-wapp level. Otherwise back
       // leaves for the launcher.
-      canPop: _graphPanelBack == null && thread == null && !navBack,
+      canPop:
+          _graphPanelBack == null && thread == null && !navBack && !roomsOpen,
       onPopInvoked: (didPop) {
         if (didPop) return;
         if (_graphPanelBack != null) {
@@ -3987,6 +3998,8 @@ class _WappPageState extends State<WappPage>
           setState(() => _convOpenId = null);
         } else if (navBack) {
           _sendCommand('nav_back');
+        } else if (roomsOpen) {
+          setState(() => _roomsOpenId = null);
         }
       },
       child: Scaffold(

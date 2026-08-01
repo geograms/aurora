@@ -3473,6 +3473,21 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
+    // Everyone messageable, in one list: LXMF peers heard on the mesh plus
+    // geogram people, each row carrying where it came from and how fresh it
+    // is. Not liveness-gated — see RnsService.messagingDirectory.
+    final halPeopleDirectory = WasmFunction(
+      (int qPtr, int qLen, int outPtr, int outCap) {
+        if (outCap <= 0) return -1;
+        final q = qLen > 0 ? _readUtf8(qPtr, qLen) : '';
+        final bytes = utf8
+            .encode(jsonEncode(RnsService.instance.messagingDirectory(q)));
+        if (bytes.length > outCap) return -2;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
 
     final allImports = [
       // System
@@ -3725,6 +3740,7 @@ class WappEngine {
       // Contacts (reusable people picker source)
       WasmImport('hal', 'contacts_query', halContactsQuery),
       WasmImport('hal', 'people_search', halPeopleSearch),
+      WasmImport('hal', 'people_directory', halPeopleDirectory),
       // WASI
       WasmImport('wasi_snapshot_preview1', 'random_get', wasiRandomGet),
       WasmImport('wasi_snapshot_preview1', 'args_get', stubI32([ValueTy.i32, ValueTy.i32], 0)),

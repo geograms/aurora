@@ -79,6 +79,7 @@ class _RoomsFieldState extends State<RoomsField> {
   bool get _railExpanded => _railW > _threshold;
 
   void _dragUpdate(DragUpdateDetails d) {
+    _userSized = true; // the user's width choice outranks the auto sizing
     setState(() => _railW = (_railW + d.delta.dx).clamp(_collapsed, _expanded));
   }
 
@@ -86,19 +87,24 @@ class _RoomsFieldState extends State<RoomsField> {
     setState(() => _railW = _railExpanded ? _expanded : _collapsed);
   }
 
-  /// Wide layouts open with the rail EXPANDED (names visible). A rail of
-  /// bare identicon circles tells a new user nothing — on a desktop there is
-  /// room to say what each room is, so say it. The user's own drag still
-  /// wins afterwards. Phones keep the collapsed rail (space is real there).
-  bool _sizedOnce = false;
+  /// Wide layouts open with the rail EXPANDED (names visible); narrow ones
+  /// collapse it, because there the rail OVERLAYS the chat and an expanded
+  /// one hides the conversation you just opened. Re-evaluated whenever the
+  /// width crosses the threshold (a resized desktop window is the same
+  /// problem as a phone), but the user's own drag wins from then on.
+  bool _userSized = false;
+  double? _autoW;
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return LayoutBuilder(builder: (ctx, c) {
-      if (!_sizedOnce) {
-        _sizedOnce = true;
-        if (c.maxWidth >= 900) _railW = _expanded;
+      if (!_userSized) {
+        final want = c.maxWidth >= 900 ? _expanded : _collapsed;
+        if (_autoW != want) {
+          _autoW = want;
+          _railW = want;
+        }
       }
       if (c.maxWidth >= 640) return _wide(cs);
       return _narrow(cs, c.maxWidth);
@@ -238,7 +244,15 @@ class _RoomsFieldState extends State<RoomsField> {
       ]);
     }
     final tile = InkWell(
-      onTap: () => widget.onOpenRoom(id),
+      onTap: () {
+        widget.onOpenRoom(id);
+        // Narrow: the expanded rail is an overlay ON the chat, so picking a
+        // conversation has to get out of the way — otherwise you tap a room
+        // and still see the list.
+        if (MediaQuery.of(context).size.width < 900 && _railExpanded) {
+          setState(() => _railW = _collapsed);
+        }
+      },
       child: Padding(
         padding: EdgeInsets.fromLTRB(
             expanded ? 8.0 + depth * 14 : 8, 4, 8, 4),
@@ -382,25 +396,61 @@ class _RoomsFieldState extends State<RoomsField> {
   Widget _chat(ColorScheme cs) {
     final open = widget.openId;
     final room = open == null ? null : widget.store.items[open];
-    final name = room?.title ?? (open ?? '');
+    // Who you are talking to. The store title is the display name; for a
+    // direct LXMF peer also show the address underneath, because a name alone
+    // ("Ben Mobile") does not tell you WHICH address you are about to message
+    // — and when there is no name yet, the address is the only identity there
+    // is. Falling back to the raw conversation id (as this did) shows neither.
+    final isLxmf = (open ?? '').startsWith('lxmf:');
+    final addr = isLxmf ? open!.substring(5) : '';
+    var name = room?.title ?? '';
+    if (name.isEmpty) {
+      name = isLxmf
+          ? 'LXMF ${addr.length > 8 ? addr.substring(0, 8) : addr}'
+          : (open ?? '');
+    }
     return Column(
       children: [
-        // room header: name + members toggle
+        // room header: who + members toggle (and, on a narrow window where the
+        // rail is hidden behind the chat, the way back to it)
         Container(
           height: 48,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
+          padding: const EdgeInsets.only(left: 4, right: 12),
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: cs.outlineVariant, width: 1)),
           ),
           child: Row(children: [
+            if (!_railExpanded && MediaQuery.of(context).size.width < 900)
+              IconButton(
+                tooltip: 'All chats',
+                icon: const Icon(Icons.arrow_back, size: 20),
+                onPressed: () => setState(() {
+                  _userSized = true;
+                  _railW = _expanded;
+                }),
+              )
+            else
+              const SizedBox(width: 8),
             Expanded(
-              child: Text(name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleMedium
-                      ?.copyWith(fontWeight: FontWeight.w700)),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context)
+                          .textTheme
+                          .titleMedium
+                          ?.copyWith(fontWeight: FontWeight.w700)),
+                  if (isLxmf)
+                    Text('NomadNet · $addr',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 11, color: cs.onSurfaceVariant)),
+                ],
+              ),
             ),
             IconButton(
               tooltip: 'Members',

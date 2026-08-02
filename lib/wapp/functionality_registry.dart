@@ -345,12 +345,14 @@ class FunctionalityRegistry {
         ParamDef('relays', 'string', 'JSON array of relay hashes'),
       ], ReturnDef('int', '1 if queued, -1 on error')),
       EndpointDef('hal_relay_resolve',
-          'Trigger an async callsign→npub resolve by querying relays', [
-        ParamDef('callsign', 'string', 'callsign to resolve'),
+          'Trigger an async callsign→npub resolve by querying relays; a target '
+          'containing @ is an email address resolved via NIP-05 instead', [
+        ParamDef('callsign', 'string', 'callsign or email address to resolve'),
         ParamDef('relays', 'string', 'JSON array of relay hashes'),
       ], ReturnDef('int', '1 if queued, -1 on error')),
       EndpointDef('hal_relay_resolve_recv',
-          'Pop next resolution JSON {callsign,npub,deliv,prop}', [],
+          'Pop next resolution JSON {callsign,npub,deliv,prop}; email results '
+          'carry the address in callsign plus kind0_match', [],
           ReturnDef('uint32', 'Bytes written, 0 if none')),
     ]),
     'hal.nostr': FunctionalityDef('hal.nostr',

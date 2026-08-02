@@ -22,6 +22,7 @@ import '../hero/followed_media_cache.dart';
 import '../hero/hero_inbox.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
+import '../social/email_resolve_service.dart';
 import '../../util/media_archive.dart';
 import 'rns_service.dart';
 
@@ -76,6 +77,10 @@ Future<void> ensureRnsAutostart() async {
     rns.identityPath = ws.getAbsolutePath('rns_identity.key');
     rns.blossomLoad(); // the user's media servers, not just the shipped ones
     rns.followsPath = ws.getAbsolutePath('host_follows.json');
+    // Email→npub resolver (NIP-05 ladder) — injected here because the service
+    // sits above RnsService (direct import would cycle). Serves both the WS
+    // relay's mailto REQ trigger and hal_relay_resolve for '@' targets.
+    rns.emailResolver = (email) => EmailResolveService.instance.resolve(email);
     rns.diskIndexPath = ws.getAbsolutePath('disk_index.sqlite3');
 
     // Persistent observed-node cache lives in the reticulum wapp's per-profile

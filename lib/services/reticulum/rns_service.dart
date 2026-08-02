@@ -878,10 +878,13 @@ class RnsService {
     final out = <Map<String, dynamic>>[];
 
     // ── LXMF peers (NomadNet, Sideband, other geogram devices) ──
+    var lxmfTagged = 0, destOk = 0;
     for (final n in _observed.values) {
       if (!n.services.contains('lxmf')) continue;
+      lxmfTagged++;
       final dest = _lxmfDestHexForPub(n.publicKeyHex);
       if (dest.isEmpty) continue;
+      destOk++;
       final name = n.lxmfName ?? '';
       final call = n.callsign ?? '';
       if (q.isNotEmpty) {
@@ -921,6 +924,19 @@ class RnsService {
       return ((b['lastSeen'] as int?) ?? 0)
           .compareTo((a['lastSeen'] as int?) ?? 0);
     });
+    // Why the picker is empty is otherwise unanswerable from outside: log the
+    // funnel (observed -> lxmf.delivery announce -> derivable dest) once per
+    // change, so a silent stage shows up instead of "nobody heard yet".
+    // Keyed on the funnel alone, NOT on the query: the wapp polls this once a
+    // second to resolve peer names, and including q would log on every poll.
+    final tally = '${_observed.length}/$lxmfTagged/$destOk';
+    if (tally != _lastDirectoryTally) {
+      _lastDirectoryTally = tally;
+      LogService.instance.add(
+        'RNS: directory observed=${_observed.length} lxmfAnnounce=$lxmfTagged '
+        'destOk=$destOk',
+      );
+    }
     return out;
   }
 
@@ -1731,6 +1747,7 @@ class RnsService {
   /// Cached — the dest hash is a few hashes over immutable inputs, but the
   /// graph snapshot calls this per node per render.
   final Map<String, String> _lxmfDestCache = {};
+  String _lastDirectoryTally = '';
   String _lxmfDestHexForPub(String pubkeyHex) {
     final hit = _lxmfDestCache[pubkeyHex];
     if (hit != null) return hit;
@@ -4315,7 +4332,19 @@ class RnsService {
       content: content,
       fields: fields,
     );
-    return r.send_(msg);
+    // Say which of the two things actually happened. The router logs "stored
+    // message for relay" BEFORE it tries the direct link (deliberately — see
+    // LxmfRouter.send_), so that line alone reads as failure even when the
+    // message went straight through. Without this, "did my LXMF message get
+    // there?" is unanswerable from the log.
+    final ok = await r.send_(msg);
+    final who = destHex.length >= 8 ? destHex.substring(0, 8) : destHex;
+    LogService.instance.add(
+      ok
+          ? 'RNS/lxmf: delivered to $who over a direct link'
+          : 'RNS/lxmf: no direct link to $who — held for relay pickup',
+    );
+    return ok;
   }
 
   /// Send a 1:1 LXMF message to a peer identified by its 64-byte public key hex

@@ -103,6 +103,19 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/app_icon.png"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 
+# XDG desktop integration: hicolor icon tree + .desktop entry. Packaging
+# (deb/tar) picks these up from share/ under the install prefix; system
+# installs land in /usr/share/icons/hicolor and /usr/share/applications.
+foreach(ICON_SIZE 16 22 24 32 48 64 128 256 512)
+  install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps/geogram.png"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/${ICON_SIZE}x${ICON_SIZE}/apps"
+    COMPONENT Runtime)
+endforeach()
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/geogram.desktop"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}/share/applications"
+  COMPONENT Runtime)
+
 install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 

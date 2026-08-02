@@ -104,7 +104,7 @@ object BgBridge {
         val n: Notification = NotificationCompat.Builder(context, EVENT_CHANNEL_ID)
             .setContentTitle(title)
             .apply { if (!body.isNullOrEmpty()) setContentText(body) }
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setSmallIcon(R.drawable.ic_stat_geogram)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .apply { if (pi != null) setContentIntent(pi) }

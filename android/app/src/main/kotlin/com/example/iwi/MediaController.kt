@@ -142,7 +142,7 @@ object MediaController {
         } else null
 
         val b = NotificationCompat.Builder(ctx, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_geogram)
             .setContentTitle(title.ifEmpty { "Aurora" })
             .setContentText(artist)
             .setOngoing(playing)

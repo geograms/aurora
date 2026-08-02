@@ -113,7 +113,7 @@ class BgService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Aurora")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_geogram)
             .setOngoing(true)
             .setContentIntent(pi)
             .build()

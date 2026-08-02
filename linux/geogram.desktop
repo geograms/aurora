@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Geogram
+GenericName=Offgrid wapp launcher
+Comment=Geogram — offgrid communication and wapp launcher
+Exec=aurora
+Icon=geogram
+Terminal=false
+Categories=Network;Chat;
+StartupWMClass=radio.geogram.aurora
+Keywords=geogram;aurora;mesh;reticulum;aprs;offgrid;

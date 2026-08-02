@@ -51,7 +51,7 @@ class DownloadForegroundService : Service() {
         val b = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Geogram Aurora")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.ic_stat_geogram)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
         if (progress in 0..100) {

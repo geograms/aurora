@@ -159,10 +159,11 @@ flutter_native_splash:
   android_12:
     color: "#F4F1EA"
     color_dark: "#232A2E"
-    # Triad padded into the circular icon mask's safe zone so every launch
-    # surface shows the same image (user preference over the star-only icon).
-    image: icons/splash/android12_triad.png
-    image_dark: icons/splash/android12_triad_dark.png
+    # Fully transparent icon: the Android 12+ system splash is just the flat
+    # background colour, so the triad (the first Flutter frame, held ~3s) is
+    # the only launch image the user ever sees — no small circled icon first.
+    image: icons/splash/android12_blank.png
+    image_dark: icons/splash/android12_blank.png
     icon_background_color: "#F4F1EA"
     icon_background_color_dark: "#232A2E"
 

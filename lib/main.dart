@@ -96,9 +96,11 @@ Future<void> main() async {
       ..maximumSize = 60;
   }
 
-  // First frame: the triad splash. The system launch window (Android 12+
-  // shows only the masked star) hands off to this on the same background
-  // colour; the second runApp below replaces it once boot completes.
+  // First frame: the triad splash. The Android 12+ system launch window is a
+  // flat colour (transparent icon), so this is the only launch image; the
+  // second runApp below replaces it once boot completes, but never before
+  // the splash has been visible for a beat (see the hold below runAll).
+  final splashShownAt = DateTime.now();
   runApp(const BootSplashApp());
 
   // The shared-package Blossom server logs through this injectable sink
@@ -294,6 +296,14 @@ Future<void> main() async {
   // Run every registered boot task. Sequential boot tasks run first,
   // alone, in registration order; then all parallels run concurrently.
   await BootOrchestrator.instance.runAll();
+
+  // Keep the triad splash on screen for at least 3 seconds — a fast boot
+  // otherwise flashes it too briefly to read.
+  const minSplash = Duration(seconds: 3);
+  final splashElapsed = DateTime.now().difference(splashShownAt);
+  if (splashElapsed < minSplash) {
+    await Future<void>.delayed(minSplash - splashElapsed);
+  }
 
   runApp(IwiApp(messengerKey: rootMessengerKey));
 

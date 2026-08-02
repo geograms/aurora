@@ -2,6 +2,14 @@
 
 Status: all five phases implemented (crypto core, SQLCipher databases, profile.ear loose files, unlock UI + enable/disable, headless remember-key + locked notification). Android on-device validation pending. This document specifies how Aurora encrypts each profile's user data at rest.
 
+> **Amendment (2026-08-02):** the "fingerprint prompt is the lock" doctrine is
+> retired. Device-key profiles now unlock **silently everywhere** (UI and
+> headless) — encryption is at-rest protection, not an app lock — so the
+> biometric gate (`biometric_gate.dart`, `unlockWithBiometrics`, the
+> device-key UnlockPage shape) and the "Aurora is locked" system notification
+> were removed. Only password profiles still see UnlockPage, and only they can
+> genuinely "Lock now". `local_auth` dropped from pubspec.
+
 ## Context
 
 Each Aurora profile (`devices/<id>/`) holds private user data — chat history, messages, media, wallet, folder keys — today all plaintext. Requirement: profile data encrypted at rest, unlocked with a user password (emoji allowed) **mixed with the profile's nsec**. The earlier geogram iteration (`/home/brito/code/geogram/geogram`) already built the hard part: a proven `encrypted_archive` Dart package (SQLite container `EARCH01`, Argon2id → wrapped random master key → HKDF per-file keys → AES-256-GCM chunks, streaming, password change = re-wrap only). Old geogram derived the key from nsec only — the user password + emoji mix is new here.

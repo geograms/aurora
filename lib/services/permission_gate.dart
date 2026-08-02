@@ -5,7 +5,6 @@ import '../profile/profile_db.dart';
 import '../profile/profile_encryption.dart';
 import '../profile/profile_service.dart';
 import '../services/log_service.dart';
-import '../services/notification_service.dart';
 import '../services/reticulum/rns_autostart.dart';
 import '../wapp/background_wapp_manager.dart';
 import 'android_permissions_service.dart';
@@ -32,26 +31,6 @@ class PermissionGate {
 
   static bool _started = false;
 
-  static bool _lockedNotified = false;
-
-  /// One system notification per locked boot, Android only: on desktop the
-  /// unlock page is already on screen, but a headless engine has no UI at
-  /// all — the notification is the only sign that messages are NOT being
-  /// received until the user opens Aurora and unlocks.
-  static void _notifyLockedOnce() {
-    if (_lockedNotified) return;
-    if (platform.platformName() != 'android') return;
-    _lockedNotified = true;
-    NotificationService.instance.show(GeogramNotification(
-      level: NotificationLevel.warning,
-      title: 'Aurora is locked',
-      body: 'Open Aurora and unlock your profile to receive messages in '
-          'the background.',
-      source: 'host:encryption',
-      scope: NotificationScope.system,
-    ));
-  }
-
   /// True when it is safe to start the permission-guarded services: always on
   /// desktop, and on Android only once every required permission is granted
   /// (which is exactly when the intro screen lets the user leave).
@@ -67,12 +46,10 @@ class PermissionGate {
   static Future<void> startGatedServices() async {
     if (_started) return;
     // Encrypted profile that has not been unlocked yet: the gated services
-    // would immediately open profile databases and throw. Try the
-    // "keep unlocked on this device" cache first — that is what lets the
-    // headless Android boot (BOOT_COMPLETED → BgService → main() with no
-    // UI) come up with background message reception. No cache → stay
-    // stopped; the unlock page calls this again after unlocking, and a
-    // headless engine surfaces one system notification instead.
+    // would immediately open profile databases and throw. Device-key
+    // profiles (the default) unlock silently right here — UI and headless
+    // boot alike. Only a password-locked profile stays stopped; the unlock
+    // page calls this again after the user types the password.
     final active = ProfileService.instance.activeProfile;
     if (active != null &&
         ProfileKeyring.instance.isEncryptedProfile(active.id) &&
@@ -82,13 +59,11 @@ class PermissionGate {
       if (!silent) {
         LogService.instance.add(
             'permissions: profile ${active.id} locked — gated services wait');
-        _notifyLockedOnce();
         return;
       }
     }
     _started = true;
     LogService.instance.add('permissions: granted — starting gated services');
-    _lockedNotified = false;
 
     // Reticulum: brings up the BLE5 interface (scan + advertise).
     startRnsAutostart();

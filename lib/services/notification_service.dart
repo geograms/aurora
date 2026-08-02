@@ -26,6 +26,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../platform/platform.dart' as platform;
+import 'announced_tags_store.dart';
 import 'event_bus.dart';
 
 enum NotificationLevel { info, success, warning, error }
@@ -160,31 +161,49 @@ class NotificationService {
         scope: NotificationScope.app,
       ));
     });
+
+    // Tagged notifications buffered before the persisted announce set was
+    // readable go back through the guard as soon as it is.
+    unawaited(AnnouncedTagsStore.instance.ready.then((_) => _flushPending()));
   }
 
-  /// tag -> when it was last shown. Bounded; a tag nobody repeats simply ages
-  /// out with the rest.
-  final Map<String, int> _shownTags = {};
-  static const int _maxTags = 500;
+  void _flushPending() {
+    if (_pending.isEmpty) return;
+    final batch = List<GeogramNotification>.of(_pending);
+    _pending.clear();
+    for (final n in batch) {
+      show(n);
+    }
+  }
+
+  /// Tagged notifications that arrived before [AnnouncedTagsStore] finished
+  /// loading the active profile's announced set. Replayed through [show]'s
+  /// guard once the store is ready, so boot-time behavior does not depend on
+  /// load-vs-event timing.
+  final List<GeogramNotification> _pending = [];
 
   /// Dispatch [n] to every backend that declares it handles the
   /// notification's scope. Backend errors are swallowed so one broken
   /// backend cannot prevent the others from firing.
   ///
   /// A notification carrying a [GeogramNotification.tag] is announced once,
-  /// ever: the tag is its identity, and the same identity twice is a repeat,
-  /// not news. Social rides on this — its inbox is answered out of SQLite, so
-  /// stored events are re-delivered on every start.
+  /// ever, ACROSS RESTARTS: the tag is its identity, persisted per profile by
+  /// [AnnouncedTagsStore]. Wapps re-subscribe and re-ingest their backlog on
+  /// every start (Social answers its inbox out of SQLite, Mail replays the
+  /// relay backlog), so a process-lifetime guard would re-announce — and
+  /// re-mark unread — everything the user already saw.
   void show(GeogramNotification n) {
     final tag = n.tag;
     if (tag != null && tag.isNotEmpty) {
+      final guard = AnnouncedTagsStore.instance;
+      if (!guard.loaded) {
+        _pending.add(n);
+        return;
+      }
       // Already announced. Showing it again would tell the user something
       // happened when nothing did.
-      if (_shownTags.containsKey(tag)) return;
-      _shownTags[tag] = DateTime.now().millisecondsSinceEpoch;
-      if (_shownTags.length > _maxTags) {
-        _shownTags.remove(_shownTags.keys.first);
-      }
+      if (guard.contains(tag)) return;
+      guard.add(tag);
     }
     history.add(n);
     if (history.length > maxHistory) {
@@ -205,7 +224,7 @@ class NotificationService {
     _errorSub = null;
     _backends.clear();
     history.clear();
-    _shownTags.clear();
+    _pending.clear();
     _initialised = false;
   }
 }

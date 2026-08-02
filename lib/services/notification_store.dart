@@ -145,6 +145,9 @@ class NotificationStore {
   }
 
   Future<void> clear() async {
+    // Clears the visible history only. Deliberately does NOT touch
+    // AnnouncedTagsStore: clearing the list must not re-arm announcement of
+    // events that replay on the next start.
     items.value = const [];
     unreadCount.value = 0;
     try {

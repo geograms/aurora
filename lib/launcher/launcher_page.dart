@@ -954,7 +954,7 @@ class _AppIcon extends StatelessWidget {
       if (enable) {
         await BackgroundWappManager.instance.start(wappDir!);
       } else {
-        BackgroundWappManager.instance.stop(wappId!);
+        await BackgroundWappManager.instance.stop(wappId!);
       }
     }
   }

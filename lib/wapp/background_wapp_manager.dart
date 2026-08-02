@@ -124,12 +124,22 @@ class BackgroundWappManager {
   }
 
   /// Stop and dispose a background wapp (releases its BLE scan ref, sockets…).
-  void stop(String wappName) {
+  ///
+  /// Awaitable because svc.stop() runs the service's onStop, which flushes
+  /// its debounced conversation saves — a page opening the same wapp must
+  /// wait for that flush before reading messages/*.json, or it reads a stale
+  /// store and then overwrites the flushed one (losing messages that arrived
+  /// headlessly). Callers that don't read those files may fire-and-forget.
+  Future<void> stop(String wappName) async {
     final svc = _running.remove(wappName);
     if (svc == null) return;
-    unawaited(svc.stop());
-    debugPrint('BackgroundWapp: stopped $wappName');
+    debugPrint('BackgroundWapp: stopping $wappName');
     _onRunningChanged();
+    try {
+      await svc.stop();
+    } catch (e) {
+      debugPrint('BackgroundWapp: stop $wappName failed: $e');
+    }
   }
 
   /// Inject a flat `{"command":…}` JSON into a running background wapp engine,
@@ -154,7 +164,8 @@ class BackgroundWappManager {
 
   /// A UI page for [wappName] is opening — drop the background engine so the
   /// page owns the only engine (avoids double BLE scan / double processing).
-  void suspend(String wappName) => stop(wappName);
+  /// Await it before reading the wapp's persisted conversations (see [stop]).
+  Future<void> suspend(String wappName) => stop(wappName);
 
   /// A UI page for the wapp at [wappDir] closed — bring the background engine
   /// back if the user enabled autostart for it.

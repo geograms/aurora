@@ -16,7 +16,8 @@ travel from an in-app card all the way to an OS-level toast on the desktop or An
 - **Severity:** `info | success | warning | error`.
 - **Reach:** `scope: app | system | both` decides whether it stays in-app or escalates
   to the OS (system tray on Linux/macOS, `NotificationManager` on Android).
-- **Dedupe:** set a `tag`; a given tag is shown **once, ever**.
+- **Dedupe:** set a `tag`; a given tag is shown **once, ever — across restarts**
+  (persisted per profile by `AnnouncedTagsStore`).
 
 ## Architecture
 
@@ -123,11 +124,11 @@ Distinct mechanism, same outbox. A wapp can set an app-tile / header badge count
 raising a notification:
 
 ```json
-{"type":"unread", "count": 3, "intent": "messages"}
+{"type":"unread", "count": 3, "intent": "mail"}
 ```
 
 This drives `WappUnreadService` (keyed by `wappId` and optional `intent`, e.g.
-`wappId#messages`). Use `unread` for "there are N things" ambient counts; use `notify`
+`wappId#mail`). Use `unread` for "there are N things" ambient counts; use `notify`
 for "interrupt the user now".
 
 ## Raising a notification from a wapp
@@ -155,8 +156,14 @@ Wire fields:
 | `title` | yes      | string                                | —       |
 | `level` | no       | `info`/`success`/`warning`/`error`    | `info`  |
 | `body`  | no       | string                                | —       |
-| `tag`   | no       | string dedupe key (shown once ever)   | none    |
+| `tag`   | no       | string dedupe key (shown once ever, across restarts) | none |
 | `scope` | no       | `app`/`system`/`both`                 | `app`   |
+
+**Tag discipline.** Use a per-event, namespaced tag (`mail:<rmid>`, `batt-x1`),
+never a constant: a constant tag ("msg") suppresses every later notification of
+that kind FOREVER — the first one claims the tag and the announce guard is
+persistent. Namespacing (`<wapp>:<event-id>`) also keeps two wapps from
+colliding on the same raw tag.
 
 The host sets `source` for you to `wapp:<wappName>` — don't send it yourself.
 
@@ -206,7 +213,9 @@ notification. You often don't need to raise error notifications by hand — fire
   `NotificationStore.instance.unreadCount`. Opens the notification center.
 - **Notification center** — `NotificationsPage`: full-screen list, grouped by day
   (Today / Yesterday / date), filter chips for `all` / `wapp` / `host` and one per level.
-  Opening it marks all seen.
+  Opening it marks all seen. Rows are tappable by `source`: `wapp:<folder>`
+  opens that wapp, `host:updates` opens Settings (Updates lives there), any
+  other `host:*` row is inert.
 - **OS notification** — for `system`/`both`: `notify-send` (Linux), `osascript`
   (macOS), or a heads-up `NotificationManager` post (Android). Tapping the Android one
   opens the launcher.
@@ -218,10 +227,31 @@ notification. You often don't need to raise error notifications by hand — fire
 - **Persistent store:** `NotificationStore` writes to `notifications/history.jsonl` in the
   active profile (cap 300), with a read cursor in `notifications/seen_ms.txt`. Reloads on
   profile switch. Exposes `items` and `unreadCount` as `ValueNotifier`s.
-- **Dedupe by `tag`:** `NotificationService.show` shows a given tag **once, ever**
-  (tracked in a `_shownTags` map capped at 500). In the persistent store, a repeated `tag`
-  **replaces** the earlier row rather than stacking (the tag is used as the row id). Use a
-  stable `tag` for recurring conditions (e.g. `batt-x1`) so you don't spam the user.
+- **Dedupe by `tag`:** `NotificationService.show` shows a given tag **once, ever, across
+  restarts**. The announced set is persisted per profile by `AnnouncedTagsStore`
+  (`notifications/announced.txt`, one tag per line, FIFO-capped at 4000): a replayed
+  tagged event after a restart is dropped before it reaches any backend or the store —
+  no resurrected unread count, no duplicate Android shade entry. Tag-less notifications
+  bypass the guard entirely (transient status/errors). Tagged notifications that arrive
+  before the guard has loaded are buffered and re-run through it once it is ready.
+  In the persistent store, a repeated `tag` **replaces** the earlier row rather than
+  stacking (the tag is used as the row id).
+- **Clear vs guard:** `NotificationStore.clear()` empties the visible history but does
+  NOT clear the announced set — otherwise Clear would re-arm announcement of everything
+  that replays on the next start.
+
+## Muting a conversation (close = mute)
+
+The Mail wapp treats **Close** as mute: the host sends `conversations_close`
+(both the long-press sheet and the app-bar menu), the wapp persists the peer on
+its closed list (KV `closed`) and from then on drops that peer's incoming
+messages at ingest — before the store write and before `notify_new` — in both
+the foreground and headless drains. No message, no notification, no unread.
+Re-engaging uncloses it: opening the thread, sending to the peer (any device),
+or a New message to their key; the wapp then emits `ui.convo.upsert` with
+`closed:false` so the host's `ConversationStore` (which persisted the flag)
+un-hides the thread. The host-side drop in `ConversationStore.addMessage`
+remains as a backstop for messages already in flight.
 
 ## Platform support matrix
 
@@ -243,6 +273,7 @@ notifications are always delivered even where OS escalation isn't wired up. No
 |------|------|
 | `lib/services/notification_service.dart`        | enums, `GeogramNotification`, `NotificationService`, backends, `NotificationLayer` overlay |
 | `lib/services/notification_store.dart`          | persistence + `unreadCount` |
+| `lib/services/announced_tags_store.dart`        | persisted announce-once guard (per-profile tag set) |
 | `lib/launcher/notifications_page.dart`          | notification center UI |
 | `lib/launcher/home_header.dart`                 | bell + badge |
 | `lib/services/wapp_unread_service.dart`         | `unread` badge counts (separate from notifications) |

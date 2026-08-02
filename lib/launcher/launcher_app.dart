@@ -156,16 +156,16 @@ class _IwiAppState extends State<IwiApp> {
     if (hasProfile) {
       final active = ProfileService.instance.activeProfile!;
       final pid = active.id;
-      // Encrypted profile gate: try the keep-unlocked cache silently, then
-      // fall to the password page. Everything that touches profile storage
-      // (seeding below, gated services) waits behind this.
+      // Encrypted profile gate: try the silent unlock, then fall to the
+      // password page. Everything that touches profile storage (seeding
+      // below, gated services) waits behind this.
       if (ProfileEncryption.isEncrypted(pid) &&
           !ProfileEncryption.isUnlocked(pid)) {
         return FutureBuilder<bool>(
           key: ValueKey('unlock-$pid'),
-          // Device-key profiles are NEVER unlocked silently in the UI: the
-          // fingerprint prompt on UnlockPage is the lock. Only a password
-          // profile the user told to stay unlocked skips the page.
+          // Device-key profiles (the default) always unlock silently —
+          // encryption is at-rest protection, not an app lock. Only a
+          // password profile without the keep-unlocked cache shows the page.
           future: ProfileEncryption.canUnlockSilently(pid).then((silent) async {
             if (!silent) return false;
             final ok = await ProfileEncryption.tryUnlockCached(pid);

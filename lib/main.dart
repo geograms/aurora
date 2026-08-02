@@ -16,6 +16,7 @@ import 'wapp/native/wasm_video_session.dart';
 import 'services/power_governor.dart';
 import 'services/i2p/i2p_background_service.dart';
 import 'services/update_service.dart';
+import 'services/announced_tags_store.dart';
 import 'services/notification_service.dart';
 import 'services/notification_store.dart';
 import 'services/permission_gate.dart';
@@ -132,6 +133,7 @@ Future<void> main() async {
     init: () async {
       NotificationService.instance.init();
       NotificationStore.instance.init();
+      AnnouncedTagsStore.instance.init();
     },
   );
   BootOrchestrator.instance.register(

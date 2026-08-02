@@ -4,11 +4,11 @@
  *
  * Profiles are encrypted BY DEFAULT. A new profile gets "device key" mode:
  * a random secret in the OS keychain (DeviceKeyStore) plays the role of the
- * password, and unlocking asks for fingerprint/face (BiometricGate) instead
- * of typing anything. The user can ADD a password later — that replaces the
- * device secret with something they carry in their head, which is the only
- * thing that also protects the profile from someone who owns the unlocked
- * phone.
+ * password and the profile unlocks silently — encryption protects the data
+ * at rest, it is not an app lock. The user can ADD a password later — that
+ * replaces the device secret with something they carry in their head, which
+ * is the only thing that also protects the profile from someone who owns
+ * the unlocked phone.
  *
  * On-disk pieces:
  *   devices/<id>/keyslot.json   wrapped profile master key (ProfileKeyslot)
@@ -24,7 +24,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' show PlatformDispatcher;
 
-import 'biometric_gate.dart';
 import 'device_key_store.dart';
 import 'iwi_profile.dart';
 import 'profile_crypto.dart';
@@ -64,13 +63,15 @@ class ProfileEncryption {
   /// Whether the UI must show the unlock page for this profile, or the keys
   /// can be taken from the keychain without asking.
   ///
-  /// Password profiles that the user told to stay unlocked: silent. Device-key
-  /// profiles: never silent in the UI — the fingerprint prompt IS the lock.
+  /// Device-key profiles (the default): always silent — encryption protects
+  /// the data at rest, it is not an app lock, so the profile opens with no
+  /// prompt anywhere (UI or headless). Password profiles are silent only when
+  /// the user told them to stay unlocked on this device.
   static Future<bool> canUnlockSilently(String id) async {
     if (!isEncrypted(id)) return true;
     if (isUnlocked(id)) return true;
     if (isHeadless) return true;
-    if (await usesDeviceKey(id)) return false;
+    if (await usesDeviceKey(id)) return true;
     return hasCachedKeys(id);
   }
 
@@ -177,29 +178,9 @@ class ProfileEncryption {
     LogService.instance.add('encryption: unlocked $id');
   }
 
-  /// Unlock without a typed password: fingerprint/face, then the keychain.
-  ///
-  /// Returns false when the user failed/cancelled the biometric prompt or
-  /// there is nothing in the keychain for this profile (then it's a
-  /// password profile, and the UI must ask).
-  static Future<bool> unlockWithBiometrics(String id,
-      {String reason = 'Unlock your profile'}) async {
-    if (!isEncrypted(id)) return true;
-    if (isUnlocked(id)) return true;
-    if (!await DeviceKeyStore.instance.hasCachedKeys(id) &&
-        !await DeviceKeyStore.instance.hasDevicePassword(id)) {
-      return false;
-    }
-    if (!await BiometricGate.instance.authenticate(reason: reason)) {
-      LogService.instance.add('encryption: biometric refused for $id');
-      return false;
-    }
-    return _unlockFromStore(id);
-  }
-
-  /// Silent unlock from the keychain — no biometric prompt. This is the
-  /// HEADLESS path (Android boot, background service): there is no UI to
-  /// prompt with, and the whole point of the device key is that background
+  /// Silent unlock from the keychain — no prompt of any kind. Used by both
+  /// the UI (device-key profiles open with no unlock page) and the headless
+  /// Android boot, where the whole point of the device key is that background
   /// message reception keeps working.
   static Future<bool> tryUnlockCached(String id) async {
     if (!isEncrypted(id)) return true;

@@ -603,7 +603,7 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                         !ProfileEncryption.isEncrypted(_p.id)
                             ? 'Off'
                             : _usesDeviceKey
-                                ? 'Fingerprint'
+                                ? 'Device key'
                                 : 'Password',
                         style: TextStyle(
                             fontSize: 11, color: cs.onSurfaceVariant),
@@ -618,8 +618,8 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                             'data and starts fresh.'
                         : _usesDeviceKey
                             ? 'Everything this profile stores on this device '
-                                'is encrypted, and unlocks with your '
-                                'fingerprint. Add a password to protect it '
+                                'is encrypted, and unlocks automatically on '
+                                'this device. Add a password to protect it '
                                 'even from someone holding the unlocked phone.'
                             : 'Everything this profile stores on this device '
                                 'is encrypted. Unlocked by your password '
@@ -647,11 +647,15 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                                 label: const Text('Encrypt profile'),
                               )
                             else ...[
-                              OutlinedButton.icon(
-                                onPressed: _lockNow,
-                                icon: const Icon(Icons.lock, size: 16),
-                                label: const Text('Lock now'),
-                              ),
+                              // "Lock now" on a device-key profile is a lie:
+                              // the next launch silently unlocks it again.
+                              // Only a password profile genuinely locks.
+                              if (!_usesDeviceKey)
+                                OutlinedButton.icon(
+                                  onPressed: _lockNow,
+                                  icon: const Icon(Icons.lock, size: 16),
+                                  label: const Text('Lock now'),
+                                ),
                               if (_usesDeviceKey)
                                 OutlinedButton.icon(
                                   onPressed: _addPassword,
@@ -666,8 +670,8 @@ class _ProfileEditPageState extends State<ProfileEditPage> {
                                 ),
                                 OutlinedButton.icon(
                                   onPressed: _removePassword,
-                                  icon: const Icon(Icons.fingerprint, size: 16),
-                                  label: const Text('Use fingerprint only'),
+                                  icon: const Icon(Icons.key, size: 16),
+                                  label: const Text('Use device key'),
                                 ),
                               ],
                               if (_hasCachedKeys && !_usesDeviceKey)

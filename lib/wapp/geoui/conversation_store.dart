@@ -149,6 +149,11 @@ class ConversationStore {
       it.activityTs = _nowMs();
       _bump(id);
     }
+    // The wapp is the authority on closed state: it emits closed:false when
+    // the user re-engages a muted conversation (open / send / new message).
+    // Without this, addMessage's closed-drop was permanent — nothing ever
+    // cleared the flag.
+    if (d.containsKey('closed')) it.closed = d['closed'] == true;
   }
 
   void addMessage(Map d) {

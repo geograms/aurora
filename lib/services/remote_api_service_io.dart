@@ -924,7 +924,7 @@ class RemoteApiService {
       }
       if (req.method == 'POST' && path == '/api/wapp/stop') {
         final name = (await _body(req))['wapp']?.toString() ?? '';
-        BackgroundWappManager.instance.stop(name);
+        await BackgroundWappManager.instance.stop(name);
         return _json(res, {'ok': true, 'wapp': name});
       }
       if (req.method == 'POST' && path == '/api/wapp/cmd') {

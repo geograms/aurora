@@ -205,6 +205,10 @@ class _WappPageState extends State<WappPage>
   // background keep-alive and the Android lock-screen / notification controls.
   bool _mediaActive = false; // playing or paused (something is loaded)
   bool _bgKeepAlive = false; // this page's engine is ticking in the background
+
+  /// Completion of the background engine's handover (suspend → onStop flush).
+  /// _loadWapp awaits it before reading persisted conversations.
+  Future<void> _suspendDone = Future<void>.value();
   String? _videoCurrentPath;
 
   /// Storage for installed wapps (extracted .wapp packages) — used by the
@@ -958,7 +962,10 @@ class _WappPageState extends State<WappPage>
     );
     // If this wapp is running as a background service, hand it over to this
     // page so only one engine (and one BLE scan) is live while it's open.
-    BackgroundWappManager.instance.suspend(_wappName);
+    // Keep the future: _loadWapp awaits it before reading conversations so
+    // the background engine's onStop flush lands first (else messages that
+    // arrived headlessly are read stale and overwritten).
+    _suspendDone = BackgroundWappManager.instance.suspend(_wappName);
     unawaited(_loadWappProfilesCache());
     _loadWapp();
   }
@@ -1026,7 +1033,7 @@ class _WappPageState extends State<WappPage>
         BackgroundWappManager.instance.releasePage(_wappName);
         _bgKeepAlive = false;
       }
-      BackgroundWappManager.instance.suspend(_wappName);
+      unawaited(BackgroundWappManager.instance.suspend(_wappName));
       if (mounted) setState(() {});
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
@@ -1306,7 +1313,11 @@ class _WappPageState extends State<WappPage>
     // particular — survive a restart instead of reverting to the default.
     _applyPersistedFields();
     // Restore persisted Messenger conversations before the first build so the
-    // history shows immediately when the tab opens.
+    // history shows immediately when the tab opens. Wait for the background
+    // engine's handover first: its onStop flushes the debounced conversation
+    // save, and reading before that flush would both miss headless-arrived
+    // messages and later overwrite them with this page's stale copy.
+    await _suspendDone;
     await _loadConversations();
 
     // Seed the install wapp's `source` KV on first run (when the user

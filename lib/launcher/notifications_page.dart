@@ -1,5 +1,34 @@
 part of 'launcher.dart';
 
+/// Open the wapp a notification came from. [source] follows the
+/// `wapp:<folder>` convention (docs/notifications.md); anything else is not
+/// routable here. Pushes WappPage directly — same shortcut the remote API's
+/// /api/launch takes — deliberately skipping the launcher grid's dependency
+/// gate and launch-count bookkeeping.
+Future<bool> _openWappBySource(BuildContext context, String source) async {
+  if (!source.startsWith('wapp:')) return false;
+  final folder = source.substring(5).trim();
+  if (folder.isEmpty) return false;
+  final installed = installedAppsStorage();
+  if (!await installed.directoryExists(folder)) return false;
+  final dir = installed.getAbsolutePath(folder);
+  var title = folder;
+  try {
+    final raw = await wappPackageStorage(dir).readString('manifest.json');
+    if (raw != null) {
+      final m = jsonDecode(raw);
+      if (m is Map && (m['title'] ?? '').toString().isNotEmpty) {
+        title = m['title'].toString();
+      }
+    }
+  } catch (_) {}
+  if (!context.mounted) return false;
+  await Navigator.of(context).push(
+    MaterialPageRoute(builder: (_) => WappPage(wappDir: dir, title: title)),
+  );
+  return true;
+}
+
 class NotificationsPage extends StatefulWidget {
   const NotificationsPage({super.key});
 
@@ -137,9 +166,22 @@ class _NotificationRow extends StatelessWidget {
       NotificationLevel.error => const Color(0xFFda3633),
       NotificationLevel.info => Theme.of(context).colorScheme.primary,
     };
+    // Rows route by source: a wapp notification opens its wapp, the updater's
+    // rows open Settings (which hosts Updates). Other host rows have nowhere
+    // meaningful to go and stay inert (null onTap = no splash, no promise).
+    final source = notification.source;
+    VoidCallback? onTap;
+    if (source.startsWith('wapp:')) {
+      onTap = () => unawaited(_openWappBySource(context, source));
+    } else if (source == 'host:updates') {
+      onTap = () => Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const IwiSettingsPage()),
+          );
+    }
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       child: ListTile(
+        onTap: onTap,
         leading: Container(
           width: 44,
           height: 44,

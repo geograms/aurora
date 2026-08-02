@@ -18,9 +18,9 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
-// FlutterFragmentActivity, not FlutterActivity: BiometricPrompt (local_auth,
-// used to unlock an encrypted profile) needs an androidx FragmentActivity —
-// on a plain FlutterActivity it fails with 'no_fragment_activity'.
+// FlutterFragmentActivity, not FlutterActivity: kept for plugins that need an
+// androidx FragmentActivity (and for the historical BiometricPrompt path).
+// Harmless for everything else; do not downgrade without checking plugins.
 class MainActivity : FlutterFragmentActivity() {
     companion object {
         // Held so the foreground service can ping Dart ('onTick') even while

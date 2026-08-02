@@ -159,7 +159,10 @@ flutter_native_splash:
   android_12:
     color: "#F4F1EA"
     color_dark: "#232A2E"
-    image: icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png
+    # Triad padded into the circular icon mask's safe zone so every launch
+    # surface shows the same image (user preference over the star-only icon).
+    image: icons/splash/android12_triad.png
+    image_dark: icons/splash/android12_triad_dark.png
     icon_background_color: "#F4F1EA"
     icon_background_color_dark: "#232A2E"
 

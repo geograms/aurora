@@ -3,17 +3,17 @@ part of 'launcher.dart';
 class _HomeHeader extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback onMenu;
   final VoidCallback onNotifications;
-  final VoidCallback? onMessages;
+  final VoidCallback? onMail;
   final VoidCallback? onChat;
-  final WappManifest? messagesWapp;
+  final WappManifest? mailWapp;
   final WappManifest? chatWapp;
 
   const _HomeHeader({
     required this.onMenu,
     required this.onNotifications,
-    this.onMessages,
+    this.onMail,
     this.onChat,
-    this.messagesWapp,
+    this.mailWapp,
     this.chatWapp,
   });
 
@@ -47,14 +47,13 @@ class _HomeHeader extends StatelessWidget implements PreferredSizeWidget {
             onPressed: onNotifications,
           ),
         ),
-        if (messagesWapp != null && onMessages != null)
+        if (mailWapp != null && onMail != null)
           _IntentBadgeIcon(
             icon: Icons.mail_outline,
-            tooltip: 'Messages',
-            wappId: BackgroundWappManager.folderName(messagesWapp!.dirPath),
-            intent: 'messages',
-            includeLxmf: true,
-            onPressed: onMessages!,
+            tooltip: 'Mail',
+            wappId: BackgroundWappManager.folderName(mailWapp!.dirPath),
+            intent: 'mail',
+            onPressed: onMail!,
           ),
         if (chatWapp != null && onChat != null)
           _IntentBadgeIcon(
@@ -62,6 +61,11 @@ class _HomeHeader extends StatelessWidget implements PreferredSizeWidget {
             tooltip: 'Chat',
             wappId: BackgroundWappManager.folderName(chatWapp!.dirPath),
             intent: 'chat',
+            // LXMF direct messages land in the CHAT wapp's rail, so they count
+            // here. They used to light the Mail badge instead: you were told by
+            // one app about a message stored in another, and the message
+            // "never arrived".
+            includeLxmf: true,
             onPressed: onChat!,
           ),
         const SizedBox(width: 6),

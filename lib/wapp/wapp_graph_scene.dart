@@ -22,6 +22,8 @@ import 'package:flutter/material.dart' show Colors;
 import 'package:graph3d/graph3d.dart';
 import 'package:vector_math/vector_math_64.dart' show Quaternion, Vector3;
 
+import '../services/reticulum/rns_iface_kind.dart';
+
 /// The network a device is reached over, grouped the way a person thinks
 /// about them: LAN and WiFi are one local network, TCP and UDP are both just
 /// "the internet". The palette is the graph's primary code — blue, green,
@@ -47,17 +49,24 @@ enum RnsIface {
 /// falls back to its relayer's network, else the internet (bootstrap hubs are
 /// TCP endpoints today).
 RnsIface classifyVia(String via, {RnsIface? relayerIface}) {
-  final v = via.toLowerCase();
-  if (v.startsWith('ble')) return RnsIface.ble;
-  if (v.startsWith('lan') || v.startsWith('wfd') || v.startsWith('wifi')) {
-    return RnsIface.lanWifi;
+  // The rule itself lives in rns_iface_kind.dart, because the Chat wapp asks
+  // the same question ("is this device reachable without the internet?") and
+  // two copies of it is exactly how a device ended up on the graph and missing
+  // from the nearby list. This function owns only the mapping to a colour.
+  switch (rnsIfaceKind(via)) {
+    case 'ble':
+      return RnsIface.ble;
+    case 'lan':
+      return RnsIface.lanWifi;
+    case 'lora':
+      return RnsIface.lora;
+    case 'radio':
+      return RnsIface.radio;
+    case 'internet':
+      return RnsIface.internet;
+    default:
+      return relayerIface ?? RnsIface.internet;
   }
-  if (v.startsWith('tcp') || v.startsWith('udp')) return RnsIface.internet;
-  if (v.startsWith('lora')) return RnsIface.lora;
-  if (v.startsWith('radio') || v.startsWith('aprs') || v.startsWith('kiss')) {
-    return RnsIface.radio;
-  }
-  return relayerIface ?? RnsIface.internet;
 }
 
 /// One node of the observed-network snapshot (see RnsService.graphSnapshot).
@@ -242,6 +251,42 @@ const double kPeerShell = 620; // direct neighbours
 const double kHubShell = 1300; // uplink anchors / relayers
 const double kHopSpacing = 340; // extra radius per hop behind an anchor
 
+/// The projected core radius below which a label is not worth drawing at all.
+/// This is a floor on absurdity — "is this orb even a dot" — NOT the density
+/// control. What keeps the view readable is the painter's screen-space
+/// de-collision pass (placeLabels), which measures the pixels the text
+/// actually eats; a threshold on orb size never could.
+const double kRnsLabelFloorPx = 3.0;
+
+/// Peers per concentric sub-shell before a new ring starts.
+const int kPeersPerRing = 9;
+
+/// World units of arc each peer wants for itself. NOTE: growing the shells
+/// uniformly does NOTHING on screen — the camera auto-fits the scene radius,
+/// so a bigger sphere is framed from further away and projects identically.
+/// This exists to keep the peer ring's spacing sane *relative* to the hub
+/// shell as the mix changes, not to de-crowd by itself.
+const double kPeerArc = 210;
+
+/// Hub elevations, in radians off the equator: ±19°, ±33°. Index 0 stays on
+/// the equator so the primary anchor sits where it always did.
+const List<double> kHubTilts = <double>[
+  0.0, 0.34, -0.34, 0.58, -0.58, 0.22, -0.22,
+];
+
+/// Shell radius for [count] peers sharing [sweep] radians of azimuth. Capped,
+/// or a 200-peer interface would push the ring out until the hub shell became
+/// a dot in the middle.
+double peerShellFor(int count, double sweep) {
+  // Bucketed by fours: a shell that resized on every arrival would make the
+  // whole ring breathe in and out as devices announce.
+  final bucket = ((count + 3) ~/ 4) * 4;
+  final wanted = kPeerArc * bucket / math.max(sweep, 0.6);
+  return wanted.clamp(kPeerShell, kPeerShell * 2.2);
+}
+
+
+
 /// Which nodes are on the canvas: self, every uplink anchor and true direct
 /// peer always; clustered members only while their anchor is the expanded
 /// one (one cluster at a time keeps busy-hub snapshots bounded).
@@ -255,14 +300,33 @@ List<RnsGraphNode> visibleRnsNodes(
     if (seen.add(n.id)) vis.add(n);
   }
 
+  // Sorted by id within each class, because rnsEgoLayout assigns azimuth
+  // slots BY INDEX: if the daemon ever hands us the same set in a different
+  // order, every node swaps wedges and the whole ring twitches. Sorting makes
+  // the layout a pure function of the node SET.
+  final anchors = <RnsGraphNode>[];
+  final leaves = <RnsGraphNode>[];
   for (final n in allNodes) {
-    if (n.effectiveKind == 'self' || n.effectiveKind == 'hub') add(n);
-  }
-  for (final n in allNodes) {
-    if (n.effectiveKind != 'leaf') continue;
-    if (n.effectiveRelayer.isEmpty || n.effectiveRelayer == expandedHubId) {
-      add(n);
+    if (n.effectiveKind == 'self' || n.effectiveKind == 'hub') {
+      anchors.add(n);
+    } else if (n.effectiveKind == 'leaf' &&
+        (n.effectiveRelayer.isEmpty || n.effectiveRelayer == expandedHubId)) {
+      leaves.add(n);
     }
+  }
+  // Self stays first — it is the origin of the ego layout.
+  anchors.sort((a, b) {
+    if (a.effectiveKind != b.effectiveKind) {
+      return a.effectiveKind == 'self' ? -1 : 1;
+    }
+    return a.id.compareTo(b.id);
+  });
+  leaves.sort((a, b) => a.id.compareTo(b.id));
+  for (final n in anchors) {
+    add(n);
+  }
+  for (final n in leaves) {
+    add(n);
   }
   return vis;
 }
@@ -366,11 +430,20 @@ Map<RnsIface, (double, double)> _egoSectors(List<RnsGraphNode> all) {
   ];
   final total = weights.fold(0.0, (a, b) => a + b);
   final sectors = <RnsIface, (double, double)>{};
+  // Snap boundaries to 15°. Weighting by a live sqrt(count) meant ONE node
+  // joining re-apportioned every wedge and rotated the entire ring — motion
+  // that says nothing about the network. Quantised, the wedges move only on a
+  // real change of shape.
+  const quantum = math.pi / 12;
   var theta = 0.0;
+  var acc = 0.0;
   for (var i = 0; i < present.length; i++) {
-    final sweep = 2 * math.pi * weights[i] / total;
-    sectors[present[i]] = (theta, sweep);
-    theta += sweep;
+    acc += 2 * math.pi * weights[i] / total;
+    final end = i == present.length - 1
+        ? 2 * math.pi
+        : (acc / quantum).round() * quantum;
+    sectors[present[i]] = (theta, math.max(end - theta, quantum));
+    theta = end;
   }
   return sectors;
 }
@@ -385,6 +458,9 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
 
   final positions = List<Vector3?>.filled(all.length, null);
   final azimuthOf = <String, double>{};
+  // A tilted anchor's cluster has to tilt with it, or the cone visually
+  // detaches from the hub it belongs to.
+  final elevationOf = <String, double>{};
 
   final byIfacePeers = <RnsIface, List<int>>{};
   final byIfaceHubs = <RnsIface, List<int>>{};
@@ -401,17 +477,33 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
 
   byIfacePeers.forEach((iface, indices) {
     final (start, sweep) = sectors[iface] ?? (0.0, 2 * math.pi);
-    final poses = sectorShellPoses(
-      indices.length,
-      radius: kPeerShell,
-      thetaStart: start + sweep * 0.08,
-      thetaSweep: sweep * 0.84,
-      phiSpread: math.pi / 2.4,
-    );
-    for (var j = 0; j < indices.length; j++) {
-      positions[indices[j]] = poses[j].position;
-      azimuthOf[all[indices[j]].id] =
-          start + sweep * 0.08 + (j + 0.5) / indices.length * sweep * 0.84;
+    final usable = sweep * 0.84;
+    final base = start + sweep * 0.08;
+    // Concentric sub-shells instead of one crowded ring. Twenty peers on a
+    // single shell sit 18° apart and read as noise; in rings of nine they sit
+    // 40° apart AND gain parallax — orbiting now separates them instead of
+    // sliding them past each other as one wall.
+    final rings = (indices.length / kPeersPerRing).ceil().clamp(1, 6);
+    for (var r = 0; r < rings; r++) {
+      final ringIdx = <int>[
+        for (var k = r; k < indices.length; k += rings) indices[k],
+      ];
+      if (ringIdx.isEmpty) continue;
+      final radius = peerShellFor(ringIdx.length, usable) * (1 + 0.38 * r);
+      // Half-slot stagger on odd rings so rings don't line up radially.
+      final stagger = r.isOdd ? usable / (ringIdx.length * 2) : 0.0;
+      final poses = sectorShellPoses(
+        ringIdx.length,
+        radius: radius,
+        thetaStart: base + stagger,
+        thetaSweep: usable,
+        phiSpread: math.pi / 2.4 + 0.10 * r,
+      );
+      for (var j = 0; j < ringIdx.length; j++) {
+        positions[ringIdx[j]] = poses[j].position;
+        azimuthOf[all[ringIdx[j]].id] =
+            base + stagger + (j + 0.5) / ringIdx.length * usable;
+      }
     }
   });
 
@@ -419,12 +511,22 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
     final (start, sweep) = sectors[iface] ?? (0.0, 2 * math.pi);
     for (var j = 0; j < indices.length; j++) {
       final theta = start + sweep * (j + 1) / (indices.length + 1);
+      // Off the equator. Four hubs pinned at y=0 projected onto one horizontal
+      // band with every uplink edge a parallel spoke; a deterministic tilt
+      // table (not jitter — three random tilts look like a mistake) separates
+      // them in depth while the first, highest-ranked hub keeps the equator.
+      final phi = math.pi / 2 + kHubTilts[j % kHubTilts.length];
+      // Fixed shell, deliberately: the anchors are the map's landmarks, and a
+      // radius that tracked a live member count would slide them outward every
+      // time somebody's device announced.
+      const radius = kHubShell;
       positions[indices[j]] = Vector3(
-        kHubShell * math.sin(theta),
-        0,
-        kHubShell * math.cos(theta),
+        radius * math.sin(phi) * math.sin(theta),
+        radius * math.cos(phi),
+        radius * math.sin(phi) * math.cos(theta),
       );
       azimuthOf[all[indices[j]].id] = theta;
+      elevationOf[all[indices[j]].id] = phi;
     }
   });
 
@@ -449,7 +551,7 @@ LayoutGeometry rnsEgoLayout(List<SceneNode<RnsGraphNode>> nodes) {
     final spreadHalf = siblings > 40 ? 0.5 : 0.28;
     final theta =
         hubAzimuth + ((ordinal + 0.5) / siblings - 0.5) * 2 * spreadHalf;
-    final phi = math.pi / 2 +
+    final phi = (elevationOf[n.effectiveRelayer] ?? math.pi / 2) +
         (((ordinal * golden) % 1.0) - 0.5) * (siblings > 40 ? 0.9 : 0.45);
     final radius = kHubShell + kHopSpacing * math.max(1, n.hops - 1);
     positions[i] = Vector3(
@@ -480,7 +582,8 @@ NodeSprite spriteOfRnsNode(
         haloScale: 3.0,
         ringColor: const Color(0xFFE0FFFF),
         label: n.label.isNotEmpty ? n.label : 'this node',
-        labelMinPx: 2.5,
+        labelMinPx: kRnsLabelFloorPx,
+        labelPriority: 3, // you are always worth naming
       );
     case 'hub':
       // Anchors carry the "how big is this hub" number as their badge —
@@ -493,9 +596,11 @@ NodeSprite spriteOfRnsNode(
         secondaryColor: n.geogram ? geogramGreen : null,
         badge:
             n.members > 0 && n.id != expandedHubId ? '${n.members}' : null,
-        badgeMinPx: 2.5,
+        // A pill floating on a 2px dot looks broken; match the halo floor.
+        badgeMinPx: 4.0,
         label: n.label,
-        labelMinPx: 2.5,
+        labelMinPx: kRnsLabelFloorPx,
+        labelPriority: 2, // the anchors are the map's landmarks
       );
     default:
       final direct = n.effectiveRelayer.isEmpty;
@@ -504,7 +609,8 @@ NodeSprite spriteOfRnsNode(
         coreColor: n.iface.color,
         secondaryColor: n.geogram ? geogramGreen : null,
         label: n.label,
-        labelMinPx: direct ? 2.5 : null,
+        labelMinPx: direct ? kRnsLabelFloorPx : null,
+        labelPriority: direct ? 1 : 0,
       );
   }
 }

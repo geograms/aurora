@@ -296,7 +296,7 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
   /// The description shown under a wapp's name on the home bars.
   ///
   /// Manifests routinely open with the wapp's own title ("Social — follow
-  /// people…", "Messages — one inbox…"), which is written for a store listing,
+  /// people…", "Mail — one inbox…"), which is written for a store listing,
   /// where the name is not already three centimetres above it. On the launcher
   /// the row shows the name AND this line, so the title is simply said twice and
   /// the useful half of a one-line description gets pushed off the end. Strip a
@@ -481,9 +481,9 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
             context,
           ).push(MaterialPageRoute(builder: (_) => const NotificationsPage()));
         },
-        messagesWapp: _wappForIntent('messages'),
+        mailWapp: _wappForIntent('mail'),
         chatWapp: _wappForIntent('chat'),
-        onMessages: () => _openWappIntent('messages'),
+        onMail: () => _openWappIntent('mail'),
         onChat: () => _openWappIntent('chat'),
       ),
       body: _buildBody(),

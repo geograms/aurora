@@ -18,6 +18,7 @@ class NodeSprite {
     this.badgeMinPx,
     this.label,
     this.labelMinPx,
+    this.labelPriority = 0,
   });
 
   /// Core radius in world units. The engine's own scale reference: a card is
@@ -55,6 +56,11 @@ class NodeSprite {
   /// label. The few always-visible anchors of a scene can set this low so
   /// their names read even at overview distance; crowds keep the default.
   final double? labelMinPx;
+
+  /// Who wins when two labels want the same pixels. Higher survives; the
+  /// loser is nudged to another side of its orb, or dropped. Default 0 keeps
+  /// existing scenes exactly as they were (pure nearest-first order).
+  final int labelPriority;
 }
 
 /// Depth-fog parameters: nodes fade with camera distance, which is most of

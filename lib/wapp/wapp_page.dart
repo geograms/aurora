@@ -131,6 +131,13 @@ class WappPage extends StatefulWidget {
   /// the Bluetooth wapp's envelope button).
   final String? initialConvo;
 
+  /// The human name for [initialConvo], when the CALLER knows it and the wapp
+  /// does not. Opening "X16JK8" from the Reticulum graph used to land in a
+  /// thread titled `LXMF 85cdc031` — the identity was thrown away one screen
+  /// after it was shown. Delivered to the wapp as a `convo_name` command so it
+  /// can file the alias and title the row properly.
+  final String? initialConvoName;
+
   /// For a `post:<mid>` [initialView]: the post's row (activity-archive map
   /// shape), already held by the caller. Lets the thread page open instantly
   /// with this as its root instead of waiting for the wapp to re-download the
@@ -150,6 +157,7 @@ class WappPage extends StatefulWidget {
     this.editWappDir,
     this.initialCommand,
     this.initialConvo,
+    this.initialConvoName,
     this.initialView,
     this.initialPost,
   });
@@ -1470,7 +1478,15 @@ class _WappPageState extends State<WappPage>
       final convo = widget.initialConvo;
       if (convo != null && convo.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _openConvoById(convo);
+          if (!mounted) return;
+          // Name first, so the row is titled before it is opened.
+          final nm = widget.initialConvoName;
+          if (nm != null && nm.isNotEmpty) {
+            _fieldValues['convo_name_id'] = convo;
+            _fieldValues['convo_name'] = nm;
+            _sendCommand('convo_name');
+          }
+          _openConvoById(convo);
         });
       }
 
@@ -1704,21 +1720,23 @@ class _WappPageState extends State<WappPage>
               ),
             );
           }
-        } else if (type == 'messages.open') {
-          // Jump into the Messages wapp's 1:1 with a callsign/npub — the ONE
+        } else if (type == 'ui.profile.open') {
+          // A wapp asks for the host's full profile screen for one person.
+          // Generic: the host owns the screen (avatar, bio, devices, follow,
+          // Chat / Mail), the wapp only says WHO. Used by Chat's nearby list —
+          // a row you tap should open the person, not a modal sheet.
+          final call = (data['callsign'] as String? ?? '').trim();
+          final npub = (data['npub'] as String? ?? '').trim();
+          if (call.isNotEmpty && mounted) {
+            _openProfile(call, npub: npub.isEmpty ? null : npub);
+          }
+        } else if (type == 'mail.open' || type == 'messages.open') {
+          // Jump into the Mail wapp's 1:1 with a callsign/npub — the ONE
           // kind-4 inbox. Chat's "New chat" panel routes NOSTR people here
           // instead of growing a second, worse copy of the same conversation.
-          final target = (data['target'] as String? ?? '').trim();
-          if (target.isNotEmpty && mounted) {
-            final dir = '${installedAppsDirPath()}/messages';
-            // ignore: discarded_futures
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => WappPage(
-                    wappDir: dir, title: 'Messages', initialConvo: target),
-              ),
-            );
-          }
+          // `messages.open` is the pre-rename spelling, still honoured so a
+          // not-yet-upgraded Chat build keeps working.
+          _openMailWith((data['target'] as String? ?? '').trim());
         } else if (type == 'ui.graph.set') {
           // The wapp pushes a {nodes,edges} snapshot for the native `$type:
           // "graph"` widget. We just hand it to the ValueNotifier the _GraphView
@@ -3220,6 +3238,9 @@ class _WappPageState extends State<WappPage>
       _wappName,
       jsonEncode(scalarFields),
     );
+    // User actions only (not per-frame), so this stays cheap — and "did the
+    // wapp even get my send?" was unanswerable without it.
+    LogService.instance.add('wapp $_wappName: cmd $cmd');
     _engine.sendMessage(jsonEncode({'command': cmd, 'fields': scalarFields}));
     _engine.handleEvent();
     _drainOutbox();
@@ -3268,7 +3289,7 @@ class _WappPageState extends State<WappPage>
         });
       }
     }
-    return RoomsField(
+    final roomsField = RoomsField(
       rooms: rooms,
       store: store,
       openId: openId,
@@ -3313,6 +3334,17 @@ class _WappPageState extends State<WappPage>
         _sendCommand('conversations_block');
       },
     );
+    // "Held for relay" used to be invisible: a message parked in the outbound
+    // mailbox looked exactly like a delivered one. Say it, above the thread it
+    // belongs to, and say that we keep trying.
+    final openDest = (openId != null && openId.startsWith('lxmf:'))
+        ? openId.substring(5)
+        : '';
+    if (openDest.isEmpty) return roomsField;
+    return Column(children: [
+      _LxmfPendingStrip(destHex: openDest),
+      Expanded(child: roomsField),
+    ]);
   }
 
   Widget _buildConversationsScreen(GeoUiBlock screen, GeoUiBlock group) {
@@ -3415,10 +3447,14 @@ class _WappPageState extends State<WappPage>
         _fieldValues['${field}_hidekey'] = key;
         _sendCommand('${field}_hide');
       },
-      onBlock: (from) {
-        if (from.isEmpty) return;
-        _fieldValues['${field}_blockcall'] = from;
-        _sendCommand('${field}_block');
+      onBlock: (id, from) {
+        if (id.isEmpty && from.isEmpty) return;
+        // Confirm first — blocking takes the thread and its messages off the
+        // screen. The helper sends both the conversation id (the address; a
+        // pubkey for Mail) and the display name (what a callsign-keyed wapp
+        // blocks on).
+        // ignore: discarded_futures
+        _confirmBlockConversation(field, id, from.isNotEmpty ? from : id);
       },
       onMute: (id, muted) {
         setState(() => store.setMuted(id, muted));
@@ -4146,6 +4182,11 @@ class _WappPageState extends State<WappPage>
                         : const [],
                     roomConvField: convField,
                     roomConvId: _convOpenId,
+                    // Independent of `thread` (which is narrow-layout only):
+                    // a wide window shows list + thread side by side and still
+                    // needs Block/Mute/Close for whatever is open.
+                    convActionsField: convGroup?.name ?? 'conversations',
+                    convActionsId: convGroup == null ? null : _convOpenId,
                   ),
                 ],
         ),
@@ -4337,9 +4378,22 @@ class _WappPageState extends State<WappPage>
       final isNotif = _menuScreens[i].children.any(
         (c) => c.keyword == 'field' && c.name == 'notifications',
       );
+      // Any panel can carry a count on its icon by naming the field that holds
+      // it (`"badge": "<field>"`). A panel you have to open to find out whether
+      // it is worth opening is a panel nobody opens — the number on the glyph
+      // IS the reason to look.
+      final badgeField = _menuScreens[i].getString('badge') ?? '';
+      final declared = badgeField.isEmpty
+          ? 0
+          : switch (_fieldValues[badgeField]) {
+              final int v => v,
+              final num v => v.toInt(),
+              final String v => int.tryParse(v.trim()) ?? 0,
+              _ => 0,
+            };
       final unread = isNotif
           ? RnsService.instance.nostrNotificationsUnread()
-          : 0;
+          : declared;
 
       Widget button = IconButton(
         icon: Icon(_panelIcon(i)),
@@ -4470,6 +4524,57 @@ class _WappPageState extends State<WappPage>
     ];
   }
 
+  /// Confirm, then fire the wapp's `<field>_block` for an open conversation.
+  /// Same command the long-press "Block" sheet sends, so a wapp implements it
+  /// once. The wapp decides what blocking means (Mail drops the sender's key,
+  /// Chat drops a callsign) — the host only asks and forwards.
+  Future<void> _confirmBlockConversation(
+      String field, String id, String title) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Block $title?'),
+        content: const Text(
+          'Their messages are dropped as they arrive and this conversation is '
+          'removed. Nothing is sent — they are not told. You can undo this '
+          'from the wapp\'s Blocked list.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Block',
+                style: TextStyle(color: Color(0xFFda3633))),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    _fieldValues['${field}_convo'] = id;
+    _fieldValues['${field}_blockcall'] = title;
+    _sendCommand('${field}_block');
+    setState(() {
+      if (_convOpenId == id) _convOpenId = null;
+    });
+  }
+
+  /// The command of a screen whose entire content is a single `<action>` —
+  /// null when the screen has fields, groups or more than one action. Used to
+  /// collapse "a panel containing one link" into the link itself.
+  String? _soleAction(GeoUiBlock screen) {
+    final kids = screen.children
+        .where((c) => c.keyword != 'label')
+        .toList();
+    if (kids.length != 1) return null;
+    final a = kids.first;
+    if (a.keyword != 'action') return null;
+    final n = a.name ?? '';
+    return n.isEmpty ? null : n;
+  }
+
   /// Top-right options menu: the active screen's actions (for people screens),
   /// then any screens flagged `"menu": true` (open as panels), plus "Edit".
   Widget _buildWappOptionsMenu({
@@ -4477,8 +4582,21 @@ class _WappPageState extends State<WappPage>
     List<GeoUiBlock> roomToggles = const [],
     String roomConvField = '',
     String? roomConvId,
+    String convActionsField = '',
+    String? convActionsId,
   }) {
     final actions = _activeScreenMenuActions();
+    // The open conversation's own actions (block / mute / close). They exist on
+    // the message long-press sheet too, but a long-press is invisible: someone
+    // being spammed looks for a menu, and this is the menu. Shown whenever a
+    // conversation is open, in EVERY layout — the narrow-screen thread chrome
+    // is a rendering detail, not a precondition for wanting to block.
+    final convOpen = (convActionsId ?? '').isNotEmpty;
+    final convItem =
+        convOpen ? _convStore(convActionsField).items[convActionsId] : null;
+    final convTitle = (convItem?.title.isNotEmpty ?? false)
+        ? convItem!.title
+        : (convActionsId ?? '');
     return PopupMenuButton<String>(
       icon: const Icon(Icons.menu),
       tooltip: 'Options',
@@ -4496,11 +4614,45 @@ class _WappPageState extends State<WappPage>
           // which conversation it applies to, then fire it.
           _fieldValues['${roomConvField}_convo'] = roomConvId;
           _sendCommand(value.substring(5));
+        } else if (value == 'conv:block') {
+          // Blocking drops the thread off the screen, so ask first — the
+          // messages go with it. The wapp owns the list; this only fires the
+          // same command the long-press sheet does.
+          // ignore: discarded_futures
+          _confirmBlockConversation(convActionsField, convActionsId!, convTitle);
+        } else if (value == 'conv:mute') {
+          final store = _convStore(convActionsField);
+          final was = store.items[convActionsId]?.muted ?? false;
+          setState(() => store.setMuted(convActionsId!, !was));
+          _scheduleConvoSave(convActionsField);
+          _syncAppBadge(); // muting drops it from the app-wide badge
+        } else if (value == 'conv:close') {
+          final store = _convStore(convActionsField);
+          setState(() {
+            store.setClosed(convActionsId!, true);
+            if (_convOpenId == convActionsId) _convOpenId = null;
+          });
+          // Tell the wapp too (same as the long-press sheet's Close): it
+          // persists the closed list and mutes the peer at ingest, so no
+          // further messages OR notifications arrive for this conversation.
+          _fieldValues['${convActionsField}_convo'] = convActionsId!;
+          _sendCommand('${convActionsField}_close');
+          _scheduleConvoSave(convActionsField);
+          _syncAppBadge();
         } else if (value.startsWith('action:')) {
           _sendCommand(value.substring(7));
         } else if (value.startsWith('panel:')) {
           final i = int.tryParse(value.substring(6)) ?? -1;
           if (i >= 0 && i < _menuScreens.length) {
+            // A menu screen whose whole body is ONE action is a button wearing
+            // a screen's clothes: pushing a full page to show a single link
+            // ("Start a chat" → "New chat") is a step that exists only because
+            // of how the wapp declared it. Fire the action instead.
+            final only = _soleAction(_menuScreens[i]);
+            if (only != null) {
+              _sendCommand(only);
+              return;
+            }
             setState(() {
               _panelScreen = _menuScreens[i];
               _panelName = _menuNames[i];
@@ -4510,6 +4662,46 @@ class _WappPageState extends State<WappPage>
         }
       },
       itemBuilder: (_) => [
+        if (convOpen) ...[
+          PopupMenuItem<String>(
+            value: 'conv:mute',
+            child: ListTile(
+              leading: Icon(
+                (convItem?.muted ?? false)
+                    ? Icons.notifications_off
+                    : Icons.notifications_none,
+              ),
+              title: Text(
+                (convItem?.muted ?? false) ? 'Unmute' : 'Mute notifications',
+              ),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            ),
+          ),
+          PopupMenuItem<String>(
+            value: 'conv:close',
+            child: const ListTile(
+              leading: Icon(Icons.close),
+              title: Text('Close conversation'),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            ),
+          ),
+          PopupMenuItem<String>(
+            value: 'conv:block',
+            child: ListTile(
+              leading: const Icon(Icons.block, color: Color(0xFFda3633)),
+              title: Text(
+                'Block $convTitle',
+                style: const TextStyle(color: Color(0xFFda3633)),
+                overflow: TextOverflow.ellipsis,
+              ),
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+            ),
+          ),
+          const PopupMenuDivider(),
+        ],
         for (final f in roomToggles)
           CheckedPopupMenuItem<String>(
             value: 'toggle:${f.name ?? ''}',
@@ -6860,6 +7052,34 @@ class _WappPageState extends State<WappPage>
         });
   }
 
+  /// Open the Mail wapp on the 1:1 with [target] (a pubkey hex / npub, or a
+  /// callsign the Mail wapp resolves). One place, because three callers want
+  /// it: the `mail.open` outbox type, the profile screen's Mail button, and
+  /// the legacy `messages.open` spelling.
+  void _openMailWith(String target, {String name = ''}) {
+    if (target.isEmpty || !mounted) return;
+    // Mail keys every conversation by the 64-char HEX pubkey — that is what it
+    // encrypts to. Handing it an npub opened a thread titled `npub1…` whose
+    // send path then refused the id (`is_hex64` fails) and dropped the message
+    // without a word. Convert here, where the encoding is known.
+    final hex = _keepHexOf(target);
+    final convo = hex ?? target;
+    final dir = '${installedAppsDirPath()}/mail';
+    // ignore: discarded_futures
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => WappPage(
+          wappDir: dir,
+          title: name.isNotEmpty ? name : 'Mail',
+          initialConvo: convo,
+          // …and the person's name, so the thread says X1RD89 and not 64 hex
+          // characters. Same door the Chat wapp uses.
+          initialConvoName: name,
+        ),
+      ),
+    );
+  }
+
   void _openConvoById(String convo) {
     if (convo.isEmpty) return;
     // The rooms layout (Chat) has no `conversations` group — its rail IS the
@@ -6973,6 +7193,20 @@ class _WappPageState extends State<WappPage>
               : () {
                   Navigator.of(context).pop();
                   _openConvoById(c);
+                },
+          // Mail is a different destination from chat, not a synonym. It is
+          // keyed by the person's KEY — but a callsign works too: the Mail
+          // wapp resolves callsign -> key through the relay directory, which
+          // is exactly what its New-message box does. Hiding the button
+          // because we have not learned their key YET would strand someone
+          // who is standing right next to you.
+          onMail: isSelf
+              ? null
+              : () {
+                  Navigator.of(context).pop();
+                  _openMailWith(
+                      (resolvedNpub ?? '').isNotEmpty ? resolvedNpub! : c,
+                      name: c);
                 },
           following: _followedCalls.contains(c.toUpperCase()),
           blocked: _blockedCalls.contains(c.toUpperCase()),
@@ -10914,6 +11148,60 @@ class _QrScanPageState extends State<_QrScanPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+
+/// A one-line "waiting to deliver" banner for an open LXMF thread. Rebuilds
+/// itself off RnsService's LXMF listener, so it disappears the moment a retry
+/// gets through.
+class _LxmfPendingStrip extends StatefulWidget {
+  final String destHex;
+  const _LxmfPendingStrip({required this.destHex});
+
+  @override
+  State<_LxmfPendingStrip> createState() => _LxmfPendingStripState();
+}
+
+class _LxmfPendingStripState extends State<_LxmfPendingStrip> {
+  @override
+  void initState() {
+    super.initState();
+    RnsService.instance.addLxmfListener(_refresh);
+  }
+
+  @override
+  void dispose() {
+    RnsService.instance.removeLxmfListener(_refresh);
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final n = RnsService.instance.lxmfPendingFor(widget.destHex);
+    if (n == 0) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: cs.tertiaryContainer.withValues(alpha: 0.45),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      child: Row(children: [
+        const Icon(Icons.schedule, size: 15),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            n == 1
+                ? 'Waiting to deliver — still trying'
+                : 'Waiting to deliver $n messages — still trying',
+            style: const TextStyle(fontSize: 12.5),
+          ),
+        ),
+      ]),
     );
   }
 }

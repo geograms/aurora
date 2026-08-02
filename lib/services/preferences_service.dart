@@ -400,7 +400,7 @@ class PreferencesService {
   // cost is the seeding itself, which is the point of pinning.
   static const Set<String> _defaultAutostartWappIds = {
     'chat',
-    'messages',
+    'mail',
     'torrents',
   };
   bool getWappAutostart(String wappId) =>
@@ -698,6 +698,16 @@ class PreferencesService {
     // ignore: discarded_futures
     _prefs.setStringList('nostr.blossomServers', v);
   }
+
+  /// Serve the device's NOSTR relay over WebSocket (NostrWsServer). Binds
+  /// 0.0.0.0, so a port-forwarded/public device becomes a public NOSTR relay
+  /// (and answers mailto→npub conversion REQs). Default on; kind-4 DMs are
+  /// never served over this socket.
+  bool get nostrWsRelayEnabled => _prefs.getBool('nostr.wsRelay') ?? true;
+  set nostrWsRelayEnabled(bool v) => _prefs.setBool('nostr.wsRelay', v);
+
+  int get nostrWsRelayPort => _prefs.getInt('nostr.wsRelay.port') ?? 4848;
+  set nostrWsRelayPort(int v) => _prefs.setInt('nostr.wsRelay.port', v);
 
   List<String> get rnsBootstrapServers {
     final v = _prefs.getStringList('rns.bootstrapServers');

@@ -342,6 +342,7 @@ class _Graph3DViewState<T> extends State<Graph3DView<T>> {
                               fogNear: -(distance - radius * 0.4),
                               fogFar: -(distance + radius),
                               style: _controller.style,
+                              hoveredId: _controller.hoveredId,
                             ),
                           );
                         }

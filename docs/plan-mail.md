@@ -1,9 +1,9 @@
-# Plan — the unified `Messages` wapp
+# Plan — the unified `Mail` wapp
 
 > Status: approved by the user (2026-07-11), implementing.
 > Goal: **one inbox**. Merge the messaging that today exists twice — in the
 > **Chat** wapp (`tools.geogram.chat`) and the **Social** wapp
-> (`tools.geogram.social`) — into a single wapp, `Messages`, that speaks
+> (`tools.geogram.social`) — into a single wapp, `Mail`, that speaks
 > **NOSTR** to send message notes between people.
 
 ## 1. Why this is a merge and not a rewrite
@@ -102,15 +102,15 @@ So the wapp is: transports in, decrypt/dedup, `ui.convo.*` out. It should be
 
 ## 5. Host integration (already waiting for us)
 
-The launcher header resolves its Messages icon **by intent** —
-`_wappForIntent('messages')` (`launcher_page.dart:395`) — and no wapp currently
+The launcher header resolves its Mail icon **by intent** —
+`_wappForIntent('mail')` (`launcher_page.dart:395`) — and no wapp currently
 declares it, so the icon is dark. The manifest therefore declares:
 
 ```json
-"provides": { "intents": ["messages"] }
+"provides": { "intents": ["mail"] }
 ```
 
-Unread badge: the wapp emits `{"type":"unread","count":N,"intent":"messages"}`
+Unread badge: the wapp emits `{"type":"unread","count":N,"intent":"mail"}`
 (`background_wapp_manager.dart:430`), which lights the header icon and the app
 tile. Running in the background, `{"type":"notify",...}` raises a native
 notification for a new message.
@@ -118,8 +118,8 @@ notification for a new message.
 ## 6. Scope
 
 **In:**
-- New wapp `wapps/messages` — id `tools.geogram.messages`, title `Messages`,
-  icon mail, `intents: ["messages"]`, autostart/background (messages must arrive
+- New wapp `wapps/mail` — id `tools.geogram.mail`, title `Mail`,
+  icon mail, `intents: ["mail"]`, autostart/background (messages must arrive
   when the app is closed).
 - Conversations keyed by pubkey; display name + avatar from `hal_nostr_profile`;
   callsign shown as an alias when known.
@@ -153,8 +153,8 @@ hub), on release-grade AOT builds:
   [messages] recv key=47360655 (envelope)   <- first lane to land, shown
   [messages] fold key=47360655 (envelope)   <- the other lane's copy, folded
   ```
-- **The launcher icon lights.** `provides.intents:["messages"]` resolves, and the
-  header Messages badge shows the unread count.
+- **The launcher icon lights.** `provides.intents:["mail"]` resolves, and the
+  header Mail badge shows the unread count.
 - **Background delivery works** — the wapp autostarts, so messages arrive with
   the page closed.
 - 20 wapp unit tests, run natively against the same source.
@@ -201,3 +201,91 @@ Neither would have been caught by reading the code, and neither crashed anything
    delivery + store-and-forward).
 5. Confirm the same message is not double-notified when the relay copy lands
    after the direct copy.
+
+## 8. Renamed to `Mail` (2026-08-02)
+
+The wapp shipped as `Messages` and was renamed to **`Mail`** — folder
+`wapps/messages` → `wapps/mail`, id `tools.geogram.messages` →
+`tools.geogram.mail`, title/screen `Messages` → `Mail`, icon
+`media/icons/mail.svg`, first release `0.2.0`.
+
+The launcher **intent** moved with it: `messages` → `mail`. Both sides changed
+together (`manifest.provides.intents`, the wapp's `unread`/`notify` payloads,
+`_wappForIntent('mail')` and `_HomeHeader`'s badge). A device still running the
+pre-rename wapp therefore stops lighting the header badge until the bundled
+0.2.0 lands — which it does on the next launch via `upgradeBundledWapps`.
+
+Two compatibility surfaces are kept deliberately:
+
+- Host accepts **both** `mail.open` and the legacy `messages.open` outbox type
+  (`wapp_page.dart`), so a not-yet-upgraded Chat build still routes NOSTR people
+  into the inbox.
+- `migrateMessagesToMail` (`launcher/seeding.dart`, registered as a boot task
+  before seeding) moves the installed program dir, the **data dir** (conversation
+  history, dedup ring, peers), the autostart preference and the offered-set
+  entries. Without the data-dir move the rename would read as history loss.
+
+## 9. Blocking (0.2.1)
+
+An inbox anyone can write to needs a way to say **no**: a spammer knows your
+key, so the only defence is dropping what arrives from theirs.
+
+**Keyed on the pubkey, never the name.** A display name is a kind-0 nickname —
+or, for a stranger, the 12-char truncation of their key (`fa31ff61cfa7`) — and
+both are things the spammer chooses. The block list holds 64-char hex keys,
+persisted in the wapp's KV under `blocked` (";"-joined), so it survives a
+restart. Nothing is transmitted: the sender is never told, and there is no list
+to leak.
+
+Entry points:
+
+| Where | What happens |
+|---|---|
+| **☰ menu** (top-right) with a conversation open → *Block <name>* | host confirms, then sends `conversations_block` with `conversations_convo` (the peer's key) + `conversations_blockcall` (display name). The same menu carries *Mute notifications* and *Close conversation* |
+| Long-press a message → **Block** | same command, no confirmation (the sheet is already an explicit choice) |
+| **Blocked** screen → *Block a key* | `ui.prompt` for an npub / hex key |
+| **Blocked** screen → *Unblock* | `ui.prompt` with the blocked keys as one-tap chips |
+
+`block_convo()` adds the key, then emits `ui.convo.remove` for that thread —
+blocking a spammer has to remove the spam already on screen, not just the next
+message. `ingest()` drops a blocked sender **before** the dedup ring, the
+conversation store and the notification, so nothing lights up.
+
+Two host changes came with it, both generic:
+
+- `ConversationsField.onBlock` now yields `(id, from)` instead of `from` alone,
+  and `wapp_page` puts the id in `<field>_convo`. A pubkey-keyed wapp cannot
+  block on a display name; a callsign-keyed one (Chat) still reads `blockcall`.
+- The ☰ options menu grows Mute / Close / Block entries **as text** whenever a
+  conversation is open, in every layout (the old thread-chrome path only
+  existed below 640px). A long-press is invisible: someone being spammed looks
+  for a menu, so the menu has to carry it. Block asks for confirmation there,
+  since it takes the thread off the screen.
+- Icon vocabulary gained `block`.
+
+Also fixed while in here: the New-message prompt sent a `fields:[…]` array,
+which `ui.prompt` ignores — the box had chips and no way to type a key — and
+its result was read from `to`/`value` instead of `prompt_value` /
+`prompt_input`. Prompt results now dispatch on `prompt_id`
+(`newmsg` / `blockkey` / `unblock`).
+
+### 9.1 Where Block lives in the UI (verified on Linux desktop, 2026-08-02)
+
+Three entry points, all reaching the same `conversations_block` command, all
+screenshot-verified against a live spammer (`fa31ff61cfa7…310e988`):
+
+1. **Conversation row ⋮** — Mute / Close / *Block <name>*.
+2. **Message bubble ⋮ (or long-press)** — Info / Copy / Forward / Hide this
+   message / *Block <name>*.
+3. **☰ app-bar menu** — *Mute notifications* / *Close conversation* /
+   *Block <name>*, shown ONLY while a conversation is open; with nothing
+   selected the menu holds just the panel screens (Blocked, Status) and Edit
+   wapp. The gate is `convActionsId`, not the narrow-layout `thread` variable —
+   the wide side-by-side layout has an open conversation too.
+
+All three confirm first (`_confirmBlockConversation`), because blocking removes
+the thread and its messages from the screen.
+
+Blocked senders are logged (`[mail] blocked drop from <key>`) — a message that
+vanishes with no trace is indistinguishable from a delivery bug. Note the host
+log ring is small and NOSTR-chatty; read it from `/api/log` and grep.

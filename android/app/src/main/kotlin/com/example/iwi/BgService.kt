@@ -29,6 +29,7 @@ class BgService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -68,6 +69,20 @@ class BgService : Service() {
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "aurora:wifi")
                 .apply { setReferenceCounted(false); acquire() }
         }
+        // Reticulum finds peers on the LAN with UDP broadcast, and Android's
+        // WiFi chip drops broadcast/multicast frames before userspace unless a
+        // multicast lock is held. MainActivity holds one — but only while the
+        // Activity exists, so with the screen off (or after a boot with no UI)
+        // the device went deaf to its own neighbours: it kept announcing and
+        // stopped hearing anyone. Hold it for as long as this service lives.
+        if (multicastLock == null) {
+            try {
+                val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+                multicastLock = wm.createMulticastLock("aurora-rns-lan-bg")
+                    .apply { setReferenceCounted(false); acquire() }
+            } catch (_: Throwable) {
+            }
+        }
         handler.removeCallbacks(ticker)
         handler.postDelayed(ticker, TICK_MS)
         return START_STICKY
@@ -79,6 +94,8 @@ class BgService : Service() {
         wakeLock = null
         wifiLock?.let { if (it.isHeld) it.release() }
         wifiLock = null
+        multicastLock?.let { if (it.isHeld) it.release() }
+        multicastLock = null
         super.onDestroy()
     }
 

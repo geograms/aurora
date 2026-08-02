@@ -327,3 +327,52 @@ reputation levels; ⚙ → Settings (identity/position/bluetooth/media/pubkey on
   `chat/room.h`, `chat/manifest.json`, `chat/app.wasm`, and the specific
   `binaries/chat/chat-0.2.117.wapp` / index entry) so unrelated Social changes are
   not folded in.
+
+## Nearby devices (chat 0.4.8)
+
+A mesh radio's first question is not "who exists" but **"who can I touch from
+here, right now"**. Chat answers it in a full-size tab, `$type:"people"`, fed by
+one presence table the wapp merges from three sources:
+
+| Source | What it gives |
+|---|---|
+| `hal_people_directory` | Reticulum: geogram people + LXMF peers, with `via` (interface) and hop count |
+| `hal_mesh_devices` | BLE street-mesh neighbours (direct radio reach) |
+| `g_pk_call` / `g_pk_ts` | the pubkey beacons Chat already hears over BLE broadcast / APRS / RNS |
+
+Merged **by identity, not by radio**: the same neighbour heard over BLE and LAN
+is one row carrying two tags (LAN / BLE / Reticulum / LXMF / Radio), not two
+rows. Peers more than one hop away are dropped — reachable *through* somebody is
+a different promise from local reach.
+
+Two sections, each sorted newest-first:
+
+- **Within reach** — heard within `NEAR_ACTIVE_SEC` (10 minutes).
+- **Seen before** — everyone else, rendered grey (`"dim": true`, honoured by
+  `PeopleViewField`) with the age spelled out ("last seen 40m ago"). Nobody is
+  deleted and the table is persisted in KV `nearby`: "who was here earlier" is
+  the second question a presence list has to answer, and dropping the row
+  answers it with a lie.
+
+A stats strip carries the two counts. Section titles carry NO count — the host's
+section tab already appends one (a "(0) (0)" bug caught in review). "direct" is
+only claimed for active rows: it is a statement about now.
+
+Tapping a row emits `ui.profile.open {callsign, npub}` — a generic host outbox
+type — and the host opens its full profile screen, where **Chat** and **Mail**
+sit side by side. Mail falls back to the callsign when the key is not known yet
+(the Mail wapp resolves callsign → key through the relay directory), so someone
+standing next to you is never unreachable just because their beacon has not
+landed.
+
+Refresh runs on a 5s cadence while a UI is attached, diffed via
+`fnd_changed_send` — a quiet poll costs two HAL reads and no rebuild. The tab is
+switched by the HOST, so there is no "screen opened" event to hang it on; that
+mistake shipped a permanently empty list in 0.4.6.
+
+### Validated (2026-08-02, desktop X16JK8 ⇄ phone X1RD89 on one LAN)
+
+Both directions, screenshot-verified: each device listed the other under
+**Within reach (1)** with tags `LAN` + `LXMF`, the age ticking ("seen 2s ago -
+direct"), the desktop's 7 stale radio-beacon rows greyed under **Seen before**,
+and phone-side row → profile → **Mail** opening the 1:1 composer for X16JK8.

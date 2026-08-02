@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart';
 
 /// Per-wapp unread counts that drive launcher badges. Counts are session-scoped
 /// and in-memory. Base keys are `wappId`; intent-specific counts use
-/// `wappId#intent` so host icons can distinguish "messages" from "chat" even
+/// `wappId#intent` so host icons can distinguish "mail" from "chat" even
 /// when one wapp provides both views.
 class WappUnreadService {
   WappUnreadService._();

@@ -176,141 +176,151 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
     // glance); it is nonsense when the row is a folder or a file, where a random
     // coloured sigil says nothing and the type says everything.
     final iconName = (it['icon'] ?? '').toString();
+    // `dim: true` — the row is real but no longer current (e.g. a device last
+    // heard an hour ago). Greyed rather than hidden: "who was here" is the
+    // question a presence list answers second, right after "who is here now".
+    final dim = it['dim'] == true;
 
-    return InkWell(
-      onTap: () => widget.onTap(id),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (avatar.startsWith('file:'))
-              // A content-addressed media token (e.g. a torrent's favicon-style
-              // icon): render from the local archive, fetching if we do not hold
-              // it yet. Falls back to the generated avatar until it lands.
-              _TokenAvatar(token: avatar, seed: id, size: 44)
-            else if (avatar.isNotEmpty)
-              ClipOval(
-                child: Image.network(
-                  avatar,
+    return Opacity(
+      opacity: dim ? 0.45 : 1,
+      child: InkWell(
+        onTap: () => widget.onTap(id),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (avatar.startsWith('file:'))
+                // A content-addressed media token (e.g. a torrent's favicon-style
+                // icon): render from the local archive, fetching if we do not hold
+                // it yet. Falls back to the generated avatar until it lands.
+                _TokenAvatar(token: avatar, seed: id, size: 44)
+              else if (avatar.isNotEmpty)
+                ClipOval(
+                  child: Image.network(
+                    avatar,
+                    width: 44,
+                    height: 44,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) =>
+                        GeneratedAvatar(seed: id, size: 44),
+                  ),
+                )
+              else if (iconName.isEmpty)
+                GeneratedAvatar(seed: id, size: 44)
+              else
+                SizedBox(
                   width: 44,
                   height: 44,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) =>
-                      GeneratedAvatar(seed: id, size: 44),
-                ),
-              )
-            else if (iconName.isEmpty)
-              GeneratedAvatar(seed: id, size: 44)
-            else
-              SizedBox(
-                width: 44,
-                height: 44,
-                child: Icon(
-                  geoUiResolveIcon(iconName),
-                  size: 30,
-                  color: cs.onSurfaceVariant,
-                ),
-              ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 15,
-                    ),
+                  child: Icon(
+                    geoUiResolveIcon(iconName),
+                    size: 30,
+                    color: cs.onSurfaceVariant,
                   ),
-                  if (subtitle.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 1),
-                      child: Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: cs.onSurfaceVariant,
-                          fontSize: 12.5,
+                ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15,
+                      ),
+                    ),
+                    if (subtitle.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 1),
+                        child: Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: cs.onSurfaceVariant,
+                            fontSize: 12.5,
+                          ),
                         ),
                       ),
-                    ),
-                  if (tags.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 5),
-                      child: Wrap(
-                        spacing: 5,
-                        runSpacing: 5,
-                        children: [
-                          for (final t in tags)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: cs.primaryContainer.withAlpha(110),
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Text(
-                                t,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: cs.onPrimaryContainer,
+                    if (tags.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 5),
+                        child: Wrap(
+                          spacing: 5,
+                          runSpacing: 5,
+                          children: [
+                            for (final t in tags)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: cs.primaryContainer.withAlpha(110),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Text(
+                                  t,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: cs.onPrimaryContainer,
+                                  ),
                                 ),
                               ),
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            if (action.isNotEmpty && actionLabel.isNotEmpty) ...[
-              const SizedBox(width: 8),
-              filled
-                  ? FilledButton(
-                      style: FilledButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
+              if (action.isNotEmpty && actionLabel.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                filled
+                    ? FilledButton(
+                        style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                        ),
+                        onPressed: () => widget.onAction(action, id),
+                        child: Text(actionLabel),
+                      )
+                    : OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                        ),
+                        onPressed: () => widget.onAction(action, id),
+                        child: Text(actionLabel),
                       ),
-                      onPressed: () => widget.onAction(action, id),
-                      child: Text(actionLabel),
-                    )
-                  : OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
+              ],
+              for (final b in buttons)
+                IconButton(
+                  icon: Icon(_rowIcon((b['icon'] ?? '').toString()), size: 20),
+                  tooltip: (b['tip'] ?? '').toString(),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () =>
+                      widget.onAction((b['action']).toString(), id),
+                ),
+              if (menu.isNotEmpty)
+                PopupMenuButton<String>(
+                  icon: const Icon(Icons.more_vert),
+                  tooltip: 'More',
+                  onSelected: (v) => widget.onAction(v, id),
+                  itemBuilder: (_) => [
+                    for (final m in menu)
+                      PopupMenuItem<String>(
+                        value: (m['value'] ?? '').toString(),
+                        child: Text(
+                          (m['label'] ?? m['value'] ?? '').toString(),
+                        ),
                       ),
-                      onPressed: () => widget.onAction(action, id),
-                      child: Text(actionLabel),
-                    ),
+                  ],
+                ),
             ],
-            for (final b in buttons)
-              IconButton(
-                icon: Icon(_rowIcon((b['icon'] ?? '').toString()), size: 20),
-                tooltip: (b['tip'] ?? '').toString(),
-                visualDensity: VisualDensity.compact,
-                onPressed: () => widget.onAction((b['action']).toString(), id),
-              ),
-            if (menu.isNotEmpty)
-              PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert),
-                tooltip: 'More',
-                onSelected: (v) => widget.onAction(v, id),
-                itemBuilder: (_) => [
-                  for (final m in menu)
-                    PopupMenuItem<String>(
-                      value: (m['value'] ?? '').toString(),
-                      child: Text((m['label'] ?? m['value'] ?? '').toString()),
-                    ),
-                ],
-              ),
-          ],
+          ),
         ),
       ),
     );
@@ -350,11 +360,7 @@ class _TokenAvatar extends StatefulWidget {
   final String token;
   final String seed;
   final double size;
-  const _TokenAvatar({
-    required this.token,
-    required this.seed,
-    this.size = 44,
-  });
+  const _TokenAvatar({required this.token, required this.seed, this.size = 44});
 
   @override
   State<_TokenAvatar> createState() => _TokenAvatarState();

@@ -91,6 +91,14 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
       GraphSceneController<RnsGraphNode>(vsync: this)
         ..camera.rotateSpeed = 0.24
         ..camera.dampingFactor = 0.18;
+  /// Viewport aspect (w/h) at the last frame — the framing maths needs it,
+  /// and a portrait phone is a very different problem from a desktop window.
+  double _aspect = 1.0;
+
+  /// What the last built scene looked like, so an identical snapshot does not
+  /// restart every node's transition. See _rebuildScene.
+  String? _sceneSignature;
+
   String? _expandedHubId; // one expanded hub cluster max
   RnsIface? _focusedIface; // legend-chip group focus
   bool _framedOnce = false; // first non-empty snapshot frames the view
@@ -217,11 +225,34 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     if (peerHex.isEmpty) return;
     final k = peerHex.toLowerCase();
     final dir = '${installedAppsDirPath()}/chat';
+    // Carry the NAME. Without it the thread opened as "LXMF 85cdc031" one tap
+    // after the panel showed the peer as X16JK8 — the identity was known and
+    // then dropped on the doorstep.
+    // ignore: discarded_futures
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => WappPage(
+          wappDir: dir,
+          title: name.isNotEmpty ? name : 'Chat',
+          initialConvo: 'lxmf:$k',
+          initialConvoName: name,
+        ),
+      ),
+    );
+  }
+
+  /// Open the Mail wapp's 1:1 with this peer — the kind-4 inbox, keyed by their
+  /// key. "Chat them" and "write them mail" are different destinations, and the
+  /// panel that knows both their callsign and their npub is where the choice
+  /// belongs.
+  void _openMail(String target) {
+    if (target.isEmpty) return;
+    final dir = '${installedAppsDirPath()}/mail';
     // ignore: discarded_futures
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) =>
-            WappPage(wappDir: dir, title: 'Chat', initialConvo: 'lxmf:$k'),
+            WappPage(wappDir: dir, title: 'Mail', initialConvo: target),
       ),
     );
   }
@@ -279,6 +310,41 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
       expandedHubId: _expandedHubId,
     );
 
+    // A snapshot arrives every ~2s, and setScene relayouts unconditionally and
+    // restarts a 1200ms glide for every node — so an unchanged network still
+    // twitched, forever. Skip the whole thing when nothing that affects what
+    // is drawn has changed. The signature has to include the render-visible
+    // data (label, members, geogram), not just the topology: the controller
+    // keeps the old node objects, so anything left out of it would go stale on
+    // screen instead of updating.
+    final signature = StringBuffer(_expandedHubId ?? '-');
+    for (final n in built.scene.nodes) {
+      final d = n.data;
+      signature
+        ..write('|')
+        ..write(d.id)
+        ..write(':')
+        ..write(d.effectiveKind)
+        ..write(':')
+        ..write(d.effectiveRelayer)
+        ..write(':')
+        ..write(d.iface.index)
+        ..write(':')
+        ..write(d.hops)
+        ..write(':')
+        ..write(d.members)
+        ..write(':')
+        ..write(d.geogram ? 1 : 0)
+        ..write(':')
+        ..write(d.label);
+    }
+    final sig = signature.toString();
+    if (sig == _sceneSignature) {
+      if (mounted) setState(() {});
+      return;
+    }
+    _sceneSignature = sig;
+
     _scene.advancePoses();
     final positionById = <String, Vector3>{
       for (var i = 0; i < _scene.renderNodes.length; i++)
@@ -324,7 +390,16 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         Vector3.zero(),
         lookAtQuaternion(Vector3.zero(), Vector3(0, 0.5, 1)),
       ),
-      halfExtent: Vector3(radius, radius * 0.62, radius * 0.9),
+      // Frame the HEART, not the whole sphere. fitDistance's horizontal term
+      // is x/(tan*aspect), so on a portrait phone (aspect ~0.5) fitting the
+      // full width dominated by 3.2x and shrank a peer orb to ~4px carrying
+      // 11px text. Half the width, twice the orb, twice every gap between
+      // labels; the fringe pans into view, and panning is tethered.
+      halfExtent: Vector3(
+        radius * (_aspect < 0.75 ? 0.55 : 0.85),
+        radius * 0.62,
+        radius * 0.72,
+      ),
       sceneRadius: radius,
       durationMs: immediate ? 0 : 1200,
     );
@@ -480,6 +555,10 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     _reportNav(); // keep the host app bar's title + back in sync with the panel
+    // Portrait phone vs desktop window changes how much of the sphere we can
+    // frame before the orbs turn into specks — see _resetView.
+    final mq = MediaQuery.maybeOf(context)?.size;
+    if (mq != null && mq.height > 0) _aspect = mq.width / mq.height;
     return ColoredBox(
       color: _gBg,
       child: Stack(children: [
@@ -992,6 +1071,14 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
             : 'Peer';
     final pubkey = (m['pubkey'] ?? '').toString();
     final canMessage = n.kind != 'self' && n.dm.isNotEmpty && pubkey.isNotEmpty;
+    // Mail is keyed by the person, not the device: their npub when the announce
+    // carried one, else the callsign (the Mail wapp resolves that through the
+    // relay directory). Devices that are only an LXMF address have neither.
+    final mailTarget = n.kind == 'self'
+        ? ''
+        : ((m['npub'] ?? '').toString().isNotEmpty
+            ? (m['npub'] ?? '').toString()
+            : (m['callsign'] ?? '').toString());
     final color = n.effectiveKind == 'self'
         ? _gSelf
         : n.effectiveKind == 'hub'
@@ -1042,16 +1129,31 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
       const SizedBox(height: 18),
       // Prominent Message button (or a reachability note when unreachable).
       if (canMessage)
-        SizedBox(
-          width: double.infinity,
-          child: FilledButton.icon(
-            icon: const Icon(Icons.send, size: 18),
-            label: const Text('Message'),
-            style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 13)),
-            onPressed: () => _messagePeer(n, pubkey),
+        Row(children: [
+          // "Message" said nothing about WHERE it lands. It opens the Chat
+          // wapp's 1:1 — so it says Chat, and Mail sits beside it.
+          Expanded(
+            child: FilledButton.icon(
+              icon: const Icon(Icons.forum_outlined, size: 18),
+              label: const Text('Chat'),
+              style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 13)),
+              onPressed: () => _messagePeer(n, pubkey),
+            ),
           ),
-        )
+          if (mailTarget.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.mail_outline, size: 18),
+                label: const Text('Mail'),
+                style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 13)),
+                onPressed: () => _openMail(mailTarget),
+              ),
+            ),
+          ],
+        ])
       else if (n.kind != 'self')
         Row(children: [
           const Icon(Icons.do_not_disturb_on, size: 15, color: _gMuted),
@@ -1091,7 +1193,20 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
             ),
           ),
         ),
-      if (n.services.isNotEmpty) _chips(n.services),
+      // Services this device ANSWERS. They read as buttons in a chip row, so
+      // they get a heading that says what they are: facts, not actions.
+      if (n.services.isNotEmpty) ...[
+        const Padding(
+          padding: EdgeInsets.only(bottom: 4),
+          child: Text('Answers to',
+              style: TextStyle(
+                  color: _gMuted,
+                  fontSize: 11,
+                  letterSpacing: 0.6,
+                  fontWeight: FontWeight.w700)),
+        ),
+        _chips(n.services),
+      ],
       if ((m['nickname'] ?? '').toString().isNotEmpty &&
           (m['nickname'] ?? '').toString().toUpperCase() !=
               (m['callsign'] ?? '').toString().toUpperCase())
@@ -1107,8 +1222,10 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
       if (n.effectiveKind == 'hub' && n.members > 0)
         _kv('Peers heard', '≈ ${n.members} (sample)'),
       if (m['firstSeen'] != null) _kv('First seen', _ago(m['firstSeen'])),
-      if (n.npub.isNotEmpty) _kv('npub', n.npub),
-      if (n.id.isNotEmpty) _kv('Identity', n.id),
+      // The two long identifiers are things you COPY (paste into Mail, into a
+      // relay query) — printed raw they are just a wall of hex you cannot use.
+      if (n.npub.isNotEmpty) _kvCopy('npub', n.npub),
+      if (n.id.isNotEmpty) _kvCopy('Identity', n.id),
     ]);
   }
 
@@ -1124,6 +1241,37 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     }
     _openChat(dest, name: n.label.isNotEmpty ? n.label : _shorten(n.id));
   }
+
+  /// A key/value row whose value is a long identifier: monospace, wrapped, and
+  /// with a copy button — the only way to get it off a touch screen.
+  Widget _kvCopy(String k, String v) => Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Text(k.toUpperCase(),
+                style: const TextStyle(
+                    color: _gMuted,
+                    fontSize: 11,
+                    letterSpacing: 0.6,
+                    fontWeight: FontWeight.w700)),
+            const Spacer(),
+            InkWell(
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: v));
+                ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                    SnackBar(content: Text('$k copied'), duration: const Duration(seconds: 1)));
+              },
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                child: Icon(Icons.copy, size: 14, color: _gMuted),
+              ),
+            ),
+          ]),
+          SelectableText(v,
+              style: const TextStyle(
+                  color: _gFg, fontSize: 12, fontFamily: 'monospace')),
+        ]),
+      );
 
   Widget _chips(List<String> svcs) => Padding(
         padding: const EdgeInsets.only(bottom: 10),

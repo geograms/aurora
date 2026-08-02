@@ -7,6 +7,7 @@ import '../model.dart';
 import '../profile.dart';
 import 'pose.dart';
 import 'projection.dart';
+import 'label_layout.dart';
 import 'sprite.dart';
 
 /// Draws every node as a screen-facing glow orb: one cached radial-gradient
@@ -28,6 +29,7 @@ class SpriteCrowdPainter<T> extends CustomPainter {
     this.fogNear = -1,
     this.fogFar = -1,
     this.style = const GraphStyle(),
+    this.hoveredId,
   });
 
   final List<Pose> poses;
@@ -44,19 +46,28 @@ class SpriteCrowdPainter<T> extends CustomPainter {
 
   final GraphStyle style;
 
+  /// The node the pointer is over, if any. Its label outranks its neighbours'
+  /// — you are asking about that one.
+  final int? hoveredId;
+
   /// Below this projected core radius the halo is skipped: a distant node is
   /// a flat star, not a big transparent gradient — that is both the look and
   /// the fill-rate save.
   static const double kHaloMinPx = 4;
 
   /// Labels and badges only make sense when the orb is big enough to anchor
-  /// them.
-  static const double kLabelMinPx = 9;
-  static const double kBadgeMinPx = 11;
+  /// them. These are a floor on absurdity, not the density control — that is
+  /// [placeLabels], which measures the pixels the text actually eats.
+  static const double kLabelMinPx = 7;
+  static const double kBadgeMinPx = 9;
 
-  /// At most this many labels per frame, nearest first. A 500-node cluster
-  /// stays a field of lights, not a wall of text.
+  /// At most this many labels PLACED per frame. A 500-node cluster stays a
+  /// field of lights, not a wall of text.
   static const int kLabelBudget = 40;
+
+  /// Alpha of the plate drawn behind a label. Over a starfield and additive
+  /// orbs, 11px text without a backing is guesswork.
+  static const double kLabelPlateAlpha = 0.55;
 
   static final ProfileTimer _timer = ProfileTimer('SPRITEPAINT');
 
@@ -86,7 +97,12 @@ class SpriteCrowdPainter<T> extends CustomPainter {
   static const int _kMaxTexts = 600;
 
   static TextPainter _text(String text, double fontSize, Color color) {
-    final key = '$text#$fontSize#${color.toARGB32()}';
+    // Quantise alpha into the key. Callers pass a continuously varying fade,
+    // so a moving camera used to mint (and re-layout) a fresh TextPainter for
+    // every string every frame and thrash the LRU. 1/16 steps are invisible
+    // against a fog ramp.
+    final a = (color.a * 16).round();
+    final key = '$text#$fontSize#${color.toARGB32() & 0x00FFFFFF}#$a';
     final cached = _texts.remove(key);
     if (cached != null) {
       _texts[key] = cached;
@@ -129,7 +145,9 @@ class SpriteCrowdPainter<T> extends CustomPainter {
 
     final flatPaint = Paint();
     final ringPaint = Paint()..style = PaintingStyle.stroke;
-    final labelled = <(int, Offset, double, double)>[]; // index, pos, corePx, alpha
+    final candidates = <LabelCandidate>[];
+    final labelAlpha = <int, double>{}; // index -> alpha the label draws at
+    final orbSeeds = <Rect>[];
 
     for (final (index, depth) in visible) {
       final id = index + 1;
@@ -202,28 +220,89 @@ class SpriteCrowdPainter<T> extends CustomPainter {
         );
       }
 
-      if (sprite.label != null &&
-          corePx >= (sprite.labelMinPx ?? kLabelMinPx)) {
-        labelled.add((index, projected.screen, corePx, alpha));
+      // A bright core is a place text cannot go: the orb wins, always.
+      if (corePx >= kOrbSeedMinPx) {
+        orbSeeds.add(
+          Rect.fromCircle(center: projected.screen, radius: corePx * 1.15),
+        );
+      }
+
+      if (sprite.label != null) {
+        final minPx = sprite.labelMinPx ?? kLabelMinPx;
+        // Fade the label IN across a band above the floor instead of popping
+        // it at a threshold: zooming should reveal names, not flick them on.
+        final labelFade = ((corePx - minPx) / (minPx * 0.8)).clamp(0.0, 1.0);
+        if (labelFade > 0.05) {
+          final a = (alpha * 0.85 * labelFade).clamp(0.0, 1.0);
+          final text = _text(
+            sprite.label!,
+            11,
+            Color.fromRGBO(214, 245, 250, a),
+          );
+          labelAlpha[index] = a;
+          candidates.add(LabelCandidate(
+            index: index,
+            key: nodes[index].key,
+            anchor: projected.screen,
+            corePx: corePx,
+            size: Size(text.width, text.height),
+            priority: labelPriorityOf(
+              selected: selected,
+              hovered: hoveredId != null && hoveredId == id,
+              highlighted: highlighted,
+              spritePriority: sprite.labelPriority,
+              fade: labelFade,
+            ),
+            depth: depth,
+          ));
+        }
       }
     }
 
-    // Nearest labels win the budget; the list is already far-to-near.
-    final start = labelled.length > kLabelBudget
-        ? labelled.length - kLabelBudget
-        : 0;
-    for (var i = start; i < labelled.length; i++) {
-      final (index, screen, corePx, alpha) = labelled[i];
-      final sprite = spriteOf(nodes[index]);
+    // Who gets to be readable. Anything that would land on top of another
+    // label (or on a bright core) is moved to another side of its orb, and
+    // dropped if there is nowhere left — a name half-written over another
+    // name says less than no name at all.
+    final placements = placeLabels(
+      candidates,
+      viewport: Rect.fromLTWH(
+        -size.width / 2,
+        -size.height / 2,
+        size.width,
+        size.height,
+      ),
+      budget: kLabelBudget,
+      seeds: orbSeeds,
+    );
+
+    // Lowest priority first, so a selected node's label lands on top of any
+    // neighbour it grazes.
+    for (var i = placements.length - 1; i >= 0; i--) {
+      final placement = placements[i];
+      final sprite = spriteOf(nodes[placement.index]);
+      final a = labelAlpha[placement.index] ?? 1.0;
       final painter = _text(
         sprite.label!,
         11,
-        Color.fromRGBO(214, 245, 250, (alpha * 0.85).clamp(0.0, 1.0)),
+        Color.fromRGBO(214, 245, 250, a),
       );
-      painter.paint(
-        canvas,
-        screen + Offset(-painter.width / 2, corePx * 1.15 + 4),
+      final plate = Rect.fromLTWH(
+        placement.topLeft.dx,
+        placement.topLeft.dy,
+        painter.width,
+        painter.height,
+      ).inflate(3).deflate(0);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(plate, Radius.circular(plate.height / 2)),
+        Paint()
+          ..color = Color.fromRGBO(
+            0,
+            10,
+            14,
+            (a * kLabelPlateAlpha).clamp(0.0, 1.0),
+          ),
       );
+      painter.paint(canvas, placement.topLeft);
     }
 
     canvas.restore();

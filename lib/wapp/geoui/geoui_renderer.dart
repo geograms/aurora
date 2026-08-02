@@ -1431,6 +1431,11 @@ IconData geoUiResolveIcon(String name) {
       return Icons.person_add_alt_1;
     case 'person_remove':
       return Icons.person_remove_alt_1;
+    case 'block':
+      return Icons.block;
+    case 'radar':
+    case 'nearby':
+      return Icons.radar;
     case 'home':
       return Icons.home_outlined;
     case 'mail':

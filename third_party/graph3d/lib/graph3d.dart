@@ -10,6 +10,7 @@ export 'src/model.dart';
 export 'src/profile.dart' show kProfileScene;
 export 'src/scene/card_bakery.dart';
 export 'src/scene/crowd_painter.dart' show CardCrowdPainter, pickCard;
+export 'src/scene/label_layout.dart';
 export 'src/scene/layouts.dart';
 export 'src/scene/orbit_camera.dart';
 export 'src/scene/pose.dart';

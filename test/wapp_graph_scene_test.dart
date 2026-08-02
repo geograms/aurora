@@ -159,5 +159,68 @@ void main() {
       expect(byId['r1']!.length, closeTo(kHubShell + kHopSpacing, 1));
       expect(byId['r2']!.length, closeTo(kHubShell + 3 * kHopSpacing, 1));
     });
+
+    test('layout is a pure function of the node SET, not its order', () {
+      // rnsEgoLayout hands out azimuth slots by index, so a reordered snapshot
+      // used to permute every wedge — the twitch you see with nothing moving.
+      final forward = prepared([
+        node('self', kind: 'self', hops: 0, via: ''),
+        node('relay-a', hops: 1, services: ['relay']),
+        node('p1', hops: 1),
+        node('p2', hops: 1),
+        node('p3', hops: 1),
+      ]);
+      final shuffled = prepared([
+        node('p3', hops: 1),
+        node('relay-a', hops: 1, services: ['relay']),
+        node('p1', hops: 1),
+        node('self', kind: 'self', hops: 0, via: ''),
+        node('p2', hops: 1),
+      ]);
+      Map<String, Object> posesOf(List<RnsGraphNode> all) {
+        final built = buildRnsScene(allNodes: all, expandedHubId: null);
+        final g = built.layout(built.scene.nodes);
+        return {
+          for (var i = 0; i < built.scene.nodes.length; i++)
+            built.scene.nodes[i].data.id: g.poses[i].position,
+        };
+      }
+
+      final a = posesOf(forward);
+      final b = posesOf(shuffled);
+      expect(a.keys.toSet(), b.keys.toSet());
+      for (final id in a.keys) {
+        expect('${a[id]}', '${b[id]}', reason: id);
+      }
+    });
+
+    test('several hubs do not share one horizontal band', () {
+      final all = prepared([
+        node('self', kind: 'self', hops: 0, via: ''),
+        node('relay-a',
+            hops: 1, services: ['relay'], via: 'tcp:a.example.net:4242'),
+        node('relay-b',
+            hops: 1, services: ['relay'], via: 'tcp:b.example.net:4242'),
+        node('relay-c',
+            hops: 1, services: ['relay'], via: 'tcp:c.example.net:4242'),
+        node('ra1', via: 'tcp:a.example.net:4242'),
+        node('rb1', via: 'tcp:b.example.net:4242'),
+        node('rc1', via: 'tcp:c.example.net:4242'),
+      ]);
+      final built = buildRnsScene(allNodes: all, expandedHubId: null);
+      final g = built.layout(built.scene.nodes);
+      final ys = <double>[
+        for (var i = 0; i < built.scene.nodes.length; i++)
+          if (built.scene.nodes[i].data.effectiveKind == 'hub')
+            g.poses[i].position.y,
+      ];
+      expect(ys.length, 3);
+      expect(ys.toSet().length, 3, reason: 'each hub sits at its own height');
+      // …and they stay on the shell: tilt is applied at constant radius.
+      for (var i = 0; i < built.scene.nodes.length; i++) {
+        if (built.scene.nodes[i].data.effectiveKind != 'hub') continue;
+        expect(g.poses[i].position.length, closeTo(kHubShell, 1e-6));
+      }
+    });
   });
 }

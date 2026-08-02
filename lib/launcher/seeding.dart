@@ -6,7 +6,7 @@ part of 'launcher.dart';
 /// `kind: "system"` wapp. Keeps the default set in one place.
 const _kDefaultSeedNames = {
   'install',
-  'messages',
+  'mail',
   'chat',
   'mp4player',
   'reticulum',
@@ -14,88 +14,81 @@ const _kDefaultSeedNames = {
   'torrents',
 };
 
-/// One-time migration for the wapp rename aprs -> chat (folder name 'aprs' was
-/// the comms wapp's install key). Renames the installed folder and moves its
-/// autostart preference, so an existing profile transitions to the renamed
-/// "Chat" wapp instead of keeping the old "APRS" one (or losing it). Idempotent:
-/// a no-op once 'chat' exists / 'aprs' is gone. Runs before seeding + the
-/// bundled-wapp upgrade, so the renamed install then upgrades to the new bundle
-/// (new id/title/icon).
-Future<void> migrateAprsToChat() async {
+/// One-time migration for a wapp FOLDER rename ([oldName] -> [newName]).
+///
+/// A wapp's folder name is its install key: it names the extracted package dir,
+/// the data dir that holds its history and settings, its autostart preference,
+/// and its entry in the two offered-sets. So a rename that only swaps the
+/// bundled `.wapp` would leave the old install (and its history) orphaned and
+/// install the new one as a stranger.
+///
+/// Moves all four:
+///   - program dir  `wapps/<old>`      -> `wapps/<new>`
+///   - data dir     `data/<old>`       -> `data/<new>`   (history + settings)
+///   - preference   `wapp.autostart.*`
+///   - offered-sets `.seed_offered.json` / `.seeded.json` — without these,
+///     [upgradeBundledWapps] would treat the renamed bundle as a first-time
+///     addition and reinstall it even for a user who deliberately uninstalled
+///     the wapp under its old name.
+///
+/// Idempotent: a no-op once `<new>` exists / `<old>` is gone. Runs before
+/// seeding + the bundled-wapp upgrade, so the renamed install then upgrades to
+/// the new bundle (new id/title/icon).
+Future<void> _migrateWappFolder(String oldName, String newName) async {
   if (ProfileService.instance.activeProfile == null) return;
-  final prefs = await PreferencesService.instance();
-  // Program dir (wapps/aprs -> wapps/chat): the extracted .wapp package.
-  try {
-    final installed = installedAppsStorage();
-    if (await installed.directoryExists('aprs') &&
-        !await installed.directoryExists('chat')) {
-      await installed.renameDirectory('aprs', 'chat');
-      debugPrint('migrateAprsToChat: program aprs -> chat');
-    }
-  } catch (e) {
-    debugPrint('migrateAprsToChat program: $e');
-  }
-  // Data dir (data/aprs -> data/chat): the wapp's messages, settings and
-  // activity archive — keyed by wapp name, so it must move too or history is
-  // lost. Honours the user's wappDataDir override via wappsDataStorage.
-  try {
-    final data = wappsDataStorage(prefs);
-    if (await data.directoryExists('aprs') &&
-        !await data.directoryExists('chat')) {
-      await data.renameDirectory('aprs', 'chat');
-      debugPrint('migrateAprsToChat: data aprs -> chat');
-    }
-  } catch (e) {
-    debugPrint('migrateAprsToChat data: $e');
-  }
-  await prefs.migrateWappAutostart('aprs', 'chat');
-}
-
-/// One-time migration for the wapp rename nostr -> social (folder name 'nostr'
-/// was the social wapp's install key). Same shape as [migrateAprsToChat]:
-/// renames the installed program dir + data dir + autostart pref. Additionally
-/// renames the entry inside the two offered-sets (.seed_offered.json and
-/// .seeded.json) — without that, upgradeBundledWapps would treat the renamed
-/// social.wapp bundle as a first-time addition and reinstall it even for a
-/// user who had deliberately uninstalled the NOSTR wapp. Idempotent.
-Future<void> migrateNostrToSocial() async {
-  if (ProfileService.instance.activeProfile == null) return;
+  final tag = 'migrate wapp $oldName -> $newName';
   final prefs = await PreferencesService.instance();
   final installed = installedAppsStorage();
-  // Program dir (wapps/nostr -> wapps/social): the extracted .wapp package.
+  // Program dir: the extracted .wapp package.
   try {
-    if (await installed.directoryExists('nostr') &&
-        !await installed.directoryExists('social')) {
-      await installed.renameDirectory('nostr', 'social');
-      debugPrint('migrateNostrToSocial: program nostr -> social');
+    final hasOld = await installed.directoryExists(oldName);
+    final hasNew = await installed.directoryExists(newName);
+    if (hasOld && !hasNew) {
+      await installed.renameDirectory(oldName, newName);
+      debugPrint('$tag: program dir moved');
+    } else if (hasOld && hasNew) {
+      // BOTH exist — seen live: the rename was skipped on an earlier launch
+      // while the bundled `<new>.wapp` installed itself as a first-time
+      // addition, leaving the old install behind. The launcher then lists the
+      // wapp TWICE, under both names. The new dir is the current bundle, so
+      // the old one is a stale copy: drop it. A user-edited copy is never
+      // deleted — that is somebody's source, not a package we can re-extract.
+      final oldManifest = await installed.readJson('$oldName/manifest.json');
+      if (oldManifest?['user_modified'] == true) {
+        debugPrint('$tag: both dirs exist, keeping user-modified $oldName');
+      } else {
+        await installed.deleteDirectory(oldName, recursive: true);
+        debugPrint('$tag: removed stale duplicate program dir $oldName');
+      }
     }
   } catch (e) {
-    debugPrint('migrateNostrToSocial program: $e');
+    debugPrint('$tag program: $e');
   }
-  // Data dir (data/nostr -> data/social): feed archive + settings, keyed by
-  // wapp name. Honours the user's wappDataDir override via wappsDataStorage.
+  // Data dir: the wapp's messages, settings and archives — keyed by wapp name,
+  // so it must move too or history is lost. Honours the user's wappDataDir
+  // override via wappsDataStorage.
   try {
     final data = wappsDataStorage(prefs);
-    if (await data.directoryExists('nostr') &&
-        !await data.directoryExists('social')) {
-      await data.renameDirectory('nostr', 'social');
-      debugPrint('migrateNostrToSocial: data nostr -> social');
+    if (await data.directoryExists(oldName) &&
+        !await data.directoryExists(newName)) {
+      await data.renameDirectory(oldName, newName);
+      debugPrint('$tag: data dir moved');
     }
   } catch (e) {
-    debugPrint('migrateNostrToSocial data: $e');
+    debugPrint('$tag data: $e');
   }
-  await prefs.migrateWappAutostart('nostr', 'social');
+  await prefs.migrateWappAutostart(oldName, newName);
   // Offered-sets: carry the "was offered" record across the rename so an
-  // uninstall of the old NOSTR wapp keeps sticking for the social bundle.
+  // uninstall under the old name keeps sticking for the renamed bundle.
   try {
     final j = jsonDecode(await installed.readString('.seed_offered.json') ?? '');
     if (j is Map && j['offered'] is List) {
       final offered = (j['offered'] as List).whereType<String>().toSet();
-      if (offered.remove('nostr')) {
-        offered.add('social');
+      if (offered.remove(oldName)) {
+        offered.add(newName);
         await installed
             .writeJson('.seed_offered.json', {'offered': offered.toList()});
-        debugPrint('migrateNostrToSocial: .seed_offered nostr -> social');
+        debugPrint('$tag: .seed_offered updated');
       }
     }
   } catch (_) {}
@@ -105,17 +98,28 @@ Future<void> migrateNostrToSocial() async {
     final offeredList = marker?['offered'];
     if (marker != null && offeredList is List) {
       final offered = offeredList.map((e) => e.toString()).toSet();
-      if (offered.remove('nostr')) {
-        offered.add('social');
+      if (offered.remove(oldName)) {
+        offered.add(newName);
         await profileRoot
             .writeJson('.seeded.json', {...marker, 'offered': offered.toList()});
-        debugPrint('migrateNostrToSocial: .seeded offered nostr -> social');
+        debugPrint('$tag: .seeded offered updated');
       }
     }
   } catch (e) {
-    debugPrint('migrateNostrToSocial seeded marker: $e');
+    debugPrint('$tag seeded marker: $e');
   }
 }
+
+/// Rename aprs -> chat: an existing profile transitions to the renamed "Chat"
+/// wapp instead of keeping the old "APRS" one (or losing it).
+Future<void> migrateAprsToChat() => _migrateWappFolder('aprs', 'chat');
+
+/// Rename nostr -> social.
+Future<void> migrateNostrToSocial() => _migrateWappFolder('nostr', 'social');
+
+/// Rename messages -> mail: the one kind-4 inbox keeps its conversation
+/// history, its dedup ring and its autostart setting across the rename.
+Future<void> migrateMessagesToMail() => _migrateWappFolder('messages', 'mail');
 
 /// First-run bootstrap, run as a boot task BEFORE the UI so the launcher
 /// never renders an empty grid mid-seed. Installs the curated default

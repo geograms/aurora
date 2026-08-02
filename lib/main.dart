@@ -236,6 +236,18 @@ Future<void> main() async {
     init: migrateNostrToSocial,
   );
   BootOrchestrator.instance.register(
+    id: 'migrate-messages-to-mail',
+    name: 'Migrate messages wapp to mail',
+    description:
+        'One-time rename of the messenger wapp folder messages->mail (data '
+        'dir, autostart preference and offered-set markers included) so '
+        'existing profiles transition to the renamed "Mail" wapp with their '
+        'conversation history intact. Idempotent; runs before seeding + '
+        'bundled-wapp upgrade so the renamed install picks up the new bundle.',
+    mode: BootStart.sequential,
+    init: migrateMessagesToMail,
+  );
+  BootOrchestrator.instance.register(
     id: 'seed-default-wapps',
     name: 'Seed default wapps',
     description:

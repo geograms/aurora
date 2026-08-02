@@ -18,6 +18,13 @@ class ProfileView extends StatefulWidget {
   final void Function(Map<String, dynamic> post)? onPostTap;
   final VoidCallback? onMessage;
 
+  /// Open a private 1:1 with this person in the Mail wapp (the one kind-4
+  /// inbox). Distinct from [onMessage], which opens the chat conversation:
+  /// "chat with them here" and "write them mail" are different destinations,
+  /// and a profile reached from a nearby-devices list is exactly where the
+  /// choice is made.
+  final VoidCallback? onMail;
+
   /// Per-post social actions (Like / Reply / Retweet), mirroring the feed. When
   /// a callback is null the corresponding control is hidden. Keyed by the post's
   /// `mid`.
@@ -99,6 +106,7 @@ class ProfileView extends StatefulWidget {
     this.posts = const [],
     this.onPostTap,
     this.onMessage,
+    this.onMail,
     this.likeInfo,
     this.onLike,
     this.replyCount,
@@ -542,7 +550,9 @@ class _ProfileViewState extends State<ProfileView> {
           ),
           if (widget.isSelf && widget.onEdit != null ||
               !widget.isSelf &&
-                  (widget.onSetFollow != null || widget.onMessage != null)) ...[
+                  (widget.onSetFollow != null ||
+                      widget.onMessage != null ||
+                      widget.onMail != null)) ...[
             const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerRight,
@@ -561,8 +571,14 @@ class _ProfileViewState extends State<ProfileView> {
                   if (!widget.isSelf && widget.onMessage != null)
                     OutlinedButton.icon(
                       onPressed: widget.onMessage,
+                      icon: const Icon(Icons.forum_outlined, size: 16),
+                      label: const Text('Chat'),
+                    ),
+                  if (!widget.isSelf && widget.onMail != null)
+                    OutlinedButton.icon(
+                      onPressed: widget.onMail,
                       icon: const Icon(Icons.mail_outline, size: 16),
-                      label: const Text('Message'),
+                      label: const Text('Mail'),
                     ),
                 ],
               ),

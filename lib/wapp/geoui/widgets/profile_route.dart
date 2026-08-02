@@ -27,6 +27,7 @@ class ProfileRoute extends StatefulWidget {
   final bool muted;
   final void Function(Map<String, dynamic> post)? onPostTap;
   final VoidCallback? onMessage;
+  final VoidCallback? onMail;
   final void Function(bool follow)? onSetFollow;
   final void Function(bool block)? onSetBlock;
   final void Function(bool mute)? onSetMute;
@@ -109,6 +110,7 @@ class ProfileRoute extends StatefulWidget {
     this.onSetKeep,
     this.onPostTap,
     this.onMessage,
+    this.onMail,
     this.onSetFollow,
     this.onSetBlock,
     this.onSetMute,
@@ -248,6 +250,7 @@ class _ProfileRouteState extends State<ProfileRoute> {
       posts: widget.posts,
       onPostTap: widget.onPostTap,
       onMessage: widget.onMessage,
+      onMail: widget.onMail,
       following: widget.following,
       blocked: widget.blocked,
       onSetFollow: widget.onSetFollow,

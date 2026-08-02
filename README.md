@@ -225,6 +225,34 @@ Android:
 ./launch-android.sh         # build + install on a connected device
 ```
 
+### Running the desktop build for testing
+
+Two modes, and the choice is about who is looking:
+
+```sh
+# 1. Automated GUI testing — invisible, on its own X server. Nothing appears on
+#    your desktop and nothing steals your focus, so clicks and keystrokes driven
+#    by a script cannot land in whatever you are actually typing into.
+Xvfb :99 -screen 0 1400x900x24 &
+DISPLAY=:99 ./build/linux/x64/release/bundle/aurora &
+DISPLAY=:99 xdotool search --class radio.geogram.aurora    # drive it
+import -display :99 -window root shot.png                  # look at it
+
+# 2. Manual confirmation — on your screen, where you can see and click it.
+./build/linux/x64/release/bundle/aurora
+```
+
+Build the bundle first (the machine-wide lock serialises heavy builds; see the
+note below):
+
+```sh
+~/bin/android-build-locked flutter build linux --release
+```
+
+Launching the built bundle directly, rather than `flutter run`, matters when a
+build is queued: `flutter run` holds the build lock for as long as the app is
+open, so an APK build behind it waits for you to quit.
+
 The wapps that ship with the app live in `assets/wapps/`. To rebuild one from
 source, see the [`geograms/wapps`](https://github.com/geograms/wapps) repo.
 

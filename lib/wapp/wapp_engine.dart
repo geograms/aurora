@@ -25,6 +25,7 @@ import '../services/preferences_service.dart';
 import '../services/folders/folder_meta.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/log_service.dart';
+import '../services/social/email_resolve_service.dart';
 import '../services/social/node_role_api.dart';
 import '../services/mesh/mesh_bulk_spool.dart';
 import '../services/mesh/mesh_service.dart';
@@ -2936,12 +2937,27 @@ class WappEngine {
     );
     // Trigger an async resolve of a callsign → npub by querying [relays] for the
     // identity event; the result (if any) lands on _relayResolveRx for
-    // hal_relay_resolve_recv. Fire-and-forget; returns 1 if queued.
+    // hal_relay_resolve_recv. Fire-and-forget; returns 1 if queued. A target
+    // containing '@' is an email address and routes to the host NIP-05
+    // resolver instead — same result shape, the email rides `callsign`.
     final halRelayResolve = WasmFunction(
       (int callPtr, int callLen, int relaysPtr, int relaysLen) {
         final call = _readStr(callPtr, callLen);
         if (call.isEmpty) return -1;
         final relays = jsonStrList(_readStr(relaysPtr, relaysLen));
+        // "nip05:<email>" = the wapp's Verify button: skip caches and the
+        // store/mesh rungs, check the domain live.
+        var target = call.trim().toLowerCase();
+        final fresh = target.startsWith('nip05:');
+        if (fresh) target = target.substring('nip05:'.length);
+        if (target.contains('@')) {
+          EmailResolveService.instance
+              .resolve(target, relayDestsHex: relays, freshNip05: fresh)
+              .then((m) {
+            if (m != null) _relayResolveRx.add(jsonEncode(m));
+          }).ignore();
+          return 1;
+        }
         RnsService.instance
             .relayResolveCallsign(call, relayDestsHex: relays)
             .then((m) {
@@ -3213,7 +3229,7 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
-    // Our own x-only pubkey (hex) — for the Messages tab's kind-4 #p filter.
+    // Our own x-only pubkey (hex) — for the Mail wapp's kind-4 #p filter.
     final halNostrSelf = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
@@ -3284,6 +3300,11 @@ class WappEngine {
         String? service;
         var geogramOnly = false;
         String? search;
+        // "Who is in the room" instead of "what is the network" — see
+        // RnsService.graphSnapshot. Absent key means the full graph, so the
+        // reticulum wapp is unaffected.
+        var localOnly = false;
+        var limit = 0;
         if (filterLen > 0) {
           try {
             final f = jsonDecode(_readStr(filterPtr, filterLen))
@@ -3293,10 +3314,17 @@ class WappEngine {
             geogramOnly = f['geogramOnly'] == true;
             final q = f['search'];
             if (q is String && q.isNotEmpty) search = q;
+            localOnly = f['localOnly'] == true;
+            final l = f['limit'];
+            if (l is int && l > 0) limit = l;
           } catch (_) {}
         }
         final snap = RnsService.instance.graphSnapshot(
-            service: service, geogramOnly: geogramOnly, search: search);
+            service: service,
+            geogramOnly: geogramOnly,
+            search: search,
+            localOnly: localOnly,
+            limit: limit);
         final bytes = utf8.encode(jsonEncode(snap));
         if (bytes.length > outCap) return -bytes.length;
         return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
@@ -3459,7 +3487,7 @@ class WappEngine {
       results: [ValueTy.i32],
     );
     // People search: contacts ∪ observed-announce registry, aggregated by
-    // callsign — the same search the Messages "find a user" flow runs, exposed
+    // callsign — the same search the Mail "find a user" flow runs, exposed
     // so a wapp can offer "start a conversation with…" itself.
     final halPeopleSearch = WasmFunction(
       (int qPtr, int qLen, int outPtr, int outCap) {

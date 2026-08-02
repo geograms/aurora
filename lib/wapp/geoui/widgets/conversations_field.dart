@@ -139,10 +139,13 @@ class ConversationsField extends StatefulWidget {
 
   /// Long-press message actions (purely local on the host). Forward gives the
   /// conversation id + the whole message; hide gives id + the message key;
-  /// block gives the sender callsign. Null disables that menu entry.
+  /// block gives the conversation id AND the sender's display name. The id
+  /// matters: a wapp keyed by pubkey (Mail) cannot block on a display name,
+  /// which is only a nickname and may be a truncated key. Null disables that
+  /// menu entry.
   final void Function(String id, Map<String, dynamic> m)? onForward;
   final void Function(String id, String key)? onHide;
-  final void Function(String from)? onBlock;
+  final void Function(String id, String from)? onBlock;
 
   /// Per-conversation "…" menu actions. Mute toggles app-wide attention for the
   /// row; Close removes it from the list. Null disables the menu.
@@ -611,7 +614,9 @@ class _ConversationsFieldState extends State<ConversationsField> {
                   ],
                 ),
               ),
-              if (widget.onMute != null || widget.onClose != null)
+              if (widget.onMute != null ||
+                  widget.onClose != null ||
+                  widget.onBlock != null)
                 _convMenu(context, it),
             ],
           ),
@@ -620,8 +625,10 @@ class _ConversationsFieldState extends State<ConversationsField> {
     );
   }
 
-  /// The per-conversation "…" menu — the built-in Mute/Unmute and Close. (The
-  /// wapp's room actions live in the OPEN conversation's header, not here.)
+  /// The per-conversation "…" menu — Mute/Unmute, Close, and Block. Block is
+  /// here because this row is where a spammer is looked at: the message
+  /// long-press sheet is invisible, and the app-bar menu is one level away.
+  /// (The wapp's room actions live in the OPEN conversation's header.)
   Widget _convMenu(BuildContext context, ConversationItem it) {
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_vert, size: 20),
@@ -631,6 +638,8 @@ class _ConversationsFieldState extends State<ConversationsField> {
           widget.onMute?.call(it.id, !it.muted);
         } else if (v == 'close') {
           widget.onClose?.call(it.id);
+        } else if (v == 'block') {
+          widget.onBlock?.call(it.id, it.title);
         }
       },
       itemBuilder: (_) => [
@@ -655,6 +664,19 @@ class _ConversationsFieldState extends State<ConversationsField> {
                 Icon(Icons.close),
                 SizedBox(width: 10),
                 Text('Close'),
+              ],
+            ),
+          ),
+        if (widget.onBlock != null)
+          PopupMenuItem(
+            value: 'block',
+            child: Row(
+              children: [
+                const Icon(Icons.block, color: Color(0xFFda3633)),
+                const SizedBox(width: 10),
+                Text('Block ${it.title}',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Color(0xFFda3633))),
               ],
             ),
           ),
@@ -761,7 +783,7 @@ class _ConversationsFieldState extends State<ConversationsField> {
                 : (m) => widget.onHide!(id, (m['key'] ?? '').toString()),
             onBlock: widget.onBlock == null
                 ? null
-                : (m) => widget.onBlock!((m['from'] ?? '').toString()),
+                : (m) => widget.onBlock!(id, (m['from'] ?? '').toString()),
           ),
         ),
       ],

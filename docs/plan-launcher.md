@@ -161,8 +161,8 @@ cleaner follow-up once the mutation sites are consolidated.
 
 - **Notifications** — `NotificationStore.unreadCount` (`ValueNotifier`). Live day
   one.
-- **Messages** — `RnsService.lxmfUnreadCount` (wrapped in a notifier fed by
-  `addLxmfListener`) **plus** `WappUnreadService.countFor(wappId, intent: 'messages')`.
+- **Mail** — `RnsService.lxmfUnreadCount` (wrapped in a notifier fed by
+  `addLxmfListener`) **plus** `WappUnreadService.countFor(wappId, intent: 'mail')`.
   The two count different systems (host LXMF DMs vs the wapp's own 1:1 store), so
   no double-count. Live day one via the LXMF half.
 - **Chat** — `WappUnreadService.countFor(wappId, intent: 'chat')`. **Reads 0
@@ -222,7 +222,7 @@ Host-only, each shippable alone:
    (a harmless no-op until wapps opt in)
 
 **Follow-ups in `geograms/wapps`** (none block host shipping): chat wapp declares
-`provides.intents: ["messages","chat"]` (until then the messages/chat icons
+`provides.intents: ["mail","chat"]` (until then the mail/chat icons
 resolve nothing and are hidden); handles `view.open` (until then they open the
 wapp at its default view); emits per-intent unread (until then the chat badge is
 0).

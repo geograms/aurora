@@ -44,6 +44,7 @@ import '../files/partial_store.dart';
 import '../files/serve_quota.dart';
 import '../files/serve_stats.dart';
 import '../log_service.dart';
+import 'rns_iface_kind.dart';
 import '../media_disk_cache.dart';
 import '../social/relay_event_store.dart';
 import '../social/relay_node.dart';
@@ -238,6 +239,43 @@ class RnsService {
   // this proxy just sends commands + reads caches. Plus the LAN wss server.
   NostrClient? _nostrHub;
   NostrWsServer? _nostrWs;
+
+  /// Host email→npub resolver (NIP-05 ladder), injected at boot by
+  /// rns_autostart (EmailResolveService lives above this service — a direct
+  /// import here would cycle). Consumed by the WS relay's mailto REQ trigger
+  /// and by hal_relay_resolve when the target contains '@'.
+  Future<Map<String, dynamic>?> Function(String email)? emailResolver;
+
+  /// Retention tier of an author (0 self / 1 followed / 2 stranger) — the one
+  /// classification both relay front doors (RNS RelayNode + WS server) use.
+  int _tierIndexOf(String pub) => tierOf(
+        pub,
+        selfPubHex: selfPubHex,
+        followsHex: _mirroredAuthors,
+      ).index;
+
+  /// Per-tier admission shared by both relay front doors: self always;
+  /// kind-4 DMs always (transient store-and-forward mailbox items, deleted by
+  /// the recipient via authorized DROP); strangers refused past their monthly
+  /// note / storage caps. Text notes only here (isMedia false).
+  String? _admitHostedEvent(NostrEvent ev, int tier) {
+    if (tier == Tier.self.index) return null;
+    if (ev.kind == NostrEventKind.encryptedDirectMessage) return null;
+    final store = _relayStore;
+    if (store == null) return null;
+    final u = store.hostUsage();
+    final bytes = jsonEncode(ev.toJson()).length;
+    final d = admit(
+      Tier.values[tier],
+      bytes,
+      isMedia: false,
+      totalHostedBytes: u.totalBytes,
+      strangerHostedBytes: u.strangerBytes,
+      strangerNotesThisMonth: u.strangerNotesThisMonth,
+      q: hostQuota(),
+    );
+    return d.ok ? null : d.reason;
+  }
 
   // Store-and-forward hosting: the set of NOSTR pubkeys (hex) the local user
   // follows, used to classify hosted content into the "followed" retention tier.
@@ -593,12 +631,63 @@ class RnsService {
   void _scheduleAnnounce() {
     _announceTimer?.cancel();
     _announceTimer = Timer(_announceInterval(), () {
-      if (_up) {
-        announce(_announceText);
-        _announceServiceDests();
-      }
+      if (_up) _announceNow();
       _scheduleAnnounce();
     });
+  }
+
+  /// When we last told the network we exist. Read by [pumpAnnounce] so the
+  /// timer and the native heartbeat cannot double-announce.
+  int _lastAnnounceMs = 0;
+
+  void _announceNow() {
+    _lastAnnounceMs = DateTime.now().millisecondsSinceEpoch;
+    announce(_announceText);
+    _announceServiceDests();
+  }
+
+  /// Last LAN-only presence beacon.
+  int _lastLanBeaconMs = 0;
+  Timer? _lanBeaconTimer;
+  /// How often we say "I am on this LAN". Deliberately NOT the adaptive
+  /// [_announceInterval]: that one is throttled to 5 minutes off-charger to
+  /// spare the hubs and the battery, which is right for the wide network and
+  /// wrong for the room you are standing in — a phone in a pocket dropped out
+  /// of its neighbour's "nearby" list between beats. A broadcast datagram on
+  /// the local subnet costs nothing anyone is paying for.
+  static const int _lanBeaconEveryMs = 90 * 1000;
+
+  /// Broadcast our announce on the LAN interface ONLY. Same packet the wide
+  /// announce sends, but it never touches a hub uplink, so it can be frequent.
+  Future<void> _lanBeacon() async {
+    final lan = _lan;
+    if (!_up || _id == null || lan == null) return;
+    _lastLanBeaconMs = DateTime.now().millisecondsSinceEpoch;
+    final pkt = await RnsAnnounceBuilder.build(
+      _id!,
+      _app,
+      _aspects,
+      appData: Uint8List.fromList(utf8.encode(_announceText)),
+    );
+    lan.send(pkt.pack());
+  }
+
+  /// Re-announce if we are overdue. Called from the Android foreground
+  /// service's native heartbeat.
+  ///
+  /// The periodic announce above is a Dart [Timer], and Dart timers are frozen
+  /// while the app is backgrounded or the screen is off (that is precisely why
+  /// BgService drives a native Handler at all). So a phone in someone's pocket
+  /// went quiet: it held its wifi lock, it stayed reachable, and it simply
+  /// stopped saying it was there — the desktop next to it saw it drop off the
+  /// map after a few minutes. Announcing from the native tick keeps presence
+  /// alive exactly as long as the service is alive.
+  void pumpAnnounce() {
+    if (!_up) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastLanBeaconMs >= _lanBeaconEveryMs) unawaited(_lanBeacon());
+    if (now - _lastAnnounceMs < _announceInterval().inMilliseconds) return;
+    _announceNow();
   }
 
   // Re-publish our DHT provider records well under their 45-minute TTL so they
@@ -851,7 +940,12 @@ class RnsService {
   /// directly, not replayed by anyone, so a single announce IS proof of life.
   bool _isFreshNode(_ObservedNode n, int nowMs) {
     if (nowMs - n.lastSeenMs > _onlineWindowMs) return false;
-    if (n.via == 'lan') return true;
+    // Heard locally within the window: one announce IS proof of life, and this
+    // survives a lost race with the hub copy (which used to demote a LAN peer
+    // off the graph mid-conversation).
+    if (n.lastLocalMs > 0 && nowMs - n.lastLocalMs <= _onlineWindowMs) {
+      return true;
+    }
     return n.heardCount >= 2 &&
         n.lastSeenMs - n.firstHeardMs >= _reannounceMinSpanMs;
   }
@@ -1485,6 +1579,10 @@ class RnsService {
     n.lastSeenMs = now;
     n.hops = wireHops + 1;
     n.via = via;
+    if (rnsIfaceIsLocal(rnsIfaceKind(via))) {
+      n.localVia = via;
+      n.lastLocalMs = now;
+    }
     n.relayerHex = relayer == null ? null : _hex(relayer);
     if (relayer != null) n.relayers.add(_hex(relayer));
     if (svc != null) {
@@ -1730,6 +1828,13 @@ class RnsService {
         'capacity': relay?.announcement.capacity ?? 0,
         'firstSeen': n.firstSeenMs,
         'lastSeen': n.lastSeenMs,
+        // Reachable WITHOUT the internet, and on what. Sticky (see
+        // _ObservedNode.lastLocalMs) so a lost announce race cannot flip it.
+        // The graph colours by it; the Chat wapp's nearby list IS it.
+        'local': n.lastLocalMs > 0 &&
+            DateTime.now().millisecondsSinceEpoch - n.lastLocalMs <=
+                _onlineWindowMs,
+        'ifaceKind': rnsIfaceKind(n.localVia.isNotEmpty ? n.localVia : n.via),
         // Every relayer/hub this node is currently reachable through.
         'relayers': n.relayers.toList(),
         // NomadNet/LXMF messaging handles: the announced display name and the
@@ -1811,10 +1916,17 @@ class RnsService {
   /// remaining nodes as leaves clustered under their relayer (or direct neighbours
   /// of self). [service] filters to nodes announcing that service; [geogramOnly]
   /// hides generic Reticulum nodes; [search] matches callsign/identity/service.
+  /// [localOnly] answers a different question from the rest: not "what is the
+  /// network" but "who is in the room" — every node heard on something other
+  /// than the internet, geogram or not, newest first, capped at [limit]. The
+  /// Chat wapp's nearby list is built from exactly this, so the list and the
+  /// graph can never disagree about who is local.
   Map<String, dynamic> graphSnapshot({
     String? service,
     bool geogramOnly = false,
     String? search,
+    bool localOnly = false,
+    int limit = 0,
   }) {
     sweepObserved();
     final q = (search ?? '').trim().toLowerCase();
@@ -1982,6 +2094,30 @@ class RnsService {
         if (n.services.contains('lxmf')) lxmfReachable++;
         if (isGeogram(n)) geogramReachable++;
       }
+    }
+
+    if (localOnly) {
+      // "Who is in the room": local nodes only, newest first, capped — and NO
+      // trailing objects after nodes[], so a wasm caller walking the JSON with
+      // a flat parser cannot wander into edges/stats.
+      final local = <Map<String, dynamic>>[
+        for (final node in nodes)
+          if ((node['meta'] as Map?)?['local'] == true &&
+              node['kind'] != 'self')
+            node,
+      ]..sort((a, b) {
+          final an = ((a['meta'] as Map?)?['lastSeen'] as int?) ?? 0;
+          final bn = ((b['meta'] as Map?)?['lastSeen'] as int?) ?? 0;
+          return bn.compareTo(an);
+        });
+      return {
+        'nodes': limit > 0 && local.length > limit
+            ? local.sublist(0, limit)
+            : local,
+        'edges': const <Map<String, dynamic>>[],
+        'localOnly': true,
+        'observed': _observed.length,
+      };
     }
 
     return {
@@ -2481,35 +2617,12 @@ class RnsService {
             // the decentralised "ask the device by callsign for its content" path.
             selfPubHex: () => selfPubHex,
             // Classify an author into a retention tier (0 self / 1 followed /
-            // 2 stranger) for hosting quota + eviction.
-            tierOfPub: (pub) => tierOf(
-              pub,
-              selfPubHex: selfPubHex,
-              followsHex: _mirroredAuthors,
-            ).index,
+            // 2 stranger) for hosting quota + eviction. Shared with the WS
+            // front door below — one policy, two doors.
+            tierOfPub: _tierIndexOf,
             // Per-tier admission: self always; strangers refused past their
             // monthly note / storage caps. Text notes only here (isMedia false).
-            admitEvent: (ev, tier) {
-              if (tier == Tier.self.index) return null;
-              // kind-4 (NIP-04 DM) is a small, transient store-and-forward mailbox
-              // item — admit it regardless of the author's stranger quota; the
-              // recipient deletes it (recipient-authorized DROP) once received.
-              if (ev.kind == NostrEventKind.encryptedDirectMessage) return null;
-              final store = _relayStore;
-              if (store == null) return null;
-              final u = store.hostUsage();
-              final bytes = jsonEncode(ev.toJson()).length;
-              final d = admit(
-                Tier.values[tier],
-                bytes,
-                isMedia: false,
-                totalHostedBytes: u.totalBytes,
-                strangerHostedBytes: u.strangerBytes,
-                strangerNotesThisMonth: u.strangerNotesThisMonth,
-                q: hostQuota(),
-              );
-              return d.ok ? null : d.reason;
-            },
+            admitEvent: _admitHostedEvent,
             // A peer indexer just PUSHED an event into our store (fan-out). If
             // it is reticulum-native (z=rns), hand it to the Nomadnet feed as a
             // live push trigger — the open feed updates immediately, no poll.
@@ -2561,14 +2674,39 @@ class RnsService {
           );
           // NOSTR client hub: transport-abstract relays (wss:// internet, rns://
           // Reticulum, local device) all merging into the SAME _relayStore. Plus a
-          // local wss:// server so any stock NOSTR app on the LAN uses THIS device
-          // as a relay, and its subscribers see mesh + internet events live.
-          _nostrWs = NostrWsServer(
-            _relayStore!,
-            log: (m) => LogService.instance.add('NOSTR/wss: $m'),
-          );
-          // ignore: discarded_futures
-          _nostrWs!.start();
+          // local wss:// server so any stock NOSTR app on the LAN (or, when the
+          // device is port-forwarded/public, the internet) uses THIS device as a
+          // relay, and its subscribers see mesh + internet events live. The WS
+          // door runs the SAME admission policy as the RNS door above, and it
+          // answers mailto→npub conversion REQs via the host email resolver.
+          if ((p?.nostrWsRelayEnabled ?? true) && (p?.hostEnabled ?? true)) {
+            _nostrWs = NostrWsServer(
+              _relayStore!,
+              port: p?.nostrWsRelayPort ?? 4848,
+              spam: SpamPolicy.lenient(),
+              tierOf: _tierIndexOf,
+              admitEvent: _admitHostedEvent,
+              resolveMailto: (email) async {
+                await emailResolver?.call(email);
+              },
+              relayInfo: () => {
+                'name': 'geogram',
+                'description':
+                    'geogram device relay — REQ kind 30078 #d mailto:<email> '
+                        'to resolve an email address into a verified npub',
+                'pubkey': selfPubHex,
+                'software': 'geogram-aurora',
+                'supported_nips': [1, 9, 11, 50],
+                'limitation': {'max_message_length': 131072},
+              },
+              log: (m) => LogService.instance.add('NOSTR/wss: $m'),
+            );
+            // ignore: discarded_futures
+            _nostrWs!.start();
+          }
+          // Every durably stored event — mesh push, publish, batch merge, WS
+          // ingest — live-pushes to any open WS subscription.
+          _relayStore!.onPut = (ev) => _nostrWs?.broadcast(ev);
           // The NOSTR relay pipeline (WebSocket receive, decode, verify, SQLite,
           // like/reply/profile tallies) all runs on a DEDICATED background isolate
           // via NostrEngine — the UI isolate only sends commands + reads caches, so
@@ -3001,6 +3139,16 @@ class RnsService {
       // announces to converge.
       unawaited(_warmStartFromCache());
       _scheduleAnnounce();
+      _lanBeaconTimer?.cancel();
+      _lanBeaconTimer = Timer.periodic(
+        const Duration(milliseconds: _lanBeaconEveryMs),
+        (_) => unawaited(_lanBeacon()),
+      );
+      // …and a second, un-throttleable clock for the same job. On Android the
+      // Dart timer above stops firing once the screen goes off; the foreground
+      // service's native heartbeat does not. Both call the same pump, which
+      // no-ops unless we are actually overdue.
+      AndroidForegroundService.instance.addTickListener(pumpAnnounce);
       _republishTimer?.cancel();
       _republishTimer = Timer.periodic(_republishEvery, (_) {
         if (_up) _files?.republishAll();
@@ -4296,6 +4444,84 @@ class RnsService {
   /// Received LXMF messages (verified). Newest appended.
   List<Map<String, dynamic>> get lxmfInbox => List.unmodifiable(_lxmfInbox);
 
+  // ── Outbound retry ─────────────────────────────────────────────────────
+  //
+  // "Held for relay" is not delivery. It means the recipient must PULL from our
+  // mailbox — which only happens if they already know us as a contact. Between
+  // two devices that just met (the Reticulum graph → Message path), nobody ever
+  // pulls, and the message sits in memory forever. Observed live: a message
+  // between a phone and a desktop ON THE SAME LAN, one hop apart, never arrived.
+  //
+  // So we keep trying the direct link on a backoff for as long as the app is up.
+  // The recipient dedups by content, so a late direct delivery after a pull is
+  // harmless.
+  final List<Map<String, Object?>> _lxmfRetries = [];
+  Timer? _lxmfRetryTimer;
+  static const List<int> _lxmfBackoffSec = [20, 60, 180, 600, 1800];
+
+  void _queueLxmfRetry(
+      String destHex, String title, String content, Map<int, Object?>? fields) {
+    // Wapp datagrams have their own delivery story; only user messages retry.
+    if (fields != null && fields.containsKey(_kWappLxmfField)) return;
+    _lxmfRetries.add({
+      'dest': destHex,
+      'title': title,
+      'content': content,
+      'try': 0,
+      'at': DateTime.now().millisecondsSinceEpoch + _lxmfBackoffSec[0] * 1000,
+    });
+    if (_lxmfRetries.length > 100) _lxmfRetries.removeAt(0);
+    _notifyLxmf();
+    _lxmfRetryTimer ??=
+        Timer.periodic(const Duration(seconds: 10), (_) => _runLxmfRetries());
+  }
+
+  Future<void> _runLxmfRetries() async {
+    if (_lxmfRetries.isEmpty) {
+      _lxmfRetryTimer?.cancel();
+      _lxmfRetryTimer = null;
+      return;
+    }
+    final r = _lxmf;
+    if (!_up || r == null || _id == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final e in List<Map<String, Object?>>.from(_lxmfRetries)) {
+      if ((e['at'] as int) > now) continue;
+      final destHex = e['dest'] as String;
+      final dh = _bytesFromHex(destHex);
+      if (dh == null) {
+        _lxmfRetries.remove(e);
+        continue;
+      }
+      final t = _transport;
+      if (t != null && !t.hasPath(dh)) t.requestPath(dh);
+      final msg = await LxmfMessage.create(
+        destinationHash: dh,
+        source: _id!,
+        title: e['title'] as String,
+        content: e['content'] as String,
+      );
+      final ok = await r.send_(msg, timeout: const Duration(seconds: 12));
+      final who = destHex.length >= 8 ? destHex.substring(0, 8) : destHex;
+      final n = (e['try'] as int) + 1;
+      if (ok) {
+        _lxmfRetries.remove(e);
+        _notifyLxmf();
+        LogService.instance
+            .add('RNS/lxmf: retry $n delivered to $who over a direct link');
+      } else if (n >= _lxmfBackoffSec.length) {
+        // Give up on pushing; the copy stays in the mailbox for a pull.
+        _lxmfRetries.remove(e);
+        _notifyLxmf();
+        LogService.instance.add(
+            'RNS/lxmf: $who unreachable after $n tries — left for relay pickup');
+      } else {
+        e['try'] = n;
+        e['at'] = now + _lxmfBackoffSec[n] * 1000;
+      }
+    }
+  }
+
   /// Send an LXMF message to [destHex] (a peer's LXMF delivery destination hash,
   /// learned from its announce). Returns true once delivered over the link.
   Future<bool> sendLxmf({
@@ -4344,6 +4570,7 @@ class RnsService {
           ? 'RNS/lxmf: delivered to $who over a direct link'
           : 'RNS/lxmf: no direct link to $who — held for relay pickup',
     );
+    if (!ok) _queueLxmfRetry(destHex, title, content, fields);
     return ok;
   }
 
@@ -5542,6 +5769,21 @@ class RnsService {
 
   int get lxmfUnreadCount => _lxmfUnread.length;
 
+  /// How many messages to [destHex] are still waiting to go out (direct push
+  /// failed, retries pending). Drives the "waiting to deliver" strip in the
+  /// chat header: a message parked in the outbound mailbox used to look exactly
+  /// like a delivered one, which is how "I sent it and nothing arrived" becomes
+  /// a mystery instead of a status.
+  int lxmfPendingFor(String destHex) {
+    final k = destHex.toLowerCase();
+    var n = 0;
+    for (final e in _lxmfRetries) {
+      if ((e['dest'] as String).toLowerCase() == k) n++;
+    }
+    return n;
+  }
+
+
   void lxmfMarkRead(String peerHex) {
     if (_lxmfUnread.remove(peerHex.toLowerCase())) _notifyLxmf();
   }
@@ -6186,6 +6428,67 @@ class RnsService {
     }
   }
 
+  /// Fan a [filter] out to each relay dest in [relayDestsHex] and collect every
+  /// answer. Callers still verify signatures and pick newest — this is just the
+  /// transport loop, shared by callsign and mailto resolution.
+  Future<List<NostrEvent>> relayQueryDests(
+    NostrFilter filter,
+    List<String> relayDestsHex, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    final collected = <NostrEvent>[];
+    for (final hex in relayDestsHex) {
+      final id = _relayIdentity(hex);
+      if (id != null && _relay != null) {
+        try {
+          collected.addAll(await _relay!.query(id, filter, timeout: timeout));
+        } catch (_) {}
+      }
+    }
+    return collected;
+  }
+
+  /// Publish a signed email→npub mapping as a kind-30078 event keyed
+  /// (replaceable) by `d = mailto:<email>`. The mapping is an ATTESTATION by
+  /// THIS device's profile key: "I resolved this address via NIP-05 and
+  /// [kind0Match] says whether the target's kind-0 nip05 field agreed".
+  /// relayPublish stores it locally (→ onPut → WS broadcast reaches any open
+  /// subscription waiting on the conversion) and fans it out to indexers, so
+  /// offgrid peers can resolve the same address from the mesh later.
+  Future<NostrEvent?> publishMailtoMapping({
+    required String email,
+    required String pubHex,
+    required bool kind0Match,
+  }) async {
+    final pub = selfPubHex;
+    final privHex = _profilePrivHex();
+    final addr = email.trim().toLowerCase();
+    if (pub == null || privHex == null || addr.isEmpty) return null;
+    final ev = NostrEvent(
+      pubkey: pub,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: _kIdentityKind,
+      tags: [
+        ['d', 'mailto:$addr'],
+      ],
+      content: jsonEncode({
+        'email': addr,
+        'npub': pubHex,
+        'method': 'nip05',
+        'verified_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        'kind0_match': kind0Match,
+      }),
+    );
+    try {
+      ev.sign(privHex);
+    } catch (e) {
+      LogService.instance.add('RNS/relay: mailto sign failed: $e');
+      return null;
+    }
+    await relayPublish(ev.toJson());
+    return ev;
+  }
+
   /// Resolve [callsign] → identity by querying [relayDestsHex] (+ the local
   /// store) for the newest verified kind-30078 event keyed by that callsign.
   /// Returns `{callsign, npub(base64url), deliv, prop}` (npub in the wapp's
@@ -6203,21 +6506,7 @@ class RnsService {
       },
       limit: 4,
     );
-    final collected = <NostrEvent>[];
-    for (final hex in relayDestsHex) {
-      final id = _relayIdentity(hex);
-      if (id != null && _relay != null) {
-        try {
-          collected.addAll(
-            await _relay!.query(
-              id,
-              filter,
-              timeout: const Duration(seconds: 12),
-            ),
-          );
-        } catch (_) {}
-      }
-    }
+    final collected = await relayQueryDests(filter, relayDestsHex);
     collected.addAll(_relayStore?.query(filter) ?? const []);
     NostrEvent? best;
     for (final ev in collected) {
@@ -9204,6 +9493,8 @@ class RnsService {
   Future<void> stop() async {
     _announceTimer?.cancel();
     _announceTimer = null;
+    _lanBeaconTimer?.cancel();
+    _lanBeaconTimer = null;
     _republishTimer?.cancel();
     _republishTimer = null;
     _rvTimer?.cancel();
@@ -9225,6 +9516,7 @@ class RnsService {
     _nostrHub?.close();
     _nostrHub = null;
     AndroidForegroundService.instance.removeTickListener(_nostrBackgroundTick);
+    AndroidForegroundService.instance.removeTickListener(pumpAnnounce);
     unawaited(AndroidForegroundService.instance.release('nostr'));
     // ignore: discarded_futures
     _nostrWs?.stop();
@@ -9330,6 +9622,16 @@ class _ObservedNode {
   // one-shot hub connect-flood replay. Reset every run (cache hydration removed).
   int heardCount = 0;
   int firstHeardMs = 0;
+  // The last time we heard this node WITHOUT the internet, and on what.
+  //
+  // `via`/`hops` above are last-write-wins per announce, and the transport
+  // dedups announces on a hash that excludes the hops byte — so when the
+  // hub-flooded copy of a round beats the LAN copy, a neighbour standing next
+  // to us is suddenly recorded as `tcp:…`, two hops away. Anything that asks
+  // "is this device in the room" must ask THESE fields instead, or it flickers
+  // once per announce round. Not persisted: locality is a per-run fact.
+  String localVia = '';
+  int lastLocalMs = 0;
 
   _ObservedNode({
     required this.identityHex,

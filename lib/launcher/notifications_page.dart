@@ -1,32 +1,18 @@
 part of 'launcher.dart';
 
-/// Open the wapp a notification came from. [source] follows the
-/// `wapp:<folder>` convention (docs/notifications.md); anything else is not
-/// routable here. Pushes WappPage directly — same shortcut the remote API's
-/// /api/launch takes — deliberately skipping the launcher grid's dependency
-/// gate and launch-count bookkeeping.
-Future<bool> _openWappBySource(BuildContext context, String source) async {
-  if (!source.startsWith('wapp:')) return false;
-  final folder = source.substring(5).trim();
-  if (folder.isEmpty) return false;
-  final installed = installedAppsStorage();
-  if (!await installed.directoryExists(folder)) return false;
-  final dir = installed.getAbsolutePath(folder);
-  var title = folder;
-  try {
-    final raw = await wappPackageStorage(dir).readString('manifest.json');
-    if (raw != null) {
-      final m = jsonDecode(raw);
-      if (m is Map && (m['title'] ?? '').toString().isNotEmpty) {
-        title = m['title'].toString();
-      }
-    }
-  } catch (_) {}
-  if (!context.mounted) return false;
-  await Navigator.of(context).push(
-    MaterialPageRoute(builder: (_) => WappPage(wappDir: dir, title: title)),
+/// Open the wapp a notification came from — on the exact conversation when
+/// the notification names one. [source] follows the `wapp:<folder>`
+/// convention (docs/notifications.md); anything else is not routable here.
+/// Delegates to [openWappByFolder], the same door the Android notification
+/// deep link uses, so both taps behave identically.
+Future<bool> _openWappBySource(BuildContext context, String source,
+    {String? convo}) {
+  if (!source.startsWith('wapp:')) return Future.value(false);
+  return openWappByFolder(
+    source.substring(5).trim(),
+    convo: convo,
+    navigator: Navigator.of(context),
   );
-  return true;
 }
 
 class NotificationsPage extends StatefulWidget {
@@ -172,7 +158,8 @@ class _NotificationRow extends StatelessWidget {
     final source = notification.source;
     VoidCallback? onTap;
     if (source.startsWith('wapp:')) {
-      onTap = () => unawaited(_openWappBySource(context, source));
+      onTap = () => unawaited(
+          _openWappBySource(context, source, convo: notification.convo));
     } else if (source == 'host:updates') {
       onTap = () => Navigator.of(context).push(
             MaterialPageRoute(builder: (_) => const IwiSettingsPage()),

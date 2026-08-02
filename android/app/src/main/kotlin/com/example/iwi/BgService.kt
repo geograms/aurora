@@ -100,8 +100,16 @@ class BgService : Service() {
                         CHANNEL_ID,
                         "Background services",
                         NotificationManager.IMPORTANCE_LOW,
-                    ),
+                    ).apply {
+                        // Status, not news: the ongoing keep-alive must never
+                        // put a dot on the launcher icon. Only aurora_events
+                        // (real messages) may badge.
+                        setShowBadge(false)
+                    },
                 )
+                // The pre-badge-policy channel; its settings are sticky, so a
+                // rename is the only way existing installs lose the dot.
+                nm.deleteNotificationChannel("aurora_bg")
             }
         }
         val pi = PendingIntent.getActivity(
@@ -120,7 +128,9 @@ class BgService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "aurora_bg"
+        // Renamed from "aurora_bg": channel settings are immutable once
+        // created, and the old channel badged the launcher icon forever.
+        private const val CHANNEL_ID = "aurora_service"
         private const val NOTIF_ID = 7001
         private const val TICK_MS = 2000L
         const val ACTION_START_FROM_BOOT = "com.geogram.aurora.START_FROM_BOOT"

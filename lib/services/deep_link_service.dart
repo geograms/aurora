@@ -20,6 +20,7 @@ import 'package:flutter/services.dart';
 
 import '../launcher/launcher.dart' show rootNavigatorKey;
 import '../profile/storage_paths.dart';
+import '../wapp/wapp_open.dart';
 import '../wapp/wapp_page.dart';
 import 'log_service.dart';
 
@@ -55,7 +56,19 @@ class DeepLinkService {
   Future<void> _handle(String url) async {
     LogService.instance.add('DeepLink: $url');
     final lower = url.toLowerCase();
-    // Only circle links are handled today.
+    // geogram://open?wapp=<folder>&convo=<id> — a tapped Android notification.
+    // Same opener as the in-app notification center, so both taps land on the
+    // same screen: the wapp, on the conversation when one is named.
+    if (lower.startsWith('geogram://open')) {
+      final uri = Uri.tryParse(url);
+      if (uri == null) return;
+      await openWappByFolder(
+        uri.queryParameters['wapp'] ?? '',
+        convo: uri.queryParameters['convo'],
+        navigator: rootNavigatorKey.currentState,
+      );
+      return;
+    }
     if (!lower.contains('/circle/') && !lower.startsWith('geogram://circle')) {
       return;
     }

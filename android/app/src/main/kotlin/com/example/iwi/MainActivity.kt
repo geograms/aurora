@@ -74,14 +74,17 @@ class MainActivity : FlutterFragmentActivity() {
         initialLink = link
     }
 
-    /** Pull a circle deep link out of an ACTION_VIEW intent, or null. */
+    /** Pull a deep link out of an ACTION_VIEW intent, or null. Handled links:
+     * circle invites (https://geogram.radio/circle/… and geogram://circle/…)
+     * and notification taps (geogram://open?wapp=…&convo=…, set by
+     * BgBridge.notify so a message notification opens its conversation). */
     private fun linkFrom(intent: Intent?): String? {
         if (intent == null || intent.action != Intent.ACTION_VIEW) return null
         val data = intent.data ?: return null
         val s = data.toString()
         val ok = (data.scheme == "https" || data.scheme == "http") &&
             data.host == "geogram.radio" && (data.path?.startsWith("/circle") == true) ||
-            (data.scheme == "geogram" && data.host == "circle")
+            (data.scheme == "geogram" && (data.host == "circle" || data.host == "open"))
         return if (ok) s else null
     }
 

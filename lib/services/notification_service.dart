@@ -61,6 +61,13 @@ class GeogramNotification {
   final String? tag;
 
   final NotificationScope scope;
+
+  /// Conversation id inside the source wapp this notification is about
+  /// (e.g. the peer pubkey for Mail, a room id for Chat). Tapping the
+  /// notification — Android shade or in-app center — opens that
+  /// conversation, not just the wapp's front page.
+  final String? convo;
+
   final DateTime timestamp;
 
   GeogramNotification({
@@ -70,6 +77,7 @@ class GeogramNotification {
     required this.source,
     this.tag,
     this.scope = NotificationScope.app,
+    this.convo,
   }) : timestamp = DateTime.now();
 }
 
@@ -116,6 +124,10 @@ class SystemTrayNotificationBackend implements NotificationBackend {
       title: n.title,
       body: n.body,
       error: n.level == NotificationLevel.error,
+      // Android routes taps through geogram://open — hand over the wapp
+      // folder and the conversation so the tap can land on the thread.
+      wapp: n.source.startsWith('wapp:') ? n.source.substring(5) : null,
+      convo: n.convo,
     );
   }
 }

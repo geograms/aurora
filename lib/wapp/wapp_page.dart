@@ -2232,6 +2232,7 @@ class _WappPageState extends State<WappPage>
               source: 'wapp:$_wappName',
               tag: data['tag'] as String?,
               scope: scope,
+              convo: data['convo'] as String?,
             ),
           );
         } else if (type == 'unread') {

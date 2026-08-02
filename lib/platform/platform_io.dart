@@ -37,6 +37,8 @@ Future<void> showSystemNotification({
   required String title,
   String? body,
   bool error = false,
+  String? wapp,
+  String? convo,
 }) async {
   try {
     if (Platform.isLinux) {
@@ -55,18 +57,34 @@ Future<void> showSystemNotification({
       ]);
     } else if (Platform.isAndroid) {
       // Route to the native foreground-service bridge, which posts a heads-up
-      // notification (works while backgrounded / headless from boot).
-      _androidNotifId = (_androidNotifId + 1) & 0x7fffffff;
+      // notification (works while backgrounded / headless from boot). Ids
+      // cycle inside 9000..9099 — BgBridge.clearEvents sweeps exactly that
+      // range, and the service (7001) / media (7002) ids stay clear of it.
+      _androidNotifId = 9000 + ((_androidNotifId - 9000 + 1) % 100);
       await _bgChannel.invokeMethod('notify', {
         'id': _androidNotifId,
         'title': title,
         if (body != null && body.isNotEmpty) 'body': body,
+        if (wapp != null && wapp.isNotEmpty) 'wapp': wapp,
+        if (convo != null && convo.isNotEmpty) 'convo': convo,
       });
     }
     // Windows native balloon not implemented — use winrt toast later.
   } catch (_) {
     // Ignore — the in-app overlay is the source of truth anyway.
   }
+}
+
+/// Remove every event notification this app put in the OS shade. Called when
+/// the user reads (or clears) the in-app notification center, so the shade —
+/// and the launcher-icon dot it feeds — always agrees with what the user has
+/// seen. Android only; desktop notifications are transient toasts already.
+Future<void> clearSystemNotifications() async {
+  try {
+    if (Platform.isAndroid) {
+      await _bgChannel.invokeMethod('notify_clear');
+    }
+  } catch (_) {}
 }
 
 // Native bridge for Android system notifications (shared with the foreground

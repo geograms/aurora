@@ -54,7 +54,19 @@ object BgBridge {
                     val id = call.argument<Int>("id") ?: (System.currentTimeMillis() and 0x7fffffff).toInt()
                     val title = call.argument<String>("title") ?: "Aurora"
                     val body = call.argument<String>("body")
-                    notify(appCtx, id, title, body)
+                    notify(
+                        appCtx, id, title, body,
+                        wapp = call.argument<String>("wapp"),
+                        convo = call.argument<String>("convo"),
+                    )
+                    result.success(true)
+                }
+                // The user read their notifications in-app (notification center
+                // opened / cleared): the shade must agree. Cancels every event
+                // notification this process posted; the ongoing foreground-
+                // service and media notifications are untouched.
+                "notify_clear" -> {
+                    clearEvents(appCtx)
                     result.success(true)
                 }
                 "media.update" -> {
@@ -81,8 +93,37 @@ object BgBridge {
         Log.d(TAG, "bg_service channel attached")
     }
 
-    /** Post a heads-up notification for a message/event. Tapping opens the app. */
-    fun notify(context: Context, id: Int, title: String, body: String?) {
+    /** Ids of event notifications posted by this process, so notify_clear can
+     * cancel exactly them (never the foreground-service / media entries). */
+    private val postedEventIds = mutableSetOf<Int>()
+
+    /** Cancel every event notification we posted — the in-app notification
+     * center was read, and a shade that still shows them is lying. Also sweeps
+     * the whole event id range (9000..9099, see platform_io._androidNotifId):
+     * a previous process (headless boot) may have posted entries this process
+     * never saw. Service/media notifications live at 7001/7002 — untouched. */
+    fun clearEvents(context: Context) {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        synchronized(postedEventIds) {
+            for (id in postedEventIds) nm.cancel(id)
+            postedEventIds.clear()
+        }
+        for (id in 9000..9099) nm.cancel(id)
+    }
+
+    /** Post a heads-up notification for a message/event. Tapping opens the
+     * app — and when [wapp] is given, deep-links straight to that wapp (and
+     * to [convo] inside it) via geogram://open, the same route the in-app
+     * notification center takes. A notification that names a conversation
+     * must open that conversation, not a front page. */
+    fun notify(
+        context: Context,
+        id: Int,
+        title: String,
+        body: String?,
+        wapp: String? = null,
+        convo: String? = null,
+    ) {
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             nm.getNotificationChannel(EVENT_CHANNEL_ID) == null
@@ -95,9 +136,20 @@ object BgBridge {
             nm.createNotificationChannel(channel)
         }
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        if (launch != null && !wapp.isNullOrEmpty()) {
+            val uri = android.net.Uri.Builder()
+                .scheme("geogram").authority("open")
+                .appendQueryParameter("wapp", wapp)
+                .apply { if (!convo.isNullOrEmpty()) appendQueryParameter("convo", convo) }
+                .build()
+            launch.action = Intent.ACTION_VIEW
+            launch.data = uri
+        }
         val pi = if (launch != null) {
+            // requestCode = id: each notification keeps its OWN target intent
+            // (a shared requestCode would collapse them all onto the last one).
             PendingIntent.getActivity(
-                context, 0, launch,
+                context, id, launch,
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
         } else null
@@ -109,6 +161,7 @@ object BgBridge {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .apply { if (pi != null) setContentIntent(pi) }
             .build()
+        synchronized(postedEventIds) { postedEventIds.add(id) }
         nm.notify(id, n)
     }
 }

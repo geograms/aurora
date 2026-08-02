@@ -44,8 +44,12 @@ class DownloadForegroundService : Service() {
                 nm.createNotificationChannel(
                     NotificationChannel(
                         CHANNEL_ID, "Updates", NotificationManager.IMPORTANCE_LOW,
-                    ),
+                    ).apply {
+                        // Progress is status, not news — no launcher-icon dot.
+                        setShowBadge(false)
+                    },
                 )
+                nm.deleteNotificationChannel("aurora_download")
             }
         }
         val b = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -63,7 +67,9 @@ class DownloadForegroundService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "aurora_download"
+        // Renamed from "aurora_download": channel settings are immutable once
+        // created, and the old channel could badge the launcher icon.
+        private const val CHANNEL_ID = "aurora_updates"
         private const val NOTIF_ID = 7002
 
         fun start(context: Context, text: String) {

@@ -25,9 +25,14 @@ Future<void> showSystemNotification({
   required String title,
   String? body,
   bool error = false,
+  String? wapp,
+  String? convo,
 }) async {
   // no-op
 }
+
+/// Remove app-posted OS notifications. No-op on web (there are none).
+Future<void> clearSystemNotifications() async {}
 
 /// True when the current platform supports spawning subprocesses
 /// (Linux / macOS / Windows). Web and mobile return false so

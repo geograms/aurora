@@ -72,6 +72,7 @@ import '../wapp/background_wapp_manager.dart';
 import '../wapp/functionality_registry.dart';
 import '../wapp/wapp_icons.dart';
 import '../wapp/wapp_engine.dart';
+import '../wapp/wapp_open.dart';
 import '../wapp/wapp_page.dart';
 
 import 'hardware_page.dart';

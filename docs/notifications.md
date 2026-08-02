@@ -108,15 +108,20 @@ String parsing accepts aliases: `warn` → `warning`, `err` → `error`. Unknown
 At the OS layer, Android sorts notifications into channels (each with its own importance
 and user-facing settings). Package `com.geogram.aurora`:
 
-| Channel id          | Label                  | Importance | Used for                                          |
-|---------------------|------------------------|-----------|---------------------------------------------------|
-| `EVENT_CHANNEL_ID`  | "Messages & events"    | HIGH      | the general `notify` escalation path (heads-up)   |
-| `aurora_bg`         | "Background services"  | LOW       | the ongoing foreground-service notification       |
-| (updates channel)   | "Updates"              | —         | download/update progress (`DownloadForegroundService`) |
-| (media channel)     | —                      | —         | lock-screen media transport (Player wapp)         |
+| Channel id       | Label                  | Importance | Badges icon? | Used for                                          |
+|------------------|------------------------|-----------|:---:|---------------------------------------------------|
+| `aurora_events`  | "Messages & events"    | HIGH      | ✅  | the general `notify` escalation path (heads-up)   |
+| `aurora_service` | "Background services"  | LOW       | ❌  | the ongoing foreground-service notification       |
+| `aurora_updates` | "Updates"              | LOW       | ❌  | download/update progress (`DownloadForegroundService`) |
+| `aurora_media`   | "Now playing"          | LOW       | ❌  | lock-screen media transport (Player wapp)         |
 
-For general notifications, only `EVENT_CHANNEL_ID` matters — it's the high-importance,
-heads-up channel `BgBridge` posts to.
+**Badge policy:** only `aurora_events` may put a dot on the launcher icon —
+messages are news, everything else is status. The service and updates channels
+were renamed (from `aurora_bg` / `aurora_download`) because channel settings
+are immutable once created; the old ids are deleted on first run of the new
+build. For general notifications only `aurora_events` matters — it's the
+high-importance, heads-up channel `BgBridge` posts to, with ids cycling in
+9000..9099 (service = 7001, download/media = 7002 — outside the sweep range).
 
 ### Unread badges are not notifications
 
@@ -158,6 +163,13 @@ Wire fields:
 | `body`  | no       | string                                | —       |
 | `tag`   | no       | string dedupe key (shown once ever, across restarts) | none |
 | `scope` | no       | `app`/`system`/`both`                 | `app`   |
+| `convo` | no       | conversation id inside the wapp — the TAP TARGET | none |
+
+**`convo` makes the notification tappable.** When set, tapping the
+notification — Android shade or in-app center, both — opens the source wapp
+ON that conversation (`WappPage(initialConvo: …)`), not its front page. Mail
+sets it to the peer's pubkey. A message notification without `convo` opens
+the wapp's front page, which for a message is broken UX — always set it.
 
 **Tag discipline.** Use a per-event, namespaced tag (`mail:<rmid>`, `batt-x1`),
 never a constant: a constant tag ("msg") suppresses every later notification of
@@ -213,9 +225,17 @@ notification. You often don't need to raise error notifications by hand — fire
   `NotificationStore.instance.unreadCount`. Opens the notification center.
 - **Notification center** — `NotificationsPage`: full-screen list, grouped by day
   (Today / Yesterday / date), filter chips for `all` / `wapp` / `host` and one per level.
-  Opening it marks all seen. Rows are tappable by `source`: `wapp:<folder>`
-  opens that wapp, `host:updates` opens Settings (Updates lives there), any
-  other `host:*` row is inert.
+  Opening it marks all seen — which ALSO cancels the app's event notifications
+  in the Android shade (`platform.clearSystemNotifications()` → `BgBridge`
+  `notify_clear`), so the shade and the launcher-icon dot always agree with
+  the center. Rows are tappable by `source`: `wapp:<folder>` opens that wapp —
+  on the row's `convo` when it has one — via `openWappByFolder`
+  (`lib/wapp/wapp_open.dart`), the same helper the Android tap deep link uses;
+  `host:updates` opens Settings; any other `host:*` row is inert.
+- **Android tap deep link** — `BgBridge.notify` attaches
+  `geogram://open?wapp=<folder>&convo=<id>` to the notification's tap intent;
+  `MainActivity.linkFrom` accepts it and `DeepLinkService` routes it through
+  the same `openWappByFolder`. One opener, two doors.
 - **OS notification** — for `system`/`both`: `notify-send` (Linux), `osascript`
   (macOS), or a heads-up `NotificationManager` post (Android). Tapping the Android one
   opens the launcher.
@@ -274,6 +294,8 @@ notifications are always delivered even where OS escalation isn't wired up. No
 | `lib/services/notification_service.dart`        | enums, `GeogramNotification`, `NotificationService`, backends, `NotificationLayer` overlay |
 | `lib/services/notification_store.dart`          | persistence + `unreadCount` |
 | `lib/services/announced_tags_store.dart`        | persisted announce-once guard (per-profile tag set) |
+| `lib/wapp/wapp_open.dart`                        | shared open-wapp(+convo) helper for notification taps |
+| `lib/services/deep_link_service.dart`            | geogram://open route for Android notification taps |
 | `lib/launcher/notifications_page.dart`          | notification center UI |
 | `lib/launcher/home_header.dart`                 | bell + badge |
 | `lib/services/wapp_unread_service.dart`         | `unread` badge counts (separate from notifications) |

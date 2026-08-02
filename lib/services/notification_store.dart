@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../platform/platform.dart' as platform;
 import '../profile/profile_service.dart';
 import '../profile/storage_paths.dart';
 import 'event_bus.dart';
@@ -14,6 +15,10 @@ class StoredNotification {
   final String title;
   final String? body;
   final String source;
+
+  /// Conversation inside the source wapp this is about — the tap target.
+  final String? convo;
+
   final DateTime timestamp;
 
   const StoredNotification({
@@ -22,6 +27,7 @@ class StoredNotification {
     required this.title,
     this.body,
     required this.source,
+    this.convo,
     required this.timestamp,
   });
 
@@ -32,6 +38,7 @@ class StoredNotification {
       title: (json['title'] ?? '').toString(),
       body: json['body']?.toString(),
       source: (json['source'] ?? '').toString(),
+      convo: json['convo']?.toString(),
       timestamp: DateTime.fromMillisecondsSinceEpoch(
         (json['timestamp'] as num?)?.toInt() ?? 0,
       ),
@@ -51,6 +58,7 @@ class StoredNotification {
       title: n.title,
       body: n.body,
       source: n.source,
+      convo: n.convo,
       timestamp: ts,
     );
   }
@@ -61,6 +69,7 @@ class StoredNotification {
     'title': title,
     if (body != null) 'body': body,
     'source': source,
+    if (convo != null && convo!.isNotEmpty) 'convo': convo,
     'timestamp': timestamp.millisecondsSinceEpoch,
   };
 }
@@ -137,6 +146,10 @@ class NotificationStore {
   Future<void> markAllSeen() async {
     _seenMs = DateTime.now().millisecondsSinceEpoch;
     unreadCount.value = 0;
+    // Read in-app = read everywhere: drop the Android shade's event
+    // notifications (and with them the launcher-icon dot). One lifecycle —
+    // the shade must never disagree with the notification center.
+    unawaited(platform.clearSystemNotifications());
     try {
       final root = activeProfileRoot();
       await root.createDirectory('notifications');
@@ -150,6 +163,7 @@ class NotificationStore {
     // events that replay on the next start.
     items.value = const [];
     unreadCount.value = 0;
+    unawaited(platform.clearSystemNotifications());
     try {
       final root = activeProfileRoot();
       await root.delete(_itemsFile);

@@ -147,6 +147,13 @@
                 <data
                     android:scheme="geogram"
                     android:host="circle"/>
+                <!-- Notification taps: geogram://open?wapp=<folder>&convo=<id>
+                     (BgBridge.notify). Declared here too so the route is
+                     resolvable externally (tests, other apps) — it only ever
+                     navigates, it carries no privileged action. -->
+                <data
+                    android:scheme="geogram"
+                    android:host="open"/>
             </intent-filter>
         </activity>
         <!-- Background-service runtime for autostarted wapps (keeps BLE/APRS-IS

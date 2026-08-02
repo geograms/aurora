@@ -513,6 +513,7 @@ class _WappBackgroundService extends BackgroundService {
             source: 'wapp:$name',
             tag: data['tag'] as String?,
             scope: NotificationScope.both,
+            convo: data['convo'] as String?,
           ),
         );
         // A background wapp can't render UI, so surface activity as an unread

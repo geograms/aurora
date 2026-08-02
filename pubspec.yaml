@@ -93,6 +93,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_native_splash: ^2.4.1          # generates the Android/iOS launch screens from icons/splash/
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -108,6 +109,9 @@ flutter:
   assets:
     - assets/hello_world.wasm
     - assets/terminal_settings.ui.json
+    # Launch-screen triad (star + mountains + waves), light + dark ink.
+    - assets/splash/geogram-triad.svg
+    - assets/splash/geogram-triad-dark.svg
     # First-run default wapps, bundled as flat .wapp (zip) files so they can
     # be seeded on devices where the in-repo ../wapps library isn't present
     # (Android/iOS, packaged desktop). See lib/launcher/seeding.dart.
@@ -146,6 +150,18 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+flutter_native_splash:
+  color: "#F4F1EA"
+  color_dark: "#232A2E"
+  image: icons/splash/android-xxxhdpi/splash_triad.png
+  image_dark: icons/splash/android-xxxhdpi/splash_triad_dark.png
+  android_12:
+    color: "#F4F1EA"
+    color_dark: "#232A2E"
+    image: icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png
+    icon_background_color: "#F4F1EA"
+    icon_background_color_dark: "#232A2E"
 
 dependency_overrides:
   dtorrent_task_v2:

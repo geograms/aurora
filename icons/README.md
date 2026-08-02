@@ -18,6 +18,30 @@ Stroke thickens as the icon shrinks: 7.5% of the box at large sizes, 9% at 48dp,
 Freedesktop hicolor tree: install `<size>x<size>/geogram.png` to `/usr/share/icons/hicolor/<size>x<size>/apps/`.
 `geogram-512-dark.png` is the light-on-dark variant for dark shells.
 
+## splash/
+Full triad — the launch surface, the only place with room for all three signs.
+- `geogram-triad.svg` / `geogram-triad-dark.svg` — source vectors (ink / bone)
+- `android-*/splash_triad.png` + `splash_triad_dark.png` — five densities, transparent
+
+Android 12+ owns the launch window and only accepts the masked launcher icon,
+so the star shows there for a fraction of a second and the triad is the first
+Flutter frame straight after. Use the same background colour on both and the
+handoff is invisible.
+
+```yaml
+flutter_native_splash:
+  color: "#F4F1EA"
+  color_dark: "#232A2E"
+  image: icons/splash/android-xxxhdpi/splash_triad.png
+  image_dark: icons/splash/android-xxxhdpi/splash_triad_dark.png
+  android_12:
+    color: "#F4F1EA"
+    color_dark: "#232A2E"
+    image: icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png
+    icon_background_color: "#F4F1EA"
+    icon_background_color_dark: "#232A2E"
+```
+
 ## web/
 `favicon.svg` (preferred), PNG fallbacks 16–512, `maskable-512.png` with extra padding for PWA installs, `site.webmanifest`.
 

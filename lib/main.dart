@@ -29,6 +29,7 @@ import 'profile/profile_service.dart';
 import 'profile/storage_paths.dart';
 import 'services/task_monitor_service.dart';
 
+import 'launcher/boot_splash.dart';
 import 'launcher/launcher.dart';
 
 /// Entry point. Boots the host services through the [BootOrchestrator]
@@ -94,6 +95,11 @@ Future<void> main() async {
       ..maximumSizeBytes = 20 << 20
       ..maximumSize = 60;
   }
+
+  // First frame: the triad splash. The system launch window (Android 12+
+  // shows only the masked star) hands off to this on the same background
+  // colour; the second runApp below replaces it once boot completes.
+  runApp(const BootSplashApp());
 
   // The shared-package Blossom server logs through this injectable sink
   // (it no longer knows aurora's LogService directly).

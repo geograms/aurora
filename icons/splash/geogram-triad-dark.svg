@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 12 276 258" width="276" height="258" role="img" aria-label="Geogram">
+  <g fill="none" stroke="#e8e3d6" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="138" y1="24" x2="138" y2="116"></line>
+    <line x1="92" y1="70" x2="184" y2="70"></line>
+    <line x1="105" y1="37" x2="171" y2="103"></line>
+    <line x1="171" y1="37" x2="105" y2="103"></line>
+    <path d="M44 198 L68 148 L92 198"></path>
+    <path d="M12 260 L36 210 L60 260"></path>
+    <path d="M76 260 L100 210 L124 260"></path>
+    <path d="M152 175 Q180 158 208 175 T264 175"></path>
+    <path d="M152 210 Q180 193 208 210 T264 210"></path>
+    <path d="M152 245 Q180 228 208 245 T264 245"></path>
+  </g>
+</svg>

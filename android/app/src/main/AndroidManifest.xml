@@ -2,69 +2,101 @@
     <!-- Networking: required in RELEASE builds (the debug/profile manifests
          add INTERNET automatically, but main does not). Needed by the remote
          API server, APRS-IS sockets, and all http(s) traffic. -->
-    <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission
+        android:name="android.permission.INTERNET"/>
+    <uses-permission
+        android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <!-- Camera: scanning a torrent's QR code to open it (mobile_scanner). -->
-    <uses-permission android:name="android.permission.CAMERA"/>
-    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <uses-permission
+        android:name="android.permission.CAMERA"/>
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false"/>
     <!-- Broad file access so an owner can add a real on-disk folder and serve
          its files straight from disk (granted at runtime via the system
          "All files access" screen; requested only when the user adds a disk folder). -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
-
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29"/>
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
     <!-- Bluetooth LE for APRS-over-BLE (scan + advertise). On Android 12+
          the *_SCAN/CONNECT/ADVERTISE runtime permissions are used; on <=30 the
          legacy BLUETOOTH/ADMIN + fine location are required for scanning. We
          don't derive location from BLE, hence neverForLocation. -->
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30"/>
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30"/>
     <!-- Location: serves both legacy BLE scanning (<=30) AND device GPS for the
          hal_sensor_gps_* HAL (geolocator), so it is uncapped. BLE scan sets
          neverForLocation below, so scanning itself never derives location. -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
-                     android:usesPermissionFlags="neverForLocation"/>
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
-    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
-    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
-
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"/>
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="false"/>
     <!-- Foreground service so autostarted wapps (e.g. APRS) keep receiving
          over BLE/APRS-IS with the screen off / app backgrounded. The
          connectedDevice type is gated on BLUETOOTH_CONNECT (granted above). -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
     <!-- dataSync type for the in-app update download foreground service. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission
+        android:name="android.permission.WAKE_LOCK"/>
     <!-- Hold a high-perf WiFi lock so a backgrounded/asleep device keeps serving
          incoming connections (Blossom + BitTorrent seeds) and receiving APRS-IS
          pushes without WiFi power-save latency. -->
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <uses-permission
+        android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission
+        android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <!-- WiFi Direct bulk data plane: form/join P2P groups (BLE coordinates, the
          P2P link carries >1MB Reticulum transfers). NEARBY_WIFI_DEVICES is the
          API 33+ runtime permission; we never derive location from it. -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
-                     android:usesPermissionFlags="neverForLocation"/>
-    <uses-feature android:name="android.hardware.wifi.direct" android:required="false"/>
+    <uses-permission
+        android:name="android.permission.CHANGE_WIFI_STATE"/>
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"/>
+    <uses-feature
+        android:name="android.hardware.wifi.direct"
+        android:required="false"/>
     <!-- Ask to be exempt from battery optimization (Doze) so the always-on
          background service isn't killed in deep sleep on aggressive OEMs. -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <!-- Auto-start the background service after device reboot (BootReceiver). -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission
+        android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <!-- In-app updater: install the downloaded APK. -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
-
+    <uses-permission
+        android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <!-- Unlocking an encrypted profile with fingerprint/face (local_auth →
          BiometricPrompt). Not a runtime prompt of ours: the OS shows its own
          sheet when we ask. -->
-    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
-
+    <uses-permission
+        android:name="android.permission.USE_BIOMETRIC"/>
     <application
         android:label="Geogram"
         android:name=".AuroraApplication"
@@ -75,7 +107,6 @@
             android:launchMode="singleTop"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
-            android:screenOrientation="portrait"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
@@ -84,9 +115,8 @@
                  while the Flutter UI initializes. After that, this theme continues
                  to determine the Window background behind the Flutter UI. -->
             <meta-data
-              android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme"
-              />
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme"/>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
@@ -94,19 +124,34 @@
             <!-- Deep links: tapping https://geogram.radio/circle/<key> opens Aurora
                  straight on the "apply to join" flow. autoVerify lets Android open
                  the link without the chooser once the assetlinks are served. -->
-            <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="https" android:host="geogram.radio" android:pathPrefix="/circle"/>
-                <data android:scheme="http" android:host="geogram.radio" android:pathPrefix="/circle"/>
+            <intent-filter
+                android:autoVerify="true">
+                <action
+                    android:name="android.intent.action.VIEW"/>
+                <category
+                    android:name="android.intent.category.DEFAULT"/>
+                <category
+                    android:name="android.intent.category.BROWSABLE"/>
+                <data
+                    android:scheme="https"
+                    android:host="geogram.radio"
+                    android:pathPrefix="/circle"/>
+                <data
+                    android:scheme="http"
+                    android:host="geogram.radio"
+                    android:pathPrefix="/circle"/>
             </intent-filter>
             <!-- Custom-scheme fallback (QR apps / chats that don't linkify https). -->
             <intent-filter>
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="geogram" android:host="circle"/>
+                <action
+                    android:name="android.intent.action.VIEW"/>
+                <category
+                    android:name="android.intent.category.DEFAULT"/>
+                <category
+                    android:name="android.intent.category.BROWSABLE"/>
+                <data
+                    android:scheme="geogram"
+                    android:host="circle"/>
             </intent-filter>
         </activity>
         <!-- Background-service runtime for autostarted wapps (keeps BLE/APRS-IS
@@ -114,8 +159,7 @@
         <service
             android:name=".BgService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
-
+            android:foregroundServiceType="connectedDevice"/>
         <!-- Auto-start the background service on device boot. Gated at runtime on
              the autoStartOnBoot preference (set when any wapp is marked autostart),
              so a device with no always-on wapp does no work at boot. -->
@@ -124,29 +168,30 @@
             android:enabled="true"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
-                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+                <action
+                    android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action
+                    android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action
+                    android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
             </intent-filter>
         </receiver>
-
         <!-- In-app updater: keeps the APK download alive + shows progress when
              backgrounded during a download. -->
         <service
             android:name=".DownloadForegroundService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
+            android:foregroundServiceType="dataSync"/>
         <!-- Receives the media notification's transport-button taps (play /
              pause / next / prev) and forwards them to the Player wapp. -->
         <receiver
             android:name=".MediaActionReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.geogram.aurora.MEDIA_ACTION" />
+                <action
+                    android:name="com.geogram.aurora.MEDIA_ACTION"/>
             </intent-filter>
         </receiver>
-
         <!-- FileProvider so the downloaded APK can be handed to the system
              package installer (content:// URI, Android 7+). -->
         <provider
@@ -156,14 +201,13 @@
             android:grantUriPermissions="true">
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
+                android:resource="@xml/file_paths"/>
         </provider>
-
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
             android:name="flutterEmbedding"
-            android:value="2" />
+            android:value="2"/>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -172,17 +216,23 @@
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
         <intent>
-            <action android:name="android.intent.action.PROCESS_TEXT"/>
-            <data android:mimeType="text/plain"/>
+            <action
+                android:name="android.intent.action.PROCESS_TEXT"/>
+            <data
+                android:mimeType="text/plain"/>
         </intent>
         <!-- url_launcher: open http(s) links from posts in the system browser. -->
         <intent>
-            <action android:name="android.intent.action.VIEW"/>
-            <data android:scheme="https"/>
+            <action
+                android:name="android.intent.action.VIEW"/>
+            <data
+                android:scheme="https"/>
         </intent>
         <intent>
-            <action android:name="android.intent.action.VIEW"/>
-            <data android:scheme="http"/>
+            <action
+                android:name="android.intent.action.VIEW"/>
+            <data
+                android:scheme="http"/>
         </intent>
     </queries>
 </manifest>

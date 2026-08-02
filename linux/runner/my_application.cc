@@ -64,6 +64,9 @@ static void my_application_activate(GApplication* application) {
   // Window icon (taskbar / alt-tab / app menu). Load from data/app_icon.png
   // next to the executable (bundled by the linux CMakeLists), and also set a
   // themed icon name for XDG hicolor lookups when the app is installed.
+  // Themed name first, file icon last: GTK treats icon and icon-name as
+  // last-set-wins, and only the file icon exports _NET_WM_ICON on X11.
+  gtk_window_set_icon_name(window, "geogram");
   g_autoptr(GError) icon_error = nullptr;
   g_autofree gchar* exe_path = g_file_read_link("/proc/self/exe", nullptr);
   if (exe_path != nullptr) {
@@ -74,7 +77,6 @@ static void my_application_activate(GApplication* application) {
       g_warning("Failed to set window icon: %s", icon_error->message);
     }
   }
-  gtk_window_set_icon_name(window, "geogram");
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(

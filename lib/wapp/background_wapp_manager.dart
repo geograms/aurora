@@ -30,6 +30,7 @@ import '../profile/storage_paths.dart';
 import '../services/background_service.dart';
 import 'geoui/geo_chat_archive.dart';
 import 'geoui/activity_archive.dart';
+import 'geoui/conversation_db.dart';
 import 'geoui/conversation_store.dart';
 import 'shared_media_fetch.dart';
 import '../services/log_service.dart';
@@ -84,6 +85,19 @@ class BackgroundWappManager {
   /// Start a wapp as a background service. No-op if already running.
   final Set<String> _startingNames = {};
 
+  /// Wapps whose page is currently on screen — no headless engine for these.
+  final Set<String> _claimed = {};
+
+  /// Claim a wapp for a foreground page, stopping any headless engine first.
+  Future<void> claim(String wappDir) async {
+    final name = folderName(wappDir);
+    _claimed.add(name);
+    await stop(name);
+  }
+
+  /// Hand a wapp back to the headless side.
+  void release(String wappDir) => _claimed.remove(folderName(wappDir));
+
   Future<void> start(String wappDir) async {
     final name = folderName(wappDir);
     // The load below awaits (wasm read + compile) — without the in-flight
@@ -91,6 +105,11 @@ class BackgroundWappManager {
     // both pass the containsKey check and TWO engines end up running: BLE
     // frames then queue into the orphan engine and never reach the one being
     // ticked, so background messages silently vanish.
+    // A page owns its wapp while it is on screen: two engines writing the same
+    // conversation database interleave fine at the SQLite level, but they hold
+    // independent in-memory stores whose unread counts and open-thread state
+    // then disagree. The page claims on open and releases on close/pause.
+    if (_claimed.contains(name)) return;
     if (_running.containsKey(name) || !_startingNames.add(name)) return;
     try {
       final pkg = wappPackageStorage(wappDir);
@@ -257,52 +276,54 @@ class _WappBackgroundService extends BackgroundService {
     fileName: 'social_following.sqlite3',
   );
 
-  // Conversation stores shared with the foreground page via the SAME
-  // messages/<field>.json files. Without this, a 1:1 received while running
-  // headless fires its notification but never lands in the store the Messages
-  // tab renders — the message "arrives" yet the conversation stays empty.
-  // No concurrency with the page: it suspends this engine while open.
+  // Conversation history shared with the foreground page through the SAME
+  // `conversations.sqlite3`. Without this, a 1:1 received while running
+  // headless fires its notification but never lands in the store the page
+  // renders — the message "arrives" yet the conversation stays empty. SQLite's
+  // own locking makes the two engines safe to interleave; the ownership claim
+  // in [BackgroundWappManager.start] keeps them from both running anyway.
   final Map<String, ConversationStore> _convStores = {};
-  final Set<String> _convDirty = {};
-  Timer? _convSaveTimer;
-  static const String _convDir = 'messages';
+  ConversationDb? _convDb;
 
   ConversationStore _convStore(String field) =>
-      _convStores.putIfAbsent(field, () => ConversationStore());
+      _convStores.putIfAbsent(field, () {
+        final store = ConversationStore()..dbField = field;
+        final db = _convDb;
+        if (db != null) {
+          store.db = db;
+          store.loaded = true;
+        }
+        return store;
+      });
 
   Future<void> _loadConversations() async {
     final data = wappDataStorageFor(prefs, name);
     try {
-      if (!await data.directoryExists(_convDir)) return;
-      for (final entry in await data.listDirectory(_convDir)) {
-        if (entry.isDirectory || !entry.path.endsWith('.json')) continue;
-        final field = entry.name.substring(0, entry.name.length - 5);
-        final json = await data.readJson(entry.path);
-        if (json != null) {
-          _convStores[field] = ConversationStore()..loadJson(json);
-        }
-      }
-    } catch (_) {}
-  }
-
-  void _scheduleConvoSave(String field) {
-    _convDirty.add(field);
-    _convSaveTimer?.cancel();
-    _convSaveTimer = Timer(const Duration(milliseconds: 800), () async {
-      final data = wappDataStorageFor(prefs, name);
-      final fields = _convDirty.toList();
-      _convDirty.clear();
+      _convDb = ConversationDb.open(
+          data.getAbsolutePath('conversations.sqlite3'));
+    } catch (e) {
+      // Locked/corrupt: run memory-only rather than overwrite real history.
+      LogService.instance.add(
+          'bg wapp $name: conversation history unavailable ($e)');
+      return;
+    }
+    for (final field in _convDb!.fields()) {
+      final store = _convStores.putIfAbsent(field, () => ConversationStore());
+      store
+        ..db = null
+        ..dbField = field
+        ..loaded = false;
       try {
-        await data.createDirectory(_convDir);
-        for (final f in fields) {
-          final store = _convStores[f];
-          if (store != null)
-            await data.writeJson('$_convDir/$f.json', store.toJson());
-        }
-      } catch (_) {
-        _convDirty.addAll(fields);
+        _convDb!.loadInto(field, store);
+      } catch (e) {
+        LogService.instance
+            .add('bg wapp $name: could not read convo field "$field" ($e)');
+        continue;
       }
-    });
+      store
+        ..db = _convDb
+        ..loaded = true;
+    }
   }
 
   @override
@@ -320,21 +341,11 @@ class _WappBackgroundService extends BackgroundService {
 
   @override
   Future<void> onStop() async {
-    // Flush pending conversation saves NOW: the page engine is about to load
-    // the same files and would otherwise miss the last-arrived messages.
-    _convSaveTimer?.cancel();
-    if (_convDirty.isNotEmpty) {
-      final data = wappDataStorageFor(prefs, name);
-      try {
-        await data.createDirectory(_convDir);
-        for (final f in _convDirty) {
-          final store = _convStores[f];
-          if (store != null)
-            await data.writeJson('$_convDir/$f.json', store.toJson());
-        }
-      } catch (_) {}
-      _convDirty.clear();
-    }
+    // Nothing to flush: every conversation mutation was committed as it
+    // happened, so the page engine about to open the same database already
+    // sees the last message that arrived here.
+    _convDb?.close();
+    _convDb = null;
     try {
       engine.dispose();
     } catch (_) {}
@@ -451,7 +462,6 @@ class _WappBackgroundService extends BackgroundService {
             // headless engine must honour the same messages the page does.
             store.clear(data['id']?.toString());
         }
-        _scheduleConvoSave(field);
       } else if (type == 'social.note') {
         // A wapp posting one of OUR messages as a signed NOSTR note (a Chat
         // group post). The page handled this and headless did not, so a group

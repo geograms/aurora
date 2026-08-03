@@ -103,48 +103,54 @@ class _RoomsFieldState extends State<RoomsField> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return LayoutBuilder(builder: (ctx, c) {
-      if (!_userSized) {
-        final want = c.maxWidth >= 900 ? _expanded : _collapsed;
-        if (_autoW != want) {
-          _autoW = want;
-          _railW = want;
+    return LayoutBuilder(
+      builder: (ctx, c) {
+        if (!_userSized) {
+          final want = c.maxWidth >= 900 ? _expanded : _collapsed;
+          if (_autoW != want) {
+            _autoW = want;
+            _railW = want;
+          }
         }
-      }
-      if (c.maxWidth >= 640) return _wide(cs);
-      return _narrow(cs, c.maxWidth);
-    });
+        if (c.maxWidth >= 640) return _wide(cs);
+        return _narrow(cs, c.maxWidth);
+      },
+    );
   }
 
   Widget _railBox(ColorScheme cs) => GestureDetector(
-        onHorizontalDragUpdate: _dragUpdate,
-        onHorizontalDragEnd: _dragEnd,
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          width: _railW,
-          color: cs.surfaceContainerHigh,
-          child: _rail(cs),
-        ),
-      );
+    onHorizontalDragUpdate: _dragUpdate,
+    onHorizontalDragEnd: _dragEnd,
+    behavior: HitTestBehavior.opaque,
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      width: _railW,
+      color: cs.surfaceContainerHigh,
+      child: _rail(cs),
+    ),
+  );
 
   // Wide (tablet/desktop): all three panes side by side.
   Widget _wide(ColorScheme cs) {
-    return Row(children: [
-      _railBox(cs),
-      const VerticalDivider(width: 1, thickness: 1),
-      Expanded(child: _chat(cs)),
-      AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        width: _membersOpen ? 260 : 0,
-        child: _membersOpen
-            ? Row(children: [
-                const VerticalDivider(width: 1, thickness: 1),
-                Expanded(child: _members(cs)),
-              ])
-            : null,
-      ),
-    ]);
+    return Row(
+      children: [
+        _railBox(cs),
+        const VerticalDivider(width: 1, thickness: 1),
+        Expanded(child: _chat(cs)),
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: _membersOpen ? 260 : 0,
+          child: _membersOpen
+              ? Row(
+                  children: [
+                    const VerticalDivider(width: 1, thickness: 1),
+                    Expanded(child: _members(cs)),
+                  ],
+                )
+              : null,
+        ),
+      ],
+    );
   }
 
   // Narrow (phone): the chat keeps full width behind a collapsed rail; the
@@ -153,37 +159,60 @@ class _RoomsFieldState extends State<RoomsField> {
   Widget _narrow(ColorScheme cs, double maxW) {
     final panelW = (maxW * 0.82).clamp(220.0, 340.0);
     final drawerOpen = _railW > _collapsed + 4 || _membersOpen;
-    return Stack(children: [
-      Positioned(
-          left: _collapsed, top: 0, right: 0, bottom: 0, child: _chat(cs)),
-      if (drawerOpen)
-        Positioned(
-          left: _collapsed,
-          top: 0,
-          right: 0,
-          bottom: 0,
-          child: GestureDetector(
-            onTap: () => setState(() {
-              _railW = _collapsed;
-              _membersOpen = false;
-            }),
-            child: Container(color: Colors.black.withValues(alpha: 0.45)),
+    // Back closes what is on top before it closes anything else: the member
+    // panel, then the room drawer. Without this the system back button walked
+    // straight out of the wapp while a panel was still covering the screen.
+    return PopScope(
+      canPop: !_membersOpen && !_railExpanded,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        setState(() {
+          if (_membersOpen) {
+            _membersOpen = false;
+          } else if (_railExpanded) {
+            _railW = _collapsed;
+          }
+        });
+      },
+      child: Stack(
+        children: [
+          Positioned(
+            left: _collapsed,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            child: _chat(cs),
           ),
-        ),
-      Positioned(left: 0, top: 0, bottom: 0, child: _railBox(cs)),
-      Positioned(
-        right: 0,
-        top: 0,
-        bottom: 0,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
-          width: _membersOpen ? panelW : 0,
-          child: _membersOpen
-              ? Material(color: cs.surface, child: _members(cs))
-              : null,
-        ),
+          if (drawerOpen)
+            Positioned(
+              left: _collapsed,
+              top: 0,
+              right: 0,
+              bottom: 0,
+              child: GestureDetector(
+                onTap: () => setState(() {
+                  _railW = _collapsed;
+                  _membersOpen = false;
+                }),
+                child: Container(color: Colors.black.withValues(alpha: 0.45)),
+              ),
+            ),
+          Positioned(left: 0, top: 0, bottom: 0, child: _railBox(cs)),
+          Positioned(
+            right: 0,
+            top: 0,
+            bottom: 0,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              width: _membersOpen ? panelW : 0,
+              child: _membersOpen
+                  ? Material(color: cs.surface, child: _members(cs))
+                  : null,
+            ),
+          ),
+        ],
       ),
-    ]);
+    );
   }
 
   Widget _rail(ColorScheme cs) {
@@ -241,7 +270,9 @@ class _RoomsFieldState extends State<RoomsField> {
   /// "2m" / "4h" / "yd" / "3d" — a chat list wants an age, not a clock.
   static String _ago(int ms) {
     if (ms <= 0) return '';
-    final d = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));
+    final d = DateTime.now().difference(
+      DateTime.fromMillisecondsSinceEpoch(ms),
+    );
     if (d.inMinutes < 1) return 'now';
     if (d.inMinutes < 60) return '${d.inMinutes}m';
     if (d.inHours < 24) return '${d.inHours}h';
@@ -258,9 +289,8 @@ class _RoomsFieldState extends State<RoomsField> {
     // The wapp rarely knows the unread count — the conversation store does
     // (it tracks arrivals against the open room). Fall back to it, so a room
     // or channel with waiting messages actually says so on the rail.
-    final unread = (r['unread'] as num?)?.toInt() ??
-        widget.store.items[id]?.unread ??
-        0;
+    final unread =
+        (r['unread'] as num?)?.toInt() ?? widget.store.items[id]?.unread ?? 0;
     final selected = r['selected'] == true || id == widget.openId;
     final item = widget.store.items[id];
     final live = r['live'] == true;
@@ -299,27 +329,34 @@ class _RoomsFieldState extends State<RoomsField> {
     // rail, so the count rides ON the avatar as a corner chip (a badge in the
     // row overflowed it). Expanded keeps the inline pill next to the name.
     if (!expanded && unread > 0) {
-      icon = Stack(clipBehavior: Clip.none, children: [
-        icon,
-        Positioned(
-          top: -3,
-          right: -3,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
-            constraints: const BoxConstraints(minWidth: 16),
-            decoration: BoxDecoration(
+      icon = Stack(
+        clipBehavior: Clip.none,
+        children: [
+          icon,
+          Positioned(
+            top: -3,
+            right: -3,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0.5),
+              constraints: const BoxConstraints(minWidth: 16),
+              decoration: BoxDecoration(
                 color: cs.primary,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: cs.surface, width: 1.5)),
-            child: Text(unread > 99 ? '99+' : '$unread',
+                border: Border.all(color: cs.surface, width: 1.5),
+              ),
+              child: Text(
+                unread > 99 ? '99+' : '$unread',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                    color: cs.onPrimary,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700)),
+                  color: cs.onPrimary,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
           ),
-        ),
-      ]);
+        ],
+      );
     }
     final tile = InkWell(
       onTap: () {
@@ -332,8 +369,7 @@ class _RoomsFieldState extends State<RoomsField> {
         }
       },
       child: Padding(
-        padding: EdgeInsets.fromLTRB(
-            expanded ? 8.0 + depth * 14 : 8, 4, 8, 4),
+        padding: EdgeInsets.fromLTRB(expanded ? 8.0 + depth * 14 : 8, 4, 8, 4),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
@@ -347,18 +383,22 @@ class _RoomsFieldState extends State<RoomsField> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(children: [
-                      if (live) ...[
-                        Container(
-                          width: 7,
-                          height: 7,
-                          decoration: const BoxDecoration(
-                              color: Color(0xFF3FB950), shape: BoxShape.circle),
-                        ),
-                        const SizedBox(width: 5),
-                      ],
-                      Expanded(
-                        child: Text(name,
+                    Row(
+                      children: [
+                        if (live) ...[
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF3FB950),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                        ],
+                        Expanded(
+                          child: Text(
+                            name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -366,30 +406,38 @@ class _RoomsFieldState extends State<RoomsField> {
                               fontWeight: unread > 0 || selected
                                   ? FontWeight.w700
                                   : FontWeight.w500,
-                            )),
-                      ),
-                      if (age.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 6),
-                          child: Text(age,
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: unread > 0
-                                      ? cs.primary
-                                      : cs.onSurfaceVariant)),
+                            ),
+                          ),
                         ),
-                    ]),
+                        if (age.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 6),
+                            child: Text(
+                              age,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: unread > 0
+                                    ? cs.primary
+                                    : cs.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                     if (sub.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 1),
-                        child: Text(sub,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                fontSize: 11.5,
-                                color: unread > 0
-                                    ? cs.onSurface
-                                    : cs.onSurfaceVariant)),
+                        child: Text(
+                          sub,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: unread > 0
+                                ? cs.onSurface
+                                : cs.onSurfaceVariant,
+                          ),
+                        ),
                       ),
                   ],
                 ),
@@ -397,13 +445,18 @@ class _RoomsFieldState extends State<RoomsField> {
               if (unread > 0)
                 Container(
                   margin: const EdgeInsets.only(left: 6),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
                   decoration: BoxDecoration(
-                      color: cs.primary,
-                      borderRadius: BorderRadius.circular(10)),
-                  child: Text('$unread',
-                      style: TextStyle(color: cs.onPrimary, fontSize: 11)),
+                    color: cs.primary,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    '$unread',
+                    style: TextStyle(color: cs.onPrimary, fontSize: 11),
+                  ),
                 ),
             ],
           ],
@@ -439,18 +492,21 @@ class _RoomsFieldState extends State<RoomsField> {
         shape: BoxShape.circle,
         border: selected ? Border.all(color: cs.primary, width: 2.5) : null,
       ),
-      child: Text(label,
-          style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-              fontSize: label.length <= 1
-                  ? 18
-                  : label.length == 2
-                      ? 14
-                      : label.length == 3
-                          ? 12
-                          : 10.5,
-              letterSpacing: label.length >= 3 ? -0.3 : 0)),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w700,
+          fontSize: label.length <= 1
+              ? 18
+              : label.length == 2
+              ? 14
+              : label.length == 3
+              ? 12
+              : 10.5,
+          letterSpacing: label.length >= 3 ? -0.3 : 0,
+        ),
+      ),
     );
   }
 
@@ -467,19 +523,25 @@ class _RoomsFieldState extends State<RoomsField> {
                   color: cs.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(19),
                 ),
-                child: Row(children: [
-                  Icon(Icons.search, size: 18, color: cs.onSurfaceVariant),
-                  const SizedBox(width: 8),
-                  Text('Search',
-                      style: TextStyle(color: cs.onSurfaceVariant)),
-                ]),
+                child: Row(
+                  children: [
+                    Icon(Icons.search, size: 18, color: cs.onSurfaceVariant),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Search',
+                      style: TextStyle(color: cs.onSurfaceVariant),
+                    ),
+                  ],
+                ),
               )
             : Container(
                 width: 44,
                 height: 44,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                    color: cs.surfaceContainerHighest, shape: BoxShape.circle),
+                  color: cs.surfaceContainerHighest,
+                  shape: BoxShape.circle,
+                ),
                 child: Icon(Icons.search, color: cs.onSurfaceVariant),
               ),
       ),
@@ -494,13 +556,15 @@ class _RoomsFieldState extends State<RoomsField> {
       onTap: widget.onSettings,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-        child: Row(children: [
-          Icon(Icons.settings, color: cs.onSurfaceVariant, size: 26),
-          if (expanded) ...[
-            const SizedBox(width: 12),
-            Text('Settings', style: TextStyle(color: cs.onSurfaceVariant)),
+        child: Row(
+          children: [
+            Icon(Icons.settings, color: cs.onSurfaceVariant, size: 26),
+            if (expanded) ...[
+              const SizedBox(width: 12),
+              Text('Settings', style: TextStyle(color: cs.onSurfaceVariant)),
+            ],
           ],
-        ]),
+        ),
       ),
     );
   }
@@ -529,62 +593,81 @@ class _RoomsFieldState extends State<RoomsField> {
           height: 48,
           padding: const EdgeInsets.only(left: 4, right: 12),
           decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: cs.outlineVariant, width: 1)),
+            border: Border(
+              bottom: BorderSide(color: cs.outlineVariant, width: 1),
+            ),
           ),
-          child: Row(children: [
-            if (!_railExpanded && MediaQuery.of(context).size.width < 900)
-              IconButton(
-                tooltip: 'All chats',
-                icon: const Icon(Icons.arrow_back, size: 20),
-                onPressed: () => setState(() {
-                  _userSized = true;
-                  _railW = _expanded;
-                }),
-              )
-            else
-              const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(name,
+          child: Row(
+            children: [
+              if (!_railExpanded && MediaQuery.of(context).size.width < 900)
+                IconButton(
+                  tooltip: 'All chats',
+                  icon: const Icon(Icons.arrow_back, size: 20),
+                  onPressed: () => setState(() {
+                    _userSized = true;
+                    _railW = _expanded;
+                  }),
+                )
+              else
+                const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context)
-                          .textTheme
-                          .titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w700)),
-                  if (isLxmf)
-                    Text('NomadNet · $addr',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (isLxmf)
+                      Text(
+                        'NomadNet · $addr',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                            fontSize: 11, color: cs.onSurfaceVariant)),
-                ],
+                          fontSize: 11,
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            IconButton(
-              tooltip: 'Members',
-              icon: Icon(_membersOpen ? Icons.group : Icons.group_outlined),
-              onPressed: () => setState(() => _membersOpen = !_membersOpen),
-            ),
-          ]),
+              IconButton(
+                tooltip: 'Members',
+                icon: Icon(_membersOpen ? Icons.group : Icons.group_outlined),
+                onPressed: () => setState(() => _membersOpen = !_membersOpen),
+              ),
+            ],
+          ),
         ),
         Expanded(
           child: open == null
               ? Center(
-                  child: Text('Pick a room',
-                      style: TextStyle(color: cs.onSurfaceVariant)))
+                  child: Text(
+                    'Pick a room',
+                    style: TextStyle(color: cs.onSurfaceVariant),
+                  ),
+                )
               : GestureDetector(
-                  // swipe left over the chat reveals the member panel
-                  onHorizontalDragEnd: (d) {
-                    if ((d.primaryVelocity ?? 0) < -200) {
-                      setState(() => _membersOpen = true);
-                    } else if ((d.primaryVelocity ?? 0) > 200) {
-                      setState(() => _membersOpen = false);
-                    }
-                  },
+                  // Swipe left over the chat reveals the member panel — but ONLY
+                  // on a wide layout. On a phone, Android's own back gesture is
+                  // an inward swipe from the screen edge, which arrives here as
+                  // exactly this leftward drag: trying to leave a conversation
+                  // opened the member list instead, over and over, with no way
+                  // out. The header's group button is the way in on narrow.
+                  onHorizontalDragEnd: MediaQuery.of(context).size.width < 640
+                      ? null
+                      : (d) {
+                          if ((d.primaryVelocity ?? 0) < -200) {
+                            setState(() => _membersOpen = true);
+                          } else if ((d.primaryVelocity ?? 0) > 200) {
+                            setState(() => _membersOpen = false);
+                          }
+                        },
                   child: ChatViewField(
                     key: ValueKey('room-$open'),
                     fieldName: 'rooms_chat',
@@ -597,12 +680,11 @@ class _RoomsFieldState extends State<RoomsField> {
                     onSenderTap: widget.onSenderTap,
                     onHide: widget.onHide == null
                         ? null
-                        : (m) => widget.onHide!(
-                            open, (m['key'] ?? '').toString()),
+                        : (m) =>
+                              widget.onHide!(open, (m['key'] ?? '').toString()),
                     onBlock: widget.onBlock == null
                         ? null
-                        : (m) => widget.onBlock!(
-                            (m['from'] ?? '').toString()),
+                        : (m) => widget.onBlock!((m['from'] ?? '').toString()),
                   ),
                 ),
         ),
@@ -618,13 +700,16 @@ class _RoomsFieldState extends State<RoomsField> {
           alignment: Alignment.centerLeft,
           padding: const EdgeInsets.symmetric(horizontal: 14),
           decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: cs.outlineVariant, width: 1)),
+            border: Border(
+              bottom: BorderSide(color: cs.outlineVariant, width: 1),
+            ),
           ),
-          child: Text('Members',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleSmall
-                  ?.copyWith(fontWeight: FontWeight.w700)),
+          child: Text(
+            'Members',
+            style: Theme.of(
+              context,
+            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+          ),
         ),
         Expanded(
           child: PeopleViewField(

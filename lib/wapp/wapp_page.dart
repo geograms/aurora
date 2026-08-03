@@ -52,6 +52,7 @@ import '../profile/profile_edit_page.dart';
 import '../util/media_ref.dart';
 import '../util/nostr_crypto.dart';
 import '../util/nostr_imeta.dart';
+import 'geoui/conversation_db.dart';
 import 'geoui/conversation_store.dart';
 import 'geoui/geo_chat_archive.dart';
 import 'geoui/activity_archive.dart';
@@ -705,13 +706,30 @@ class _WappPageState extends State<WappPage>
   // ConversationsField. No app-specific (e.g. APRS) knowledge lives here.
   final Map<String, ConversationStore> _convStores = {};
 
-  ConversationStore _convStore(String field) =>
-      _convStores.putIfAbsent(field, () => ConversationStore());
+  /// Durable conversation history (SQLCipher). Null until [_loadConversations]
+  /// has opened it — and it STAYS null when the open failed, which is exactly
+  /// the state in which nothing may be written.
+  ConversationDb? _convDb;
 
-  // Conversation persistence: stores are saved under the wapp data dir as
-  // `messages/<field>.json` and reloaded on open, so the Messenger survives a
-  // restart. Writes are debounced and coalesced across fields.
-  static const String _convDir = 'messages';
+  ConversationStore _convStore(String field) =>
+      _convStores.putIfAbsent(field, () {
+        final store = ConversationStore()..dbField = field;
+        final db = _convDb;
+        if (db != null) {
+          // A field first seen at runtime has no stored history to lose, so it
+          // is safe to write from the start.
+          store.db = db;
+          store.loaded = true;
+        }
+        return store;
+      });
+
+  // Conversation persistence lives in `conversations.sqlite3` under the wapp
+  // data dir — a real file even inside an encrypted profile (`.sqlite3` is
+  // passthrough), encrypted by SQLCipher with the profile key. Writes are
+  // per-row and immediate; there is no debounce and no whole-file rewrite to
+  // lose, and a restore that FAILS can no longer erase what it could not read.
+  static const String _convDir = 'messages'; // legacy JSON, imported once
 
   // App-bar icons sat at the 48dp Material tap pitch, which sprawled them across
   // the bar with big ugly gaps. These pull every app-bar icon (plain buttons and
@@ -721,54 +739,94 @@ class _WappPageState extends State<WappPage>
   static const BoxConstraints _kAppBarIconConstraints =
       BoxConstraints(minWidth: 0, minHeight: 40);
 
-  Timer? _convSaveTimer;
-  final Set<String> _convDirty = {};
-
-  /// Restore persisted conversation stores from `messages/*.json` (called from
+  /// Open the conversation database and rebuild every stored field (called from
   /// _loadWapp once _wappData is set, before the first build).
   Future<void> _loadConversations() async {
     final data = _wappData;
     if (data == null) return;
     try {
-      if (!await data.directoryExists(_convDir)) return;
-      for (final entry in await data.listDirectory(_convDir)) {
-        if (entry.isDirectory || !entry.path.endsWith('.json')) continue;
-        final field = entry.name.substring(
-          0,
-          entry.name.length - 5,
-        ); // strip .json
-        final json = await data.readJson(entry.path);
-        if (json != null) {
-          _convStores[field] = ConversationStore()..loadJson(json);
-        }
+      _convDb = ConversationDb.open(
+          data.getAbsolutePath('conversations.sqlite3'));
+    } catch (e) {
+      // Locked profile, wrong key, corrupt file. Say so — and leave _convDb
+      // null so every store stays memory-only. Silence here is what used to
+      // cost a phone its entire history on the next incoming message.
+      LogService.instance.add(
+        'wapp $_wappName: conversation history unavailable ($e) — '
+        'running memory-only, nothing will be overwritten',
+      );
+      return;
+    }
+    await _importLegacyConversations(data);
+    for (final field in _convDb!.fields()) {
+      final store = _convStores.putIfAbsent(field, () => ConversationStore());
+      store
+        ..db = null // no write-through while we fill it
+        ..dbField = field
+        ..loaded = false;
+      try {
+        _convDb!.loadInto(field, store);
+      } catch (e) {
+        LogService.instance.add(
+            'wapp $_wappName: could not read convo field "$field" ($e)');
+        continue; // stays loaded:false → never written
       }
-    } catch (_) {
-      // Corrupt/partial file — start empty rather than blocking the wapp.
+      store
+        ..db = _convDb
+        ..loaded = true;
+      final msgs =
+          store.items.values.fold<int>(0, (n, it) => n + it.messages.length);
+      LogService.instance.add(
+        'wapp $_wappName: restored convo field "$field" '
+        '(${store.items.length} threads, $msgs messages)',
+      );
     }
   }
 
-  /// Mark a conversation field dirty and schedule a debounced save.
-  void _scheduleConvoSave(String field) {
-    _convDirty.add(field);
-    _convSaveTimer?.cancel();
-    _convSaveTimer = Timer(const Duration(milliseconds: 800), _flushConvoSaves);
+  /// Re-open the database and refill every store — used when coming back to
+  /// the foreground, where the headless engine may have written in the gap.
+  Future<void> _reloadConversations() async {
+    _convDb?.close();
+    _convDb = null;
+    for (final store in _convStores.values) {
+      store
+        ..db = null
+        ..loaded = false
+        ..items.clear()
+        ..order.clear()
+        ..reactions.clear();
+    }
+    await _loadConversations();
   }
 
-  Future<void> _flushConvoSaves() async {
-    final data = _wappData;
-    if (data == null) return;
-    final fields = _convDirty.toList();
-    _convDirty.clear();
+  /// One-time carry-over of the old `messages/<field>.json` files. Imported
+  /// only when the database has nothing for that field, then renamed so the
+  /// import can never run twice or be mistaken for live data.
+  Future<void> _importLegacyConversations(ProfileStorage data) async {
+    final db = _convDb;
+    if (db == null) return;
     try {
-      await data.createDirectory(_convDir);
-      for (final field in fields) {
-        final store = _convStores[field];
-        if (store == null) continue;
-        await data.writeJson('$_convDir/$field.json', store.toJson());
+      if (!await data.directoryExists(_convDir)) return;
+      for (final entry in await data.listDirectory(_convDir)) {
+        if (entry.isDirectory || !entry.path.endsWith('.json')) continue;
+        final field =
+            entry.name.substring(0, entry.name.length - 5); // strip .json
+        if (db.hasField(field)) continue;
+        final json = await data.readJson(entry.path);
+        if (json == null) continue;
+        final legacy = ConversationStore()..loadJson(json);
+        db.importStore(field, legacy);
+        final msgs =
+            legacy.items.values.fold<int>(0, (n, it) => n + it.messages.length);
+        await data.writeJson('${entry.path}.imported', json);
+        await data.delete(entry.path);
+        LogService.instance.add(
+          'wapp $_wappName: imported legacy convo field "$field" '
+          '($msgs messages) into conversations.sqlite3',
+        );
       }
-    } catch (_) {
-      // Best-effort: re-mark so the next change retries.
-      _convDirty.addAll(fields);
+    } catch (e) {
+      LogService.instance.add('wapp $_wappName: legacy convo import failed ($e)');
     }
   }
 
@@ -973,7 +1031,10 @@ class _WappPageState extends State<WappPage>
     // Keep the future: _loadWapp awaits it before reading conversations so
     // the background engine's onStop flush lands first (else messages that
     // arrived headlessly are read stale and overwritten).
-    _suspendDone = BackgroundWappManager.instance.suspend(_wappName);
+    // Claim ownership for as long as this page is on screen: it stops the
+    // headless engine AND stops a later autostart from spawning a second one
+    // behind our back (permission-gated autostart on Android fires late).
+    _suspendDone = BackgroundWappManager.instance.claim(widget.wappDir);
     unawaited(_loadWappProfilesCache());
     _loadWapp();
   }
@@ -1041,8 +1102,15 @@ class _WappPageState extends State<WappPage>
         BackgroundWappManager.instance.releasePage(_wappName);
         _bgKeepAlive = false;
       }
-      unawaited(BackgroundWappManager.instance.suspend(_wappName));
-      if (mounted) setState(() {});
+      // Re-claim BEFORE reading: while we were away a headless engine may have
+      // written messages into the same database, and our in-memory stores are
+      // from before the pause. Reload them, or the next message we handle would
+      // push a stale view back over what arrived in the background.
+      unawaited(() async {
+        await BackgroundWappManager.instance.claim(widget.wappDir);
+        await _reloadConversations();
+        if (mounted) setState(() {});
+      }());
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       // App backgrounded while this page is still open. If audio is playing
@@ -1054,6 +1122,16 @@ class _WappPageState extends State<WappPage>
         _bgKeepAlive = true;
         BackgroundWappManager.instance.keepPageAlive(_wappName, _bgTick);
       } else {
+        // Android kills paused processes, so hand over only once our own
+        // database handle is closed — then the headless engine owns it.
+        BackgroundWappManager.instance.release(widget.wappDir);
+        _convDb?.close();
+        _convDb = null;
+        for (final store in _convStores.values) {
+          store
+            ..db = null
+            ..loaded = false;
+        }
         unawaited(BackgroundWappManager.instance.resume(widget.wappDir));
       }
     }
@@ -1982,12 +2060,10 @@ class _WappPageState extends State<WappPage>
               _syncAppBadge();
             }
           }
-          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.msg') {
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).addMessage(data);
-          _scheduleConvoSave(field);
           // Bulk-lane tap: outgoing 1:1 with a hosted file: token queues the
           // payload for mesh delivery (encrypted wires hide the token, the
           // bubble text doesn't).
@@ -1996,24 +2072,20 @@ class _WappPageState extends State<WappPage>
         } else if (type == 'ui.convo.remove') {
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).remove(data);
-          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.react') {
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).react(data);
-          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.status') {
           // Delivery/read receipt: advance an outgoing 1:1 message's tick state
           // (sent → delivered → read), keyed by its correlation id `rid`.
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).setStatus(data);
-          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.convo.clear') {
           final field = data['field'] as String? ?? 'conversations';
           _convStore(field).clear(data['id'] as String?);
-          _scheduleConvoSave(field);
           changed = true;
         } else if (type == 'ui.prompt') {
           // Generic prompt: the wapp asks the host to show a dialog (title +
@@ -3284,7 +3356,6 @@ class _WappPageState extends State<WappPage>
           if (!mounted || _roomsOpenId != null) return;
           setState(() => _roomsOpenId = adopted);
           store.clearUnread(adopted);
-          _scheduleConvoSave('conversations');
           _syncAppBadge();
         });
       }
@@ -3300,7 +3371,6 @@ class _WappPageState extends State<WappPage>
         // Persist the cleared count NOW — the debounced save otherwise waits
         // for the next message event, and a restart in between resurrects a
         // badge the user already dismissed by reading.
-        _scheduleConvoSave('conversations');
         _syncAppBadge();
         _fieldValues['${field}_convo'] = id;
         _sendCommand('${field}_open');
@@ -3458,7 +3528,6 @@ class _WappPageState extends State<WappPage>
       },
       onMute: (id, muted) {
         setState(() => store.setMuted(id, muted));
-        _scheduleConvoSave(field);
         _syncAppBadge(); // muting drops it from the app-wide badge
       },
       onClose: (id) {
@@ -3469,7 +3538,6 @@ class _WappPageState extends State<WappPage>
         // Tell the wapp to unsubscribe so we stop receiving the group entirely.
         _fieldValues['${field}_convo'] = id;
         _sendCommand('${field}_close');
-        _scheduleConvoSave(field);
         _syncAppBadge();
       },
     );
@@ -3823,8 +3891,8 @@ class _WappPageState extends State<WappPage>
     }
     _tickTimer?.cancel();
     // Flush any pending conversation writes so the latest messages aren't lost.
-    _convSaveTimer?.cancel();
-    if (_convDirty.isNotEmpty) unawaited(_flushConvoSaves());
+    _convDb?.close();
+    _convDb = null;
     TaskMonitorService.instance.unregister(_tickTaskId);
     EventBus().fire(WappUnloadedEvent(wappId: _wappName, wappName: _wappName));
     _localeSub?.cancel();
@@ -3858,8 +3926,11 @@ class _WappPageState extends State<WappPage>
     _graphData.dispose();
     _graphHubs.dispose();
     _engine.dispose();
-    // Page closed: restart the background service if the user enabled autostart
-    // for this wapp (so it keeps receiving once its engine ref is released).
+    // Page closed: hand the wapp back, then restart the background service if
+    // the user enabled autostart for it (so it keeps receiving once its engine
+    // ref is released). Our database handle is already closed above, so the
+    // headless engine opens it cleanly.
+    BackgroundWappManager.instance.release(widget.wappDir);
     unawaited(BackgroundWappManager.instance.resume(widget.wappDir));
     _cmdController.dispose();
     _scrollController.dispose();
@@ -4624,7 +4695,6 @@ class _WappPageState extends State<WappPage>
           final store = _convStore(convActionsField);
           final was = store.items[convActionsId]?.muted ?? false;
           setState(() => store.setMuted(convActionsId!, !was));
-          _scheduleConvoSave(convActionsField);
           _syncAppBadge(); // muting drops it from the app-wide badge
         } else if (value == 'conv:close') {
           final store = _convStore(convActionsField);
@@ -4637,7 +4707,6 @@ class _WappPageState extends State<WappPage>
           // further messages OR notifications arrive for this conversation.
           _fieldValues['${convActionsField}_convo'] = convActionsId!;
           _sendCommand('${convActionsField}_close');
-          _scheduleConvoSave(convActionsField);
           _syncAppBadge();
         } else if (value.startsWith('action:')) {
           _sendCommand(value.substring(7));
@@ -6845,7 +6914,6 @@ class _WappPageState extends State<WappPage>
       }
     }
     if (added > 0) {
-      _scheduleConvoSave('conversations');
       if (mounted) setState(() {});
     }
     return added;
@@ -7104,7 +7172,6 @@ class _WappPageState extends State<WappPage>
           _tabController!.animateTo(roomsIdx);
         }
       });
-      _scheduleConvoSave('conversations');
       _syncAppBadge();
       return;
     }

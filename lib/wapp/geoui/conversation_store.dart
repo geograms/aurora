@@ -4,6 +4,8 @@
 // the ui.convo.* protocol; the host only renders what it is told. There is
 // no domain knowledge here (no groups, callsigns, bulletins, distance, etc.).
 
+import 'conversation_db.dart';
+
 /// One conversation row + its messages. All fields are opaque to the host.
 class ConversationItem {
   final String id;
@@ -88,6 +90,25 @@ class ConversationItem {
 class ConversationStore {
   final Map<String, ConversationItem> items = {};
 
+  /// Durable backing store. When set AND [loaded] is true, every mutation is
+  /// written through as it happens — no debounce, no whole-file rewrite.
+  ConversationDb? db;
+
+  /// Which field name this store is persisted under (one database serves all
+  /// of a wapp's conversation fields).
+  String dbField = 'conversations';
+
+  /// True once the history has been READ successfully (or confirmed empty).
+  ///
+  /// This is the guard that stops the loss it is named after: when a restore
+  /// throws — a locked profile, a wrong key, an unreadable file — the store
+  /// stays usable in memory but NEVER writes, because a store that could not
+  /// read the history must not be allowed to overwrite it. The old code could
+  /// not tell those apart and erased a phone's entire history on every launch.
+  bool loaded = true;
+
+  bool get _wt => db != null && loaded;
+
   /// Most-recent-first display order.
   final List<String> order = [];
 
@@ -154,6 +175,7 @@ class ConversationStore {
     // Without this, addMessage's closed-drop was permanent — nothing ever
     // cleared the flag.
     if (d.containsKey('closed')) it.closed = d['closed'] == true;
+    if (_wt) db!.upsertThread(dbField, it);
   }
 
   void addMessage(Map d) {
@@ -164,6 +186,17 @@ class ConversationStore {
     final existing = items[id];
     final dir = (d['dir'] ?? 'in').toString();
     if (existing != null && existing.closed && dir == 'in') return;
+    // A restarted engine re-reads the host's durable inbox from the beginning
+    // and re-emits everything in it, so the same message can arrive twice with
+    // the same content signature. Show it once.
+    final ckey = (d['key'] ?? '').toString();
+    final dmid = (d['mid'] ?? '').toString();
+    if (existing != null) {
+      final dup = existing.messages.any((m) =>
+          (ckey.isNotEmpty && (m['key'] ?? '').toString() == ckey) ||
+          (dmid.isNotEmpty && (m['mid'] ?? '').toString() == dmid));
+      if (dup) return;
+    }
     final it = _ensure(id);
     it.messages.add({
       'dir': dir,
@@ -206,18 +239,26 @@ class ConversationStore {
     if (dir == 'in' && id != openId && d['sys'] != true) it.unread++;
     it.activityTs = _nowMs();
     _bump(id);
+    if (_wt) {
+      db!.addMessage(dbField, id, it.messages.last);
+      db!.upsertThread(dbField, it);
+    }
   }
 
   /// Mute / unmute a conversation (its unread stops counting app-wide).
   void setMuted(String id, bool v) {
     final it = items[id];
-    if (it != null) it.muted = v;
+    if (it == null) return;
+    it.muted = v;
+    if (_wt) db!.upsertThread(dbField, it);
   }
 
   /// Close a conversation (hide from the list) or reopen it.
   void setClosed(String id, bool v) {
     final it = items[id];
-    if (it != null) it.closed = v;
+    if (it == null) return;
+    it.closed = v;
+    if (_wt) db!.upsertThread(dbField, it);
   }
 
   /// Remove already-shown messages locally (hide / block — never network state).
@@ -236,6 +277,15 @@ class ConversationStore {
         items.remove(from);
         order.remove(from);
       }
+      if (_wt) {
+        db!.removeThread(dbField, from);
+        for (final e in items.entries) {
+          db!.clear(dbField, e.key);
+          for (final m in e.value.messages) {
+            db!.addMessage(dbField, e.key, Map<String, dynamic>.from(m));
+          }
+        }
+      }
       return;
     }
     final id = (d['id'] ?? '').toString();
@@ -245,9 +295,18 @@ class ConversationStore {
       // Remove the whole conversation row (e.g. a wapp deleting/leaving a circle).
       items.remove(id);
       order.remove(id);
+      if (_wt) db!.removeThread(dbField, id);
       return;
     }
-    items[id]?.messages.removeWhere((m) => (m['key'] ?? '').toString() == key);
+    final it = items[id];
+    if (it == null) return;
+    it.messages.removeWhere((m) => (m['key'] ?? '').toString() == key);
+    if (_wt) {
+      db!.clear(dbField, id);
+      for (final m in it.messages) {
+        db!.addMessage(dbField, id, Map<String, dynamic>.from(m));
+      }
+    }
   }
 
   /// Record a reaction (like) on a message. [d]: `{mid, from, remove?, mine?}`.
@@ -270,6 +329,7 @@ class ConversationStore {
       if (mine) r['mine'] = true;
     }
     _applyReaction(mid);
+    if (_wt) db!.setReaction(dbField, mid, r);
   }
 
   /// Mirror a mid's tally (`likes` count + `liked` mine-flag) onto every stored
@@ -284,6 +344,7 @@ class ConversationStore {
         if ((m['mid'] ?? '') == mid) {
           m['likes'] = count;
           m['liked'] = mine;
+          if (_wt) db!.updateMessage(dbField, it.id, m);
         }
       }
     }
@@ -300,6 +361,7 @@ class ConversationStore {
     if (cur != null && (_statusRank[cur] ?? 0) >= (_statusRank[s] ?? 0)) return;
     _statuses[rid] = s;
     _applyStatus(rid);
+    if (_wt) db!.setStatus(dbField, rid, s);
   }
 
   /// Mirror a rid's status onto every stored message carrying that rid.
@@ -308,13 +370,19 @@ class ConversationStore {
     if (s == null) return;
     for (final it in items.values) {
       for (final m in it.messages) {
-        if ((m['rid'] ?? '') == rid) m['status'] = s;
+        if ((m['rid'] ?? '') == rid) {
+          m['status'] = s;
+          if (_wt) db!.updateMessage(dbField, it.id, m);
+        }
       }
     }
   }
 
   void clearUnread(String id) {
-    items[id]?.unread = 0;
+    final it = items[id];
+    if (it == null || it.unread == 0) return;
+    it.unread = 0;
+    if (_wt) db!.upsertThread(dbField, it);
   }
 
   /// Clear one conversation (id given) or all (id empty/null).
@@ -322,9 +390,11 @@ class ConversationStore {
     if (id == null || id.isEmpty) {
       items.clear();
       order.clear();
+      if (_wt) db!.clear(dbField);
     } else {
       items.remove(id);
       order.remove(id);
+      if (_wt) db!.removeThread(dbField, id);
     }
   }
 
@@ -362,6 +432,19 @@ class ConversationStore {
       return (idx[a.id] ?? 0).compareTo(idx[b.id] ?? 0); // stable
     });
     return list;
+  }
+
+  /// Read-only view of the delivery/read statuses (for the durable store).
+  Map<String, String> statusesSnapshot() => Map.unmodifiable(_statuses);
+
+  /// Restore statuses read back from the durable store and re-mirror them.
+  void restoreStatuses(Map<String, String> saved) {
+    _statuses
+      ..clear()
+      ..addAll(saved);
+    for (final rid in _statuses.keys) {
+      _applyStatus(rid);
+    }
   }
 
   /// Serialize the whole store for on-disk persistence.

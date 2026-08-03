@@ -187,6 +187,17 @@ class RnsService {
   NomadNode? _nomad; // NomadNet page fetcher
   final List<Map<String, dynamic>> _lxmfInbox = [];
 
+  /// Content keys of LXMF messages already accepted, so the direct copy and
+  /// the propagation copy of one message become one message. Insertion-ordered
+  /// and bounded; a session-lifetime set is enough because the duplicate
+  /// window is the delivery race, seconds wide.
+  final Map<String, int> _lxmfSeenContent = <String, int>{};
+
+  /// How long one message stays "already received". Covers the outbound
+  /// retry ceiling (30 min), after which the identical text is treated as
+  /// something the sender genuinely said twice.
+  static const int _lxmfDedupWindowMs = 30 * 60 * 1000;
+
   // Distributed NOSTR-like relay/indexer: a local event store + search, a relay
   // endpoint over Reticulum, a directory of peer indexers, a capacity-driven
   // role, and LXMF store-and-forward. The DB path is set by the app before start
@@ -2500,6 +2511,32 @@ class RnsService {
                 'LXMF: wapp datagram from ${_hex(m.sourceHash)} (${m.contentString.isEmpty ? 'addressed' : m.contentString})',
               );
               return;
+            }
+            // The SAME message can legitimately arrive twice: the sender holds
+            // a propagation copy the moment it sends (so an unreachable
+            // recipient can pull it) and pushes directly at the same time. Each
+            // arrival is a fresh envelope with its own hash, so hash dedup does
+            // not see it — the router's own comment says "the recipient dedups",
+            // and this is where that has to happen. Key on what the message IS:
+            // sender + title + content + timestamp.
+            // Deliberately WITHOUT the timestamp: the outbound retry above
+            // re-packs the same message as a fresh envelope with a new
+            // timestamp, which is precisely the copy we must collapse.
+            // Same key the router dedups its own mailbox on.
+            final contentKey =
+                '${_hex(m.sourceHash)}|${m.titleString}|${m.contentString}';
+            final nowMs = DateTime.now().millisecondsSinceEpoch;
+            final prev = _lxmfSeenContent[contentKey];
+            if (prev != null && nowMs - prev < _lxmfDedupWindowMs) {
+              LogService.instance.add(
+                'LXMF: duplicate copy of a message already received '
+                '(from ${_hex(m.sourceHash).substring(0, 8)}) — dropped',
+              );
+              return;
+            }
+            _lxmfSeenContent[contentKey] = nowMs;
+            if (_lxmfSeenContent.length > 512) {
+              _lxmfSeenContent.remove(_lxmfSeenContent.keys.first);
             }
             _lxmfInbox.add({
               'from': _hex(m.sourceHash),

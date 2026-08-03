@@ -187,16 +187,11 @@ class RnsService {
   NomadNode? _nomad; // NomadNet page fetcher
   final List<Map<String, dynamic>> _lxmfInbox = [];
 
-  /// Content keys of LXMF messages already accepted, so the direct copy and
-  /// the propagation copy of one message become one message. Insertion-ordered
-  /// and bounded; a session-lifetime set is enough because the duplicate
-  /// window is the delivery race, seconds wide.
-  final Map<String, int> _lxmfSeenContent = <String, int>{};
-
-  /// How long one message stays "already received". Covers the outbound
-  /// retry ceiling (30 min), after which the identical text is treated as
-  /// something the sender genuinely said twice.
-  static const int _lxmfDedupWindowMs = 30 * 60 * 1000;
+  /// Envelope hashes of LXMF messages already accepted. Retries now re-send
+  /// the SAME packed bytes (same hash), so the hash IS the message identity —
+  /// a content-based window here once silently swallowed a user genuinely
+  /// sending the same text twice, which is worse than any duplicate.
+  final Set<String> _lxmfSeenHashes = <String>{};
 
   // Distributed NOSTR-like relay/indexer: a local event store + search, a relay
   // endpoint over Reticulum, a directory of peer indexers, a capacity-driven
@@ -2512,31 +2507,21 @@ class RnsService {
               );
               return;
             }
-            // The SAME message can legitimately arrive twice: the sender holds
-            // a propagation copy the moment it sends (so an unreachable
-            // recipient can pull it) and pushes directly at the same time. Each
-            // arrival is a fresh envelope with its own hash, so hash dedup does
-            // not see it — the router's own comment says "the recipient dedups",
-            // and this is where that has to happen. Key on what the message IS:
-            // sender + title + content + timestamp.
-            // Deliberately WITHOUT the timestamp: the outbound retry above
-            // re-packs the same message as a fresh envelope with a new
-            // timestamp, which is precisely the copy we must collapse.
-            // Same key the router dedups its own mailbox on.
-            final contentKey =
-                '${_hex(m.sourceHash)}|${m.titleString}|${m.contentString}';
-            final nowMs = DateTime.now().millisecondsSinceEpoch;
-            final prev = _lxmfSeenContent[contentKey];
-            if (prev != null && nowMs - prev < _lxmfDedupWindowMs) {
+            // The SAME message can arrive twice — the sender's direct push
+            // and the propagation-mailbox copy race, and a failed push retries
+            // with the identical bytes. Same bytes = same hash, so the hash is
+            // a complete dedup key. NEVER key on content: a user really does
+            // say "ok" twice, and dropping the second was silent data loss.
+            final mh = _hex(m.hash);
+            if (_lxmfSeenHashes.contains(mh)) {
               LogService.instance.add(
-                'LXMF: duplicate copy of a message already received '
-                '(from ${_hex(m.sourceHash).substring(0, 8)}) — dropped',
+                'LXMF: duplicate envelope ${mh.substring(0, 8)} dropped',
               );
               return;
             }
-            _lxmfSeenContent[contentKey] = nowMs;
-            if (_lxmfSeenContent.length > 512) {
-              _lxmfSeenContent.remove(_lxmfSeenContent.keys.first);
+            _lxmfSeenHashes.add(mh);
+            if (_lxmfSeenHashes.length > 1024) {
+              _lxmfSeenHashes.remove(_lxmfSeenHashes.first);
             }
             _lxmfInbox.add({
               'from': _hex(m.sourceHash),
@@ -2572,6 +2557,32 @@ class RnsService {
           // authenticate it.
           acceptUnverified: (m) => m.fields.containsKey(_kWappLxmfField),
         );
+        // Route LXMF link requests by the DELIVERY DEST's own path — the
+        // legacy per-identity hop picked an arbitrary destination's next hop
+        // (often the hub, which never cross-forwards between clients) while a
+        // live LAN path sat unused. And tell the router when that path is
+        // local, so the post-handshake body grace drops 500ms -> 150ms.
+        _lxmf!
+          ..nextHopForDest = ((h) => _transport?.pathFor(h)?.nextHop)
+          ..pathIsLocal = ((h) =>
+              rnsIfaceIsLocal(rnsIfaceKind(_transport?.pathFor(h)?.via ?? '')));
+
+        // Answer path requests aimed at any of OUR destinations by
+        // re-announcing them. Between two Dart nodes there is no reference
+        // transport node to answer, so a LAN peer that missed our periodic
+        // announce had NO way to learn e.g. our lxmf.delivery dest for up to 5
+        // minutes — the "message to the device in the same room takes forever"
+        // case. The transport rate-limits the callback; we re-announce
+        // everything at once so one request resolves every service.
+        _transport!.onPathRequest = (Uint8List wanted) {
+          final id = _id;
+          if (id == null) return;
+          if (_classifyAnnounce(id, wanted) == null) return; // not ours
+          LogService.instance
+              .add('RNS: answering path request for our ${_hex(wanted).substring(0, 8)}');
+          _announceNow();
+          unawaited(_announceLxmfDests());
+        };
 
         // NomadNet page fetcher — reads pages from nomadnetwork.node peers.
         _nomad = NomadNode(
@@ -4490,27 +4501,40 @@ class RnsService {
   // between a phone and a desktop ON THE SAME LAN, one hop apart, never arrived.
   //
   // So we keep trying the direct link on a backoff for as long as the app is up.
-  // The recipient dedups by content, so a late direct delivery after a pull is
-  // harmless.
+  //
+  // TWO RULES this queue lives by, both learned the hard way on-device:
+  //  - The retry re-sends the SAME PACKED BYTES. Re-creating the message put a
+  //    fresh timestamp inside the hashed payload, so every retry was a new
+  //    envelope with a new hash — the receiver's hash dedup was blind to it and
+  //    the user saw the same text as two or three bubbles. Identical bytes make
+  //    every dedup on the pipeline (wapp gseen, mailbox content key) just work.
+  //  - The ladder starts FAST. A LAN link that failed its first handshake (a
+  //    stale hub-pinned path, healed moments later) is deliverable within
+  //    seconds; waiting 20-30s made same-room messaging feel broken because it
+  //    was.
   final List<Map<String, Object?>> _lxmfRetries = [];
   Timer? _lxmfRetryTimer;
-  static const List<int> _lxmfBackoffSec = [20, 60, 180, 600, 1800];
+  static const List<int> _lxmfBackoffSec = [2, 5, 10, 20, 60, 300, 1800];
 
-  void _queueLxmfRetry(
-      String destHex, String title, String content, Map<int, Object?>? fields) {
+  void _queueLxmfRetry(String destHex, Uint8List packed, String title,
+      String content, Map<int, Object?>? fields) {
     // Wapp datagrams have their own delivery story; only user messages retry.
     if (fields != null && fields.containsKey(_kWappLxmfField)) return;
     _lxmfRetries.add({
       'dest': destHex,
-      'title': title,
+      'packed': packed,
+      'title': title, // display only (pending strip)
       'content': content,
       'try': 0,
       'at': DateTime.now().millisecondsSinceEpoch + _lxmfBackoffSec[0] * 1000,
     });
     if (_lxmfRetries.length > 100) _lxmfRetries.removeAt(0);
     _notifyLxmf();
+    // 1s scan while anything is due soon: the early rungs are 2-10s apart and
+    // a 10s scan would erase them. The scan itself is a no-op when nothing is
+    // due, so the cost is nil.
     _lxmfRetryTimer ??=
-        Timer.periodic(const Duration(seconds: 10), (_) => _runLxmfRetries());
+        Timer.periodic(const Duration(seconds: 1), (_) => _runLxmfRetries());
   }
 
   Future<void> _runLxmfRetries() async {
@@ -4532,12 +4556,12 @@ class RnsService {
       }
       final t = _transport;
       if (t != null && !t.hasPath(dh)) t.requestPath(dh);
-      final msg = await LxmfMessage.create(
-        destinationHash: dh,
-        source: _id!,
-        title: e['title'] as String,
-        content: e['content'] as String,
-      );
+      // Same bytes as the original attempt — same hash end to end.
+      final msg = LxmfMessage.unpack(e['packed'] as Uint8List);
+      if (msg == null) {
+        _lxmfRetries.remove(e);
+        continue;
+      }
       final ok = await r.send_(msg, timeout: const Duration(seconds: 12));
       final who = destHex.length >= 8 ? destHex.substring(0, 8) : destHex;
       final n = (e['try'] as int) + 1;
@@ -4583,9 +4607,13 @@ class RnsService {
     final t = _transport;
     if (t != null && !t.hasPath(dh)) {
       t.requestPath(dh);
-      final deadline = DateTime.now().add(const Duration(seconds: 12));
+      // 3s, not more: on a LAN the (now answered — see onPathRequest) path
+      // request resolves in well under a second, and on WAN the fast retry
+      // ladder covers the slow case. The old 12s poll was the single biggest
+      // fixed delay in the pipeline.
+      final deadline = DateTime.now().add(const Duration(seconds: 3));
       while (!t.hasPath(dh) && DateTime.now().isBefore(deadline)) {
-        await Future<void>.delayed(const Duration(milliseconds: 300));
+        await Future<void>.delayed(const Duration(milliseconds: 150));
       }
     }
     final msg = await LxmfMessage.create(
@@ -4600,14 +4628,18 @@ class RnsService {
     // LxmfRouter.send_), so that line alone reads as failure even when the
     // message went straight through. Without this, "did my LXMF message get
     // there?" is unanswerable from the log.
-    final ok = await r.send_(msg);
+    // 10s, not the 30s default: on any healthy path the handshake completes in
+    // well under a second, and the fast retry ladder (first rung 2s) plus the
+    // router's own broadcast failover recover the rest. Waiting 30s only
+    // delayed the retry that would actually deliver.
+    final ok = await r.send_(msg, timeout: const Duration(seconds: 10));
     final who = destHex.length >= 8 ? destHex.substring(0, 8) : destHex;
     LogService.instance.add(
       ok
           ? 'RNS/lxmf: delivered to $who over a direct link'
           : 'RNS/lxmf: no direct link to $who — held for relay pickup',
     );
-    if (!ok) _queueLxmfRetry(destHex, title, content, fields);
+    if (!ok) _queueLxmfRetry(destHex, msg.packed, title, content, fields);
     return ok;
   }
 

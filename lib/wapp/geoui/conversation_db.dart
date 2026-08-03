@@ -230,6 +230,20 @@ class ConversationDb {
         .isNotEmpty;
   }
 
+  /// Delete thread rows that carry no messages and have never had activity.
+  ///
+  /// These are ghosts: a wapp upserting a row keyed by something it can never
+  /// render (a bare callsign beside the real "lxmf:<dest>" thread) left a row
+  /// the user could tap that always said "No messages yet". Real conversations
+  /// have either messages or an activity stamp, so this cannot take one.
+  int pruneGhosts() {
+    _db.execute(
+      "DELETE FROM threads WHERE activity_ts = 0 AND id NOT IN "
+      '(SELECT DISTINCT convo_id FROM messages)',
+    );
+    return _db.select('SELECT changes() AS c').first['c'] as int;
+  }
+
   /// Every field that has stored rows — the set of conversation stores to
   /// rebuild when a page opens.
   List<String> fields() {

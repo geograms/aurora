@@ -757,6 +757,11 @@ class _WappPageState extends State<WappPage>
       );
       return;
     }
+    final ghosts = _convDb!.pruneGhosts();
+    if (ghosts > 0) {
+      LogService.instance
+          .add('wapp $_wappName: pruned $ghosts empty ghost conversation(s)');
+    }
     await _importLegacyConversations(data);
     for (final field in _convDb!.fields()) {
       final store = _convStores.putIfAbsent(field, () => ConversationStore());
@@ -3349,8 +3354,25 @@ class _WappPageState extends State<WappPage>
     // and chat side by side) preselects a room.
     final narrowRooms = MediaQuery.of(context).size.width < 640;
     if (openId == null && !narrowRooms && rooms.isNotEmpty) {
-      final sel = rooms.firstWhere((r) => r['selected'] == true,
-          orElse: () => rooms.first);
+      // Open the room the user was last TALKING in, not whichever one the wapp
+      // persisted as "selected". After a restart that default was an empty
+      // room, so the app came up showing "No messages yet" beside a list full
+      // of live conversations — indistinguishable from "messaging is broken".
+      Map<String, Object?>? best;
+      var bestTs = -1;
+      for (final r in rooms) {
+        final id = '${r['id'] ?? ''}';
+        if (id.isEmpty) continue;
+        final it = store.items[id];
+        if (it == null || it.messages.isEmpty) continue;
+        if (it.activityTs > bestTs) {
+          bestTs = it.activityTs;
+          best = r;
+        }
+      }
+      final sel = best ??
+          rooms.firstWhere((r) => r['selected'] == true,
+              orElse: () => rooms.first);
       openId = '${sel['id'] ?? ''}';
       if (openId.isEmpty) openId = null;
       // Adopt the default as the REAL open room: its messages are on screen,

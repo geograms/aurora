@@ -156,48 +156,36 @@ class _RoomsFieldState extends State<RoomsField> {
   // Narrow (phone): the chat keeps full width behind a collapsed rail; the
   // expanded rail and the member panel OVERLAY it (Discord-mobile style) with a
   // tap-to-close scrim, so the chat is never squeezed.
+  // Narrow (phone): the standard list<->detail pattern. No room open — the
+  // conversation list fills the screen. A room open — the chat fills the
+  // screen, and the ONE back arrow (the wapp AppBar's, wired by the host)
+  // returns to the list. The old layout kept a collapsed rail beside the chat
+  // and grew a second arrow in the thread header; two stacked back buttons
+  // with different meanings helped nobody.
   Widget _narrow(ColorScheme cs, double maxW) {
     final panelW = (maxW * 0.82).clamp(220.0, 340.0);
-    final drawerOpen = _railW > _collapsed + 4 || _membersOpen;
-    // Back closes what is on top before it closes anything else: the member
-    // panel, then the room drawer. Without this the system back button walked
-    // straight out of the wapp while a panel was still covering the screen.
+    if (widget.openId == null) {
+      _railW = _expanded; // list fills the screen
+      return Material(color: cs.surfaceContainerHigh, child: _rail(cs));
+    }
+    // Back closes what is on top: the member panel first; with it closed the
+    // pop propagates to the host, which closes the room back to the list.
     return PopScope(
-      canPop: !_membersOpen && !_railExpanded,
+      canPop: !_membersOpen,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        setState(() {
-          if (_membersOpen) {
-            _membersOpen = false;
-          } else if (_railExpanded) {
-            _railW = _collapsed;
-          }
-        });
+        setState(() => _membersOpen = false);
       },
       child: Stack(
         children: [
-          Positioned(
-            left: _collapsed,
-            top: 0,
-            right: 0,
-            bottom: 0,
-            child: _chat(cs),
-          ),
-          if (drawerOpen)
-            Positioned(
-              left: _collapsed,
-              top: 0,
-              right: 0,
-              bottom: 0,
+          Positioned.fill(child: _chat(cs)),
+          if (_membersOpen)
+            Positioned.fill(
               child: GestureDetector(
-                onTap: () => setState(() {
-                  _railW = _collapsed;
-                  _membersOpen = false;
-                }),
+                onTap: () => setState(() => _membersOpen = false),
                 child: Container(color: Colors.black.withValues(alpha: 0.45)),
               ),
             ),
-          Positioned(left: 0, top: 0, bottom: 0, child: _railBox(cs)),
           Positioned(
             right: 0,
             top: 0,
@@ -599,17 +587,10 @@ class _RoomsFieldState extends State<RoomsField> {
           ),
           child: Row(
             children: [
-              if (!_railExpanded && MediaQuery.of(context).size.width < 900)
-                IconButton(
-                  tooltip: 'All chats',
-                  icon: const Icon(Icons.arrow_back, size: 20),
-                  onPressed: () => setState(() {
-                    _userSized = true;
-                    _railW = _expanded;
-                  }),
-                )
-              else
-                const SizedBox(width: 8),
+              // No back arrow here: the wapp AppBar's single arrow is the
+              // back (the host closes the room on narrow). A second arrow in
+              // this header sat directly under it doing something different.
+              const SizedBox(width: 8),
               Expanded(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,

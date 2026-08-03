@@ -3342,7 +3342,13 @@ class _WappPageState extends State<WappPage>
         : const <Map<String, dynamic>>[];
     // Default the open room to the one the wapp marked selected, else the first.
     var openId = _roomsOpenId;
-    if (openId == null && rooms.isNotEmpty) {
+    // On a NARROW screen the thread fills the display, so auto-adopting the
+    // wapp's persisted "selected" room meant Chat opened straight into an old
+    // thread instead of the conversation list — with no visible way to know
+    // where you were. A phone starts at the LIST; only the wide layout (list
+    // and chat side by side) preselects a room.
+    final narrowRooms = MediaQuery.of(context).size.width < 640;
+    if (openId == null && !narrowRooms && rooms.isNotEmpty) {
       final sel = rooms.firstWhere((r) => r['selected'] == true,
           orElse: () => rooms.first);
       openId = '${sel['id'] ?? ''}';
@@ -4100,7 +4106,7 @@ class _WappPageState extends State<WappPage>
     // launcher, losing the whole app. Only when the rail is hidden behind the
     // chat (narrow) does this matter; a wide window shows both at once.
     final roomsOpen = _roomsOpenId != null &&
-        MediaQuery.of(context).size.width < 900 &&
+        MediaQuery.of(context).size.width < 640 &&
         _tabScreens[idx].children
             .any((c) => c.keyword == 'group' && c.type == 'rooms');
 
@@ -4140,6 +4146,16 @@ class _WappPageState extends State<WappPage>
                   icon: const Icon(Icons.arrow_back),
                   tooltip: 'Back',
                   onPressed: () => setState(() => _convOpenId = null),
+                )
+              : roomsOpen
+              // A room/thread fills the screen (narrow rooms layout): the
+              // single AppBar arrow returns to the conversation LIST. The
+              // thread header draws no arrow of its own — two stacked back
+              // arrows with different meanings is how a user gets lost.
+              ? IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  tooltip: 'Back',
+                  onPressed: () => setState(() => _roomsOpenId = null),
                 )
               : navBack
               ? IconButton(

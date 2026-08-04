@@ -1202,6 +1202,12 @@ class RnsService {
       final iface = RnsBleInterface(
         radio: radio,
         edge: true,
+        // The label MUST match the `via` inbound packets are tagged with:
+        // everything downstream looks the interface up by that string, and a
+        // default 'ble' against a 'ble5' tag meant _ifaceByLabel never found
+        // it — so the edge-bridge never rebroadcast a BLE announce onto the
+        // hubs and no link route over BLE was ever learned.
+        label: 'ble5',
         onPacket: (raw) => _onInbound(raw, 'ble5'),
         log: (m) => LogService.instance.add('RNS/ble5: $m'),
       );
@@ -3124,6 +3130,7 @@ class RnsService {
           await radio.startScan();
           final b5 = RnsBleInterface(
             radio: radio,
+            label: 'ble5', // must match the inbound `via` tag — see above
             onPacket: (raw) => _onInbound(raw, 'ble5'),
             log: (m) => LogService.instance.add('RNS/ble5: $m'),
           );
@@ -9748,6 +9755,12 @@ class RnsService {
     _ifaces.clear();
     _transport?.close(); // kill the transport engine isolate
     _transport = null;
+    // The BLE bridge was NOT reset here, while its guard flag was: after any
+    // stop/start cycle _enableBleBridge returned early, so the new transport
+    // isolate had no BLE interface at all and nothing could be sent over
+    // Bluetooth again until the process restarted.
+    _bleBridge = false;
+    _ble = null;
     _up = false;
     _localReady = false;
     _mode = '';

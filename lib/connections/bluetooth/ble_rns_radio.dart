@@ -64,6 +64,9 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
   void Function(Uint8List frame)? _handler;
   final RnsChunkAssembler _assembler = RnsChunkAssembler();
   int _msgId = 0;
+  // Stable for this radio's lifetime, unlike the advertiser MAC, which Android
+  // rotates mid-packet — see rns_chunk.dart.
+  final int _senderId = DateTime.now().microsecondsSinceEpoch & 0xFF;
   int _sent = 0;
   int _refused = 0;
 
@@ -182,7 +185,7 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
     if (!_allowPathRequest(frame)) return true; // dropped on purpose
     final cap = broadcastCap;
     final id = _msgId = (_msgId + 1) & 0xFF;
-    final parts = rnsChunkSplit(frame, cap, id);
+    final parts = rnsChunkSplit(frame, cap, id, senderId: _senderId);
     if (parts.isEmpty) {
       _refused++;
       LogService.instance.add(

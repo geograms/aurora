@@ -54,21 +54,6 @@ void main() {
   // Two devices in range can be mid-packet with the same id at the same time.
   // Merging their fragments would produce garbage that only fails RNS's own
   // integrity check — silently, and only under load.
-  test('two senders using the same id do not contaminate each other', () {
-    final a = packet(300, seed: 1);
-    final b = packet(300, seed: 2);
-    final pa = rnsChunkSplit(a, 110, 7);
-    final pb = rnsChunkSplit(b, 110, 7);
-    final asm = RnsChunkAssembler();
-    Uint8List? gotA, gotB;
-    for (var i = 0; i < pa.length; i++) {
-      gotA = asm.accept('aa:aa', pa[i]) ?? gotA;
-      gotB = asm.accept('bb:bb', pb[i]) ?? gotB;
-    }
-    expect(gotA, equals(a));
-    expect(gotB, equals(b));
-  });
-
   test('a single-fragment packet still works', () {
     final p = packet(50);
     final parts = rnsChunkSplit(p, 200, 0);
@@ -105,9 +90,48 @@ void main() {
 
   // A fragment costs 3 bytes of framing; anything more would eat the payload
   // room these adverts are short of in the first place.
-  test('framing overhead stays at three bytes', () {
-    final parts = rnsChunkSplit(packet(200), 103, 1);
-    expect(parts.first.length, 103);
+  test('framing overhead stays at four bytes', () {
+    final parts = rnsChunkSplit(packet(200), 104, 1);
+    expect(parts.first.length, 104);
     expect(parts.first.length - kRnsChunkHeader, 100);
+  });
+
+  // Android rotates the BLE random MAC mid-packet, so the advertiser address
+  // cannot identify a sender. The sender id travels IN the frame; reassembly
+  // must work even when every fragment arrives from a different address.
+  test('fragments reassemble across a rotating advertiser address', () {
+    final p = packet(600);
+    final parts = rnsChunkSplit(p, 120, 3, senderId: 0x5A);
+    final asm = RnsChunkAssembler();
+    Uint8List? whole;
+    for (var i = 0; i < parts.length; i++) {
+      whole = asm.accept('aa:bb:cc:dd:ee:0$i', parts[i]) ?? whole; // new MAC each time
+    }
+    expect(whole, equals(p));
+  });
+
+  test('two senders with the same msgId stay separate', () {
+    final a = packet(300, seed: 1);
+    final b = packet(300, seed: 2);
+    final pa = rnsChunkSplit(a, 110, 7, senderId: 0x11);
+    final pb = rnsChunkSplit(b, 110, 7, senderId: 0x22);
+    final asm = RnsChunkAssembler();
+    Uint8List? gotA, gotB;
+    for (var i = 0; i < pa.length; i++) {
+      gotA = asm.accept('same:mac', pa[i]) ?? gotA; // same address, both senders
+      gotB = asm.accept('same:mac', pb[i]) ?? gotB;
+    }
+    expect(gotA, equals(a));
+    expect(gotB, equals(b));
+  });
+
+  test('an abandoned set is counted, not just forgotten', () {
+    var clock = DateTime(2026, 8, 4, 12);
+    final asm = RnsChunkAssembler(now: () => clock);
+    asm.accept('aa', rnsChunkSplit(packet(300), 110, 5, senderId: 1).first);
+    expect(asm.abandoned, 0);
+    clock = clock.add(kRnsChunkTtl * 2);
+    asm.accept('bb', rnsChunkSplit(packet(50), 110, 6, senderId: 2).single);
+    expect(asm.abandoned, 1);
   });
 }

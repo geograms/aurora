@@ -416,12 +416,13 @@ class _ChatViewFieldState extends State<ChatViewField> {
   }
 
   /// A reaction vote that leaked into the timeline as text: "<hex id>:like" /
-  /// ":unlike" (8..64 hex chars — a message id, never something a person
+  /// ":unlike" (4..64 hex chars — a message id, never something a person
   /// types). Votes are tallied onto their target message; a bubble reading
   /// "82ccbaec…:like" is a rendering bug, including ones already persisted in
-  /// history from before the vote paths filtered them.
+  /// history from before the vote paths filtered them. 4 is the shortest form:
+  /// group and direct-conversation ids are 4 hex chars, room ids are 64.
   static final RegExp _reactionText =
-      RegExp(r'^[0-9a-f]{8,64}:(?:un)?like$');
+      RegExp(r'^[0-9a-f]{4,64}:(?:un)?like$');
 
   @override
   Widget build(BuildContext context) {

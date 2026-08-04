@@ -2605,7 +2605,10 @@ class RnsService {
         _lxmf!
           ..nextHopForDest = ((h) => _transport?.pathFor(h)?.nextHop)
           ..pathIsLocal = ((h) =>
-              rnsIfaceIsLocal(rnsIfaceKind(_transport?.pathFor(h)?.via ?? '')));
+              rnsIfaceIsLocal(rnsIfaceKind(_transport?.pathFor(h)?.via ?? '')))
+          // One connectionless packet to a delivery dest — how a message
+          // crosses Bluetooth, where a link handshake mostly times out.
+          ..sendDataTo = ((h, d) => _transport?.sendDataTo(h, d));
 
         // Answer path requests aimed at any of OUR destinations by
         // re-announcing them. Between two Dart nodes there is no reference
@@ -4602,14 +4605,31 @@ class RnsService {
         Timer.periodic(const Duration(seconds: 1), (_) => _runLxmfRetries());
   }
 
+  // One scan at a time. Each entry AWAITS a send that can take 12s, while the
+  // timer keeps firing every second — so scans overlapped, the same message was
+  // pushed several times over, and the log filled with a line a second. The
+  // scan is a no-op when nothing is due; it must also be a no-op while the
+  // previous one is still working.
+  bool _lxmfRetryBusy = false;
+
   Future<void> _runLxmfRetries() async {
     if (_lxmfRetries.isEmpty) {
       _lxmfRetryTimer?.cancel();
       _lxmfRetryTimer = null;
       return;
     }
+    if (_lxmfRetryBusy) return;
     final r = _lxmf;
     if (!_up || r == null || _id == null) return;
+    _lxmfRetryBusy = true;
+    try {
+      await _runLxmfRetriesInner(r);
+    } finally {
+      _lxmfRetryBusy = false;
+    }
+  }
+
+  Future<void> _runLxmfRetriesInner(LxmfRouter r) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     for (final e in List<Map<String, Object?>>.from(_lxmfRetries)) {
       if ((e['at'] as int) > now) continue;

@@ -301,9 +301,17 @@ Future<void> main() async {
       // BEFORE the permissions intro had even rendered. A user who has not yet
       // been through the intro gets nothing started here; the intro's
       // completion starts it (PermissionGate.startGatedServices).
-      if (await PermissionGate.ready) {
-        await PermissionGate.startGatedServices();
-      }
+      // Bounded: this runs BEFORE runApp(), so anything that stalls here holds
+      // the splash on screen with no UI at all. Whatever does not finish in
+      // time is picked up again right after runApp() (same call, idempotent).
+      await Future(() async {
+        if (await PermissionGate.ready) {
+          await PermissionGate.startGatedServices();
+        }
+      }).timeout(const Duration(seconds: 10), onTimeout: () {
+        LogService.instance
+            .add('boot: gated services still starting — continuing to UI');
+      });
     },
   );
 

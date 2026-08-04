@@ -167,7 +167,13 @@ class AndroidPermissionsService {
   Future<bool> locationServicesOn() async {
     if (!_isAndroid) return true;
     try {
-      return await Geolocator.isLocationServiceEnabled();
+      // HARD timeout. This is a platform-channel call, and PermissionGate.ready
+      // consults it from a BOOT TASK that runs before runApp() — where the
+      // plugin side is not necessarily answering yet. Without the timeout the
+      // future never completed, boot never finished, and both devices sat on a
+      // blank splash forever after a reboot. Never block the app on a probe.
+      return await Geolocator.isLocationServiceEnabled()
+          .timeout(const Duration(seconds: 2), onTimeout: () => true);
     } catch (_) {
       return true; // unknown: never block on a failed probe
     }

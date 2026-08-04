@@ -77,7 +77,10 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private val appContext: Context = context.applicationContext
 
-    private class Frame(var mfg: ByteArray, var expiresAt: Long)
+    // [prio] frames are TRAFFIC — a link handshake, a message — and they are
+    // aired ahead of the presence adverts. Presence can wait a rotation;
+    // a handshake that waits is a handshake that times out.
+    private class Frame(var mfg: ByteArray, var expiresAt: Long, var prio: Boolean = false)
 
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
@@ -204,7 +207,10 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                     if (key == null || subtype == null || data == null) {
                         result.error("ARG", "key/subtype/data required", null)
                     } else {
-                        result.success(advertiseFrame(key, subtype, data, ttlMs.toLong()))
+                        val prio = call.argument<Boolean>("prio") ?: false
+                        result.success(
+                            advertiseFrame(key, subtype, data, ttlMs.toLong(), prio),
+                        )
                     }
                 }
                 "removeFrame" -> {
@@ -267,7 +273,13 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
      * advertising set with all other active frames and aired until [ttlMs]
      * elapses (callers refresh periodically to keep it alive).
      */
-    private fun advertiseFrame(key: String, subtype: Int, payload: ByteArray, ttlMs: Long): Boolean {
+    private fun advertiseFrame(
+        key: String,
+        subtype: Int,
+        payload: ByteArray,
+        ttlMs: Long,
+        prio: Boolean = false,
+    ): Boolean {
         if (disposed || !isSupported()) return false
         val mfg = ByteArray(payload.size + 2)
         mfg[0] = MARKER
@@ -282,7 +294,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         }
         advAttempts.incrementAndGet()
         val now = System.currentTimeMillis()
-        frames[key] = Frame(mfg, now + ttlMs)
+        frames[key] = Frame(mfg, now + ttlMs, prio)
         ensureRotating()
         // Air immediately so a just-sent message doesn't wait a full rotation.
         rotateTick()
@@ -324,7 +336,13 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             stopAdvertise()
             return
         }
-        val keys = frames.keys.toList()
+        // Traffic first, in its own round-robin; presence only when no traffic
+        // is waiting. With every frame in one queue a three-packet handshake
+        // was aired a rotation apart with announces in between, and the link
+        // timed out before it completed.
+        val prioKeys = frames.filterValues { it.prio }.keys.toList()
+        val keys = if (prioKeys.isNotEmpty()) prioKeys else frames.keys.toList()
+        if (keys.isEmpty()) return
         if (rotateIdx >= keys.size) rotateIdx = 0
         val frame = frames[keys[rotateIdx]] ?: return
         rotateIdx = (rotateIdx + 1) % keys.size

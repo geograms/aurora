@@ -119,9 +119,21 @@ class NostrAllPoller {
     polling.dispose();
   }
 
+  // ── Offline circuit-breaker ───────────────────────────────────────────────
+  //
+  // Each poll opens fresh sockets, so the per-socket backoff never applies: on
+  // a phone with no internet this hammered DNS for every relay every cycle —
+  // hundreds of failed lookups a minute, on the same isolate that has to keep
+  // a Bluetooth link alive. A device off the internet must go quiet, not spin.
+  int _deadCycles = 0;
+  int _skipUntilMs = 0;
+  static const int _breakerBaseMs = 60 * 1000;
+  static const int _breakerMaxMs = 15 * 60 * 1000;
+
   /// One curated poll. Concurrency-safe: a poll in flight wins.
   Future<int> pollOnce() async {
     if (_busy || _disposed) return 0;
+    if (DateTime.now().millisecondsSinceEpoch < _skipUntilMs) return 0;
     _busy = true;
     polling.value = true;
     final clients = <NostrWsClient>[];
@@ -334,13 +346,31 @@ class NostrAllPoller {
     } catch (e) {
       LogService.instance.add('all-poll: FAILED $e');
     } finally {
+      // Did ANY relay answer? drainFrames() is evidence, not a status claim.
+      var frames = 0;
       for (final c in clients) {
+        frames += c.drainFrames();
         for (final s in const ['r', 'f', 'p', 'e', 'k']) {
           try {
             c.unsubscribe(s);
           } catch (_) {}
         }
         unawaited(c.close());
+      }
+      if (frames > 0) {
+        _deadCycles = 0;
+        _skipUntilMs = 0;
+      } else {
+        _deadCycles++;
+        final backoff =
+            (_breakerBaseMs * (1 << (_deadCycles - 1).clamp(0, 8)))
+                .clamp(_breakerBaseMs, _breakerMaxMs);
+        _skipUntilMs = DateTime.now().millisecondsSinceEpoch + backoff;
+        if (_deadCycles == 1 || _deadCycles % 5 == 0) {
+          LogService.instance.add(
+              'all-poll: no relay answered ($_deadCycles in a row) — '
+              'pausing ${backoff ~/ 1000}s');
+        }
       }
       _busy = false;
       if (!_disposed) polling.value = false;

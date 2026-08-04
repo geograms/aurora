@@ -98,20 +98,48 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
     // dropped" when we wrote to it, because the announce that carries the
     // delivery address never made it onto the air. The rotation cycles the
     // slots, so all three go out.
-    Ble5Bus.instance.advertiseFrame(_advertKey(frame), Ble5Subtype.rns, frame,
-        ttl: const Duration(seconds: 35));
+    // An ANNOUNCE is presence: one slot per destination, refreshed by the next
+    // announce for that destination, held long enough to be heard.
+    //
+    // Everything else is TRAFFIC — a link handshake is three packets in a row
+    // on the same destination, and keying those by destination made each
+    // replace the one before it. The peer answered a request we had already
+    // overwritten, so links timed out and only the occasional message got
+    // through (2 of 5 on a measured run). Traffic gets its own slot per frame
+    // and a short life: it has to be heard once, soon, not held for half a
+    // minute.
+    final isAnnounce = frame.isNotEmpty &&
+        (frame[0] & 0x03) == 0x01; // RnsPacketType.announce
+    Ble5Bus.instance.advertiseFrame(
+      isAnnounce ? _announceKey(frame) : 'rnst:${_frameKey(frame)}',
+      Ble5Subtype.rns,
+      frame,
+      ttl: isAnnounce
+          ? const Duration(seconds: 35)
+          : const Duration(seconds: 8),
+      prio: !isAnnounce,
+    );
   }
 
-  /// Advert slot for [frame]: keyed by its destination hash, so an announce for
-  /// one destination never displaces another's. Falls back to the shared slot
-  /// for anything too short to carry a destination.
-  String _advertKey(Uint8List frame) {
+  /// Advert slot for an announce: keyed by its destination hash, so an announce
+  /// for one destination never displaces another's.
+  String _announceKey(Uint8List frame) {
     if (frame.length < 18) return _kRnsKey;
     final b = StringBuffer(_kRnsKey);
     for (var i = 2; i < 8; i++) {
       b.write(frame[i].toRadixString(16).padLeft(2, '0'));
     }
     return b.toString();
+  }
+
+  /// Slot for one traffic frame — distinct per frame, so nothing it shares a
+  /// destination with can overwrite it before the peer has read it.
+  String _frameKey(Uint8List frame) {
+    var h = 0x811c9dc5;
+    for (final b in frame) {
+      h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF;
+    }
+    return h.toRadixString(16);
   }
 
   // ── Path requests must not drown the channel ──────────────────────────────
@@ -168,7 +196,7 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
       // useful while the receiver is still assembling it.
       Ble5Bus.instance.advertiseFrame(
           'rnsc:$id:$i', Ble5Subtype.rnsChunk, parts[i],
-          ttl: kRnsChunkTtl);
+          ttl: kRnsChunkTtl, prio: true);
     }
     _sent++;
     return true;

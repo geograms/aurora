@@ -6345,7 +6345,7 @@ class _WappPageState extends State<WappPage>
                     ? null
                     : RnsService.instance.nostrHexFromNpub(npub);
                 Navigator.of(context).pop();
-                if (hex != null) _openConvoById(hex);
+                if (hex != null) _openChatWithPeer(hex);
               },
               onSetFollow: (follow) {
                 if (follow) {
@@ -6826,8 +6826,17 @@ class _WappPageState extends State<WappPage>
   // so the user can continue it. The item carries a `convo` ("#GROUP" or a
   // callsign); we switch to the conversations tab and open that room (creating
   // the row if it doesn't exist yet, e.g. a brand-new BLE contact).
-  void _openConvoFromFeed(Map<String, dynamic> m) =>
-      _openConvoById((m['convo'] ?? '').toString().trim());
+  void _openConvoFromFeed(Map<String, dynamic> m) {
+    final convo = (m['convo'] ?? '').toString().trim();
+    if (convo.isEmpty) return;
+    // "#GROUP" opens as-is; a callsign has to become that peer's lxmf thread
+    // or Chat will show an empty room and swallow every send.
+    if (convo.startsWith('#')) {
+      _openConvoById(convo);
+    } else {
+      _openChatWithPeer(convo);
+    }
+  }
 
   /// Recover FEED posts that were lost over APRS-IS by asking peers on Reticulum
   /// for FEED notes since the last sweep (NOSTR kind-1), reconstructing each as a
@@ -7186,7 +7195,67 @@ class _WappPageState extends State<WappPage>
     );
   }
 
-  void _openConvoById(String convo) {
+  /// Turn whatever the caller has — a callsign, an npub/hex key, or an id that
+  /// is already a thread — into an id CHAT CAN ACTUALLY USE.
+  ///
+  /// Chat renders and sends only `#group`, room and `lxmf:<dest>` threads (see
+  /// convo_msg / do_rooms_send in the wapp). Handing it a bare callsign
+  /// produced a row that opened empty and swallowed every send: the wapp got
+  /// `rooms_send`, found no `lxmf:` prefix, and dropped the message without a
+  /// word — "I press send and it disappears". Resolve to the peer's LXMF
+  /// delivery destination, exactly as the Reticulum graph's own chat button
+  /// does (wapp_graph.dart `_openChat`).
+  String? _chatThreadIdFor(String target) {
+    final t = target.trim();
+    if (t.isEmpty) return null;
+    // Already something Chat understands.
+    if (t.startsWith('lxmf:') || t.startsWith('#')) return t;
+    // A raw 16-byte delivery dest.
+    if (RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(t)) {
+      return 'lxmf:${t.toLowerCase()}';
+    }
+    // Otherwise ask the directory that already pairs a peer with its LXMF
+    // delivery destination. Deriving the dest from a NOSTR key does NOT work:
+    // lxmfDestForPubkey wants the 64-byte RETICULUM identity key, and an npub
+    // is a 32-byte NOSTR key — feeding it one returns null, which is why
+    // "Chat" from a profile silently did nothing.
+    final wanted = t.toUpperCase();
+    for (final e in RnsService.instance.messagingDirectory('')) {
+      final dest = (e['dest'] ?? '').toString();
+      if (dest.isEmpty) continue;
+      final call = (e['callsign'] ?? '').toString().toUpperCase();
+      final npub = (e['npub'] ?? '').toString();
+      if (call == wanted || (npub.isNotEmpty && npub == t)) {
+        return 'lxmf:${dest.toLowerCase()}';
+      }
+    }
+    return null;
+  }
+
+  /// "Chat" from a profile: open the peer's real thread, or say why we can't.
+  void _openChatWithPeer(String target, {String? npub}) {
+    // Prefer the key this screen is ALREADY showing. Re-deriving it from the
+    // callsign only works if RnsService happened to learn that mapping, which
+    // is not the case for a peer the wapp discovered itself — the profile
+    // displayed npub1rd8… while the host lookup returned nothing, so "Chat"
+    // silently did nothing at all.
+    final id = _chatThreadIdFor(
+      (npub != null && npub.isNotEmpty) ? npub : target,
+    ) ??
+        _chatThreadIdFor(target);
+    if (id == null) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text('No messaging address known for $target yet — '
+              'they need to be heard on the network first.'),
+        ),
+      );
+      return;
+    }
+    _openConvoById(id, name: target);
+  }
+
+  void _openConvoById(String convo, {String name = ''}) {
     if (convo.isEmpty) return;
     // The rooms layout (Chat) has no `conversations` group — its rail IS the
     // conversation list, sharing the same store. Deep-linking a peer must land
@@ -7202,6 +7271,13 @@ class _WappPageState extends State<WappPage>
       // thread opened this way survives the next launch.
       _fieldValues['rooms_convo'] = convo;
       _sendCommand('rooms_open');
+      // Hand over the human name too, or the thread shows "LXMF 85cdc031"
+      // one tap after the profile said X16JK8.
+      if (name.isNotEmpty) {
+        _fieldValues['convo_name_id'] = convo;
+        _fieldValues['convo_name'] = name;
+        _sendCommand('convo_name');
+      }
       setState(() {
         _panelScreen = null;
         _roomsOpenId = convo;
@@ -7297,7 +7373,7 @@ class _WappPageState extends State<WappPage>
               ? null
               : () {
                   Navigator.of(context).pop();
-                  _openConvoById(c);
+                  _openChatWithPeer(c, npub: resolvedNpub);
                 },
           // Mail is a different destination from chat, not a synonym. It is
           // keyed by the person's KEY — but a callsign works too: the Mail
@@ -7401,7 +7477,7 @@ class _WappPageState extends State<WappPage>
           },
           onMessage: () {
             Navigator.of(context).pop();
-            _openConvoById(c);
+            _openChatWithPeer(c, npub: resolvedNpub);
           },
           following: _followedCalls.contains(c.toUpperCase()),
           blocked: _blockedCalls.contains(c.toUpperCase()),

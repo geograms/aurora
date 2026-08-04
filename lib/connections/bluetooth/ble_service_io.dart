@@ -801,6 +801,20 @@ class BleService {
         }
       }
     }
+    // A central that connected to OUR server and then went quiet used to keep
+    // the scan off indefinitely: we only ever dropped the link we dialled
+    // ourselves, never one someone else opened. A phone sat deaf for minutes —
+    // hearing no beacons, no announces, nobody — because of an idle connection
+    // it did not initiate. Serving a transfer is worth the radio; sitting on an
+    // idle link is not.
+    final servingIdle = (_ngServerCentral != null ||
+            (_gattServer?.clientIds.isNotEmpty ?? false)) &&
+        _gattActivityMs > 0 &&
+        DateTime.now().millisecondsSinceEpoch - _gattActivityMs > _gattIdleMs;
+    if (servingIdle && !_ngClientUp) {
+      _resumeBle5Scan();
+      unawaited(_applyScan());
+    }
     // The legacy chunk/NACK ARQ is retired on BLE5 devices — never emit NACKs
     // (they thrash the single advertiser and clobber the connectable beacon).
     if (_ble5) return;
@@ -939,8 +953,14 @@ class BleService {
     // peer is connected to our server) — scan and connection contend on a single
     // radio and the link drops otherwise. This is what kept the phone<->desktop
     // link from holding (the serving side kept scanning).
-    final serverBusy = (_gattServer?.clientIds.isNotEmpty ?? false) ||
+    // Serving a peer earns the radio only while the transfer is ALIVE. An idle
+    // central that stays connected must not keep us deaf — see _bcastTick.
+    final serving = (_gattServer?.clientIds.isNotEmpty ?? false) ||
         _ngServerCentral != null;
+    final serverBusy = serving &&
+        (_gattActivityMs == 0 ||
+            DateTime.now().millisecondsSinceEpoch - _gattActivityMs <=
+                _gattIdleMs);
     final want =
         _scanRefs > 0 && !_gattLinkUp && !_ngClientUp && !serverBusy;
     try {

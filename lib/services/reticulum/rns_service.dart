@@ -678,6 +678,37 @@ class RnsService {
     lan.send(pkt.pack());
   }
 
+  /// Last BLE-only presence announce.
+  int _lastBleBeaconMs = 0;
+
+  /// How often we say "I am here" on Bluetooth.
+  ///
+  /// The wide announce backs off to five minutes on battery or without wifi —
+  /// correct for hubs on the far side of the internet, useless for the device
+  /// on the table next to you, which is the ONLY device a Bluetooth-only phone
+  /// can talk to. A phone with wifi off announced every 5 minutes into a
+  /// 35-second advert TTL: its neighbour never learned its address, so no
+  /// message could be addressed to it in either direction. Airing an advert
+  /// costs no one's bandwidth and no hub anything.
+  static const int _bleBeaconEveryMs = 60 * 1000;
+
+  /// Broadcast our announce on the BLE interface ONLY (never a hub uplink).
+  Future<void> _bleBeacon() async {
+    final ble = _ble;
+    if (!_up || _id == null || ble == null) return;
+    _lastBleBeaconMs = DateTime.now().millisecondsSinceEpoch;
+    final pkt = await RnsAnnounceBuilder.build(
+      _id!,
+      _app,
+      _aspects,
+      appData: Uint8List.fromList(utf8.encode(_announceText)),
+    );
+    ble.send(pkt.pack());
+    // The identity announce alone is presence, not reachability: a peer needs
+    // the LXMF delivery destination to address a message to us.
+    _announceServiceDestsOn(ble);
+  }
+
   /// Re-announce if we are overdue. Called from the Android foreground
   /// service's native heartbeat.
   ///
@@ -692,6 +723,7 @@ class RnsService {
     if (!_up) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastLanBeaconMs >= _lanBeaconEveryMs) unawaited(_lanBeacon());
+    if (now - _lastBleBeaconMs >= _bleBeaconEveryMs) unawaited(_bleBeacon());
     if (now - _lastAnnounceMs < _announceInterval().inMilliseconds) return;
     _announceNow();
   }
@@ -1147,6 +1179,10 @@ class RnsService {
   // True once this node holds a BLE edge interface and relays it onto the hubs.
   bool _bleBridge = false;
 
+  /// The BLE interface, kept so presence can be aired on IT alone — see
+  /// [_bleBeacon].
+  RnsBleInterface? _ble;
+
   /// Bring up this node's BLE radio as an EDGE interface and turn on scoped
   /// edge-bridge relaying, so BLE-only peers (no internet) become reachable from
   /// across the world through us (A —BLE→ us —TCP→ hubs → C). Only the
@@ -1177,7 +1213,9 @@ class RnsService {
         // Scoped relay work is tiny; never auto-shed it (would stop bridging).
         ..setPassive(false, auto: false);
       _ifaces.add(iface);
+      _ble = iface;
       _bleBridge = true;
+      unawaited(_bleBeacon()); // say we are here NOW, not in five minutes
       LogService.instance.add(
         'RNS: BLE edge-bridge ON (relaying BLE peers onto the hubs)',
       );
@@ -3404,6 +3442,31 @@ class RnsService {
     _transport!.sendOnAll(lp.pack());
   }
 
+  /// The LXMF destinations, aired on ONE interface instead of every one.
+  ///
+  /// Presence is not reachability: a peer that has only heard our identity
+  /// announce still cannot address a message to us — it needs the LXMF
+  /// delivery destination. On a Bluetooth-only link these are the two packets
+  /// that decide whether the device next to you can be written to at all, so
+  /// they ride the frequent local beacon rather than the five-minute wide
+  /// cadence, and they never touch a hub uplink.
+  Future<void> _announceServiceDestsOn(RnsInterface iface) async {
+    if (!_up || _id == null) return;
+    final lx = await RnsAnnounceBuilder.build(
+      _id!,
+      kLxmfApp,
+      kLxmfDeliveryAspects,
+      appData: Uint8List.fromList(utf8.encode(_announceText)),
+    );
+    iface.send(lx.pack());
+    final lp = await RnsAnnounceBuilder.build(
+      _id!,
+      kLxmfApp,
+      kLxmfPropagationAspects,
+    );
+    iface.send(lp.pack());
+  }
+
   /// Announce the relay destination carrying our role/capacity/interest summary
   /// (RelayAnnouncement). Peers collect these into their RelayDirectory.
   /// Record a peer's relay/indexer role from a RelayAnnouncement [appData],
@@ -4889,6 +4952,34 @@ class RnsService {
   /// feed's refresh cycle, so a lost probe costs freshness, never correctness.
   static const Duration _npdSilenceTimeout = Duration(seconds: 4);
 
+  // Destinations whose path we have recently asked for, and when.
+  final Map<String, int> _pathWarmedAt = {};
+  static const int _pathWarmCooldownMs = 5 * 60 * 1000;
+
+  /// Ask for a path to [destHash] — but no more than once per
+  /// [_pathWarmCooldownMs] per destination.
+  ///
+  /// Every relay/feed cycle re-probes every peer it knows, and each miss asked
+  /// for a path again: a phone that had once been on the internet held hundreds
+  /// of destinations it could no longer reach, and re-requested all of them
+  /// forever — measured at ~47 path requests a second on a device whose only
+  /// link was Bluetooth. That is the entire capacity of an advertising channel
+  /// spent asking about peers that are not there, drowning the announces the
+  /// neighbour in the room actually needs.
+  void _warmPath(Uint8List destHash) {
+    final t = _transport;
+    if (t == null) return;
+    final key = _hex(destHash);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final last = _pathWarmedAt[key];
+    if (last != null && now - last < _pathWarmCooldownMs) return;
+    _pathWarmedAt[key] = now;
+    if (_pathWarmedAt.length > 2048) {
+      _pathWarmedAt.remove(_pathWarmedAt.keys.first);
+    }
+    t.requestPath(destHash);
+  }
+
   /// Query [peer] with a connectionless probe instead of a link. Wired into
   /// [RelayNode.probeQuery]; see that field for the tri-state contract.
   Future<({bool supported, Uint8List? body})> _probeRelay(
@@ -4920,7 +5011,7 @@ class RnsService {
     // pull a path first (RnsLink.ensurePath).
     final destHash = RnsDestination.hash(peer, kRelayApp, kRelayAspects);
     if (!t.hasPath(destHash)) {
-      t.requestPath(destHash); // warm it for next time
+      _warmPath(destHash); // for next time — at most once in a while per dest
       return no;
     }
 

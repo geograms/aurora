@@ -11,7 +11,8 @@
 // lib/services/reticulum/rns_ble_interface.dart.
 import 'dart:typed_data';
 
-import 'package:reticulum/reticulum.dart' show Ble5Bus, Ble5Subtype;
+import 'package:reticulum/reticulum.dart'
+    show Ble5Bus, Ble5Subtype, RnsTransport;
 
 import '../../services/log_service.dart';
 import '../../services/reticulum/rns_ble_interface.dart';
@@ -87,13 +88,70 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
 
   @override
   void broadcast(Uint8List frame) {
-    // One advert, superseded by the next announce (latest presence wins).
-    Ble5Bus.instance.advertiseFrame(_kRnsKey, Ble5Subtype.rns, frame,
+    if (!_allowPathRequest(frame)) return;
+    // One advert slot PER DESTINATION, not one for everything.
+    //
+    // A single shared key meant every packet replaced the one before it within
+    // milliseconds. Presence is three announces in a row — identity, LXMF
+    // delivery, LXMF propagation — so only the last survived, and a peer that
+    // heard us was still told "message from unknown source (no announce) —
+    // dropped" when we wrote to it, because the announce that carries the
+    // delivery address never made it onto the air. The rotation cycles the
+    // slots, so all three go out.
+    Ble5Bus.instance.advertiseFrame(_advertKey(frame), Ble5Subtype.rns, frame,
         ttl: const Duration(seconds: 35));
   }
 
+  /// Advert slot for [frame]: keyed by its destination hash, so an announce for
+  /// one destination never displaces another's. Falls back to the shared slot
+  /// for anything too short to carry a destination.
+  String _advertKey(Uint8List frame) {
+    if (frame.length < 18) return _kRnsKey;
+    final b = StringBuffer(_kRnsKey);
+    for (var i = 2; i < 8; i++) {
+      b.write(frame[i].toRadixString(16).padLeft(2, '0'));
+    }
+    return b.toString();
+  }
+
+  // ── Path requests must not drown the channel ──────────────────────────────
+  //
+  // A node that has been on the internet holds hundreds of destinations, and
+  // resolving them fires a path request each. On a hub uplink that is nothing;
+  // on Bluetooth it is the whole medium — a phone with wifi off was airing
+  // hundreds of path requests a minute through a channel that carries roughly
+  // one advert at a time, leaving no room for the announces a neighbour needs
+  // to learn it exists at all. Those requests are for destinations reachable
+  // over the internet, which is exactly what this link is not.
+  //
+  // A trickle still gets through, so genuinely resolving a nearby peer works.
+  static const int _pathReqPerMinute = 6;
+  final List<int> _pathReqAt = [];
+  int _pathReqDropped = 0;
+
+  bool _allowPathRequest(Uint8List frame) {
+    if (!RnsTransport.isPathRequest(frame)) return true;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _pathReqAt.removeWhere((t) => now - t > 60000);
+    if (_pathReqAt.length >= _pathReqPerMinute) {
+      _pathReqDropped++;
+      if (_pathReqDropped == 1 || _pathReqDropped % 200 == 0) {
+        LogService.instance.add(
+            'RNS/ble5: throttling path requests ($_pathReqDropped held back) — '
+            'the advert channel is for the peers in the room');
+      }
+      return false;
+    }
+    _pathReqAt.add(now);
+    return true;
+  }
+
+  /// Path requests held back so the channel stays usable (diagnostics).
+  int get pathRequestsDropped => _pathReqDropped;
+
   @override
   bool unicast(Uint8List frame) {
+    if (!_allowPathRequest(frame)) return true; // dropped on purpose
     final cap = broadcastCap;
     final id = _msgId = (_msgId + 1) & 0xFF;
     final parts = rnsChunkSplit(frame, cap, id);

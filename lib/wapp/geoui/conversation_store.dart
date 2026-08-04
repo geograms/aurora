@@ -4,7 +4,43 @@
 // the ui.convo.* protocol; the host only renders what it is told. There is
 // no domain knowledge here (no groups, callsigns, bulletins, distance, etc.).
 
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+
 import 'conversation_db.dart';
+
+/// Short, stable key for a message: the first 8 hex characters of sha1(text),
+/// plus the time it carries — "1a2b3c4d@13:51".
+///
+/// A vote has to name the message it votes on across two devices that may hold
+/// it under different ids (or, for anything sent before ids were derived, no
+/// id at all). Sending the text itself would work and is what a first cut did,
+/// but a message can be an image reference or several hundred characters, and
+/// these votes ride Bluetooth — this is a fixed ~14 characters whatever the
+/// message, and the far side computes the same key from what it already has.
+///
+/// The time is there because content alone is not unique: "ok" gets sent all
+/// day, and a like on this morning's would land on the newest one. It is a
+/// tie-breaker, not a requirement — see [matchesContentKey], which falls back
+/// to content when two clocks disagree about the minute.
+String contentKey(String text, [String time = '']) {
+  final t = text.replaceAll('\n', ' ').trim();
+  if (t.isEmpty) return '';
+  final h = sha1.convert(utf8.encode(t)).toString().substring(0, 8);
+  return time.isEmpty ? h : '$h@$time';
+}
+
+/// Does [key] name this message? [exact] demands the time match too.
+bool matchesContentKey(Map<String, dynamic> m, String key, {bool exact = true}) {
+  final at = key.indexOf('@');
+  final wantHash = at < 0 ? key : key.substring(0, at);
+  final wantTime = at < 0 ? '' : key.substring(at + 1);
+  final text = (m['text'] ?? '').toString();
+  if (contentKey(text) != wantHash) return false;
+  if (!exact || wantTime.isEmpty) return true;
+  return (m['time'] ?? '').toString() == wantTime;
+}
 
 /// One conversation row + its messages. All fields are opaque to the host.
 class ConversationItem {
@@ -319,11 +355,34 @@ class ConversationStore {
   /// votes, retractions, votes on other people's messages, and votes naming a
   /// message we do not hold.
   ({String convo, Map<String, dynamic> message, String from})? react(Map d) {
-    final mid = (d['mid'] ?? '').toString();
+    var mid = (d['mid'] ?? '').toString();
     final from = (d['from'] ?? '').toString();
     if (mid.isEmpty || from.isEmpty) return null;
     final remove = d['remove'] == true;
     final mine = d['mine'] == true;
+    // A vote may name a message we hold under a DIFFERENT id, or under none at
+    // all — anything sent before ids were derived, or by a peer that numbers
+    // messages its own way. The text is the one thing both ends always have,
+    // so when the id resolves to nothing we find the message by content and
+    // ADOPT the voter's id for it. The next vote then matches directly, and
+    // the message becomes votable from either side for good.
+    final voted = (d['ck'] ?? '').toString();
+    if (voted.isNotEmpty && !_knowsMid(mid)) {
+      final hit = _byContentKey(d['id']?.toString(), voted);
+      if (hit != null) {
+        final was = (hit.message['mid'] ?? '').toString();
+        if (was.isEmpty) {
+          final oldBody = jsonEncode(hit.message);
+          hit.message['mid'] = mid;
+          if (_wt) {
+            db!.setMessageMid(dbField, hit.convo, oldBody,
+                jsonEncode(hit.message), mid);
+          }
+        } else {
+          mid = was; // we already had an id for it — keep ours, tally on it
+        }
+      }
+    }
     final r = reactions.putIfAbsent(
         mid, () => {'likers': <String>[], 'mine': false});
     final likers = (r['likers'] as List).cast<String>();
@@ -343,6 +402,42 @@ class ConversationStore {
         if ((m['dir']?.toString() ?? 'in') != 'out') return null; // not ours
         return (convo: e.key, message: m, from: from);
       }
+    }
+    return null;
+  }
+
+  /// Do we hold any message carrying [mid]? A vote naming an id we never saw
+  /// is not an error — it is the normal case across two devices that numbered
+  /// the same message differently.
+  bool _knowsMid(String mid) {
+    for (final it in items.values) {
+      for (final m in it.messages) {
+        if ((m['mid'] ?? '') == mid) return true;
+      }
+    }
+    return false;
+  }
+
+  /// The message whose content matches this key, preferring the named
+  /// conversation and the most recent match — the one a person would point at.
+  ({String convo, Map<String, dynamic> message})? _byContentKey(
+      String? convo, String ck) {
+    // Same content AND the same minute first: "ok" is sent all day, and a like
+    // on this morning's must not land on the newest one. If no minute agrees —
+    // two devices stamped the same message a minute apart — fall back to
+    // content and take the most recent, which is still the right message far
+    // more often than nothing at all.
+    for (final exact in [true, false]) {
+      ({String convo, Map<String, dynamic> message})? found;
+      for (final e in items.entries) {
+        if (convo != null && convo.isNotEmpty && e.key != convo) continue;
+        for (final m in e.value.messages) {
+          if (matchesContentKey(m, ck, exact: exact)) {
+            found = (convo: e.key, message: m);
+          }
+        }
+      }
+      if (found != null) return found;
     }
     return null;
   }

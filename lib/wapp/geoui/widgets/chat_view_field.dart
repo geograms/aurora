@@ -18,6 +18,7 @@ import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../../../util/media_ref.dart';
 import '../../shared_media_fetch.dart';
+import '../conversation_store.dart';
 import 'chat_palette.dart';
 import 'generated_avatar.dart';
 import 'media_view.dart';
@@ -216,7 +217,15 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final mid = (m['mid'] ?? '').toString();
     if (mid.isEmpty) return;
     final liked = m['liked'] == true;
-    widget.onSend(liked ? '$mid:unlike' : '$mid:like');
+    // The vote names WHAT it voted on, not just an id. Two devices only share
+    // an id for messages exchanged after both derived them the same way;
+    // everything older is unreachable by id, and a like on it silently matched
+    // nothing on the far side. The content key is 8 hex characters whatever
+    // the message — these votes also ride Bluetooth.
+    final ck = contentKey(
+        (m['text'] ?? '').toString(), (m['time'] ?? '').toString());
+    final tag = liked ? '+unlike' : '+like';
+    widget.onSend(ck.isEmpty ? '$tag:$mid' : '$tag:$mid $ck');
   }
 
   static bool _isOut(Map<String, dynamic> m) =>
@@ -415,14 +424,16 @@ class _ChatViewFieldState extends State<ChatViewField> {
     return from.isEmpty ? text : '$from: $text';
   }
 
-  /// A reaction vote that leaked into the timeline as text: "<hex id>:like" /
+  /// A reaction vote that leaked into the timeline as text: "+like:<id> <text>"
+  /// (the form that carries its target) or the older "<hex id>:like" /
   /// ":unlike" (4..64 hex chars — a message id, never something a person
   /// types). Votes are tallied onto their target message; a bubble reading
   /// "82ccbaec…:like" is a rendering bug, including ones already persisted in
   /// history from before the vote paths filtered them. 4 is the shortest form:
   /// group and direct-conversation ids are 4 hex chars, room ids are 64.
   static final RegExp _reactionText =
-      RegExp(r'^[0-9a-f]{4,64}:(?:un)?like$');
+      RegExp(r'^(?:[0-9a-f]{4,64}:(?:un)?like|\+(?:un)?like:\S+(?: .*)?)$',
+          dotAll: true);
 
   @override
   Widget build(BuildContext context) {

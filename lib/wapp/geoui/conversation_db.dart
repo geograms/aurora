@@ -148,6 +148,19 @@ class ConversationDb {
     );
   }
 
+  /// Give a stored message the id a vote named it by. A message sent before
+  /// ids were derived has none, so its row can only be found by its exact
+  /// stored body — and without adopting the id the tally would be lost on the
+  /// next restart.
+  void setMessageMid(String field, String convoId, String oldBody,
+      String newBody, String mid) {
+    if (_closed) return;
+    _db.execute(
+      'UPDATE messages SET mid=?, body=? WHERE field=? AND convo_id=? AND body=?',
+      [mid, newBody, field, convoId, oldBody],
+    );
+  }
+
   /// Rewrite one message in place — used when a reaction tally or a delivery
   /// receipt mutates a bubble that is already stored.
   void updateMessage(String field, String convoId, Map<String, dynamic> m) {

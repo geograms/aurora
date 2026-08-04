@@ -11,9 +11,16 @@ void main() {
 
   setUp(() {
     store = ConversationStore();
-    store.addMessage({'id': 'c', 'dir': 'out', 'text': 'RT-1', 'mid': 'aa11'});
     store.addMessage(
-        {'id': 'c', 'dir': 'in', 'from': 'X1A33T', 'text': 'hi', 'mid': 'bb22'});
+        {'id': 'c', 'dir': 'out', 'text': 'RT-1', 'mid': 'aa11', 'time': '14:28'});
+    store.addMessage({
+      'id': 'c',
+      'dir': 'in',
+      'from': 'X1A33T',
+      'text': 'hi',
+      'mid': 'bb22',
+      'time': '14:29'
+    });
   });
 
   test('someone liking our message is reported, with the message', () {
@@ -59,5 +66,93 @@ void main() {
     store.react({'mid': 'aa11', 'from': 'X1A33T'});
     store.react({'mid': 'aa11', 'from': 'X1RD89'});
     expect(store.items['c']!.messages.first['likes'], 2);
+  });
+
+  // The case that made a like on an older message do nothing at all: the two
+  // devices never agreed on an id for it. Ours has none; the vote names theirs.
+  group('a vote naming an id we never had', () {
+    setUp(() {
+      // A message from before ids were derived: stored with no mid.
+      store.addMessage(
+          {'id': 'c', 'dir': 'out', 'text': 'smth', 'time': '13:51'});
+    });
+
+    test('finds the message by content and reports it', () {
+      final liked = store.react({
+        'id': 'c',
+        'mid': 'deadbeef',
+        'from': 'X1A33T',
+        'ck': contentKey('smth', '13:51'),
+      });
+      expect(liked, isNotNull);
+      expect(liked!.message['text'], 'smth');
+    });
+
+    test('adopts the id, so the tally lands and the next vote matches directly', () {
+      store.react({
+        'id': 'c',
+        'mid': 'deadbeef',
+        'from': 'X1A33T',
+        'ck': contentKey('smth', '13:51'),
+      });
+      final m = store.items['c']!.messages.last;
+      expect(m['mid'], 'deadbeef');
+      expect(m['likes'], 1);
+
+      // Retracting by id alone now works — no content key needed.
+      store.react(
+          {'id': 'c', 'mid': 'deadbeef', 'from': 'X1A33T', 'remove': true});
+      expect(store.items['c']!.messages.last['likes'], 0);
+    });
+
+    test('an id we already hold wins over the voter\'s', () {
+      store.react({
+        'id': 'c',
+        'mid': 'zzzz',
+        'from': 'X1A33T',
+        'ck': contentKey('RT-1', '14:28'),
+      });
+      final m = store.items['c']!.messages.first;
+      expect(m['mid'], 'aa11'); // ours kept
+      expect(m['likes'], 1); // and the tally still lands
+    });
+  });
+
+  // "ok" gets sent all day. A like on this morning's must not move the count
+  // on the newest one.
+  group('repeated text', () {
+    setUp(() {
+      store.addMessage(
+          {'id': 'c', 'dir': 'out', 'text': 'ok', 'time': '09:15'});
+      store.addMessage(
+          {'id': 'c', 'dir': 'out', 'text': 'ok', 'time': '17:40'});
+    });
+
+    test('the time picks the right one', () {
+      store.react({
+        'id': 'c',
+        'mid': 'm-morning',
+        'from': 'X1A33T',
+        'ck': contentKey('ok', '09:15'),
+      });
+      final msgs = store.items['c']!.messages;
+      final morning = msgs.firstWhere((m) => m['time'] == '09:15');
+      final evening = msgs.firstWhere((m) => m['time'] == '17:40');
+      expect(morning['likes'], 1);
+      expect(evening['likes'], isNot(1));
+    });
+
+    test('a clock a minute out still finds the message', () {
+      store.react({
+        'id': 'c',
+        'mid': 'm-x',
+        'from': 'X1A33T',
+        'ck': contentKey('ok', '17:41'), // their clock, not ours
+      });
+      // No exact minute matches, so the most recent copy takes it.
+      final evening =
+          store.items['c']!.messages.firstWhere((m) => m['time'] == '17:40');
+      expect(evening['likes'], 1);
+    });
   });
 }

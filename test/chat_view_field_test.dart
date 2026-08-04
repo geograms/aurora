@@ -4,6 +4,7 @@
 // Both halves shipped broken on a 1:1 conversation — the heart did nothing at
 // all, and a reply rendered its wire marker verbatim, as a bubble reading
 // "+9eb53a4af55e5da04cdcc44842502041e8d5e2460f123358c31a17f8a31993dd OK".
+import 'package:aurora/wapp/geoui/conversation_store.dart';
 import 'package:aurora/wapp/geoui/widgets/chat_view_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -62,6 +63,17 @@ void main() {
       expect(find.text('9eb5:like'), findsNothing);
     });
 
+    testWidgets('a content-keyed vote is not a bubble', (tester) async {
+      await pump(tester, [
+        msg('smth', mid: '9eb5'),
+        msg('+like:9eb5 1a2b3c4d'),
+        msg('+unlike:deadbeef'),
+      ]);
+      expect(find.text('smth'), findsOneWidget);
+      expect(find.textContaining('+like:'), findsNothing);
+      expect(find.textContaining('+unlike:'), findsNothing);
+    });
+
     testWidgets('a 64-hex room vote is not a bubble', (tester) async {
       const ev =
           '82ccbaec1f0d4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233';
@@ -78,18 +90,38 @@ void main() {
   });
 
   group('the heart', () {
-    testWidgets('sends a like vote naming the message', (tester) async {
+    // The vote names the message by id AND by content, because the other
+    // device may hold it under a different id or none at all.
+    testWidgets('sends a like naming the message by id and content',
+        (tester) async {
       await pump(tester, [msg('smth', mid: '9eb5')]);
       await tester.tap(find.byIcon(Icons.favorite_border).first);
       await tester.pump();
-      expect(sent, ['9eb5:like']);
+      expect(sent, ['+like:9eb5 ${contentKey('smth', '13:33')}']);
     });
 
     testWidgets('sends an unlike when already liked', (tester) async {
       await pump(tester, [msg('smth', mid: '9eb5', likes: 1, liked: true)]);
       await tester.tap(find.byIcon(Icons.favorite).first);
       await tester.pump();
-      expect(sent, ['9eb5:unlike']);
+      expect(sent, ['+unlike:9eb5 ${contentKey('smth', '13:33')}']);
+    });
+
+    // Whatever the message, the vote is a fixed handful of bytes — these ride
+    // Bluetooth, where quoting the text back would not be free.
+    testWidgets('stays small on a long message', (tester) async {
+      await pump(tester, [msg('x' * 3000, mid: '9eb5')]);
+      await tester.tap(find.byIcon(Icons.favorite_border).first);
+      await tester.pump();
+      expect(sent.single.length, lessThan(40));
+    });
+
+    // A media-only bubble has no content to key on: the id alone has to do.
+    testWidgets('falls back to the id alone with no text', (tester) async {
+      await pump(tester, [msg('', mid: '9eb5')]);
+      await tester.tap(find.byIcon(Icons.favorite_border).first);
+      await tester.pump();
+      expect(sent, ['+like:9eb5']);
     });
 
     // Without a mid there is nothing to vote on — offering the heart would

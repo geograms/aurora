@@ -199,7 +199,13 @@ class _IwiAppState extends State<IwiApp> {
       // Keyed by profile id so it re-runs when the active profile changes.
       return FutureBuilder<void>(
         key: ValueKey('seed-$pid'),
-        future: ensureProfileSeeded(),
+        // …and then start the gated services. On a fresh device the permission
+        // intro ran BEFORE this profile existed, so its startGatedServices()
+        // could not start the wapps — and with no wapp there is no Bluetooth at
+        // all. Without this the device stayed invisible to every peer until the
+        // next app launch. Idempotent: a returning user already started them.
+        future: ensureProfileSeeded()
+            .then((_) => PermissionGate.startGatedServices()),
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
             return const Scaffold(

@@ -1158,7 +1158,9 @@ class RnsService {
   Future<void> _enableBleBridge() async {
     if (_bleBridge || _transport == null || _id == null) return;
     try {
-      final radio = Ble5Radio();
+      // The chunking radio, not the bare Ble5Radio: an announce that does not
+      // fit one extended advert used to have nowhere to go and was dropped.
+      final radio = Ble5ChunkedRnsRadio();
       if (!await radio.supported()) return; // no BLE5 here — remain a leaf
       await radio.startScan();
       final iface = RnsBleInterface(
@@ -3074,7 +3076,7 @@ class RnsService {
           _ifaces.add(b);
           break;
         case 'ble5':
-          final radio = Ble5Radio();
+          final radio = Ble5ChunkedRnsRadio();
           if (!await radio.supported()) {
             throw StateError('BLE5 extended advertising unsupported');
           }

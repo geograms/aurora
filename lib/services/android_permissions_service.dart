@@ -11,6 +11,7 @@
  * surface a late prompt after the profile exists. No-op on non-Android.
  */
 
+import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../platform/platform.dart' as platform;
@@ -32,6 +33,12 @@ class AppPermission {
   /// not later, mid-app) but the user can leave the intro without it.
   final bool optional;
 
+  /// This item also needs the system-wide LOCATION SERVICES switch, not just
+  /// its runtime permission. Granting the permission while the switch is off
+  /// still leaves BLE scanning dead, so the item stays un-granted and its
+  /// request opens the location settings screen.
+  final bool needsLocationServices;
+
   const AppPermission({
     required this.key,
     required this.title,
@@ -41,6 +48,7 @@ class AppPermission {
     this.info = false,
     this.special = false,
     this.optional = false,
+    this.needsLocationServices = false,
   });
 }
 
@@ -92,15 +100,18 @@ class AndroidPermissionsService {
     AppPermission(
       key: 'location',
       title: 'Location',
-      desc: 'Put your position on the map and on the beacons you send — and '
-          'let Android scan for nearby Bluetooth devices',
+      desc: 'Required by Android to find nearby devices over Bluetooth — with '
+          'location switched off the system returns no scan results at all, so '
+          'the app goes silently deaf. Also puts your position on the map.',
       icon: 'location',
       perms: [Permission.locationWhenInUse],
-      // Optional: plenty of people will want to message without broadcasting
-      // where they are. Offered HERE so that the prompt happens with the others;
-      // if it is declined, nothing asks again (LocationService no longer
-      // prompts on its own).
-      optional: true,
+      // NOT optional, however much it looks like a privacy nicety: Android
+      // withholds every BLE scan result while the location master switch is
+      // off, whatever the app declares. A tablet in that state advertised,
+      // scanned, and heard literally nothing for hours while reporting itself
+      // healthy. The permission alone is not enough either — see
+      // [locationServicesOn], which this item's status also requires.
+      needsLocationServices: true,
     ),
     AppPermission(
       key: 'battery',
@@ -141,9 +152,24 @@ class AndroidPermissionsService {
       for (final p in item.perms) {
         if (!(await p.status).isGranted) return false;
       }
+      if (item.needsLocationServices && !await locationServicesOn()) {
+        return false;
+      }
       return true;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// The system-wide location switch (Settings → Location), not the app's
+  /// permission. Android returns ZERO BLE scan results while it is off, so this
+  /// is a hard requirement for finding anyone over Bluetooth.
+  Future<bool> locationServicesOn() async {
+    if (!_isAndroid) return true;
+    try {
+      return await Geolocator.isLocationServiceEnabled();
+    } catch (_) {
+      return true; // unknown: never block on a failed probe
     }
   }
 
@@ -175,6 +201,13 @@ class AndroidPermissionsService {
       final result = await item.perms.request();
       result.forEach((perm, status) =>
           LogService.instance.add('Permission $perm: ${status.name}'));
+      if (item.needsLocationServices && !await locationServicesOn()) {
+        // The permission is granted but the master switch is off — only the
+        // settings screen can fix that, and the panel re-checks on resume.
+        LogService.instance.add(
+            'permissions: location services are off — opening location settings');
+        await Geolocator.openLocationSettings();
+      }
       return isGranted(item);
     } catch (e) {
       LogService.instance.add('AndroidPermissions: ${item.key} request failed: $e');

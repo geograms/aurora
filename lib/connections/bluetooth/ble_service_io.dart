@@ -21,6 +21,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 
 import '../../profile/profile_service.dart';
+import '../../services/android_permissions_service.dart';
 import '../../services/log_service.dart';
 import '../../services/mesh/mesh_custody.dart';
 import '../../services/mesh/mesh_transfer_scheduler.dart';
@@ -469,6 +470,7 @@ class BleService {
       // pairing, and no dual-plugin handle-cache confusion. BLE5 extended
       // advertising carries only the connectionless broadcast (APRS + RNS).
       Ble5Bus.instance
+        ..onAdvertFailed = _onAdvertRefused
         ..onGattConnected = _onNgConnected
         ..onGattDisconnected = _onNgDisconnected
         ..onGattData = _onNgClientData
@@ -489,6 +491,50 @@ class BleService {
     unawaited(WifiDirectCoordinator.instance.start());
     RnsService.instance.onWantFastPath =
         (dest) => WifiDirectCoordinator.instance.ensureFastPath(dest);
+  }
+
+  // ── Is this radio actually transmitting and hearing? ──────────────────────
+  //
+  // Queuing an advert says nothing about whether the controller aired it, and a
+  // scan that returns nothing looks exactly like an empty room. A tablet sat
+  // for hours reporting "advertising: true, beacons sent: 40" while its stack
+  // held no advertising set and its scans returned zero results — the app had
+  // no way to tell, and neither did we. These two make the difference visible.
+
+  int _advertRefusals = 0;
+  String? _advertLastError;
+  bool _legacyFallback = false;
+
+  void _onAdvertRefused(int status) {
+    _advertRefusals++;
+    _advertLastError = 'startAdvertisingSet status=$status';
+    LogService.instance.add(
+        'BLE5: controller refused the advert (status=$status) — '
+        'falling back to the legacy advert');
+    // BLE5 extended advertising is refused outright on some chips/ROMs. The
+    // legacy chunked broadcast still works there (it drives its own rotation),
+    // so route new adverts down that path instead of pretending we are on air.
+    if (!_legacyFallback) {
+      _legacyFallback = true;
+      _ble5 = false;
+      // The mesh beacons on the same refused set — tell it, so it stops
+      // counting refused beacons as sent and reports itself scan-only.
+      MeshService.instance.setCanAdvertise(false);
+    }
+  }
+
+  /// Everything the radio can tell us about being heard and hearing, straight
+  /// from the native side (attempts, refusals, scan results, on-air state).
+  Future<Map<String, dynamic>> radioStatus() async {
+    final native = await Ble5Bus.instance.radioStatus();
+    return {
+      ...native,
+      'legacyFallback': _legacyFallback,
+      'advertRefusals': _advertRefusals,
+      if (_advertLastError != null) 'advertLastError': _advertLastError,
+      'locationServicesOn':
+          await AndroidPermissionsService.instance.locationServicesOn(),
+    };
   }
 
   // ── Native GATT event handlers (BLE5) ─────────────────────────────────────
@@ -1014,6 +1060,9 @@ class BleService {
         'idleMs': _gattActivityMs == 0
             ? null
             : DateTime.now().millisecondsSinceEpoch - _gattActivityMs,
+        'legacyFallback': _legacyFallback,
+        'advertRefusals': _advertRefusals,
+        if (_advertLastError != null) 'advertLastError': _advertLastError,
       };
 
   /// Test helper: send [size] bytes point-to-point over GATT. Larger than the

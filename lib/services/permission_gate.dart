@@ -62,7 +62,6 @@ class PermissionGate {
         return;
       }
     }
-    _started = true;
     LogService.instance.add('permissions: granted — starting gated services');
 
     // Reticulum: brings up the BLE5 interface (scan + advertise).
@@ -78,10 +77,16 @@ class PermissionGate {
     // crash loop the user could never escape, because the crash arrived before
     // they could finish setup. Setup first, wapps after.
     if (ProfileService.instance.activeProfile == null) {
+      // NOT latched: on a fresh device this runs from the permission intro,
+      // which comes BEFORE profile creation. Latching here left that whole
+      // session with no wapps — and since Bluetooth only exists because the
+      // chat wapp starts it, the device was silently invisible to every peer
+      // until the app was restarted.
       LogService.instance
           .add('permissions: no profile yet — wapps wait for setup to finish');
       return;
     }
+    _started = true;
     unawaited(BackgroundWappManager.instance.startAutostart());
   }
 }

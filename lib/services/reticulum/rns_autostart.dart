@@ -114,6 +114,25 @@ Future<void> ensureRnsAutostart() async {
       }
     }
     if (!rns.isUp) {
+      // No hub reachable — that is not the same as no network. A phone with
+      // nothing but Bluetooth is the case this whole stack exists for, and it
+      // used to end here: no node meant no transport, so its BLE interface was
+      // never built and it could not exchange a single packet with the device
+      // sitting next to it. Come up as a local node over BLE instead, and let
+      // the periodic tick attach hub uplinks if the internet ever returns.
+      try {
+        final ok = await rns.start(mode: 'ble5', announceName: name);
+        if (ok || rns.isUp) {
+          LogService.instance.add(
+              'RNS autostart: no bootstrap reachable — up on Bluetooth only');
+          await AndroidForegroundService.instance.hold('reticulum');
+          return;
+        }
+      } catch (e) {
+        // No BLE5 on this device (desktop, older phone): nothing to fall back
+        // to, and the next tick retries the hubs anyway.
+        LogService.instance.add('RNS autostart: Bluetooth-only start failed ($e)');
+      }
       LogService.instance.add(
           'RNS autostart: no bootstrap reachable yet (local folders still work)');
       return;

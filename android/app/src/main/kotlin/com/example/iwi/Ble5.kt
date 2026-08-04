@@ -133,6 +133,18 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // Read from the legacy-scan (binder) thread as well as main.
     @Volatile private var gattEvents: EventChannel.EventSink? = null
 
+    // What the RADIO actually did, as opposed to what we asked it to do.
+    // advertiseFrame() only queues a frame; whether the controller ever put it
+    // on air is decided later, asynchronously, in the AdvertisingSetCallback.
+    // Without this the app counted a refused advert as a sent beacon, and a
+    // device could be mute for hours while reporting "advertising: true".
+    @Volatile private var advOnAir = false
+    private val advAttempts = java.util.concurrent.atomic.AtomicLong(0)
+    private val advFailures = java.util.concurrent.atomic.AtomicLong(0)
+    private val scanResults = java.util.concurrent.atomic.AtomicLong(0)
+    @Volatile private var advLastError: String? = null
+    @Volatile private var lastScanResultAt = 0L
+
     // ── GATT server (native) ────────────────────────────────────────────────
     private var gattServer: BluetoothGattServer? = null
     private var serverNotifyChar: BluetoothGattCharacteristic? = null
@@ -201,6 +213,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                     result.success(true)
                 }
                 "stopAdvertise" -> { stopAdvertise(); result.success(true) }
+                "radioStatus" -> result.success(radioStatus())
                 "startScan" -> result.success(startScan())
                 "stopScan" -> { stopScan(); result.success(true) }
                 else -> result.notImplemented()
@@ -262,9 +275,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         System.arraycopy(payload, 0, mfg, 2, payload.size)
         // 6 bytes of envelope overhead (length/type/company id) on top of mfg.
         if (mfg.size + 6 > maxDataLen()) {
+            advFailures.incrementAndGet()
+            advLastError = "frame too large: ${mfg.size}B > ${maxDataLen() - 6}B"
             android.util.Log.e(TAG, "frame too large for one advert: ${mfg.size}B")
             return false
         }
+        advAttempts.incrementAndGet()
         val now = System.currentTimeMillis()
         frames[key] = Frame(mfg, now + ttlMs)
         ensureRotating()
@@ -363,9 +379,17 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 }
                 if (status == ADVERTISE_SUCCESS && set != null) {
                     advertisingSet = set
+                    advOnAir = true
+                    advLastError = null
                 } else {
                     lastHex = null
+                    advOnAir = false
+                    advFailures.incrementAndGet()
+                    advLastError = "startAdvertisingSet status=$status"
                     android.util.Log.e(TAG, "advertising set start failed status=$status")
+                    // Tell Dart, so it can log it and fall back to the legacy
+                    // advert instead of believing it is on air.
+                    emitGatt(mapOf("event" to "advertFailed", "status" to status))
                 }
             }
         }
@@ -375,11 +399,16 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         } catch (e: Exception) {
             starting = false
             lastHex = null
+            advOnAir = false
+            advFailures.incrementAndGet()
+            advLastError = "startAdvertisingSet: ${e.message}"
             android.util.Log.e(TAG, "startAdvertisingSet: ${e.message}")
+            emitGatt(mapOf("event" to "advertFailed", "status" to -1))
         }
     }
 
     private fun stopAdvertise() {
+        advOnAir = false
         frames.clear()
         rotating = false
         rotateIdx = 0
@@ -424,6 +453,13 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             }
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 if (disposed) return
+                // Count EVERY advert heard, ours or not, before any filtering.
+                // "no geogram frames" and "the radio hears nothing at all" look
+                // identical from the app otherwise, and they have completely
+                // different causes — the second one means the scan is being
+                // refused or starved by the system, not that nobody is around.
+                scanResults.incrementAndGet()
+                lastScanResultAt = System.currentTimeMillis()
                 val sink = events ?: return
                 val mfg = result?.scanRecord?.getManufacturerSpecificData(COMPANY_ID)
                     ?: return
@@ -504,6 +540,18 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // Connect to a peer's FFE0 GATT server by address (learned from the extended
     // scan), so the connectable extended advert above can serve BOTH broadcast
     // and connections — no legacy advert, no second advertiser.
+
+    /** Ground truth for the diagnostics: attempted vs refused, heard vs deaf. */
+    private fun radioStatus(): Map<String, Any?> = mapOf(
+        "advOnAir" to advOnAir,
+        "advAttempts" to advAttempts.get(),
+        "advFailures" to advFailures.get(),
+        "advLastError" to advLastError,
+        "scanResults" to scanResults.get(),
+        "lastScanResultAgeMs" to
+            (if (lastScanResultAt == 0L) null else System.currentTimeMillis() - lastScanResultAt),
+        "maxDataLen" to maxDataLen(),
+    )
 
     private fun emitGatt(map: Map<String, Any?>) {
         val sink = gattEvents ?: return
@@ -1014,6 +1062,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 if (disposed) return
+                scanResults.incrementAndGet()          // see the extended scan
+                lastScanResultAt = System.currentTimeMillis()
                 val sink = gattEvents ?: return
                 val mfg = result?.scanRecord?.getManufacturerSpecificData(COMPANY_ID) ?: return
                 // Presence beacon: [0x3E, deviceId 1..15, callsign...].

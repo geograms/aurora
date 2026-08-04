@@ -239,6 +239,22 @@ class MeshService {
     return MeshDeviceClass.computer;
   }
 
+  /// Stop (or resume) claiming we can advertise. Called when the controller
+  /// refuses our advertising set: a node that cannot transmit is a scan-only
+  /// leaf, and saying otherwise is how a mute device reported itself healthy.
+  void setCanAdvertise(bool can) {
+    if (_canAdvertise == can) return;
+    _canAdvertise = can;
+    LogService.instance.add(
+        'Mesh: now ${can ? "relay-capable" : "scan-only (radio refuses to advertise)"}');
+  }
+
+  int _beaconsFailed = 0;
+
+  /// Beacons the radio refused to air. `beaconsSent` counts only the ones that
+  /// actually went out.
+  int get beaconsFailed => _beaconsFailed;
+
   Future<void> _sendBeacon() async {
     final t = _table;
     if (t == null || !_canAdvertise) return;
@@ -287,10 +303,23 @@ class MeshService {
           .encode();
     }
     try {
-      await Ble5Bus.instance
+      // Count it only if the radio TOOK it. This used to increment regardless,
+      // so a device whose controller refused every advert still reported
+      // "advertising: true, beaconsSent: 40" while airing nothing at all.
+      final aired = await Ble5Bus.instance
           .advertiseFrame('mesh', Ble5Subtype.mesh, bytes, ttl: _beaconTtl);
-      _beaconsSent++;
+      if (aired) {
+        _beaconsSent++;
+      } else {
+        _beaconsFailed++;
+        if (_beaconsFailed == 1 || _beaconsFailed % 10 == 0) {
+          LogService.instance.add(
+              'Mesh: radio refused the beacon ($_beaconsFailed so far) — '
+              'nobody can see this device');
+        }
+      }
     } catch (e) {
+      _beaconsFailed++;
       LogService.instance.add('Mesh: beacon tx failed: $e');
     }
   }

@@ -179,18 +179,33 @@ class _NotificationRow extends StatelessWidget {
           child: Icon(_iconFor(notification), color: color),
         ),
         title: Text(notification.title),
-        subtitle: Text(
-          [
-            if ((notification.body ?? '').isNotEmpty) notification.body!,
-            notification.source,
-          ].join('\n'),
-        ),
-        trailing: Text(
-          _relativeTime(notification.timestamp),
-          style: TextStyle(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-            fontSize: 12,
-          ),
+        subtitle: (notification.body ?? '').isEmpty
+            ? null
+            : Text(notification.body!),
+        // Who it came from goes top-right beside the time, as a NAME: the raw
+        // routing id ("wapp:chat") was leaking a wire convention into the UI on
+        // its own line under every message.
+        trailing: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(
+              _sourceLabel(source),
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              _relativeTime(notification.timestamp),
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -204,6 +219,18 @@ class _NotificationRow extends StatelessWidget {
       NotificationLevel.error => Icons.error_outline,
       NotificationLevel.info => Icons.notifications_none,
     };
+  }
+
+  /// Human label for a notification source. `wapp:<folder>` and `host:<service>`
+  /// are routing ids (docs/notifications.md), not something to show a user:
+  /// strip the prefix and title-case what is left.
+  String _sourceLabel(String source) {
+    var s = source;
+    final colon = s.indexOf(':');
+    if (colon >= 0) s = s.substring(colon + 1);
+    s = s.trim();
+    if (s.isEmpty) return source;
+    return s[0].toUpperCase() + s.substring(1);
   }
 
   String _relativeTime(DateTime dt) {

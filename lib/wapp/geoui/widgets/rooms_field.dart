@@ -103,6 +103,13 @@ class _RoomsFieldState extends State<RoomsField> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    // Tell the store which room is on screen, exactly as ConversationsField
+    // does. Without it the store believed NOTHING was open, so a message
+    // arriving in the very thread the user was reading bumped its unread
+    // badge — a "1" sitting on the row you are looking at.
+    widget.store.openId = widget.openId;
+    final open = widget.openId;
+    if (open != null) widget.store.clearUnread(open);
     return LayoutBuilder(
       builder: (ctx, c) {
         if (!_userSized) {

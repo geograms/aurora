@@ -112,6 +112,10 @@ class ChatViewField extends StatefulWidget {
 
 class _ChatViewFieldState extends State<ChatViewField> {
   final _input = TextEditingController();
+  /// Keeps the caret in the composer after a send. Sending rebuilds the thread
+  /// (new bubble, scroll to bottom) and the field lost focus with it, so every
+  /// second message needed a click into the box first.
+  final _inputFocus = FocusNode();
   final _scroll = ScrollController();
   int _lastCount = 0;
 
@@ -156,6 +160,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
   void dispose() {
     _scroll.removeListener(_onScroll);
     _input.dispose();
+    _inputFocus.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -191,6 +196,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
     _pending.clear();
     if (_replyingTo != null) setState(() => _replyingTo = null);
     _atBottom = true;
+    // Type, Enter, type again — no click in between. Requested after the frame
+    // so it survives the rebuild the new bubble triggers.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _inputFocus.requestFocus();
+    });
   }
 
   void _startReply(Map<String, dynamic> m) {
@@ -1339,6 +1349,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
           Expanded(
             child: TextField(
               controller: _input,
+              focusNode: _inputFocus,
               style: const TextStyle(color: Colors.white, fontSize: 14),
               minLines: 1,
               maxLines: 3,

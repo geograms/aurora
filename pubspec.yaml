@@ -169,4 +169,10 @@ flutter_native_splash:
 dependency_overrides:
   dtorrent_task_v2:
     path: third_party/dtorrent_task_v2
+  # Vendored: upstream's wasm->host callback typedef declares the function id
+  # as Int64 while Rust passes a u32, which puts the args pointer in the wrong
+  # register on 32-bit ARM and segfaults every wapp. See
+  # third_party/wasm_run/README.geogram.md.
+  wasm_run:
+    path: third_party/wasm_run
   xml: 6.5.0

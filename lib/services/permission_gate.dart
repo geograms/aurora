@@ -70,6 +70,18 @@ class PermissionGate {
 
     // Background wapps: Chat scans/advertises over BLE, reads GPS, and runs
     // under a foreground-service notification.
+    //
+    // Only once the user actually HAS a profile. A device where setup was
+    // abandoned half-way (app closed on the welcome/callsign screen) would
+    // otherwise autostart engines against a profile that does not exist yet —
+    // and on a device where the wasm engine is unusable that turned into a
+    // crash loop the user could never escape, because the crash arrived before
+    // they could finish setup. Setup first, wapps after.
+    if (ProfileService.instance.activeProfile == null) {
+      LogService.instance
+          .add('permissions: no profile yet — wapps wait for setup to finish');
+      return;
+    }
     unawaited(BackgroundWappManager.instance.startAutostart());
   }
 }

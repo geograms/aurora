@@ -1017,7 +1017,20 @@ class BleService {
       final fresh = keys.add(key);
       if (keys.length > 64) keys.remove(keys.first);
       if (fresh) _dbg('BLE5 APRS advert ${payload.length}B key=$key');
-      Ble5Bus.instance.advertiseFrame(key, Ble5Subtype.aprs, payload, ttl: ttl);
+      // HONOUR the answer. A frame the controller refuses is aired nowhere;
+      // ignoring the return left the app broadcasting into nothing, with
+      // `ble5` still true, for the rest of the process. A refusal means this
+      // payload does not fit the medium — send it the way an over-cap payload
+      // is meant to go.
+      unawaited(Ble5Bus.instance
+          .advertiseFrame(key, Ble5Subtype.aprs, payload, ttl: ttl)
+          .then((aired) {
+        if (aired) return;
+        LogService.instance.add(
+            'BLE5: ${payload.length}B refused by the controller '
+            '(cap ${Ble5Bus.instance.maxPayload}B) — routing point-to-point');
+        _gattSend(payload);
+      }));
       return;
     }
     // Legacy small-chunk connectionless broadcast (non-BLE5 devices).
@@ -1083,6 +1096,12 @@ class BleService {
         'legacyFallback': _legacyFallback,
         'advertRefusals': _advertRefusals,
         if (_advertLastError != null) 'advertLastError': _advertLastError,
+        // What the radio can actually carry, one request away instead of a
+        // stack dump away. The whole BLE story turned on this number.
+        'maxPayload': _ble5 ? Ble5Bus.instance.maxPayload : kBleBcastMax,
+        'advertFailures': Ble5Bus.instance.advertFailures,
+        if (Ble5Bus.instance.advertLastError != null)
+          'busLastError': Ble5Bus.instance.advertLastError,
       };
 
   /// Test helper: send [size] bytes point-to-point over GATT. Larger than the

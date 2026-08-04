@@ -2614,7 +2614,14 @@ class RnsService {
               rnsIfaceIsLocal(rnsIfaceKind(_transport?.pathFor(h)?.via ?? '')))
           // One connectionless packet to a delivery dest — how a message
           // crosses Bluetooth, where a link handshake mostly times out.
-          ..sendDataTo = ((h, d) => _transport?.sendDataTo(h, d));
+          ..sendDataTo = ((h, d) => _transport?.sendDataTo(h, d))
+          // What one frame toward this peer holds — the BLE advert cap on a
+          // Bluetooth path. Anything larger takes the link, where Reticulum
+          // fragments with acknowledged Resources.
+          ..mtuForDest = ((h) {
+            final mtu = _transport?.nextHopInterfaceHwMtu(h) ?? kRnsMtu;
+            return mtu > 64 ? mtu - 64 : mtu; // room for the RNS envelope
+          });
 
         // Answer path requests aimed at any of OUR destinations by
         // re-announcing them. Between two Dart nodes there is no reference

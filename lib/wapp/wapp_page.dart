@@ -2080,7 +2080,15 @@ class _WappPageState extends State<WappPage>
           changed = true;
         } else if (type == 'ui.convo.react') {
           final field = data['field'] as String? ?? 'conversations';
-          _convStore(field).react(data);
+          final liked = _convStore(field).react(data);
+          if (liked != null) {
+            NotificationService.instance.show(likeNotification(
+              wappName: _wappName,
+              convo: liked.convo,
+              from: liked.from,
+              message: liked.message,
+            ));
+          }
           changed = true;
         } else if (type == 'ui.convo.status') {
           // Delivery/read receipt: advance an outgoing 1:1 message's tick state

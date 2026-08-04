@@ -452,7 +452,15 @@ class _WappBackgroundService extends BackgroundService {
           case 'ui.convo.remove':
             store.remove(data);
           case 'ui.convo.react':
-            store.react(data);
+            final liked = store.react(data);
+            if (liked != null) {
+              NotificationService.instance.show(likeNotification(
+                wappName: name,
+                convo: liked.convo,
+                from: liked.from,
+                message: liked.message,
+              ));
+            }
           case 'ui.convo.status':
             store.setStatus(data);
           case 'ui.convo.clear':

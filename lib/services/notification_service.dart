@@ -432,3 +432,28 @@ class _NotificationCard extends StatelessWidget {
     );
   }
 }
+
+/// "X liked your message" — the user-facing half of a reaction.
+///
+/// A like that only moves a counter is a like the recipient never learns
+/// about; the tally is on a screen they are usually not looking at. Generic
+/// conversation semantics, so it lives with the store rather than in a wapp:
+/// the store is what knows whose message was liked.
+GeogramNotification likeNotification({
+  required String wappName,
+  required String convo,
+  required String from,
+  required Map<String, dynamic> message,
+}) {
+  var text = (message['text'] ?? '').toString().replaceAll('\n', ' ').trim();
+  if (text.length > 80) text = '${text.substring(0, 80)}…';
+  return GeogramNotification(
+    level: NotificationLevel.info,
+    title: '$from liked your message',
+    body: text.isEmpty ? null : text,
+    source: 'wapp:$wappName',
+    tag: 'like:$convo:${message['mid'] ?? ''}:$from',
+    scope: NotificationScope.both,
+    convo: convo,
+  );
+}

@@ -312,10 +312,16 @@ class ConversationStore {
   /// Record a reaction (like) on a message. [d]: `{mid, from, remove?, mine?}`.
   /// The set of `likers` is deduped, so each actor counts once however many
   /// times they vote; `remove` retracts. `mine` marks our own vote.
-  void react(Map d) {
+  ///
+  /// Returns the conversation and message SOMEONE ELSE just liked of ours, so
+  /// the caller can tell the user — a like that only moves a counter on a
+  /// screen nobody is looking at is a like nobody receives. Null for our own
+  /// votes, retractions, votes on other people's messages, and votes naming a
+  /// message we do not hold.
+  ({String convo, Map<String, dynamic> message, String from})? react(Map d) {
     final mid = (d['mid'] ?? '').toString();
     final from = (d['from'] ?? '').toString();
-    if (mid.isEmpty || from.isEmpty) return;
+    if (mid.isEmpty || from.isEmpty) return null;
     final remove = d['remove'] == true;
     final mine = d['mine'] == true;
     final r = reactions.putIfAbsent(
@@ -330,6 +336,15 @@ class ConversationStore {
     }
     _applyReaction(mid);
     if (_wt) db!.setReaction(dbField, mid, r);
+    if (remove || mine) return null;
+    for (final e in items.entries) {
+      for (final m in e.value.messages) {
+        if ((m['mid'] ?? '') != mid) continue;
+        if ((m['dir']?.toString() ?? 'in') != 'out') return null; // not ours
+        return (convo: e.key, message: m, from: from);
+      }
+    }
+    return null;
   }
 
   /// Mirror a mid's tally (`likes` count + `liked` mine-flag) onto every stored

@@ -35,6 +35,12 @@ class BleService {
       {Duration ttl = const Duration(seconds: 30)}) {}
   void clearAdverts(Object owner) {}
   Map<String, dynamic> gattStatus() => {'autoPair': false, 'clientLinkUp': false};
+
+  bool get gattLinkUp => false;
+
+  void sendOverGatt(Uint8List payload) {}
+
+  void Function(Uint8List frame)? onGattRnsFrame;
   Map<String, int> meshDialable() => const {};
   bool meshDial(String callsign) => false;
   void gattSendTest(int size) {}

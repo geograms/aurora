@@ -47,6 +47,9 @@ class BleServiceRnsRadio implements RnsBleRadio {
   }
 
   @override
+  bool get hasLink => BleService.instance.gattLinkUp;
+
+  @override
   void onReceive(void Function(Uint8List frame) handler) => _handler = handler;
 }
 
@@ -63,10 +66,6 @@ class BleServiceRnsRadio implements RnsBleRadio {
 class Ble5ChunkedRnsRadio implements RnsBleRadio {
   void Function(Uint8List frame)? _handler;
   final RnsChunkAssembler _assembler = RnsChunkAssembler();
-  int _msgId = 0;
-  // Stable for this radio's lifetime, unlike the advertiser MAC, which Android
-  // rotates mid-packet — see rns_chunk.dart.
-  final int _senderId = DateTime.now().microsecondsSinceEpoch & 0xFF;
   int _sent = 0;
   int _refused = 0;
 
@@ -83,11 +82,17 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
       final whole = _assembler.accept(f.addr, f.data);
       if (whole != null) _handler?.call(whole);
     });
+    // Packets that arrive over the GATT link, not the advert channel.
+    BleService.instance.onGattRnsFrame = (f) => _handler?.call(f);
     await Ble5Bus.instance.startScan();
   }
 
   @override
   int get broadcastCap => Ble5Bus.instance.maxPayload;
+
+  /// A native GATT link, in either role, is up right now.
+  @override
+  bool get hasLink => BleService.instance.gattLinkUp;
 
   @override
   void broadcast(Uint8List frame) {
@@ -183,9 +188,34 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
   @override
   bool unicast(Uint8List frame) {
     if (!_allowPathRequest(frame)) return true; // dropped on purpose
-    final cap = broadcastCap;
+
+    // An over-cap packet takes the GATT link: the documented size router
+    // (docs/ble.md), and what commit 4b4e4d5 validated to a screen-off phone.
+    // enqueueAdvert routes anything past this controller's advert ceiling to
+    // _gattSend, which either hands it to a live link or stashes it and dials.
+    //
+    // The pairing dialog that made this route unusable was not the link's
+    // doing at all: ble_peripheral's GATT server callback calls createBond()
+    // on every unbonded device its server sees — and Android reports our own
+    // client's connections to our own server callback too, so merely having
+    // that plugin open bonded whichever peer we dialled. It is no longer
+    // initialised on a BLE5 device (BleService._ensureBlePeripheral).
+    // sendOverGatt, NOT enqueueAdvert: the size router airs its payload as an
+    // APRS-subtype advert, and the peer's RNS handler only reads the rns
+    // subtype — so every RNS packet sent that way was heard by nobody.
+    if (BleService.instance.gattLinkUp) {
+      BleService.instance.sendOverGatt(frame);
+      _sent++;
+      return true;
+    }
+    BleService.instance.sendOverGatt(frame); // queues + dials
+
+    // No link yet — it is being dialled, and dialling takes seconds. Air the
+    // packet across adverts as well rather than let it wait: RNS drops the
+    // duplicate by packet hash if both copies land, and an announce that
+    // arrives twice costs far less than one that never arrives.
     final id = _msgId = (_msgId + 1) & 0xFF;
-    final parts = rnsChunkSplit(frame, cap, id, senderId: _senderId);
+    final parts = rnsChunkSplit(frame, broadcastCap, id, senderId: _senderId);
     if (parts.isEmpty) {
       _refused++;
       LogService.instance.add(
@@ -204,6 +234,12 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
     _sent++;
     return true;
   }
+
+  int _msgId = 0;
+
+  /// Stable for this radio's lifetime, unlike the advertiser MAC which Android
+  /// rotates mid-packet — see rns_chunk.dart.
+  final int _senderId = DateTime.now().microsecondsSinceEpoch & 0xFF;
 
   @override
   void onReceive(void Function(Uint8List frame) handler) => _handler = handler;

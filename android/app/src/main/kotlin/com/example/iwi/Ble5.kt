@@ -738,35 +738,38 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             notifyChar = notify
             android.util.Log.i(TAG, "GATT discovered FFE0 on ${g.device?.address} " +
                 "fff1.props=${write.properties}")
-            // Subscribe to FFF2 notifications so receipts flow back. The peer's
-            // server is now NATIVE with a PLAIN (unencrypted) CCCD, so writing the
-            // CCCD does NOT trigger pairing. Emit "connected" only after the CCCD
-            // write completes (onDescriptorWrite) so the first parcel isn't issued
-            // while the descriptor write is still pending (which bounces as BUSY).
+            // Notifications are enabled LOCALLY ONLY — the CCCD is never written.
+            //
+            // setCharacteristicNotification is a local call: it tells our own
+            // stack to hand incoming FFF2 notifications to the app, and puts no
+            // packet on air. Writing the 0x2902 descriptor is what goes on air,
+            // and it is the only ATT operation on this link a peer could answer
+            // with "insufficient authentication" — after which Android's client
+            // bonds, and this transport must pair with nobody, ever.
+            //
+            // Nothing is lost by skipping it: the remote server it would inform
+            // is our own code, and pumpNotifies() notifies the connected central
+            // unconditionally, without consulting subscription state. The link
+            // is therefore ready as soon as the characteristics are known, with
+            // no descriptor round-trip to wait for.
+            //
+            // (This was NOT the cause of the pairing dialog — that was
+            // ble_peripheral's GATT server callback calling createBond(); see
+            // BleService._ensureBlePeripheral. Removing the descriptor write is
+            // kept because it deletes the remaining escalation surface and a
+            // round-trip before the first parcel.)
             try {
                 g.setCharacteristicNotification(notify, true)
-                val cccd = notify.getDescriptor(CCCD_UUID)
-                if (cccd != null) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        g.writeDescriptor(cccd,
-                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                    } else {
-                        @Suppress("DEPRECATION") run {
-                            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                            g.writeDescriptor(cccd)
-                        }
-                    }
-                } else {
-                    linkReady = true
-                    emitGatt(mapOf("event" to "connected")) // no CCCD → ready anyway
-                }
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "CCCD subscribe: ${e.message}")
-                linkReady = true
-                emitGatt(mapOf("event" to "connected"))
+                android.util.Log.w(TAG, "local notify enable: ${e.message}")
             }
+            linkReady = true
+            emitGatt(mapOf("event" to "connected"))
+            pumpWrites()
         }
 
+        // Dead on the phone↔phone path (no descriptor is written any more); kept
+        // for peers whose server genuinely requires a subscription.
         override fun onDescriptorWrite(
             g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int,
         ) {

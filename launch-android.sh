@@ -76,11 +76,19 @@ deploy() {
   apk="$(apk_for_abi "$abi")"
   if [ ! -f "$apk" ]; then echo "$p no APK for ABI '$abi'"; return 1; fi
   echo "$p abi=$abi installing $(basename "$apk")..."
+  # Kill the running app FIRST. `install -r` replaces the APK on disk but leaves
+  # the live process on the OLD code — including its background service — so the
+  # phone keeps behaving like the previous build and every test result is a lie.
+  "$ADB" -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+  "$ADB" -s "$serial" shell am kill "$PKG" >/dev/null 2>&1 || true
   if ! "$ADB" -s "$serial" install -r -d "$apk" >/dev/null 2>&1; then
     # -d (downgrade) can be rejected on some devices; retry without it
     "$ADB" -s "$serial" install -r "$apk" >/dev/null 2>&1 || {
       echo "$p INSTALL FAILED"; return 1; }
   fi
+  # And again after install: a service can be revived by the system between the
+  # stop and the swap.
+  "$ADB" -s "$serial" shell am force-stop "$PKG" >/dev/null 2>&1 || true
   echo "$p launching $PKG"
   "$ADB" -s "$serial" shell monkey -p "$PKG" \
         -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || {

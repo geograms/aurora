@@ -238,6 +238,15 @@ class BleService {
     _queue.incomingMessages.listen((m) {
       _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
       _dbg('GATT message received ${m.payload.length}B from ${m.sourceDeviceId}');
+      // An RNS packet that came over the link goes to RNS, not to the wapp
+      // stream. Nothing used to do this: everything arriving on GATT was handed
+      // to the wapp engine, so a Reticulum packet sent point-to-point was
+      // received by nobody and the sender's message simply vanished.
+      final rns = _stripRnsTag(m.payload);
+      if (rns != null) {
+        onGattRnsFrame?.call(rns);
+        return;
+      }
       if (!_inbound.isClosed) {
         _inbound.add(BleInboundFrame(m.sourceDeviceId, 0, m.payload));
       }
@@ -422,15 +431,18 @@ class BleService {
     }
     // Advertising backend.
     if (_useBlePeripheral) {
-      try {
-        await bp.BlePeripheral.initialize();
-        _blePeripheralReady = true;
-        _advertiseSupported = true;
-      } catch (e) {
-        _blePeripheralReady = false;
-        _advertiseSupported = false;
-        debugPrint('BleService: ble_peripheral init failed: $e');
-      }
+      // NOT initialised here. ble_peripheral's GATT server callback calls
+      // device.createBond() on EVERY unbonded central that connects
+      // (BlePeripheralPlugin.kt, onConnectionStateChange), and Android hands a
+      // server connection event to every GATT server registration in the
+      // process — including this one, for a central that dialled our NATIVE
+      // server. Merely initialising the plugin was therefore enough to raise a
+      // system pairing dialog on both phones the moment a BLE5 link formed,
+      // which is precisely what this transport must never do.
+      //
+      // So it is initialised lazily, and only on the legacy path that actually
+      // needs it (a device with no BLE5). See _ensureBlePeripheral.
+      _advertiseSupported = true;
     } else if (Platform.isLinux) {
       _advertiseSupported = true; // BlueZ D-Bus (lazily connected in _bluezReady)
       debugPrint('BleService: using BlueZ D-Bus for advertising');
@@ -451,6 +463,7 @@ class BleService {
     } catch (_) {
       _ble5 = false;
     }
+    if (!_ble5Probe.isCompleted) _ble5Probe.complete();
     if (_ble5 && !_ble5Wired) {
       _ble5Wired = true;
       // Surface scan self-healing events in the app log (the bus watchdog
@@ -513,15 +526,30 @@ class BleService {
         'falling back to the legacy advert');
     // BLE5 extended advertising is refused outright on some chips/ROMs. The
     // legacy chunked broadcast still works there (it drives its own rotation),
-    // so route new adverts down that path instead of pretending we are on air.
+    // so route new ADVERTS down that path.
+    //
+    // What must NOT happen — and did — is clearing [_ble5] wholesale. That flag
+    // also selects the GATT client: with it false the code dials through the
+    // bluetooth_low_energy plugin instead of the native stack, and THAT is what
+    // raised a system pairing dialog on both phones. The advert path and the
+    // point-to-point path are separate decisions; a controller that refuses an
+    // oversized advert is still perfectly able to carry a plain, pairing-free
+    // GATT link.
     if (!_legacyFallback) {
       _legacyFallback = true;
-      _ble5 = false;
+      _advertLegacy = true;
       // The mesh beacons on the same refused set — tell it, so it stops
       // counting refused beacons as sent and reports itself scan-only.
       MeshService.instance.setCanAdvertise(false);
     }
   }
+
+  /// Adverts have fallen back to the legacy 31-byte path. Separate from
+  /// [_ble5], which governs the GATT stack — see [_onAdvertRefused].
+  bool _advertLegacy = false;
+
+  /// Extended adverts are usable: BLE5 is up AND nothing has refused one.
+  bool get _ble5Adverts => _ble5 && !_advertLegacy;
 
   /// Everything the radio can tell us about being heard and hearing, straight
   /// from the native side (attempts, refusals, scan results, on-air state).
@@ -600,6 +628,7 @@ class BleService {
     unawaited(Ble5Bus.instance.stopScan()); // quiet extended scan during xfer
     _applyScan();
     _wireMeshHooks();
+    _flushPendingGatt(); // a peer dialling US is just as good a route
     MeshSessionManager.instance.onLinkUp(serverSide: true);
   }
 
@@ -751,14 +780,25 @@ class BleService {
       // dials; the receiver stays a passive native server. Plain characteristics
       // = no pairing. Already serving a central → don't also dial (tie-breaker).
       if (_ngClientUp || _ngServerCentral != null) return;
-      if (!fresh || _lastPeerAddr.isEmpty) return;
+      if (!fresh || _lastPeerAddr.isEmpty) {
+        // Say why the link did not form. A payload waiting for a peer that is
+        // never dialled is indistinguishable from one that was sent, and that
+        // is how "delivered" messages went missing.
+        LogService.instance.add(
+            'BLE: ${_pendingGatt.length} payload(s) waiting — no peer to dial '
+            '(${_lastPeerAddr.isEmpty ? "none discovered" : "last seen too long ago"})');
+        return;
+      }
       _ngClientPeer = _lastPeerAddr;
       _dbg('auto-pair: native GATT connect to $_lastPeerCall ($_lastPeerAddr) '
           'for ${_pendingGatt.length} payload(s)');
       Ble5Bus.instance.gattConnect(_lastPeerAddr);
       return;
     }
-    // Legacy plugin path (non-BLE5): bluetooth_low_energy considerPeer.
+    // Legacy plugin path (non-BLE5 devices only): bluetooth_low_energy
+    // considerPeer. This is the stack that can raise a system PAIRING DIALOG,
+    // so it is reachable only on a device with no BLE5 at all — never as a
+    // fallback from a refused advert (see _onAdvertRefused).
     if (_gattServer?.clientIds.isNotEmpty ?? false) return; // already serving
     final peer = _lastPeer;
     if (peer == null || (_gatt?.isConnected ?? true) || !fresh) return;
@@ -999,7 +1039,7 @@ class BleService {
     // The BLE5 cap is THIS controller's real advert ceiling (many chips carry
     // only ~247 B, far under the 450 B spec-side default) — an over-cap frame
     // is rejected by the stack, not truncated, so it must go GATT instead.
-    final smallCap = _ble5 ? Ble5Bus.instance.maxPayload : kBleBcastMax;
+    final smallCap = _ble5Adverts ? Ble5Bus.instance.maxPayload : kBleBcastMax;
     // Mesh custody tap on our own outbound 1:1s: parked in-transit so the
     // GATT plane also owes delivery. BEFORE the size router — encrypted 1:1s
     // exceed the advert cap and never reach the broadcast path at all.
@@ -1011,7 +1051,7 @@ class BleService {
     // BLE5 path (preferred): a whole APRS message fits ONE extended advert, so
     // register it as a single frame on the shared bus (no chunking, no NACK).
     // Keyed by payload hash so the wapp's periodic re-advertise refreshes it.
-    if (_ble5) {
+    if (_ble5Adverts) {
       final key = 'aprs:${_hashHex(payload)}';
       final keys = _ble5Keys.putIfAbsent(owner, () => <String>{});
       final fresh = keys.add(key);
@@ -1057,6 +1097,41 @@ class BleService {
   String? _ngClientPeer;
   String? _ngServerCentral;
 
+  /// Marks a GATT payload as a Reticulum packet rather than a wapp parcel.
+  /// Two bytes: unlikely as a parcel prefix, and cheap on a link this narrow.
+  static const List<int> _rnsGattTag = [0xA7, 0x52];
+
+  /// Handler for Reticulum packets that arrive over the GATT link. Set by the
+  /// RNS radio; without it those packets are dropped rather than misdelivered.
+  void Function(Uint8List frame)? onGattRnsFrame;
+
+  Uint8List? _stripRnsTag(Uint8List data) {
+    if (data.length <= _rnsGattTag.length) return null;
+    for (var i = 0; i < _rnsGattTag.length; i++) {
+      if (data[i] != _rnsGattTag[i]) return null;
+    }
+    return Uint8List.sublistView(data, _rnsGattTag.length);
+  }
+
+  /// Send [payload] over the GATT link, or queue it until one exists.
+  ///
+  /// This is the entry point for anything that is NOT an APRS advert — the RNS
+  /// radio in particular. Routing RNS through [enqueueAdvert] aired it under the
+  /// APRS subtype, which the peer's RNS handler never reads, so every packet
+  /// that took that path was received by nobody.
+  void sendOverGatt(Uint8List payload) {
+    _ensure();
+    final tagged = Uint8List(_rnsGattTag.length + payload.length)
+      ..setAll(0, _rnsGattTag)
+      ..setAll(_rnsGattTag.length, payload);
+    _gattSend(tagged);
+  }
+
+  /// True when a GATT link is up in either role — we dialled a peer, or a peer
+  /// dialled us. The RNS radio asks before deciding whether an over-cap packet
+  /// can rely on the point-to-point route alone.
+  bool get gattLinkUp => _connectedPeers().isNotEmpty;
+
   /// Send a large payload point-to-point over GATT. If a link is up, enqueue it
   /// to the connected peer(s); otherwise stash it and let auto-pair open a link.
   void _gattSend(Uint8List payload) {
@@ -1065,12 +1140,18 @@ class BleService {
       for (final id in peers) {
         _queue.enqueue(BLEOutgoingMessage(payload: payload, targetDeviceId: id));
       }
-      _dbg('GATT send ${payload.length}B to ${peers.length} peer(s)');
+      LogService.instance
+          .add('BLE: ${payload.length}B -> GATT, ${peers.length} peer(s)');
       return;
     }
     _pendingGatt.add(payload);
-    if (_pendingGatt.length > 16) _pendingGatt.removeAt(0);
-    _dbg('GATT: ${payload.length}B queued, awaiting auto-pair link');
+    if (_pendingGatt.length > 16) {
+      _pendingGatt.removeAt(0);
+      LogService.instance.add(
+          'BLE: queue full — dropped the oldest pending payload');
+    }
+    LogService.instance.add('BLE: ${payload.length}B queued for a GATT link '
+        '(${_pendingGatt.length} waiting)');
     _maybeAutoPair(); // dial the last-seen peer now (Android won't re-report it)
   }
 
@@ -1098,7 +1179,8 @@ class BleService {
         if (_advertLastError != null) 'advertLastError': _advertLastError,
         // What the radio can actually carry, one request away instead of a
         // stack dump away. The whole BLE story turned on this number.
-        'maxPayload': _ble5 ? Ble5Bus.instance.maxPayload : kBleBcastMax,
+        'maxPayload': _ble5Adverts ? Ble5Bus.instance.maxPayload : kBleBcastMax,
+        'advertLegacy': _advertLegacy,
         'advertFailures': Ble5Bus.instance.advertFailures,
         if (Ble5Bus.instance.advertLastError != null)
           'busLastError': Ble5Bus.instance.advertLastError,
@@ -1118,12 +1200,22 @@ class BleService {
 
   /// Flush stashed large payloads to the freshly-connected peer.
   void _flushPendingGatt() {
-    final peer = (_ngClientUp ? _ngClientPeer : null) ?? _gatt?.peerId;
-    if (peer == null || _pendingGatt.isEmpty) return;
+    if (_pendingGatt.isEmpty) return;
+    // EITHER role delivers. This used to look only at the link WE dialled, so a
+    // message queued on a device that a peer then dialled sat in this list for
+    // ever — silently, while the two phones held a perfectly good link. The
+    // send callback already routes by role (client → peer's FFF1, server →
+    // notify the central), so any connected peer will do.
+    final peer = (_ngClientUp ? _ngClientPeer : null) ??
+        _ngServerCentral ??
+        _gatt?.peerId ??
+        _gattServer?.clientIds.firstOrNull;
+    if (peer == null) return;
     for (final p in _pendingGatt) {
       _queue.enqueue(BLEOutgoingMessage(payload: p, targetDeviceId: peer));
     }
-    _dbg('GATT: flushed ${_pendingGatt.length} pending payload(s) to $peer');
+    LogService.instance.add(
+        'BLE: flushed ${_pendingGatt.length} queued payload(s) to $peer');
     _pendingGatt.clear();
   }
 
@@ -1300,6 +1392,42 @@ class BleService {
     }
   }
 
+  /// Bring up the ble_peripheral backend, once, on demand.
+  ///
+  /// Refused on a BLE5 device: everything the plugin offers there is already
+  /// done natively, and initialising it installs a GATT server callback that
+  /// bonds incoming centrals (see the note in _ensureInit). Returns false when
+  /// the backend is unavailable or deliberately not used.
+  Future<bool> _ensureBlePeripheral() async {
+    if (!_useBlePeripheral) return false;
+    // Wait for the BLE5 probe. Deciding before it answers is how the plugin got
+    // opened on a BLE5 device anyway: an advert queued during the startup
+    // window saw _ble5 still false, initialised the plugin, and its server
+    // callback then bonded every peer for the rest of the process.
+    if (!_ble5Checked) {
+      await _ble5Probe.future
+          .timeout(const Duration(seconds: 10), onTimeout: () {});
+    }
+    if (_ble5) return false;
+    if (_blePeripheralReady) return true;
+    if (_blePeripheralFailed) return false;
+    try {
+      await bp.BlePeripheral.initialize();
+      _blePeripheralReady = true;
+      return true;
+    } catch (e) {
+      _blePeripheralFailed = true;
+      _advertiseSupported = false;
+      debugPrint('BleService: ble_peripheral init failed: $e');
+      return false;
+    }
+  }
+
+  bool _blePeripheralFailed = false;
+
+  /// Completes when [_initBle5] has answered whether this device does BLE5.
+  final Completer<void> _ble5Probe = Completer<void>();
+
   /// Advertise one frame via whichever backend is available (ble_peripheral on
   /// Android/iOS, else BlueZ). On the ble_peripheral path the frame is latched
   /// (timeout: 0) and kept on air — re-registering only when the payload
@@ -1308,7 +1436,7 @@ class BleService {
   /// would miss).
   Future<void> _advertiseFrame(Uint8List payload) async {
     if (_useBlePeripheral) {
-      if (!_blePeripheralReady) return;
+      if (!await _ensureBlePeripheral()) return;
       final hex = _hex(payload);
       if (_pkgAdvertHex == hex) return; // already on air with this frame
       try {

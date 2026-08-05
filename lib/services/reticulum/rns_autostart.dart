@@ -16,6 +16,8 @@ import 'dart:async';
 import '../../profile/profile_service.dart';
 import '../../profile/storage_paths.dart';
 import '../../wapp/android_foreground_service.dart';
+import '../../wapp/background_wapp_manager.dart';
+import 'wapp_mailbox.dart';
 import '../blossom_server.dart';
 import '../files/media_file_source.dart';
 import '../hero/followed_media_cache.dart';
@@ -73,6 +75,11 @@ Future<void> ensureRnsAutostart() async {
     // themselves live content-addressed in the archive; a viewer needs a path).
     rns.folderExportDir = ws.getAbsolutePath('opened');
     rns.serveStatsPath = ws.getAbsolutePath('serve_stats.sqlite3');
+    // Datagrams that arrive for a wapp which isn't loaded. Opened before the
+    // node starts, so the very first inbound datagram already has somewhere to
+    // land, and wired to the wapp layer so mail can start the wapp it is for.
+    WappMailbox.instance.open(ws.getAbsolutePath('mail'));
+    rns.onWappWanted = _startWappForMail;
     rns.popularityPath = ws.getAbsolutePath('folder_popularity.sqlite3');
     rns.identityPath = ws.getAbsolutePath('rns_identity.key');
     rns.blossomLoad(); // the user's media servers, not just the shipped ones
@@ -214,9 +221,47 @@ Future<void> _attempt() async {
   _attempting = true;
   try {
     await ensureRnsAutostart();
+    // Mail that outlived the last run: whoever it is for gets started now,
+    // rather than waiting for the user to open that wapp by chance.
+    await startWappsWithPendingMail();
   } catch (e) {
     LogService.instance.add('RNS autostart: $e');
   } finally {
     _attempting = false;
+  }
+}
+
+/// Start the wapp a stored datagram belongs to.
+///
+/// Other wapps ride Reticulum too, and starting every one of them at launch to
+/// be ready for a message that may never come is exactly the waste this avoids:
+/// a wapp is loaded when something actually arrives for it. The tag IS the
+/// wapp's folder name (see WappEngine.setAppId), so it resolves straight to an
+/// installed directory — and one that is not installed is simply left in the
+/// mailbox rather than pretended away.
+void _startWappForMail(String tag) {
+  unawaited(() async {
+    try {
+      if (BackgroundWappManager.instance.isRunning(tag)) return;
+      final installed = installedAppsStorage();
+      if (!await installed.directoryExists(tag)) {
+        LogService.instance.add(
+            'RNS/wapp: mail for "$tag", which is not installed — held');
+        return;
+      }
+      LogService.instance.add('RNS/wapp: starting "$tag" for stored mail');
+      await BackgroundWappManager.instance.start(installed.getAbsolutePath(tag));
+    } catch (e) {
+      LogService.instance.add('RNS/wapp: could not start "$tag": $e');
+    }
+  }());
+}
+
+/// Wapps holding mail from a previous run — started once the node is up, so a
+/// message that arrived while the phone was off is not waiting for the user to
+/// happen to open that wapp.
+Future<void> startWappsWithPendingMail() async {
+  for (final tag in WappMailbox.instance.pendingTags()) {
+    _startWappForMail(tag);
   }
 }

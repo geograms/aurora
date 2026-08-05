@@ -26,7 +26,9 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
@@ -84,7 +86,20 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
-    private val main = Handler(Looper.getMainLooper())
+    // BLE work runs on its OWN thread, never the platform main looper.
+    //
+    // Every advert rotation, scan watchdog, GATT write pump and notify pump used
+    // to be posted to the main looper — the same thread Flutter uses for platform
+    // channels and the same one the Android UI runs on. A phone that is scanning,
+    // advertising and pumping a link at once puts hundreds of these a minute on
+    // the thread the interface needs to stay responsive.
+    //
+    // The sinks are the exception: an EventChannel must be fed from the main
+    // thread, so [ui] exists for exactly that and nothing else.
+    private val worker = HandlerThread("ble5-worker", Process.THREAD_PRIORITY_BACKGROUND)
+        .apply { start() }
+    private val bg = Handler(worker.looper)
+    private val ui = Handler(Looper.getMainLooper())
     @Volatile private var disposed = false
 
     // Scan watchdog: vendor power managers (and BT adapter restarts) silently
@@ -108,10 +123,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                     startScan()
                 }
             }
-            if (scanWatchdogOn) main.postDelayed(this, 60_000)
+            if (scanWatchdogOn) bg.postDelayed(this, 60_000)
         }
     }
-    // Read from the BLE scan (binder) thread in onScanResult, written from main.
+    // Read from the BLE scan (binder) thread in onScanResult, written from the
+    // platform main thread when the stream is listened to.
     @Volatile private var events: EventChannel.EventSink? = null
 
     private var advertisingSet: AdvertisingSet? = null
@@ -123,7 +139,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private val scanDedupLock = Any()
 
     // Active broadcast frames keyed by an opaque caller key (insertion-ordered for
-    // a stable round-robin). All access is on the main thread.
+    // a stable round-robin). All access is on the WORKER thread — every entry
+    // point that touches this map is dispatched there.
     private val frames = LinkedHashMap<String, Frame>()
     private var rotateIdx = 0
     private var rotating = false
@@ -133,7 +150,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private var gatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
-    // Read from the legacy-scan (binder) thread as well as main.
+    // Read from the legacy-scan (binder) thread as well as the main thread.
     @Volatile private var gattEvents: EventChannel.EventSink? = null
 
     // What the RADIO actually did, as opposed to what we asked it to do.
@@ -175,30 +192,34 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 // and an oversized frame is rejected, not truncated — the size
                 // router must know the true ceiling or messages silently drop.
                 "maxPayload" -> result.success(maxDataLen() - 8)
+                // Everything below touches the radio, so it runs on the worker
+                // thread — the method channel delivers calls on the platform
+                // main thread, and a startScan or an advertise there is work the
+                // interface then waits behind.
                 "gattConnect" -> {
                     val addr = call.argument<String>("address")
                     val auto = call.argument<Boolean>("auto") ?: false
                     if (addr == null) result.error("ARG", "address required", null)
-                    else { gattConnect(addr, auto); result.success(true) }
+                    else onWorker(result) { gattConnect(addr, auto); true }
                 }
                 "gattWrite" -> {
                     val data = call.argument<ByteArray>("data")
                     if (data == null) result.error("ARG", "data required", null)
-                    else result.success(gattWrite(data))
+                    else onWorker(result) { gattWrite(data) }
                 }
-                "gattDisconnect" -> { gattDisconnect(); result.success(true) }
+                "gattDisconnect" -> onWorker(result) { gattDisconnect(); true }
                 "startServer" -> {
                     val cs = call.argument<String>("callsign") ?: "AURORA"
-                    result.success(startServer(cs))
+                    onWorker(result) { startServer(cs) }
                 }
-                "stopServer" -> { stopServer(); result.success(true) }
+                "stopServer" -> onWorker(result) { stopServer(); true }
                 "serverNotify" -> {
                     val data = call.argument<ByteArray>("data")
                     if (data == null) result.error("ARG", "data required", null)
-                    else result.success(serverNotify(data))
+                    else onWorker(result) { serverNotify(data) }
                 }
-                "startLegacyScan" -> result.success(startLegacyScan())
-                "stopLegacyScan" -> { stopLegacyScan(); result.success(true) }
+                "startLegacyScan" -> onWorker(result) { startLegacyScan() }
+                "stopLegacyScan" -> onWorker(result) { stopLegacyScan(); true }
                 "advertiseFrame" -> {
                     val key = call.argument<String>("key")
                     val subtype = call.argument<Int>("subtype")
@@ -208,20 +229,19 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                         result.error("ARG", "key/subtype/data required", null)
                     } else {
                         val prio = call.argument<Boolean>("prio") ?: false
-                        result.success(
-                            advertiseFrame(key, subtype, data, ttlMs.toLong(), prio),
-                        )
+                        onWorker(result) {
+                            advertiseFrame(key, subtype, data, ttlMs.toLong(), prio)
+                        }
                     }
                 }
                 "removeFrame" -> {
                     val key = call.argument<String>("key")
-                    if (key != null) removeFrame(key)
-                    result.success(true)
+                    onWorker(result) { if (key != null) removeFrame(key); true }
                 }
-                "stopAdvertise" -> { stopAdvertise(); result.success(true) }
+                "stopAdvertise" -> onWorker(result) { stopAdvertise(); true }
                 "radioStatus" -> result.success(radioStatus())
-                "startScan" -> result.success(startScan())
-                "stopScan" -> { stopScan(); result.success(true) }
+                "startScan" -> onWorker(result) { startScan() }
+                "stopScan" -> onWorker(result) { stopScan(); true }
                 else -> result.notImplemented()
             }
         }
@@ -248,13 +268,19 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         disposed = true
         events = null
         gattEvents = null
-        stopScan()
-        stopLegacyScan()
-        stopAdvertise()
-        stopServer()
-        gattDisconnect()
-        synchronized(scanDedupLock) { recentScanEvents.clear() }
-        main.removeCallbacksAndMessages(null)
+        // Tear the radio down on the thread that owns it, then let that thread
+        // finish: quitting the looper from here would abandon a half-stopped
+        // scan and a GATT server nobody ever closes.
+        bg.post {
+            stopScan()
+            stopLegacyScan()
+            stopAdvertise()
+            stopServer()
+            gattDisconnect()
+            synchronized(scanDedupLock) { recentScanEvents.clear() }
+            worker.quitSafely()
+        }
+        ui.removeCallbacksAndMessages(null)
     }
 
     private fun isSupported(): Boolean {
@@ -311,7 +337,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         if (disposed) return
         if (rotating) return
         rotating = true
-        main.post(rotateRunnable)
+        bg.post(rotateRunnable)
     }
 
     private val rotateRunnable = object : Runnable {
@@ -320,7 +346,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             if (!rotating) return
             rotateTick()
             if (frames.isEmpty()) { rotating = false; return }
-            main.postDelayed(this, ROTATE_MS)
+            bg.postDelayed(this, ROTATE_MS)
         }
     }
 
@@ -491,7 +517,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 if (!shouldEmitScan("ext:$addr:$subtype:${payload.contentHashCode()}", now)) {
                     return
                 }
-                main.post {
+                ui.post {
                     if (disposed || events !== sink) return@post
                     try {
                         sink.success(
@@ -515,7 +541,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             scanStartedMs = System.currentTimeMillis()
             if (!scanWatchdogOn) {
                 scanWatchdogOn = true
-                main.postDelayed(scanWatchdog, 60_000)
+                bg.postDelayed(scanWatchdog, 60_000)
             }
             true
         } catch (e: Exception) {
@@ -550,7 +576,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         scanner = null
         if (stopWatchdog) {
             scanWatchdogOn = false
-            main.removeCallbacks(scanWatchdog)
+            bg.removeCallbacks(scanWatchdog)
         }
     }
 
@@ -571,9 +597,23 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         "maxDataLen" to maxDataLen(),
     )
 
+    /// Run [block] on the BLE worker thread and answer the method call from the
+    /// main thread, where a MethodChannel.Result must be completed.
+    private fun <T> onWorker(result: MethodChannel.Result, block: () -> T) {
+        bg.post {
+            val value: Any? = try {
+                block()
+            } catch (t: Throwable) {
+                android.util.Log.e(TAG, "worker call failed: ${t.message}")
+                null
+            }
+            ui.post { try { result.success(value) } catch (_: Throwable) {} }
+        }
+    }
+
     private fun emitGatt(map: Map<String, Any?>) {
         val sink = gattEvents ?: return
-        main.post {
+        ui.post {
             if (disposed || gattEvents !== sink) return@post
             try {
                 sink.success(map)
@@ -593,7 +633,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private fun armSetupWatchdog() {
         val gen = ++setupGen
         linkReady = false
-        main.postDelayed({
+        bg.postDelayed({
             if (!linkReady && setupGen == gen && gatt != null) {
                 android.util.Log.w(TAG, "GATT setup stalled 12s — tearing down for retry")
                 gattDisconnect()
@@ -628,7 +668,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         if (gatt == null || writeChar == null) {
             android.util.Log.e(TAG, "gattWrite: not connected"); return false
         }
-        main.post { writeQueue.add(data); pumpWrites() }
+        bg.post { writeQueue.add(data); pumpWrites() }
         return true
     }
 
@@ -663,11 +703,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         if (!ok) {
             writeBusy = false
             writeQueue.addFirst(data)
-            main.postDelayed({ pumpWrites() }, 60)
+            bg.postDelayed({ pumpWrites() }, 60)
         } else {
             // Watchdog: if onCharacteristicWrite never fires, advance anyway. Give a
             // with-response write longer (the ATT round-trip + peer processing).
-            main.postDelayed({
+            bg.postDelayed({
                 if (writeBusy && writeGen == gen) { writeBusy = false; pumpWrites() }
             }, 1500)
         }
@@ -804,7 +844,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             if (status != BluetoothGatt.GATT_SUCCESS)
                 android.util.Log.w(TAG, "onCharacteristicWrite status=$status")
             // Previous write finished — release the lock and issue the next.
-            main.post { writeBusy = false; pumpWrites() }
+            bg.post { writeBusy = false; pumpWrites() }
         }
     }
 
@@ -880,7 +920,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         if (disposed) return
         val gen = ++serverProbeGen
         val addr = device.address
-        main.postDelayed({
+        bg.postDelayed({
             if (disposed) return@postDelayed
             if (serverProbeGen == gen && serverCentral?.address == addr &&
                 !serverSawData) {
@@ -925,7 +965,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             // Native pacing for server→central bulk: the next queued notify
             // goes out only after the stack confirms this one left the buffer
             // (notifications have no ATT-level flow control of their own).
-            main.post { notifyBusy = false; pumpNotifies() }
+            bg.post { notifyBusy = false; pumpNotifies() }
         }
 
         override fun onCharacteristicWriteRequest(
@@ -974,7 +1014,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private fun serverNotify(data: ByteArray): Boolean {
         if (disposed) return false
         if (gattServer == null || serverCentral == null) return false
-        main.post {
+        bg.post {
             if (notifyQueue.size >= 256) {
                 // Deep overload (should not happen under the WIN_ACK window):
                 // drop oldest; the receiver's resync recovers the gap.
@@ -1011,10 +1051,10 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         if (!ok) {
             notifyBusy = false
             notifyQueue.addFirst(data)
-            main.postDelayed({ pumpNotifies() }, 60)
+            bg.postDelayed({ pumpNotifies() }, 60)
         } else {
             // Watchdog: some stacks miss onNotificationSent — advance anyway.
-            main.postDelayed({
+            bg.postDelayed({
                 if (notifyBusy && notifyGen == gen) { notifyBusy = false; pumpNotifies() }
             }, 800)
         }
@@ -1095,7 +1135,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                 val addr = result.device?.address ?: return
                 val now = System.currentTimeMillis()
                 if (!shouldEmitScan("legacy:$addr:$callsign", now)) return
-                main.post {
+                ui.post {
                     if (disposed || gattEvents !== sink) return@post
                     try {
                         sink.success(

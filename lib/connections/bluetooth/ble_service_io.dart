@@ -30,6 +30,7 @@ import '../../services/reticulum/rns_service.dart';
 import '../../services/wifi_direct/wifi_direct_coordinator.dart';
 import '../../services/mesh/mesh_session.dart' show mspIsFrame;
 import '../../services/preferences_service.dart';
+import '../../wapp/android_foreground_service.dart';
 import 'ble5_bus.dart';
 import 'ble_gatt_client.dart';
 import 'ble_gatt_server.dart';
@@ -169,7 +170,8 @@ class BleService {
     if (_parcelWired || _central == null) return;
     _parcelWired = true;
     _bcastSweep ??=
-        Timer.periodic(const Duration(seconds: 2), (_) => _bcastTick());
+        Timer.periodic(const Duration(seconds: 2), (_) => _dartTick());
+    _armServiceTick();
     _gatt = BleGattClient(_central!, onData: (from, data) {
       _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
       // MSP (mesh session) frames peel off before the legacy parcel queue.
@@ -931,8 +933,75 @@ class BleService {
     }
   }
 
+  // ── Kept alive by the service, not by the UI ────────────────────────────
+  //
+  // Every timer in this file belongs to the Flutter isolate, and Android stops
+  // giving that isolate CPU when the app is not on screen: with the phone in
+  // doze a 2-second Timer fires when it feels like it, and the sweep that
+  // re-arms a dead scan or drains a pending payload simply stops happening.
+  // The native foreground service ticks on its own thread every 2 s regardless,
+  // so the same work is driven from there and the Dart timer stays as a
+  // fallback for the platforms that have no such service.
+  bool _serviceTickArmed = false;
+  int _lastServiceTickMs = 0;
+
+  void _armServiceTick() {
+    if (_serviceTickArmed || !Platform.isAndroid) return;
+    _serviceTickArmed = true;
+    AndroidForegroundService.instance.addTickListener(_onServiceTick);
+  }
+
+  void _onServiceTick() {
+    _lastServiceTickMs = DateTime.now().millisecondsSinceEpoch;
+    _bcastTick();
+    _scanWatchdog();
+  }
+
+  /// The Dart fallback: skipped while the service tick is doing the work, so a
+  /// foreground device isn't running both.
+  void _dartTick() {
+    final age = DateTime.now().millisecondsSinceEpoch - _lastServiceTickMs;
+    if (_lastServiceTickMs != 0 && age < 6000) return;
+    _bcastTick();
+    _scanWatchdog();
+  }
+
+  /// Re-arm anything the system stopped behind our back. Android kills a long
+  /// BLE scan without telling the app — the callback stays registered and no
+  /// result ever arrives again — and a device that stops scanning stops hearing
+  /// its neighbour entirely.
+  void _scanWatchdog() {
+    if (_scanRefs <= 0) return;
+    if (_ble5) unawaited(Ble5Bus.instance.startScan()); // no-op when already on
+    if (_central != null && !_scanning) unawaited(_applyScan());
+  }
+
+  /// Hold the foreground service for as long as BLE is in use, so the radio
+  /// keeps running with the app off screen. Ref-counted with every other
+  /// holder (the Reticulum node, background wapps), so releasing ours does not
+  /// stop a service somebody else still needs.
+  Future<void> _holdService() async {
+    if (!Platform.isAndroid || _serviceHeld) return;
+    _serviceHeld = true;
+    try {
+      await AndroidForegroundService.instance.hold('ble');
+    } catch (_) {}
+  }
+
+  Future<void> _releaseService() async {
+    if (!_serviceHeld) return;
+    _serviceHeld = false;
+    try {
+      await AndroidForegroundService.instance.release('ble');
+    } catch (_) {}
+  }
+
+  bool _serviceHeld = false;
+
   Future<bool> startScan() async {
     await _ensure();
+    await _holdService();
+    _armServiceTick();
     // Start the shared BLE5 extended scan (also feeds Reticulum). Independent of
     // the legacy _central scan, which still runs for legacy/ESP32 peers.
     if (_ble5) await Ble5Bus.instance.startScan();
@@ -969,6 +1038,7 @@ class BleService {
   Future<void> stopScan() async {
     if (_scanRefs > 0) _scanRefs--;
     await _applyScan();
+    if (_scanRefs == 0) await _releaseService();
   }
 
   // Called on app resume: if we still want to scan, force a fresh discovery in

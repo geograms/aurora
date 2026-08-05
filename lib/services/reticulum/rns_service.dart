@@ -110,6 +110,7 @@ import 'rns_lan_interface.dart';
 import 'rns_tcp_interface.dart';
 import 'rns_tcp_server_interface.dart';
 import 'rns_transport.dart';
+import 'wapp_mailbox.dart';
 
 // Our Reticulum destination namespace is "geogram" (the platform); Aurora is one
 // branch of it. All overlay services share it: geogram/chat, geogram/files,
@@ -3536,10 +3537,62 @@ class RnsService {
 
   /// Start queueing inbound datagrams for wapp [tag] (the calling wapp's id).
   /// Idempotent; call again on each wapp load.
-  void wappRegister(String tag) => _wappInbox.putIfAbsent(tag, () => []);
+  ///
+  /// Anything that arrived for this tag while the wapp was not loaded is handed
+  /// over here, oldest first. That mail used to be dropped: an unregistered tag
+  /// meant a null queue, and the router still reported the datagram as
+  /// delivered.
+  void wappRegister(String tag) {
+    final q = _wappInbox.putIfAbsent(tag, () => []);
+    final held = WappMailbox.instance.drain(tag);
+    if (held.isEmpty) return;
+    q.addAll(held.map((e) => e.toDrainMap()));
+    while (q.length > 1024) {
+      q.removeAt(0);
+    }
+    LogService.instance
+        .add('RNS/wapp: handed ${held.length} stored datagram(s) to "$tag"');
+  }
 
   /// Stop queueing for [tag] and drop any buffered datagrams.
   void wappUnregister(String tag) => _wappInbox.remove(tag);
+
+  /// Asked to start a wapp that has mail waiting. Set by the wapp layer (the
+  /// node has no business knowing how a wapp is loaded); a null hook simply
+  /// means the datagram waits in the mailbox until something starts the wapp.
+  void Function(String tag)? onWappWanted;
+
+  /// Queue one inbound datagram for [tag]: straight to the running wapp, else
+  /// to the durable mailbox, and ask for the wapp to be started.
+  void _deliverWappDatagram(String tag, String from, Uint8List payload) {
+    final q = _wappInbox[tag];
+    if (q != null) {
+      q.add({
+        'from': from,
+        'payload': base64.encode(payload),
+        'ts': DateTime.now().millisecondsSinceEpoch,
+      });
+      while (q.length > 1024) {
+        q.removeAt(0);
+      }
+      return;
+    }
+    final kept = WappMailbox.instance.put(tag, from, payload);
+    if (!kept) {
+      LogService.instance.add(
+          'RNS/wapp: datagram for "$tag" LOST — no mailbox and the wapp is not '
+          'running');
+      return;
+    }
+    LogService.instance.add(
+        'RNS/wapp: stored ${payload.length}B for "$tag" (not running) — '
+        'starting it');
+    try {
+      onWappWanted?.call(tag);
+    } catch (e) {
+      LogService.instance.add('RNS/wapp: on-demand start of "$tag" failed: $e');
+    }
+  }
 
   /// Broadcast [payload] to every reachable peer running wapp [tag]. Returns
   /// false if the node isn't up. The payload must fit one packet (a few hundred
@@ -3618,17 +3671,8 @@ class RnsService {
     final tag = f[0];
     final payload = f[1];
     if (tag is! String || payload is! List) return false;
-    final q = _wappInbox[tag];
-    if (q != null) {
-      q.add({
-        'from': _hex(m.sourceHash),
-        'payload': base64.encode(List<int>.from(payload)),
-        'ts': DateTime.now().millisecondsSinceEpoch,
-      });
-      while (q.length > 1024) {
-        q.removeAt(0);
-      }
-    }
+    _deliverWappDatagram(
+        tag, _hex(m.sourceHash), Uint8List.fromList(List<int>.from(payload)));
     return true;
   }
 
@@ -3723,17 +3767,7 @@ class RnsService {
               allowMalformed: true,
             );
             final payload = a.sublist(1 + tagLen);
-            final q = _wappInbox[tag];
-            if (q != null) {
-              q.add({
-                'from': ann.identity.hexHash,
-                'payload': base64.encode(payload),
-                'ts': DateTime.now().millisecondsSinceEpoch,
-              });
-              while (q.length > 1024) {
-                q.removeAt(0);
-              }
-            }
+            _deliverWappDatagram(tag, ann.identity.hexHash, payload);
           }
         }
       } catch (_) {}

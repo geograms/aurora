@@ -303,14 +303,26 @@ class BleService {
           .trim()
           .toUpperCase();
       if (cs.isEmpty || cs == my) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      // A sighting is proof the peer is NEARBY, not proof of where to dial it.
+      // A node legitimately has more than one address — the dongle beacons from
+      // its extended-advert instance and accepts connections on its connectable
+      // one — and a beacon can also reach us re-aired by a neighbour, carrying
+      // the relayer's address. So when we already know where this callsign
+      // answers, keep that address and let the sighting refresh its freshness;
+      // otherwise the peer would quietly age out of the dial registry while
+      // beaconing at us every thirty seconds.
       final verified = _verifiedAddr[cs];
-      if (verified != null && verified != addr) return; // relayed beacon: lying
-      // Nor may it claim an address we have already proven is somebody else.
+      if (verified != null) {
+        _meshPeers[cs] = (addr: verified, ms: now);
+        return;
+      }
+      // An address we have already proven belongs to somebody else says this
+      // beacon was re-aired by them, not sent by its author.
       if (_verifiedAddr.entries.any((e) => e.value == addr && e.key != cs)) {
         return;
       }
-      _meshPeers[cs] =
-          (addr: addr, ms: DateTime.now().millisecondsSinceEpoch);
+      _meshPeers[cs] = (addr: addr, ms: now);
     };
     // Ground truth for who lives at an address. A mesh beacon can reach us
     // re-aired by a neighbour, and the sighting then files the ORIGINATOR's
@@ -866,6 +878,34 @@ class BleService {
     if (_ble5 && _wantScan) unawaited(Ble5Bus.instance.startScan());
   }
 
+  /// A custody session may hold the radio — but not for ever.
+  ///
+  /// A session is quiet by design between its steps, so the 25 s idle drop was
+  /// cutting every one of them (the peer logged "closed abruptly", HCI 0x13,
+  /// and the scheduler took a backoff for it). But a session that simply never
+  /// finishes is worse: scanning stays off, no beacon is heard, and after the
+  /// 5-minute neighbour TTL the device has no neighbours at all — measured, a
+  /// phone that went deaf with the dongle sitting right next to it. So the hold
+  /// is bounded well inside that TTL; past it the link is dropped like any
+  /// other idle one and the session can start again with a fresh radio.
+  static const int _sessionHoldMaxMs = 120000; // 2 min, vs the 5 min TTL
+  int _sessionSinceMs = 0;
+
+  bool get _sessionOwnsRadio {
+    if (!MeshSessionManager.instance.anyActive) {
+      _sessionSinceMs = 0;
+      return false;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_sessionSinceMs == 0) _sessionSinceMs = now;
+    if (now - _sessionSinceMs <= _sessionHoldMaxMs) return true;
+    LogService.instance.add(
+        'Mesh: session has held the radio ${(now - _sessionSinceMs) ~/ 1000}s '
+        '— dropping the link so we can hear the street again');
+    _sessionSinceMs = 0;
+    return false;
+  }
+
   /// Periodic broadcast housekeeping: sweep stale partials/dedup, then emit a
   /// NACK for any incomplete partial that has stalled (a multi-chunk message we
   /// caught only part of). The sender hears its own srcTag and re-airs the
@@ -882,8 +922,15 @@ class BleService {
     // connectionless broadcast (APRS + RNS announces) when no transfer is active.
     // Only the CLIENT side disconnects (the dialer); the server lets the central
     // leave. On BLE5 this is the native client link.
+    // A LIVE MSP SESSION IS NOT AN IDLE LINK. A custody session is quiet by
+    // nature between steps — hello, gossip, then a pause while the peer decides
+    // what it owes us — and cutting it at 25 s made the peer log "closed
+    // abruptly" and cost the scheduler a per-peer backoff. Measured against the
+    // dongle: every session ended this way, with HCI 0x13 (remote user
+    // terminated) in its log, and no mail ever moved. The session has its own
+    // 30 s stall timeout and 300 s cap; let those end it.
     final linkUp = _ngClientUp || (_gatt?.isConnected ?? false);
-    if (linkUp && _gattActivityMs > 0) {
+    if (linkUp && _gattActivityMs > 0 && !_sessionOwnsRadio) {
       final idle = DateTime.now().millisecondsSinceEpoch - _gattActivityMs;
       if (idle > _gattIdleMs) {
         _dbg('GATT idle ${idle ~/ 1000}s — disconnecting to resume broadcast');
@@ -900,7 +947,10 @@ class BleService {
     // hearing no beacons, no announces, nobody — because of an idle connection
     // it did not initiate. Serving a transfer is worth the radio; sitting on an
     // idle link is not.
-    final servingIdle = (_ngServerCentral != null ||
+    // Same for the side being dialled: a peer that opened a session with us is
+    // owed the link until the session itself ends.
+    final servingIdle = !_sessionOwnsRadio &&
+        (_ngServerCentral != null ||
             (_gattServer?.clientIds.isNotEmpty ?? false)) &&
         _gattActivityMs > 0 &&
         DateTime.now().millisecondsSinceEpoch - _gattActivityMs > _gattIdleMs;

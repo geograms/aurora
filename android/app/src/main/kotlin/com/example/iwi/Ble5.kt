@@ -668,12 +668,44 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         }
     }
 
+    /** MSP (mesh session) frames start `4D 01` — see mesh_session.dart. */
+    private fun isMsp(d: ByteArray) =
+        d.size >= 3 && d[0] == 0x4D.toByte() && d[1] == 0x01.toByte()
+
+    /**
+     * Queue one client write.
+     *
+     * MSP frames go to the FRONT. The link carries two very different things:
+     * a mesh session, which is a handful of tiny control frames that must
+     * complete inside its 30-second stall timeout, and Reticulum, which is a
+     * continuous stream of announces and packets. Behind a burst of RNS the
+     * session's next frame waited long enough to stall, the peer recorded it as
+     * closed abruptly, and the scheduler backed off a device that was working
+     * fine — measured 19 clean sessions against 41 abrupt, phone to phone.
+     * Prioritising costs Reticulum a few milliseconds; the previous answer,
+     * making RNS yield the link entirely, cost whole messages.
+     */
     private fun gattWrite(data: ByteArray): Boolean {
         if (disposed) return false
         if (gatt == null || writeChar == null) {
             android.util.Log.e(TAG, "gattWrite: not connected"); return false
         }
-        bg.post { writeQueue.add(data); pumpWrites() }
+        bg.post {
+            if (isMsp(data)) {
+                writeQueue.addFirst(data)
+            } else {
+                if (writeQueue.size >= 256) {
+                    // A backlog this deep is already latency nobody can use.
+                    // Drop the oldest ordinary frame; RNS repairs its own loss,
+                    // and an MSP frame is never the one discarded.
+                    val drop = writeQueue.indexOfLast { !isMsp(it) }
+                    if (drop >= 0) writeQueue.removeAt(drop)
+                    android.util.Log.w(TAG, "gattWrite: queue overflow, dropped oldest")
+                }
+                writeQueue.add(data)
+            }
+            pumpWrites()
+        }
         return true
     }
 
@@ -1020,13 +1052,19 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         if (disposed) return false
         if (gattServer == null || serverCentral == null) return false
         bg.post {
-            if (notifyQueue.size >= 256) {
-                // Deep overload (should not happen under the WIN_ACK window):
-                // drop oldest; the receiver's resync recovers the gap.
-                notifyQueue.removeFirstOrNull()
-                android.util.Log.w(TAG, "serverNotify: queue overflow, dropped oldest")
+            if (isMsp(data)) {
+                notifyQueue.addFirst(data) // the session's frames go first
+            } else {
+                if (notifyQueue.size >= 256) {
+                    // Deep overload (should not happen under the WIN_ACK window):
+                    // drop the oldest ORDINARY frame; the receiver's resync
+                    // recovers the gap, and a session frame is never dropped.
+                    val drop = notifyQueue.indexOfLast { !isMsp(it) }
+                    if (drop >= 0) notifyQueue.removeAt(drop)
+                    android.util.Log.w(TAG, "serverNotify: queue overflow, dropped oldest")
+                }
+                notifyQueue.add(data)
             }
-            notifyQueue.add(data)
             pumpNotifies()
         }
         return true

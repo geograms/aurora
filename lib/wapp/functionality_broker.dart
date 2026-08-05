@@ -97,7 +97,7 @@ class FunctionalityBroker {
     monitor.reportStart(taskId);
     final sw = Stopwatch()..start();
 
-    final headless = WappEngine(headless: true);
+    final headless = WappEngine(headless: true, freeOnDispose: true);
     try {
       await headless.load(wasmBytes);
       headless.init();

@@ -351,7 +351,21 @@ class WappEngine {
   /// notifying, seeding).
   bool headless = false;
 
-  WappEngine({this.headless = false}) {
+  /// Free the wasm instance in [dispose] instead of leaving it to a finalizer.
+  ///
+  /// Off by default, and deliberately so. A disposed engine used to keep
+  /// working — its instance stayed alive — and code around the app quietly
+  /// relies on that: a BLE frame or an RNS datagram arriving just after a page
+  /// closes still gets handled. Freeing eagerly turned those late arrivals into
+  /// silent drops, and measured delivery fell from 8 of 10 to 2 of 10.
+  ///
+  /// So only engines that are created, used once and thrown away opt in — the
+  /// functionality broker's per-request engine, and the video decoder. They are
+  /// the churn that mattered: each leaked its whole linear memory, which is how
+  /// a 135 MB app reached 1.4 GB and was killed by an ANR.
+  final bool freeOnDispose;
+
+  WappEngine({this.headless = false, this.freeOnDispose = false}) {
     _byId[engineId] = this;
     WappEventBroker.instance.registerEngine(engineId);
   }
@@ -3910,6 +3924,18 @@ class WappEngine {
     _byId.remove(engineId);
     WappEventBroker.instance.unregisterEngine(engineId);
     _stopwatch.stop();
+    // LAST: hand the wasm instance back. Its linear memory lives outside the
+    // Dart heap, so nothing collects it on our behalf — an engine that is
+    // merely dropped keeps every megabyte it ever grew to, for the life of the
+    // process. Everything above still needs the instance, which is why this
+    // comes at the end.
+    if (freeOnDispose) {
+      try {
+        _instance?.dispose();
+      } catch (_) {}
+      _instance = null;
+      _memory = null;
+    }
   }
 
   /// Direct handle on the outbox for the widget broker's headless

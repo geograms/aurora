@@ -1166,15 +1166,22 @@ class BleService {
   /// starvation watchdog.
   bool get _wantScan {
     if (_scanRefs <= 0) return false;
-    if (_gattLinkUp || _ngClientUp) return false; // we are a client of a peer
+    // A LINK IS NOT A REASON TO STOP LISTENING.
+    //
+    // Pausing the scan for the duration of a link made sense when links were
+    // rare and brief. They are not: the mesh scheduler holds sessions and
+    // Reticulum keeps a link to its neighbour, so the radio was listening
+    // almost never — and a Reticulum path is learned from announces heard on
+    // the advert plane. The paths expired, LXMF had nowhere to send, and a
+    // phone with a live GATT link to its neighbour sat there saying "waiting to
+    // deliver 10 messages — still trying". Measured: ten messages held, zero
+    // delivered, with the link up the whole time.
+    //
+    // Only an MSP session or a dial in flight still earns silence, and both are
+    // bounded (see _sessionOwnsRadio and _dialPendingMaxMs).
     if (_dialPending) return false; // a connect is in flight — the worst phase
-    // Serving a peer earns the radio only while the transfer is ALIVE. An idle
-    // central that stays connected must not keep us deaf — see _bcastTick.
-    final serving = (_gattServer?.clientIds.isNotEmpty ?? false) ||
-        _ngServerCentral != null;
-    if (!serving) return true;
-    return _gattActivityMs != 0 &&
-        DateTime.now().millisecondsSinceEpoch - _gattActivityMs > _gattIdleMs;
+    if (MeshSessionManager.instance.anyActive) return false;
+    return true;
   }
 
   /// A GATT connect has been asked for and has not resolved yet. A background
@@ -1183,13 +1190,26 @@ class BleService {
   bool _dialPending = false;
   int _dialPendingSinceMs = 0;
 
-  /// Longer than the scheduler's own connect window (110 s), so this can only
-  /// ever release a flag somebody forgot to clear — never cut a live dial short.
-  static const int _dialPendingMaxMs = 120000;
+  /// How long a dial may hold the scan off.
+  ///
+  /// SHORT, and measured from the FIRST dial of a run. This started at 120 s
+  /// and re-armed on every attempt, so a dial that never resolved — a peer that
+  /// walked away, a connect the controller silently dropped — kept the scan
+  /// suppressed for ever. The device then heard no beacons, saw no peers, and
+  /// so never dialled again: silently deaf with a phone in the same room, and
+  /// message delivery that decayed run by run from 10 of 10 to nothing.
+  ///
+  /// A connect only needs the radio for the first moments; after that, hearing
+  /// the street matters more than protecting an attempt that is not landing.
+  static const int _dialPendingMaxMs = 15000;
 
   void _beginDial() {
+    // Do NOT restart the clock on a retry: the window belongs to the run of
+    // attempts, not to the latest one.
+    if (!_dialPending) {
+      _dialPendingSinceMs = DateTime.now().millisecondsSinceEpoch;
+    }
     _dialPending = true;
-    _dialPendingSinceMs = DateTime.now().millisecondsSinceEpoch;
   }
 
   void _endDial() {
@@ -1203,7 +1223,8 @@ class BleService {
     if (!_dialPending) return;
     if (DateTime.now().millisecondsSinceEpoch - _dialPendingSinceMs >
         _dialPendingMaxMs) {
-      LogService.instance.add('BLE: dial never resolved — resuming the scan');
+      LogService.instance.add('BLE: dial has held the scan '
+          '${_dialPendingMaxMs ~/ 1000}s — listening again');
       _endDial();
     }
   }

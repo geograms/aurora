@@ -15,7 +15,6 @@ import 'package:reticulum/reticulum.dart'
     show Ble5Bus, Ble5Subtype, RnsTransport;
 
 import '../../services/log_service.dart';
-import '../../services/mesh/mesh_custody.dart';
 import '../../services/reticulum/rns_ble_interface.dart';
 import 'ble_reassembler.dart' show kBleBcastMax;
 import 'ble_service.dart';
@@ -91,19 +90,20 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
   @override
   int get broadcastCap => Ble5Bus.instance.maxPayload;
 
-  /// A native GATT link, in either role, is up right now AND the mesh is not
-  /// using it.
+  /// A native GATT link, in either role, is up right now.
   ///
-  /// Mail beats chatter. A custody session is a short, bounded exchange that
-  /// moves somebody's message; Reticulum on a phone with no internet is a
-  /// continuous stream of announces and path requests. Sharing one link between
-  /// them meant every MSP session closed abruptly — measured 10 sessions, 0
-  /// clean — and the mail that was waiting never moved. While a session is up,
-  /// RNS goes back to the advert plane it used before, and takes the link again
-  /// the moment the session ends.
+  /// RNS shares the link with a custody session rather than yielding it. The
+  /// abrupt closes that first suggested yielding were not contention at all —
+  /// the 25 s idle drop was cutting the sessions, and a finished session never
+  /// said goodbye. Both are fixed, and sessions now close cleanly. Yielding on
+  /// top of that cost real messages: with a dongle inviting a session every few
+  /// seconds, RNS spent most of its time back on the advert plane, which is
+  /// fire-and-forget — delivery measured 4 of 10, against 10 of 10 before.
+  ///
+  /// If a bulk transfer ever needs the link to itself, gate THAT narrowly; an
+  /// empty gossip session is no reason to drop a message on the floor.
   @override
-  bool get hasLink =>
-      BleService.instance.gattLinkUp && !MeshSessionManager.instance.anyActive;
+  bool get hasLink => BleService.instance.gattLinkUp;
 
   @override
   void broadcast(Uint8List frame) {
@@ -219,9 +219,7 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
       _sent++;
       return true;
     }
-    if (!MeshSessionManager.instance.anyActive) {
-      BleService.instance.sendOverGatt(frame); // queues + dials
-    }
+    BleService.instance.sendOverGatt(frame); // queues + dials
 
     // No link yet — it is being dialled, and dialling takes seconds. Air the
     // packet across adverts as well rather than let it wait: RNS drops the

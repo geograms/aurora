@@ -187,7 +187,8 @@ class BleService {
         _dbg('GATT link up (client) to ${_gatt?.peerId}');
         // Keep the BLE5 scan paused while the link is up so the transfer holds
         // (extended scan vs an active connection contend on one radio).
-        unawaited(Ble5Bus.instance.stopScan());
+        // The extended scan STAYS ON through a link: it is how announces
+        // arrive, and a path that stops being refreshed expires.
         _flushPendingGatt();
         MeshSessionManager.instance.onLinkUp(serverSide: false);
       } else {
@@ -209,7 +210,7 @@ class BleService {
       final n = _gattServer?.clientIds.length ?? 0;
       if (n > 0) {
         _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
-        unawaited(Ble5Bus.instance.stopScan()); // free the radio for the transfer
+        // Scan stays on — see _scanWatchdog.
         MeshSessionManager.instance.onLinkUp(serverSide: true);
       } else {
         MeshSessionManager.instance.onLinkDown(serverSide: true);
@@ -620,7 +621,7 @@ class BleService {
     _ngClientUp = true;
     _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
     _dbg('native GATT client link up to $_ngClientPeer');
-    unawaited(Ble5Bus.instance.stopScan()); // quiet the extended scan during xfer
+    // Scan stays on — announces must keep arriving while a link is up.
     _applyScan();
     _flushPendingGatt();
     _wireMeshHooks();
@@ -680,7 +681,7 @@ class BleService {
     _ngServerCentral = address;
     _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
     _dbg('native GATT server: central $address connected');
-    unawaited(Ble5Bus.instance.stopScan()); // quiet extended scan during xfer
+    // Scan stays on — announces must keep arriving while a link is up.
     _applyScan();
     _wireMeshHooks();
     _flushPendingGatt(); // a peer dialling US is just as good a route
@@ -875,7 +876,7 @@ class BleService {
 
   // Resume the shared BLE5 extended scan after a GATT connect/transfer ends.
   void _resumeBle5Scan() {
-    if (_ble5 && _wantScan) unawaited(Ble5Bus.instance.startScan());
+    if (_ble5 && _scanRefs > 0) unawaited(Ble5Bus.instance.startScan());
   }
 
   /// A custody session may hold the radio — but not for ever.
@@ -1073,9 +1074,19 @@ class BleService {
   /// its neighbour entirely.
   void _scanWatchdog() {
     _sweepDialPending();
-    if (!_wantScan) return; // a link owns the radio — do not re-arm behind it
-    if (_ble5) unawaited(Ble5Bus.instance.startScan()); // no-op when already on
-    if (_central != null && !_scanning) unawaited(_applyScan());
+    // THE EXTENDED SCAN IS NEVER GATED. It is how this device hears announces,
+    // and a Reticulum path exists only for as long as its announce keeps
+    // arriving. Gating it behind links, sessions and dials — which the mesh now
+    // holds almost continuously — meant the phone stopped hearing the peer it
+    // was linked to, its paths expired, and LXMF had nowhere to send: measured
+    // 10 of 10 delivered before the gate, 0 of 10 after, on the same two
+    // phones minutes apart.
+    if (_scanRefs > 0 && _ble5) {
+      unawaited(Ble5Bus.instance.startScan()); // no-op when already on
+    }
+    // The legacy central scan still yields, because it and a GATT connection
+    // genuinely contend on that stack.
+    if (_wantScan && _central != null && !_scanning) unawaited(_applyScan());
   }
 
   /// Hold the foreground service for as long as BLE is in use, so the radio

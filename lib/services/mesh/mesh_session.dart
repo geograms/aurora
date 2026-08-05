@@ -789,6 +789,39 @@ class MeshSession {
     }
     if ((peerCaps & MspCaps.msgCustody) != 0) await _drainCustody();
     await _maybeStartBulk();
+    _armFinish();
+  }
+
+  /// Say goodbye once the session has nothing left to do.
+  ///
+  /// A session that finished its work used to just sit there: the stall timer
+  /// only fires while something is IN FLIGHT, so an exchange with no mail to
+  /// move never closed itself. It held the radio — which on a phone means the
+  /// scan is off and no beacon is heard — until something outside killed the
+  /// link, and the peer then recorded it as closed abruptly and backed off.
+  /// Finishing politely frees the radio in seconds and lets the scheduler count
+  /// a clean session.
+  Timer? _finishTimer;
+
+  void _armFinish() {
+    _finishTimer?.cancel();
+    // A grace period: the peer runs the same sequence on its side and may still
+    // be about to hand us mail or start a transfer.
+    _finishTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (state != MeshSessionState.active) {
+        _finishTimer?.cancel();
+        _finishTimer = null;
+        return;
+      }
+      if (!idle) return; // work in flight — the stall timer owns this
+      if (DateTime.now().difference(_lastRx) < const Duration(seconds: 3)) {
+        return; // the peer is still talking
+      }
+      _finishTimer?.cancel();
+      _finishTimer = null;
+      _log('nothing left to exchange — saying goodbye');
+      unawaited(bye(MspBye.done));
+    });
   }
 
   // --- custody lane ---------------------------------------------------------
@@ -1080,6 +1113,8 @@ class MeshSession {
     _helloTimer?.cancel();
     _stallTimer?.cancel();
     _ackTimer?.cancel();
+    _finishTimer?.cancel();
+    _finishTimer = null;
     final tx = _tx;
     if (tx != null) {
       delegate.bulkDone(peerCallsign, tx.item.sha256, false, toPeer: true);

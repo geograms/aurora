@@ -15,6 +15,7 @@ import 'package:reticulum/reticulum.dart'
     show Ble5Bus, Ble5Subtype, RnsTransport;
 
 import '../../services/log_service.dart';
+import '../../services/mesh/mesh_custody.dart';
 import '../../services/reticulum/rns_ble_interface.dart';
 import 'ble_reassembler.dart' show kBleBcastMax;
 import 'ble_service.dart';
@@ -90,9 +91,19 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
   @override
   int get broadcastCap => Ble5Bus.instance.maxPayload;
 
-  /// A native GATT link, in either role, is up right now.
+  /// A native GATT link, in either role, is up right now AND the mesh is not
+  /// using it.
+  ///
+  /// Mail beats chatter. A custody session is a short, bounded exchange that
+  /// moves somebody's message; Reticulum on a phone with no internet is a
+  /// continuous stream of announces and path requests. Sharing one link between
+  /// them meant every MSP session closed abruptly — measured 10 sessions, 0
+  /// clean — and the mail that was waiting never moved. While a session is up,
+  /// RNS goes back to the advert plane it used before, and takes the link again
+  /// the moment the session ends.
   @override
-  bool get hasLink => BleService.instance.gattLinkUp;
+  bool get hasLink =>
+      BleService.instance.gattLinkUp && !MeshSessionManager.instance.anyActive;
 
   @override
   void broadcast(Uint8List frame) {
@@ -203,12 +214,14 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
     // sendOverGatt, NOT enqueueAdvert: the size router airs its payload as an
     // APRS-subtype advert, and the peer's RNS handler only reads the rns
     // subtype — so every RNS packet sent that way was heard by nobody.
-    if (BleService.instance.gattLinkUp) {
+    if (hasLink) {
       BleService.instance.sendOverGatt(frame);
       _sent++;
       return true;
     }
-    BleService.instance.sendOverGatt(frame); // queues + dials
+    if (!MeshSessionManager.instance.anyActive) {
+      BleService.instance.sendOverGatt(frame); // queues + dials
+    }
 
     // No link yet — it is being dialled, and dialling takes seconds. Air the
     // packet across adverts as well rather than let it wait: RNS drops the

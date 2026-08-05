@@ -96,7 +96,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     //
     // The sinks are the exception: an EventChannel must be fed from the main
     // thread, so [ui] exists for exactly that and nothing else.
-    private val worker = HandlerThread("ble5-worker", Process.THREAD_PRIORITY_BACKGROUND)
+    // DEFAULT priority, not BACKGROUND: this thread carries the GATT write and
+    // notify pumps and the advert rotation. Android puts a BACKGROUND thread in
+    // a cgroup that gets a sliver of CPU when the app is off screen — which is
+    // exactly when the foreground service exists to keep this work running, and
+    // it would show up as a transfer that crawls with the screen dark.
+    private val worker = HandlerThread("ble5-worker", Process.THREAD_PRIORITY_DEFAULT)
         .apply { start() }
     private val bg = Handler(worker.looper)
     private val ui = Handler(Looper.getMainLooper())

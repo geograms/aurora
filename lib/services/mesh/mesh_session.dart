@@ -587,6 +587,12 @@ abstract class MeshSessionDelegate {
   /// Peer's gossip landed (feed the mesh table + purge bloom matches).
   void gossipReceived(String peer, MspGossip g);
 
+  /// The peer said who it is (MSP HELLO). This is the ONLY statement of
+  /// identity we can trust on a link: a beacon can be re-aired by a neighbour,
+  /// which teaches its address under somebody else's callsign, and a dialer
+  /// then spends every attempt on the wrong device.
+  void peerIdentified(String callsign, {required bool dialer}) {}
+
   /// Next spooled file to move to [peer], or null.
   MeshBulkPending? nextBulkFor(String peer);
 
@@ -766,6 +772,7 @@ class MeshSession {
   Future<void> _onHello(MspHello h) async {
     if (state != MeshSessionState.hello) return;
     peerCallsign = h.callsign;
+    delegate.peerIdentified(h.callsign, dialer: dialer);
     peerCaps = h.caps;
     peerMaxFrame = h.maxFrame;
     peerPendingMsgs = h.pendingMsgs;

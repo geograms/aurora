@@ -303,11 +303,45 @@ class BleService {
           .trim()
           .toUpperCase();
       if (cs.isEmpty || cs == my) return;
+      final verified = _verifiedAddr[cs];
+      if (verified != null && verified != addr) return; // relayed beacon: lying
+      // Nor may it claim an address we have already proven is somebody else.
+      if (_verifiedAddr.entries.any((e) => e.value == addr && e.key != cs)) {
+        return;
+      }
       _meshPeers[cs] =
           (addr: addr, ms: DateTime.now().millisecondsSinceEpoch);
     };
+    // Ground truth for who lives at an address. A mesh beacon can reach us
+    // re-aired by a neighbour, and the sighting then files the ORIGINATOR's
+    // callsign against the RELAYER's address — after which every dial for that
+    // callsign lands on the wrong device, the session says a different name,
+    // and the mail it was carrying goes nowhere. Seen in the field: a phone
+    // spent hours dialling its neighbour believing it was the dongle.
+    MeshSessionManager.instance.hooks.peerIdentified = (callsign) {
+      final addr = _ngClientPeer ?? _ngServerCentral;
+      if (addr == null || callsign.isEmpty) return;
+      final cs = callsign.toUpperCase();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final wrong = _meshPeers.entries
+          .where((e) => e.value.addr == addr && e.key != cs)
+          .map((e) => e.key)
+          .toList();
+      for (final k in wrong) {
+        _meshPeers.remove(k);
+        LogService.instance.add(
+            'Mesh: $addr is $cs, not $k — dropped the bad dial address');
+      }
+      _meshPeers[cs] = (addr: addr, ms: now);
+      _verifiedAddr[cs] = addr;
+    };
     MeshTransferScheduler.instance.start();
   }
+
+  /// Addresses proven to belong to a callsign — by a session HELLO, or by the
+  /// peer's own connectable presence advert. A beacon sighting never overwrites
+  /// one of these.
+  final Map<String, String> _verifiedAddr = {};
 
   // Callsign → (BLE address, last-seen ms) registry from the native discovery
   // scan, so the mesh scheduler can dial a SPECIFIC peer (the old single
@@ -337,6 +371,7 @@ class BleService {
     final fringe = now - p.ms > 10000;
     _dbg('mesh dial: GATT connect to $callsign (${p.addr}) '
         '${fringe ? "auto" : "direct"}');
+    _beginDial(); // hold the scan off until this resolves
     Ble5Bus.instance.gattConnect(p.addr, auto: fringe);
     return true;
   }
@@ -569,6 +604,7 @@ class BleService {
 
   // ── Native GATT event handlers (BLE5) ─────────────────────────────────────
   void _onNgConnected() {
+    _endDial();
     _ngClientUp = true;
     _gattActivityMs = DateTime.now().millisecondsSinceEpoch;
     _dbg('native GATT client link up to $_ngClientPeer');
@@ -580,6 +616,7 @@ class BleService {
   }
 
   void _onNgDisconnected() {
+    _endDial(); // a refused or dropped dial resolves it too
     _dbg('native GATT client link down ($_ngClientPeer)');
     _ngClientUp = false;
     _ngClientPeer = null;
@@ -605,7 +642,11 @@ class BleService {
     _lastPeerCall = callsign;
     _lastPeerMs = DateTime.now().millisecondsSinceEpoch;
     if (callsign.isNotEmpty) {
-      _meshPeers[callsign.toUpperCase()] =
+      final cs = callsign.toUpperCase();
+      // A connectable presence advert comes from the device itself — nothing
+      // re-airs it — so it proves the address, same as a session HELLO.
+      _verifiedAddr[cs] = address;
+      _meshPeers[cs] =
           (addr: address, ms: _lastPeerMs); // mesh scheduler dial registry
     }
     _maybeAutoPair();
@@ -782,6 +823,15 @@ class BleService {
       // dials; the receiver stays a passive native server. Plain characteristics
       // = no pairing. Already serving a central → don't also dial (tie-breaker).
       if (_ngClientUp || _ngServerCentral != null) return;
+      // One client slot, two dialers. The mesh scheduler and this auto-pair
+      // path both call gattConnect, and neither used to know about the other:
+      // a dial started here mid-session cancelled the scheduler's connect, the
+      // scheduler counted a failure and backed off up to two minutes, and the
+      // custody it was carrying waited for nothing.
+      if (_dialPending || MeshSessionManager.instance.anyActive) {
+        _dbg('auto-pair: a dial/session already owns the client slot');
+        return;
+      }
       if (!fresh || _lastPeerAddr.isEmpty) {
         // Say why the link did not form. A payload waiting for a peer that is
         // never dialled is indistinguishable from one that was sent, and that
@@ -794,6 +844,7 @@ class BleService {
       _ngClientPeer = _lastPeerAddr;
       _dbg('auto-pair: native GATT connect to $_lastPeerCall ($_lastPeerAddr) '
           'for ${_pendingGatt.length} payload(s)');
+      _beginDial();
       Ble5Bus.instance.gattConnect(_lastPeerAddr);
       return;
     }
@@ -812,7 +863,7 @@ class BleService {
 
   // Resume the shared BLE5 extended scan after a GATT connect/transfer ends.
   void _resumeBle5Scan() {
-    if (_ble5 && _scanRefs > 0) unawaited(Ble5Bus.instance.startScan());
+    if (_ble5 && _wantScan) unawaited(Ble5Bus.instance.startScan());
   }
 
   /// Periodic broadcast housekeeping: sweep stale partials/dedup, then emit a
@@ -971,7 +1022,8 @@ class BleService {
   /// result ever arrives again — and a device that stops scanning stops hearing
   /// its neighbour entirely.
   void _scanWatchdog() {
-    if (_scanRefs <= 0) return;
+    _sweepDialPending();
+    if (!_wantScan) return; // a link owns the radio — do not re-arm behind it
     if (_ble5) unawaited(Ble5Bus.instance.startScan()); // no-op when already on
     if (_central != null && !_scanning) unawaited(_applyScan());
   }
@@ -1053,6 +1105,59 @@ class BleService {
     await _applyScan();
   }
 
+  /// Whether the radio should be listening right now.
+  ///
+  /// One predicate for BOTH scan planes — the legacy central discovery and the
+  /// BLE5 extended scan. They used to disagree: the extended scan was stopped
+  /// at link-up to free the radio for a transfer, and then the 2-second service
+  /// watchdog started it again, so every custody session ran against a live
+  /// scan. Scan and connection share one radio; the session pays for it in
+  /// abrupt closes, per-peer backoff and, eventually, the scheduler's
+  /// starvation watchdog.
+  bool get _wantScan {
+    if (_scanRefs <= 0) return false;
+    if (_gattLinkUp || _ngClientUp) return false; // we are a client of a peer
+    if (_dialPending) return false; // a connect is in flight — the worst phase
+    // Serving a peer earns the radio only while the transfer is ALIVE. An idle
+    // central that stays connected must not keep us deaf — see _bcastTick.
+    final serving = (_gattServer?.clientIds.isNotEmpty ?? false) ||
+        _ngServerCentral != null;
+    if (!serving) return true;
+    return _gattActivityMs != 0 &&
+        DateTime.now().millisecondsSinceEpoch - _gattActivityMs > _gattIdleMs;
+  }
+
+  /// A GATT connect has been asked for and has not resolved yet. A background
+  /// (fringe) connect waits at controller level for up to 110 s, and scanning
+  /// through that window is what makes a dial fail rather than land.
+  bool _dialPending = false;
+  int _dialPendingSinceMs = 0;
+
+  /// Longer than the scheduler's own connect window (110 s), so this can only
+  /// ever release a flag somebody forgot to clear — never cut a live dial short.
+  static const int _dialPendingMaxMs = 120000;
+
+  void _beginDial() {
+    _dialPending = true;
+    _dialPendingSinceMs = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  void _endDial() {
+    _dialPending = false;
+    _dialPendingSinceMs = 0;
+  }
+
+  /// Release a dial flag whose connect never came back, so a lost callback
+  /// cannot leave this device permanently deaf.
+  void _sweepDialPending() {
+    if (!_dialPending) return;
+    if (DateTime.now().millisecondsSinceEpoch - _dialPendingSinceMs >
+        _dialPendingMaxMs) {
+      LogService.instance.add('BLE: dial never resolved — resuming the scan');
+      _endDial();
+    }
+  }
+
   Future<void> _applyScan() async {
     final c = _central;
     if (c == null) return;
@@ -1065,14 +1170,7 @@ class BleService {
     // link from holding (the serving side kept scanning).
     // Serving a peer earns the radio only while the transfer is ALIVE. An idle
     // central that stays connected must not keep us deaf — see _bcastTick.
-    final serving = (_gattServer?.clientIds.isNotEmpty ?? false) ||
-        _ngServerCentral != null;
-    final serverBusy = serving &&
-        (_gattActivityMs == 0 ||
-            DateTime.now().millisecondsSinceEpoch - _gattActivityMs <=
-                _gattIdleMs);
-    final want =
-        _scanRefs > 0 && !_gattLinkUp && !_ngClientUp && !serverBusy;
+    final want = _wantScan;
     try {
       if (want && !_scanning && c.state == BluetoothLowEnergyState.poweredOn) {
         await c.startDiscovery();

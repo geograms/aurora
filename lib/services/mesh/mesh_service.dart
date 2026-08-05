@@ -26,6 +26,7 @@ import '../../util/media_archive.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
 import 'mesh_beacon.dart';
+import 'mesh_custody.dart';
 import 'mesh_bulk_spool.dart';
 import 'mesh_store.dart';
 import 'mesh_table.dart';
@@ -157,8 +158,14 @@ class MeshService {
     // Leaves listen too: extended SCANNING is a separate controller capability
     // from extended advertising, so a phone that can't beacon (e.g. C61) may
     // still hear the street. Idempotent; harmless where unsupported.
+    // Bounded: these calls hop to the native BLE worker thread, and an await
+    // that never returns leaves the mesh unstarted, silent, and with no log
+    // line to say so. Timing out here still leaves the node running — the scan
+    // is re-armed by the service watchdog anyway.
     try {
-      await Ble5Bus.instance.startScan();
+      await Ble5Bus.instance
+          .startScan()
+          .timeout(const Duration(seconds: 5), onTimeout: () {});
     } catch (_) {}
 
     _beaconTimer?.cancel();
@@ -196,7 +203,9 @@ class MeshService {
       _powered = true; // no battery API → assume powered (desktop)
     }
 
-    await _sendBeacon();
+    try {
+      await _sendBeacon().timeout(const Duration(seconds: 5), onTimeout: () {});
+    } catch (_) {}
     LogService.instance.add(
         'Mesh: started as $cs (${_canAdvertise ? "relay-capable" : "scan-only leaf"})');
   }
@@ -418,6 +427,9 @@ class MeshService {
       'beaconIntervalS': beaconIntervalNow().inSeconds,
       'battery': _batteryPct,
       'revision': revision,
+      // Custody counters: relaying asserted as a number, not grepped out of a
+      // rolling log that holds twenty minutes on a busy device.
+      ...MeshCustodyCounters.toJson(),
     });
   }
 }

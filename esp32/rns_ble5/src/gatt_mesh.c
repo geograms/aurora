@@ -742,7 +742,12 @@ static void start_conn_advert(void)
     ad[n++] = 2; ad[n++] = 0x01; ad[n++] = 0x06;          /* flags */
     int cs = (int)strlen(s_call);
     if (cs > 9) cs = 9;
-    ad[n++] = (uint8_t)(4 + cs);
+    /* AD length counts everything after this byte: type(1) + company(2) +
+     * marker(1) + devId(1) + callsign. It said 4 + cs, one short, so every
+     * receiver dropped the last character of the callsign — a node called
+     * X32DVA appeared as X32DV, which is a different device as far as the
+     * dial registry is concerned. */
+    ad[n++] = (uint8_t)(5 + cs);
     ad[n++] = 0xFF;                                       /* mfr data */
     ad[n++] = 0xFF; ad[n++] = 0xFF;                       /* company 0xFFFF */
     ad[n++] = 0x3E;                                       /* marker */

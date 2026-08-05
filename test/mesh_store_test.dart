@@ -90,6 +90,52 @@ void main() {
     expect(store.pendingFor('BBB', table).length, 1);
   });
 
+  // A neighbour we can hear is the shortest path there is. Handing its mail to
+  // a third party instead is how a message went round in a circle: the relay's
+  // route pointed back at us, our store already held the row, the offer came
+  // back "duplicate", and both copies ended up archived owing nothing.
+  test('a live neighbour gets its own mail — never a relay', () {
+    final table = MeshTable('ME');
+    // BBB and CCC are BOTH neighbours, and BBB also advertises reaching CCC.
+    table.ingest(MeshBeacon(
+      callsign: 'BBB',
+      deviceClass: MeshDeviceClass.phone,
+      cond: const MeshConditions(),
+      dv: [MeshDvEntry(meshHash('ME'), 1), MeshDvEntry(meshHash('CCC'), 1)],
+    ));
+    table.ingest(MeshBeacon(
+      callsign: 'CCC',
+      deviceClass: MeshDeviceClass.phone,
+      cond: const MeshConditions(),
+      dv: [MeshDvEntry(meshHash('ME'), 1)],
+    ));
+    store.offer(
+        target: 'CCC', sender: 'ME', wire: _wire('ME', 'CCC', 'for ccc'));
+
+    expect(store.pendingFor('BBB', table), isEmpty); // not via the relay
+    expect(store.pendingFor('CCC', table).length, 1); // straight to the target
+  });
+
+  // Custody handed on is archived, not deleted — that row is the receipt saying
+  // we no longer owe delivery. When a peer hands the same message BACK, saying
+  // "duplicate" made the other side archive its copy too and the message
+  // belonged to nobody.
+  test('an archived row can take custody again; an in-transit one cannot', () {
+    store.offer(
+        target: 'BBB',
+        sender: 'AAA',
+        wire: _wire('AAA', 'BBB', 'am:bbbbbb m'),
+        am: 'bbbbbb');
+    expect(store.reArm('bbbbbb'), isFalse); // still in transit = real duplicate
+
+    store.markArchived('bbbbbb');
+    expect(store.pendingFor('BBB', null), isEmpty);
+    expect(store.reArm('bbbbbb'), isTrue); // we owe delivery again
+    expect(store.pendingFor('BBB', null).length, 1);
+
+    expect(store.reArm('nosuch'), isFalse); // nothing to re-arm
+  });
+
   test('have-bloom: built from received, applyPeerBloom purges only the owner',
       () {
     store.offer(

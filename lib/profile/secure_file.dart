@@ -55,6 +55,7 @@ class SecureProfileFile {
   static Uint8List? readBytes(String absPath) {
     final f = File(absPath);
     if (!f.existsSync()) return null;
+    // arch-ignore: no-blocking-io-on-ui sync by contract: the WASI fd_* shims read encrypted profile files through here
     final raw = f.readAsBytesSync();
 
     if (!_isWrapped(raw)) return raw; // plain file (plain profile or pre-encryption)
@@ -82,6 +83,7 @@ class SecureProfileFile {
 
     final keys = _keysFor(absPath);
     if (keys == null) {
+      // arch-ignore: no-blocking-io-on-ui sync by contract: called from the WASI fd_write shim
       File(absPath).writeAsBytesSync(bytes);
       return;
     }
@@ -94,6 +96,7 @@ class SecureProfileFile {
       ..add(nonce)
       ..add(enc.ciphertext)
       ..add(enc.authTag);
+    // arch-ignore: no-blocking-io-on-ui sync by contract: called from the WASI fd_write shim
     File(absPath).writeAsBytesSync(out.toBytes());
   }
 

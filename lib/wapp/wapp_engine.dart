@@ -27,9 +27,7 @@ import '../services/reticulum/rns_service.dart';
 import '../services/log_service.dart';
 import '../services/social/email_resolve_service.dart';
 import '../services/social/node_role_api.dart';
-import '../services/mesh/mesh_bulk_spool.dart';
 import '../services/mesh/mesh_service.dart';
-import '../services/mesh/mesh_store.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -248,6 +246,7 @@ class WappEngine {
     try {
       final enc = EncryptedProfileStorage.routeAbsolutePath(s.path);
       if (enc == null) {
+        // arch-ignore: no-blocking-io-on-ui WASI fd_write is a synchronous contract — a wasm import cannot await
         File(s.path).writeAsBytesSync(
           s.writeBuf,
           mode: s.mode == 2 ? FileMode.append : FileMode.write,
@@ -765,6 +764,7 @@ class WappEngine {
               : 'bin';
           final name = path.substring(slash + 1);
           final token = archive.putBytes(
+              // arch-ignore: no-blocking-io-on-ui WASI path_open ingest, synchronous by contract
               f.readAsBytesSync(),
               RegExp(r'^[a-z0-9]{1,18}$').hasMatch(ext) ? ext : 'bin',
               name: name);
@@ -2043,6 +2043,7 @@ class WappEngine {
           try {
             s.readBuf = enc != null
                 ? enc.storage.readBytesSync(enc.rel)
+                // arch-ignore: no-blocking-io-on-ui WASI fd_read is a synchronous contract — a wasm import cannot await
                 : File(path).readAsBytesSync();
             if (s.readBuf == null) return -1;
           } catch (_) {
@@ -3333,30 +3334,7 @@ class WappEngine {
       results: [ValueTy.i32],
     );
 
-    // How many messages to this destination are still undelivered — the count
-    // behind the "Waiting to deliver" strip. Ground truth, unlike presence
-    // guesses: a peer on the LAN or a hub acks in under a second, so a nonzero
-    // count after a send IS "no path to them", which is when a copy is worth
-    // handing to a passing carrier.
-    final halLxmfPending = WasmFunction(
-      (int hexPtr, int hexLen) {
-        if (hexLen <= 0) return 0;
-        return RnsService.instance.lxmfPendingFor(_readStr(hexPtr, hexLen));
-      },
-      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
-    );
 
-    // Do we hold a route to this destination RIGHT NOW? The one honest answer
-    // to "can I reach them directly", and the question store-and-forward turns
-    // on: a wapp that guesses from a node list cannot tell a live peer from a
-    // hub replaying its announce cache. Mirrors what sendLxmf itself checks.
-    final halRnsHasPath = WasmFunction(
-      (int hexPtr, int hexLen) {
-        if (hexLen <= 0) return 0;
-        return RnsService.instance.hasPathTo(_readStr(hexPtr, hexLen)) ? 1 : 0;
-      },
-      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
-    );
 
     // ── Mesh HAL (BLE street mesh, docs/mesh.md) ─────────────────────────────
     // ── hal.node: the Indexer role, as something a person grants and revokes ──
@@ -3451,16 +3429,8 @@ class WappEngine {
     final halMeshScfStatus = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
-        final c = MeshStore.instance.counts();
-        final bytes = utf8.encode(jsonEncode({
-          'inTransit': c.inTransit,
-          'archived': c.archived,
-          'bytes': c.bytes,
-          'receivedAms': c.receivedAms,
-          'quotaBytes': MeshStore.instance.quotaBytes,
-          'spoolPending': MeshBulkSpool.instance.pendingCount(),
-          'spoolQuotaBytes': MeshBulkSpool.instance.quotaBytes,
-        }));
+        final bytes =
+            utf8.encode(jsonEncode(MeshService.instance.storeStatus()));
         if (bytes.length > outCap) return -bytes.length;
         return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
       },
@@ -3470,7 +3440,7 @@ class WappEngine {
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
         final bytes =
-            utf8.encode(jsonEncode(MeshBulkSpool.instance.transfersJson()));
+            utf8.encode(jsonEncode(MeshService.instance.transfers()));
         if (bytes.length > outCap) return -bytes.length;
         return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
       },
@@ -3486,15 +3456,7 @@ class WappEngine {
         final key = kv.substring(0, eq);
         final v = int.tryParse(kv.substring(eq + 1)) ?? -1;
         if (v < 0) return -1;
-        switch (key) {
-          case 'msgQuotaMb':
-            MeshStore.instance.quotaBytes = v * 1024 * 1024;
-          case 'bulkQuotaMb':
-            MeshBulkSpool.instance.quotaBytes = v * 1024 * 1024;
-          default:
-            return -1;
-        }
-        return 0;
+        return MeshService.instance.setQuotaPref(key, v) ? 0 : -1;
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
@@ -3790,8 +3752,6 @@ class WappEngine {
       WasmImport('hal', 'mesh_set_pref', halMeshSetPref),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),
-      WasmImport('hal', 'rns_has_path', halRnsHasPath),
-      WasmImport('hal', 'lxmf_pending', halLxmfPending),
       // Contacts (reusable people picker source)
       WasmImport('hal', 'contacts_query', halContactsQuery),
       WasmImport('hal', 'people_search', halPeopleSearch),

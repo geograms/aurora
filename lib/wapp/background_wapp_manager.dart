@@ -41,7 +41,7 @@ import '../services/hero/hero_inbox.dart';
 import '../services/preferences_service.dart';
 import 'android_foreground_service.dart';
 import 'wapp_engine.dart';
-import '../services/mesh/mesh_custody.dart';
+import '../services/mesh/mesh_service.dart';
 
 class BackgroundWappManager {
   BackgroundWappManager._();
@@ -448,7 +448,7 @@ class _WappBackgroundService extends BackgroundService {
             store.addMessage(data);
             // Bulk-lane tap: outgoing 1:1 with a hosted file: token queues
             // the payload for mesh delivery (see MeshCustodyDelegate).
-            MeshCustodyDelegate.onConvoOutMessage(data);
+            MeshService.instance.noteConvoOutMessage(data);
           case 'ui.convo.remove':
             store.remove(data);
           case 'ui.convo.react':

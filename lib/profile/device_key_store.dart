@@ -59,7 +59,7 @@ class DeviceKeyStore {
       return _secure.read(key: _devicePasswordKey(profileId));
     }
     final f = File(_devicePasswordFile(profileId));
-    return f.existsSync() ? f.readAsStringSync() : null;
+    return await f.exists() ? await f.readAsString() : null;
   }
 
   /// Mint (or return the existing) random device password for [profileId].
@@ -71,6 +71,7 @@ class DeviceKeyStore {
       await _secure.write(key: _devicePasswordKey(profileId), value: secret);
     } else {
       File(_devicePasswordFile(profileId))
+          // arch-ignore: no-blocking-io-on-ui ~100 bytes, flushed: losing it locks the user out of their own profile
           .writeAsStringSync(secret, flush: true);
     }
     return secret;
@@ -95,9 +96,7 @@ class DeviceKeyStore {
     try {
       final raw = _useKeychain
           ? await _secure.read(key: _cacheKey(profileId))
-          : (File(_cacheFile(profileId)).existsSync()
-              ? File(_cacheFile(profileId)).readAsStringSync()
-              : null);
+          : await _readCacheFile(profileId);
       if (raw == null || raw.isEmpty) return null;
       return UnlockedProfileKeys.fromCacheJson(
           jsonDecode(raw) as Map<String, dynamic>);
@@ -112,6 +111,7 @@ class DeviceKeyStore {
     if (_useKeychain) {
       await _secure.write(key: _cacheKey(profileId), value: raw);
     } else {
+      // arch-ignore: no-blocking-io-on-ui small key cache, flushed at unlock: a partial write is an unopenable profile
       File(_cacheFile(profileId)).writeAsStringSync(raw, flush: true);
     }
   }
@@ -144,5 +144,18 @@ class DeviceKeyStore {
       final f = File(path);
       if (f.existsSync()) f.deleteSync();
     } catch (_) {}
+  }
+
+  /// The on-disk fallback for platforms without a keychain. Async: this runs on
+  /// the UI isolate during unlock, and a blocked isolate is a dropped frame
+  /// (docs/architecture.md §2).
+  Future<String?> _readCacheFile(String profileId) async {
+    final f = File(_cacheFile(profileId));
+    if (!await f.exists()) return null;
+    try {
+      return await f.readAsString();
+    } catch (_) {
+      return null;
+    }
   }
 }

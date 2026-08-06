@@ -94,7 +94,7 @@ import 'functionality_registry.dart';
 import 'wapp_graph_scene.dart';
 import 'wapp_icons.dart';
 import 'wapp_engine.dart';
-import '../services/mesh/mesh_custody.dart';
+import '../services/mesh/mesh_service.dart';
 
 part '../editor/wapp_editor.dart';
 part '../editor/wapp_robot.dart';
@@ -2072,7 +2072,7 @@ class _WappPageState extends State<WappPage>
           // Bulk-lane tap: outgoing 1:1 with a hosted file: token queues the
           // payload for mesh delivery (encrypted wires hide the token, the
           // bubble text doesn't).
-          MeshCustodyDelegate.onConvoOutMessage(data);
+          MeshService.instance.noteConvoOutMessage(data);
           changed = true;
         } else if (type == 'ui.convo.remove') {
           final field = data['field'] as String? ?? 'conversations';

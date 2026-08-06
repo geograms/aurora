@@ -188,7 +188,8 @@ class FilesystemProfileStorage extends ProfileStorage {
     final f = File(_resolve(relativePath));
     if (!f.existsSync()) return null;
     try {
-      return f.readAsBytesSync();
+      // arch-ignore: no-blocking-io-on-ui the *Sync API exists for the WASI fd_* shims, which cannot await
+    return f.readAsBytesSync();
     } catch (_) {
       return null;
     }
@@ -198,6 +199,7 @@ class FilesystemProfileStorage extends ProfileStorage {
   void writeStringSync(String relativePath, String content) {
     final f = File(_resolve(relativePath));
     f.parent.createSync(recursive: true);
+    // arch-ignore: no-blocking-io-on-ui the *Sync API exists for the WASI fd_* shims, which cannot await
     f.writeAsStringSync(content);
   }
 
@@ -205,6 +207,7 @@ class FilesystemProfileStorage extends ProfileStorage {
   void writeBytesSync(String relativePath, Uint8List bytes) {
     final f = File(_resolve(relativePath));
     f.parent.createSync(recursive: true);
+    // arch-ignore: no-blocking-io-on-ui the *Sync API exists for the WASI fd_* shims, which cannot await
     f.writeAsBytesSync(bytes);
   }
 

@@ -116,6 +116,7 @@ class ProfileEncryption {
 
     File(_keyslotPath(id))
       ..parent.createSync(recursive: true)
+      // arch-ignore: no-blocking-io-on-ui the keyslot must be on disk before the profile is announced as created
       ..writeAsStringSync(jsonEncode(secrets.keyslot.toJson()), flush: true);
 
     ProfileKeyring.instance.putKeys(id, secrets.keys);
@@ -257,7 +258,7 @@ class ProfileEncryption {
     final changed = await ProfileCrypto.changePassword(
         oldPassword, newPassword, envelope, keyslot);
 
-    File(_keyslotPath(id)).writeAsStringSync(
+    await File(_keyslotPath(id)).writeAsString(
         jsonEncode(changed.keyslot.toJson()),
         flush: true);
     await service.update(profile.copyWith(
@@ -315,6 +316,7 @@ class ProfileEncryption {
       throw const ProfileKeyslotCorrupt('keyslot.json missing');
     }
     return ProfileKeyslot.fromJson(
+        // arch-ignore: no-blocking-io-on-ui small keyslot JSON, read on the unlock path before the first frame
         jsonDecode(f.readAsStringSync()) as Map<String, dynamic>);
   }
 

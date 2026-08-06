@@ -1,26 +1,4 @@
 # Architecture-guard baseline — violations that predate the guard.
 # NEW violations fail the build; these do not. Shrink this file.
 # Regenerate deliberately: dart tool/arch_guard.dart --baseline
-lib/profile/device_key_store.dart :: no-blocking-io-on-ui :: .writeAsStringSync(secret, flush: true);
-lib/profile/device_key_store.dart :: no-blocking-io-on-ui :: ? File(_cacheFile(profileId)).readAsStringSync()
-lib/profile/device_key_store.dart :: no-blocking-io-on-ui :: File(_cacheFile(profileId)).writeAsStringSync(raw, flush: true);
-lib/profile/device_key_store.dart :: no-blocking-io-on-ui :: return f.existsSync() ? f.readAsStringSync() : null;
-lib/profile/profile_encryption.dart :: no-blocking-io-on-ui :: ..writeAsStringSync(jsonEncode(secrets.keyslot.toJson()), flush: true);
-lib/profile/profile_encryption.dart :: no-blocking-io-on-ui :: File(_keyslotPath(id)).writeAsStringSync(
-lib/profile/profile_encryption.dart :: no-blocking-io-on-ui :: jsonDecode(f.readAsStringSync()) as Map<String, dynamic>);
-lib/profile/profile_storage_io.dart :: no-blocking-io-on-ui :: f.writeAsBytesSync(bytes);
-lib/profile/profile_storage_io.dart :: no-blocking-io-on-ui :: f.writeAsStringSync(content);
-lib/profile/profile_storage_io.dart :: no-blocking-io-on-ui :: return f.readAsBytesSync();
-lib/profile/secure_file.dart :: no-blocking-io-on-ui :: File(absPath).writeAsBytesSync(bytes);
-lib/profile/secure_file.dart :: no-blocking-io-on-ui :: File(absPath).writeAsBytesSync(out.toBytes());
-lib/profile/secure_file.dart :: no-blocking-io-on-ui :: final raw = f.readAsBytesSync();
-lib/services/deep_link_service.dart :: no-app-logic-in-core :: if (id == 'tools.geogram.circles' ||
-lib/wapp/background_wapp_manager.dart :: no-transport-in-wapp-layer :: import '../services/mesh/mesh_custody.dart';
-lib/wapp/functionality_registry.dart :: hal-budget :: EndpointDef('hal_lxmf_pending',
-lib/wapp/functionality_registry.dart :: hal-budget :: EndpointDef('hal_relay_reachable',
-lib/wapp/functionality_registry.dart :: hal-budget :: EndpointDef('hal_rns_has_path',
-lib/wapp/wapp_engine.dart :: no-blocking-io-on-ui :: : File(path).readAsBytesSync();
-lib/wapp/wapp_engine.dart :: no-blocking-io-on-ui :: File(s.path).writeAsBytesSync(
-lib/wapp/wapp_engine.dart :: no-blocking-io-on-ui :: f.readAsBytesSync(),
-lib/wapp/wapp_engine.dart :: no-transport-in-wapp-layer :: import '../services/mesh/mesh_store.dart';
-lib/wapp/wapp_page.dart :: no-transport-in-wapp-layer :: import '../services/mesh/mesh_custody.dart';
+

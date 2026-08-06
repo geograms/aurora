@@ -69,12 +69,10 @@ class DeepLinkService {
       );
       return;
     }
-    if (!lower.contains('/circle/') && !lower.startsWith('geogram://circle')) {
-      return;
-    }
-    final dir = await _circlesWappDir();
-    if (dir == null) {
-      LogService.instance.add('DeepLink: circles wapp not installed');
+    final target = await _wappForLink(url);
+    if (target == null) {
+      LogService.instance
+          .add('DeepLink: no installed wapp claims $url');
       return;
     }
     final nav = rootNavigatorKey.currentState;
@@ -85,8 +83,8 @@ class DeepLinkService {
     final cmd = jsonEncodeCommand(url);
     await nav.push(MaterialPageRoute(
       builder: (_) => WappPage(
-        wappDir: dir,
-        title: 'Circles',
+        wappDir: target.dir,
+        title: target.title,
         initialCommand: cmd,
       ),
     ));
@@ -123,8 +121,18 @@ class DeepLinkService {
     return b.toString();
   }
 
-  /// Locate the installed circles wapp package directory, or null.
-  Future<String?> _circlesWappDir() async {
+  /// The installed wapp that claims this link, or null.
+  ///
+  /// A wapp declares what it opens in its own manifest, the same way it
+  /// declares file handlers and view intents:
+  ///
+  ///     "provides": { "links": ["/circle/", "geogram://circle"] }
+  ///
+  /// The core matches and routes; it does not know that circles exist. Naming
+  /// a wapp here would put one application's routing table inside the core,
+  /// and the next feature would add a second (docs/architecture.md §3).
+  Future<_LinkTarget?> _wappForLink(String url) async {
+    final lower = url.toLowerCase();
     final installed = installedAppsStorage();
     if (!await installed.directoryExists('')) return null;
     for (final e in await installed.listDirectory('')) {
@@ -133,15 +141,57 @@ class DeepLinkService {
         final pkg = wappPackageStorage(installed.getAbsolutePath(e.path));
         final m = await pkg.readJson('manifest.json');
         if (m == null) continue;
-        final id = (m['id'] ?? '').toString();
-        final name = (m['name'] ?? '').toString();
-        if (id == 'tools.geogram.circles' ||
-            name == 'circles' ||
-            e.name == 'circles') {
-          return pkg.basePath;
+        final provides = m['provides'];
+        final links = (provides is Map) ? provides['links'] : null;
+        if (links is! List) continue;
+        for (final raw in links) {
+          final pat = raw.toString().trim().toLowerCase();
+          if (pat.isEmpty || !lower.contains(pat)) continue;
+          final title = (m['title'] ?? m['name'] ?? e.name).toString();
+          return _LinkTarget(pkg.basePath, title);
         }
+      } catch (_) {}
+    }
+    // Fallback for wapps installed before they declared `provides.links`:
+    // match the link's own subject word against the wapp's identity —
+    // "geogram://circle/…" -> a wapp called circles. Derived from the URL, so
+    // the core still names no application (docs/architecture.md §3). Drops out
+    // once installed copies carry the declaration.
+    final subject = _linkSubject(lower);
+    if (subject.isEmpty) return null;
+    for (final e in await installed.listDirectory('')) {
+      if (!e.isDirectory) continue;
+      try {
+        final pkg = wappPackageStorage(installed.getAbsolutePath(e.path));
+        final m = await pkg.readJson('manifest.json');
+        if (m == null) continue;
+        final hay = '${m['id'] ?? ''} ${m['name'] ?? ''} ${m['title'] ?? ''} '
+                '${e.name}'
+            .toLowerCase();
+        if (!hay.contains(subject)) continue;
+        final title = (m['title'] ?? m['name'] ?? e.name).toString();
+        return _LinkTarget(pkg.basePath, title);
       } catch (_) {}
     }
     return null;
   }
+}
+
+/// The word a geogram link is about: the first path segment after the scheme
+/// or host ("geogram://circle/ab12" and "https://x.y/circle/ab12" -> "circle").
+String _linkSubject(String lowerUrl) {
+  final u = Uri.tryParse(lowerUrl);
+  if (u == null) return '';
+  final segs = [
+    if (u.host.isNotEmpty && u.scheme == 'geogram') u.host,
+    ...u.pathSegments,
+  ].where((s) => s.isNotEmpty).toList();
+  return segs.isEmpty ? '' : segs.first;
+}
+
+/// An installed wapp that claims a link, and the title to show while it opens.
+class _LinkTarget {
+  const _LinkTarget(this.dir, this.title);
+  final String dir;
+  final String title;
 }

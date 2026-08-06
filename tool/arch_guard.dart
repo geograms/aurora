@@ -98,10 +98,14 @@ const rules = <Rule>[
         'needs one to make a TRANSPORT decision, the logic is on the wrong '
         'side of the line — that is exactly how hal_lxmf_pending was born.',
     appliesTo: ['lib/wapp/functionality_registry.dart'],
-    // Endpoints whose names describe a transport decision rather than a
-    // capability the core performs on the wapp's behalf.
-    pattern: r"EndpointDef\('hal_\w*(reach|path|pending|custody|forward|"
-        r"carrier|relay_decide)\w*'",
+    // The distinction is DECIDING vs LOOKING UP. "Is there a path", "how many
+    // are pending", "should this be carried" are the core's calls to make.
+    // Naming things — who is reachable, which relays exist, where an address
+    // points — is a directory lookup, and a wapp is allowed to ask: hal_relay_
+    // reachable was reviewed under this rule and kept, because the chat wapp
+    // uses it to TELL peers where its DM backups live, not to steer delivery.
+    pattern: r"EndpointDef\('hal_\w*(has_path|_pending|_custody|_forward|"
+        r"should_send|carrier|relay_decide)\w*'",
     message: 'Read-only diagnostics are fine but must be documented as such; '
         'a wapp must not steer delivery.',
   ),

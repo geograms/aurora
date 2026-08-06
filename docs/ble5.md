@@ -71,10 +71,30 @@ payload.length <= maxPayload   → BLE5 extended advert (connectionless)
 payload.length >  maxPayload   → GATT (auto-paired transient link)
 ```
 
-`maxPayload` is what **this controller** actually accepts, asked at runtime —
-not a spec number. Real values seen: **184 B** on the test tablet, ~296 B on
-other hardware, against a spec-side `Ble5Bus.maxFrame = 450`. Legacy (non-BLE5)
-devices fall back to chunked broadcast parcels capped at `kBleBcastMax = 300`.
+### These are controller ceilings, not BLE5 limits
+
+Worth being precise, because the numbers look small for BLE5 and invite the
+wrong conclusion:
+
+- **BLE5 extended advertising allows up to 1650 B** of advertising data, spread
+  over chained AUX PDUs. That is the protocol.
+- **A controller decides how much of that it will actually do**, and Android
+  reports the truth: `BluetoothAdapter.leMaximumAdvertisingDataLength`.
+  `Ble5.kt` asks it and returns `that - 8` (our envelope) as `maxPayload`.
+- Measured on the two test devices, both genuinely on BLE5 (`setLegacyMode(false)`,
+  non-connectable, non-scannable extended sets, `ble5: true`, zero advert
+  refusals): **TANK2 → 296 B usable (304 reported)**, **the test tablet → 184 B
+  usable (192 reported)**. Cheap chipsets report small ceilings; capable ones
+  report 1650. Nothing here is legacy 31-byte advertising — that path only
+  exists as `kBleBcastMax = 300` chunked broadcast parcels for devices without
+  extended advertising at all, plus the separate *legacy connectable presence
+  beacon* used for GATT discovery.
+- `Ble5Bus.maxFrame = 450` is **ours**, not the spec's, and it would bind first
+  on a phone that reports 1650. Nothing in the fleet does today; raise it when
+  something does.
+
+So a small `maxPayload` means "this radio is modest", never "we are on old
+BLE".
 
 Two consequences that have each cost a debugging session:
 
@@ -87,17 +107,21 @@ Two consequences that have each cost a debugging session:
 
 ### Budgets, end to end
 
-| Limit | Value | Set by |
-|---|---|---|
-| This controller's advert payload | ~184–296 B | runtime `Ble5Bus.maxPayload` |
-| Legacy broadcast parcel | 300 B | `kBleBcastMax` |
-| What a phone will park for custody | 480 B | `MeshStore.maxWire` |
-| **What the ESP32 dongle will park** | **252 B** | `BLEMESH_SCF_FRAME_MAX` |
-| What the courier will air | **240 B** | `MeshCourier.maxWire` |
+| Limit | Value | Set by | Kind of limit |
+|---|---|---|---|
+| BLE5 extended advertising data | 1650 B | the spec | protocol |
+| This controller's advert payload | 184 B / 296 B measured | runtime `leMaximumAdvertisingDataLength - 8` | hardware |
+| Our own frame ceiling | 450 B | `Ble5Bus.maxFrame` | ours, arbitrary |
+| Chunked parcel (no extended advertising) | 300 B | `kBleBcastMax` | fallback path |
+| What a phone will park for custody | 480 B | `MeshStore.maxWire` | ours |
+| **What the ESP32 dongle will park** | **252 B** | `BLEMESH_SCF_FRAME_MAX` | one un-chained AUX PDU |
+| What the courier will air | **240 B** | `MeshCourier.maxWire` | mesh interop |
 
-The courier's 240 is the binding one, and it is deliberately under the dongle's
-252: a frame the phones accept but the dongle drops is exactly the mule you
-were counting on refusing the job.
+The courier's 240 is the binding one **for carried mail**, and it is a mesh
+interop number, not a radio one: it sits under the dongle's 252 because a frame
+the phones accept but the dongle drops is exactly the mule you were counting on
+refusing the job. Direct phone-to-phone broadcast is free to use the whole
+`maxPayload`.
 
 ## 4. Receiving
 

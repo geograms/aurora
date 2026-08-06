@@ -432,4 +432,49 @@ class MeshService {
       ...MeshCustodyCounters.toJson(),
     });
   }
+
+  // ── facade for the wapp layer ─────────────────────────────────────────────
+  // lib/wapp must not reach into the mesh internals (docs/architecture.md §1):
+  // that is how store-and-forward ended up inside a wapp. Everything the wapp
+  // layer legitimately needs goes through these three, and the guard
+  // (no-transport-in-wapp-layer) keeps it that way.
+
+  /// Parked-mail counts, live transfers and quotas — what the mesh status HAL
+  /// endpoint reports.
+  Map<String, dynamic> storeStatus() {
+    final c = MeshStore.instance.counts();
+    return {
+      'inTransit': c.inTransit,
+      'archived': c.archived,
+      'bytes': c.bytes,
+      'receivedAms': c.receivedAms,
+      'quotaBytes': MeshStore.instance.quotaBytes,
+      'spoolPending': MeshBulkSpool.instance.pendingCount(),
+      'spoolQuotaBytes': MeshBulkSpool.instance.quotaBytes,
+    };
+  }
+
+  /// Bulk-lane transfers in flight.
+  List<Map<String, dynamic>> transfers() =>
+      MeshBulkSpool.instance.transfersJson();
+
+  /// How much disk this device offers: `msgQuotaMb` for other people's mail,
+  /// `bulkQuotaMb` for the file lane. Returns false on an unknown key.
+  bool setQuotaPref(String key, int mb) {
+    if (mb < 0) return false;
+    switch (key) {
+      case 'msgQuotaMb':
+        MeshStore.instance.quotaBytes = mb * 1024 * 1024;
+      case 'bulkQuotaMb':
+        MeshBulkSpool.instance.quotaBytes = mb * 1024 * 1024;
+      default:
+        return false;
+    }
+    return true;
+  }
+
+  /// A wapp echoed an outgoing 1:1 bubble. The core decides what that means for
+  /// delivery (today: queue any attachment it references on the bulk lane).
+  void noteConvoOutMessage(Map<String, dynamic> data) =>
+      MeshCustodyDelegate.onConvoOutMessage(data);
 }

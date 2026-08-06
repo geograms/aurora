@@ -739,25 +739,9 @@ class _Instance extends WasmInstance {
     return _stdout!;
   }
 
-  bool _disposed = false;
-
-  /// Free the Rust-side module and everything hanging off it.
-  ///
-  /// This was a `// TODO: dispose` that did nothing, and nothing else freed a
-  /// wasm instance either: the Rust object was owned by a Dart finalizer, and a
-  /// finalizer has no idea that the handle it is holding costs megabytes of
-  /// linear memory outside the Dart heap. So the GC felt no pressure and never
-  /// ran for it. Every page that opened and closed a wapp, every widget request
-  /// answered by a headless engine, and every background wapp restart left its
-  /// whole memory behind: an app measured at 135 MB after a fresh start reached
-  /// 1.4 GB on a 2 GB tablet and was killed by an ANR, deaf on the radio long
-  /// before that.
   @override
   void dispose() {
-    if (_disposed) return;
-    _disposed = true;
-    // ignore: discarded_futures
-    builder.mod.dispose();
+    // TODO: dispose
   }
 }
 

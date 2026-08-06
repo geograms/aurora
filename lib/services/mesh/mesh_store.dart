@@ -164,29 +164,6 @@ class MeshStore {
   }
 
   /// Custody handed to a peer (MSG_ACK / duplicate) — archive our copy.
-  /// Take an archived row back into transit.
-  ///
-  /// A row we handed to somebody else is archived, not deleted — it is the
-  /// receipt that we no longer owe delivery. But a peer may hand the same
-  /// message BACK to us (its own route pointed at us), and answering "duplicate"
-  /// then made the other side archive its copy too: two archived rows, nobody
-  /// carrying it, and the message quietly gone. Re-arming is the honest answer:
-  /// we accepted custody again, so we owe delivery again.
-  ///
-  /// Returns false when there is no such row, or when it is still in transit
-  /// (we already owe it — that IS a duplicate).
-  bool reArm(String key) {
-    final db = _db;
-    if (db == null) return false;
-    final rows =
-        db.select('SELECT state FROM mesh_store WHERE am = ?', [key]);
-    if (rows.isEmpty) return false;
-    if ((rows.first['state'] as int? ?? 0) == 0) return false;
-    db.execute('UPDATE mesh_store SET state = 0, ts = ? WHERE am = ?',
-        [_now(), key]);
-    return true;
-  }
-
   void markArchived(String key) {
     _db?.execute('UPDATE mesh_store SET state = 1 WHERE am = ?', [key]);
   }
@@ -210,18 +187,10 @@ class MeshStore {
       final target = r['target'] as String;
       var give = target == p;
       if (!give && table != null) {
-        // DIRECT BEATS RELAYED. A neighbour we can hear is the shortest path
-        // there is, and handing its mail to somebody else instead is how a
-        // message went round in a circle: the relay's own route pointed back at
-        // us, our store already held the row, the offer came back "duplicate",
-        // and both copies ended up archived with nobody owing delivery. Only
-        // route through a third party when the target itself is out of reach.
-        final targetIsNeighbour = table.neighbors.keys
-            .any((n) => n.toUpperCase() == target.toUpperCase());
         final hex = meshHashHex(meshHash(target));
         final route = table.routes[hex];
         if (route != null) {
-          give = !targetIsNeighbour && route.viaCallsign.toUpperCase() == p;
+          give = route.viaCallsign.toUpperCase() == p;
         } else if (self.isNotEmpty &&
             (r['sender'] as String) == self &&
             !table.neighbors.keys

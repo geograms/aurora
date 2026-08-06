@@ -29,11 +29,6 @@ import 'mesh_transfer_scheduler.dart';
 /// Hooks BleService injects so custody can talk back to the transport layer
 /// without a circular import.
 class MeshTransportHooks {
-  /// The peer on the CURRENT link named itself in its HELLO. The transport uses
-  /// it to correct its dial registry — an address learned from a re-aired
-  /// beacon belongs to the relayer, not to the callsign inside the beacon.
-  void Function(String callsign)? peerIdentified;
-
   /// Send one MSP frame on the client link (our GATT client → peer FFF1).
   Future<void> Function(Uint8List data)? clientSend;
 
@@ -117,12 +112,7 @@ class MeshSessionManager {
   /// Feed an inbound MSP frame. Returns true when consumed (caller must not
   /// pass it to the legacy parcel queue).
   bool onFrame(Uint8List data, {required bool serverSide}) {
-    // Two magic bytes are not proof. A parcel chunk starts with a msgId that is
-    // effectively random, so roughly one chunk in 65536 opens with 4D 01 — and
-    // swallowing it here made a file transfer corrupt for no visible reason.
-    // Consume only what actually decodes as MSP; anything else belongs to the
-    // parcel queue.
-    if (!mspIsFrame(data) || mspDecode(data) == null) return false;
+    if (!mspIsFrame(data)) return false;
     var s = serverSide ? _served : _client;
     // A peer can start speaking MSP before our connect callback ran (server
     // side sees data first on some stacks) — bring the session up lazily.
@@ -181,26 +171,6 @@ class MeshSessionManager {
 
 /// The delegate: SCF store + mesh table behind the session FSM. Bulk is
 /// stubbed until Stage 2 (offers are rejected as busy).
-/// Monotonic custody counters, exposed in the mesh status so relaying can be
-/// asserted as a number instead of grepped out of a 200-line rolling log.
-class MeshCustodyCounters {
-  static int custodyIn = 0; // frames we took custody of from a peer
-  static int custodyOut = 0; // frames we handed on and archived
-  static int delivered = 0; // frames that ended at us, the target
-  static int purged = 0; // parked copies dropped by a receipt/bloom
-  static int sessionsClean = 0;
-  static int sessionsAbrupt = 0;
-
-  static Map<String, int> toJson() => {
-        'custodyIn': custodyIn,
-        'custodyOut': custodyOut,
-        'delivered': delivered,
-        'purged': purged,
-        'sessionsClean': sessionsClean,
-        'sessionsAbrupt': sessionsAbrupt,
-      };
-}
-
 class MeshCustodyDelegate implements MeshSessionDelegate {
   MeshCustodyDelegate._();
   static final MeshCustodyDelegate instance = MeshCustodyDelegate._();
@@ -215,7 +185,6 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
   @override
   void custodyTransferred(String peer, MeshPendingMsg m) {
     MeshStore.instance.markArchived(m.key);
-    MeshCustodyCounters.custodyOut++;
     _log('custody of ${m.key} -> $peer (archived)');
   }
 
@@ -234,7 +203,6 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     if (to.toUpperCase() == self.toUpperCase()) {
       if (m.am.isNotEmpty && store.wasReceived(m.am)) return MspMsgRej.duplicate;
       store.recordReceivedAm(key);
-      MeshCustodyCounters.delivered++;
       _log('custody delivery from $peer: $from -> $to');
       MeshSessionManager.instance.hooks.deliverLocal?.call(m.wire);
       return 0;
@@ -243,28 +211,9 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     // Not for us: take custody (we owe delivery / next hop).
     final stored = store.offer(
         target: to, sender: from, wire: m.wire, am: m.am, inTransit: true);
-    if (stored) {
-      MeshCustodyCounters.custodyIn++;
-      _log('took custody of $key for $to (via $peer)');
-      return 0;
-    }
-    // The store refused it. If that is because WE handed this very message on
-    // earlier and archived our copy, then accepting it back is the only answer
-    // that keeps somebody responsible for it: rejecting made the peer archive
-    // its copy too, and the message belonged to nobody. A row still in transit
-    // is a genuine duplicate — we already owe delivery.
-    if (store.reArm(key)) {
-      MeshCustodyCounters.custodyIn++;
-      _log('took custody of $key for $to again (via $peer)');
-      return 0;
-    }
-    return MspMsgRej.duplicate;
-  }
-
-  @override
-  void peerIdentified(String callsign, {required bool dialer}) {
-    if (callsign.isEmpty) return;
-    MeshSessionManager.instance.hooks.peerIdentified?.call(callsign);
+    if (!stored) return MspMsgRej.duplicate;
+    _log('took custody of $key for $to (via $peer)');
+    return 0;
   }
 
   @override
@@ -300,10 +249,7 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     }
     if (g.bloom.isNotEmpty) {
       final purged = MeshStore.instance.applyPeerBloom(peer, g.bloom);
-      if (purged > 0) {
-        MeshCustodyCounters.purged += purged;
-        _log('peer bloom purged $purged parked msg(s)');
-      }
+      if (purged > 0) _log('peer bloom purged $purged parked msg(s)');
     }
   }
 
@@ -347,11 +293,6 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
 
   @override
   void sessionClosed(String peer, {required bool clean}) {
-    if (clean) {
-      MeshCustodyCounters.sessionsClean++;
-    } else {
-      MeshCustodyCounters.sessionsAbrupt++;
-    }
     _log('session with ${peer.isEmpty ? "(pre-hello)" : peer} closed '
         '${clean ? "cleanly" : "abruptly"}');
     // Reap AFTER the close finishes (close() fires this callback mid-teardown).
@@ -373,12 +314,8 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     // Overheard end-to-end receipt: `?ACK <am> d|r` — the target has it.
     if (text.startsWith('?ACK ')) {
       final am = text.length >= 11 ? text.substring(5, 11) : '';
-      if (am.length == 6) {
-        final n = store.purgeAm(am);
-        if (n > 0) {
-          MeshCustodyCounters.purged += n;
-          LogService.instance.add('Mesh: ?ACK $am purged parked copy');
-        }
+      if (am.length == 6 && store.purgeAm(am) > 0) {
+        LogService.instance.add('Mesh: ?ACK $am purged parked copy');
       }
       return;
     }

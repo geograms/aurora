@@ -91,17 +91,6 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
   int get broadcastCap => Ble5Bus.instance.maxPayload;
 
   /// A native GATT link, in either role, is up right now.
-  ///
-  /// RNS shares the link with a custody session rather than yielding it. The
-  /// abrupt closes that first suggested yielding were not contention at all —
-  /// the 25 s idle drop was cutting the sessions, and a finished session never
-  /// said goodbye. Both are fixed, and sessions now close cleanly. Yielding on
-  /// top of that cost real messages: with a dongle inviting a session every few
-  /// seconds, RNS spent most of its time back on the advert plane, which is
-  /// fire-and-forget — delivery measured 4 of 10, against 10 of 10 before.
-  ///
-  /// If a bulk transfer ever needs the link to itself, gate THAT narrowly; an
-  /// empty gossip session is no reason to drop a message on the floor.
   @override
   bool get hasLink => BleService.instance.gattLinkUp;
 
@@ -214,7 +203,7 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
     // sendOverGatt, NOT enqueueAdvert: the size router airs its payload as an
     // APRS-subtype advert, and the peer's RNS handler only reads the rns
     // subtype — so every RNS packet sent that way was heard by nobody.
-    if (hasLink) {
+    if (BleService.instance.gattLinkUp) {
       BleService.instance.sendOverGatt(frame);
       _sent++;
       return true;

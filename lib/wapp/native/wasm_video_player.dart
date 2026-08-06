@@ -207,7 +207,7 @@ class WasmVideoThumbnailer {
     var fw = 0, fh = 0;
     var bestScore = -1.0;
     var ended = false;
-    final engine = WappEngine(freeOnDispose: true)
+    final engine = WappEngine()
       ..onVideoFrame = (bytes, w, h, fmt, pts) {
         if (fmt != 0 || w <= 0 || h <= 0 || bytes.length < w * h * 4) return;
         final s = _frameScore(bytes, w, h);
@@ -420,7 +420,7 @@ class _WasmVideoPlayerState extends State<WasmVideoPlayer> {
       // session falls back to its own Stopwatch (video-only).
       session.masterClock = () =>
           audioOut.active ? audioOut.playedPosition : null;
-      final engine = WappEngine(freeOnDispose: true)
+      final engine = WappEngine()
         ..onVideoConfig = ((w, h, fmt) {
           _sawSignal = true;
           session.configure(w, h, fmt);

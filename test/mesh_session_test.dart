@@ -187,6 +187,13 @@ void main() {
       expect(net.b.peerCallsign, 'AAA');
       expect(net.da.gossipsSeen, 1);
       expect(net.db.gossipsSeen, 1);
+      // The HELLO is the only trustworthy statement of who is on this link: a
+      // beacon can arrive re-aired by a neighbour, filing the originator's
+      // callsign against the RELAYER's address, after which every dial for that
+      // callsign lands on the wrong device. The transport corrects its registry
+      // from this.
+      expect(net.da.identified, ['BBB']);
+      expect(net.db.identified, ['AAA']);
     });
 
     test('message custody transfers and archives', () async {
@@ -304,6 +311,11 @@ class _Delegate implements MeshSessionDelegate {
   final List<MspMsg> msgsReceived = [];
   int msgResult = 0;
   int gossipsSeen = 0;
+  final List<String> identified = [];
+
+  @override
+  void peerIdentified(String callsign, {required bool dialer}) =>
+      identified.add(callsign);
 
   // bulk tx side
   Uint8List? bulkData;

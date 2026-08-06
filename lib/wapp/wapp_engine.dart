@@ -3333,6 +3333,31 @@ class WappEngine {
       results: [ValueTy.i32],
     );
 
+    // How many messages to this destination are still undelivered — the count
+    // behind the "Waiting to deliver" strip. Ground truth, unlike presence
+    // guesses: a peer on the LAN or a hub acks in under a second, so a nonzero
+    // count after a send IS "no path to them", which is when a copy is worth
+    // handing to a passing carrier.
+    final halLxmfPending = WasmFunction(
+      (int hexPtr, int hexLen) {
+        if (hexLen <= 0) return 0;
+        return RnsService.instance.lxmfPendingFor(_readStr(hexPtr, hexLen));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+
+    // Do we hold a route to this destination RIGHT NOW? The one honest answer
+    // to "can I reach them directly", and the question store-and-forward turns
+    // on: a wapp that guesses from a node list cannot tell a live peer from a
+    // hub replaying its announce cache. Mirrors what sendLxmf itself checks.
+    final halRnsHasPath = WasmFunction(
+      (int hexPtr, int hexLen) {
+        if (hexLen <= 0) return 0;
+        return RnsService.instance.hasPathTo(_readStr(hexPtr, hexLen)) ? 1 : 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+
     // ── Mesh HAL (BLE street mesh, docs/mesh.md) ─────────────────────────────
     // ── hal.node: the Indexer role, as something a person grants and revokes ──
     final halNodeStatus = WasmFunction(
@@ -3765,6 +3790,8 @@ class WappEngine {
       WasmImport('hal', 'mesh_set_pref', halMeshSetPref),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),
+      WasmImport('hal', 'rns_has_path', halRnsHasPath),
+      WasmImport('hal', 'lxmf_pending', halLxmfPending),
       // Contacts (reusable people picker source)
       WasmImport('hal', 'contacts_query', halContactsQuery),
       WasmImport('hal', 'people_search', halPeopleSearch),

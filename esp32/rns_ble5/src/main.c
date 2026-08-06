@@ -1203,6 +1203,23 @@ static void console_handle(char *line)
         }
         return;
     }
+    if (strcmp(line, "scf") == 0) {
+        int n = blemesh_scf_count();
+        printf("scf %d/%d\n", n, BLEMESH_SCF_MAX);
+        for (int i = 0; i < n; i++) {
+            const char *tg = "", *am = "";
+            int ln = 0; uint32_t age = 0;
+            if (blemesh_scf_at(i, &tg, &am, &ln, &age, now_sec()))
+                printf("  [%d] for=%-9s am=%-6s %dB age=%us\n", i, tg,
+                       am[0] ? am : "-", ln, (unsigned)age);
+        }
+        return;
+    }
+    if (strcmp(line, "scfclear") == 0) {
+        blemesh_scf_clear();
+        printf("scf cleared\n");
+        return;
+    }
     if (strcmp(line, "beacon") == 0) { mesh_beacon_air(); printf("beacon aired\n"); return; }
     if (strncmp(line, "ack ", 4) == 0) {
         printf("purged %d\n", blemesh_scf_ack(line + 4));

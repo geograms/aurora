@@ -251,6 +251,14 @@ class FunctionalityRegistry {
       EndpointDef('hal_rns_nodes', 'Observed network graph {nodes,edges} (filtered)', [
         ParamDef('filter', 'string', 'JSON {service,geogramOnly,search} (empty = none)'),
       ], ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef('hal_lxmf_pending',
+          'Messages to this destination still undelivered (retry queue)', [
+        ParamDef('dest', 'string', 'LXMF destination hash hex'),
+      ], ReturnDef('int', 'Count still waiting')),
+      EndpointDef('hal_rns_has_path',
+          'Do we hold a route to this destination right now?', [
+        ParamDef('dest', 'string', 'Destination hash hex'),
+      ], ReturnDef('int', '1 if a path is held, else 0')),
     ]),
     'hal.node': FunctionalityDef('hal.node',
         'The Indexer role: what this device answers for, and at whose invitation', [

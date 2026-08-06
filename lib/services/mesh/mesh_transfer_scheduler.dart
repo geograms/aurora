@@ -39,6 +39,30 @@ class MeshTransferScheduler {
   final Map<String, DateTime> _nextTry = {};
   final Map<String, Duration> _backoff = {};
   final Map<String, DateTime> _pendingVisited = {};
+
+  /// What a peer advertised the last time we went to fetch from it, and how
+  /// many of those visits came back with nothing new.
+  ///
+  /// A node can advertise mail that is not for us and never will be — a dongle
+  /// holding messages for someone who left the street keeps saying "24 waiting"
+  /// for seven days. Re-dialling it every 45 s costs the one client slot this
+  /// device has, and everything else that needs the radio (Reticulum carrying
+  /// the user's actual chat) waits behind it: measured, delivery fell from 10
+  /// of 10 to 5 of 10 with a dongle in the room. So a visit that gains nothing
+  /// doubles the quiet time for that peer, and any CHANGE in what it advertises
+  /// resets it — new mail is still fetched promptly.
+  final Map<String, int> _pendingSeen = {};
+  final Map<String, int> _emptyVisits = {};
+  static const Duration _pendingQuietMax = Duration(minutes: 10);
+
+  Duration _quietFor(String peer) {
+    final n = _emptyVisits[peer] ?? 0;
+    if (n <= 0) return _pendingPeerQuiet;
+    final ms = _pendingPeerQuiet.inMilliseconds * (1 << (n > 5 ? 5 : n));
+    return ms > _pendingQuietMax.inMilliseconds
+        ? _pendingQuietMax
+        : Duration(milliseconds: ms);
+  }
   String? _dialing;
   DateTime _dialStarted = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -87,6 +111,8 @@ class MeshTransferScheduler {
     _nextTry.clear();
     _backoff.clear();
     _pendingVisited.clear();
+    _pendingSeen.clear();
+    _emptyVisits.clear();
     _dialing = null;
     _starvedSince = null;
     _lastDialAttempt = DateTime.now();
@@ -227,11 +253,17 @@ class MeshTransferScheduler {
             '${dialable.containsKey(peer) ? "" : ",undialable"}'
             '${blocked(peer) ? ",backoff" : ""})');
         if (!dialable.containsKey(peer) || blocked(peer)) continue;
+        final advertised = n.pendingMsgs + n.pendingBulk;
+        if (_pendingSeen[peer] != advertised) {
+          _pendingSeen[peer] = advertised; // something changed — worth a look
+          _emptyVisits[peer] = 0;
+        }
         final visited = _pendingVisited[peer];
-        if (visited != null && now.difference(visited) < _pendingPeerQuiet) {
+        if (visited != null && now.difference(visited) < _quietFor(peer)) {
           continue;
         }
         _pendingVisited[peer] = now;
+        _emptyVisits[peer] = (_emptyVisits[peer] ?? 0) + 1;
         _dialTo(peer, dial, 'peer advertises ${n.pendingMsgs}m/${n.pendingBulk}b pending');
         return;
       }

@@ -125,6 +125,25 @@ bool blemesh_scf_offer(const char *target, const char *am,
     return true;
 }
 
+bool blemesh_scf_at(int i, const char **target, const char **am,
+                    int *len, uint32_t *age_sec, uint32_t now)
+{
+    if (i < 0 || i >= s_scf_n) return false;
+    scf_t *e = &s_scf[i];
+    if (target) *target = e->target;
+    if (am) *am = e->am;
+    if (len) *len = e->len;
+    if (age_sec) *age_sec = (now >= e->ts) ? now - e->ts : 0;
+    return true;
+}
+
+void blemesh_scf_clear(void)
+{
+    memset(s_scf, 0, sizeof(s_scf));
+    s_scf_n = 0;
+    persist();
+}
+
 int blemesh_scf_ack(const char *am)
 {
     if (!am || !am[0]) return 0;

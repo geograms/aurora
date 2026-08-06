@@ -303,11 +303,56 @@ class BleService {
           .trim()
           .toUpperCase();
       if (cs.isEmpty || cs == my) return;
-      _meshPeers[cs] =
-          (addr: addr, ms: DateTime.now().millisecondsSinceEpoch);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      // A sighting proves the peer is NEARBY, not where to dial it. A node
+      // legitimately answers on a different address than it beacons from (the
+      // dongle beacons on its extended-advert instance and accepts connections
+      // on its connectable one), and a beacon can also reach us RE-AIRED by a
+      // neighbour, carrying the relayer's address under the originator's
+      // callsign. Where we already know the peer answers, keep that and let the
+      // sighting only refresh freshness — otherwise the peer quietly ages out of
+      // the dial registry while beaconing at us every thirty seconds.
+      final verified = _verifiedAddr[cs];
+      if (verified != null) {
+        _meshPeers[cs] = (addr: verified, ms: now);
+        return;
+      }
+      // An address already proven to belong to somebody else means this beacon
+      // was re-aired by them, not sent by its author.
+      if (_verifiedAddr.entries.any((e) => e.value == addr && e.key != cs)) {
+        return;
+      }
+      _meshPeers[cs] = (addr: addr, ms: now);
+    };
+    // GROUND TRUTH for who lives at an address: the peer's own MSP HELLO.
+    // Without this a phone spent hours dialling its neighbour believing it was
+    // the dongle, because a re-aired beacon had filed the dongle's callsign
+    // against the neighbour's address — and the mail it was carrying went
+    // nowhere.
+    MeshSessionManager.instance.hooks.peerIdentified = (callsign) {
+      final addr = _ngClientPeer ?? _ngServerCentral;
+      if (addr == null || callsign.isEmpty) return;
+      final cs = callsign.toUpperCase();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final wrong = _meshPeers.entries
+          .where((e) => e.value.addr == addr && e.key != cs)
+          .map((e) => e.key)
+          .toList();
+      for (final k in wrong) {
+        _meshPeers.remove(k);
+        LogService.instance.add(
+            'Mesh: $addr is $cs, not $k — dropped the bad dial address');
+      }
+      _meshPeers[cs] = (addr: addr, ms: now);
+      _verifiedAddr[cs] = addr;
     };
     MeshTransferScheduler.instance.start();
   }
+
+  /// Addresses proven to belong to a callsign — by an MSP HELLO on a live link,
+  /// or by the peer's own connectable presence advert (nothing re-airs that).
+  /// A beacon sighting never overwrites one of these.
+  final Map<String, String> _verifiedAddr = {};
 
   // Callsign → (BLE address, last-seen ms) registry from the native discovery
   // scan, so the mesh scheduler can dial a SPECIFIC peer (the old single
@@ -605,7 +650,11 @@ class BleService {
     _lastPeerCall = callsign;
     _lastPeerMs = DateTime.now().millisecondsSinceEpoch;
     if (callsign.isNotEmpty) {
-      _meshPeers[callsign.toUpperCase()] =
+      final cs = callsign.toUpperCase();
+      // A connectable presence advert comes from the device itself — nothing
+      // re-airs it — so it proves the address, same as a session HELLO.
+      _verifiedAddr[cs] = address;
+      _meshPeers[cs] =
           (addr: address, ms: _lastPeerMs); // mesh scheduler dial registry
     }
     _maybeAutoPair();

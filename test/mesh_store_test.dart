@@ -90,6 +90,87 @@ void main() {
     expect(store.pendingFor('BBB', table).length, 1);
   });
 
+  // A neighbour we can hear is the shortest path there is. Handing its mail to
+  // a third party instead is how a message went round in a circle: the relay's
+  // route pointed back at us, our store already held the row, the offer came
+  // back "duplicate", and both copies ended up archived owing nothing.
+  test('a live neighbour gets its own mail — never a relay', () {
+    final table = MeshTable('ME');
+    // BBB and CCC are BOTH neighbours, and BBB also advertises reaching CCC.
+    table.ingest(MeshBeacon(
+      callsign: 'BBB',
+      deviceClass: MeshDeviceClass.phone,
+      cond: const MeshConditions(),
+      dv: [MeshDvEntry(meshHash('ME'), 1), MeshDvEntry(meshHash('CCC'), 1)],
+    ));
+    table.ingest(MeshBeacon(
+      callsign: 'CCC',
+      deviceClass: MeshDeviceClass.phone,
+      cond: const MeshConditions(),
+      dv: [MeshDvEntry(meshHash('ME'), 1)],
+    ));
+    store.offer(
+        target: 'CCC', sender: 'ME', wire: _wire('ME', 'CCC', 'for ccc'));
+
+    expect(store.pendingFor('BBB', table), isEmpty); // not via the relay
+    expect(store.pendingFor('CCC', table).length, 1); // straight to the target
+  });
+
+  // Custody handed on is archived, not deleted — that row is the receipt saying
+  // we no longer owe delivery. When a peer hands the same message BACK, saying
+  // "duplicate" made the other side archive its copy too and the message
+  // belonged to nobody.
+  test('an archived row can take custody again; an in-transit one cannot', () {
+    store.offer(
+        target: 'BBB',
+        sender: 'AAA',
+        wire: _wire('AAA', 'BBB', 'am:bbbbbb m'),
+        am: 'bbbbbb');
+    expect(store.reArm('bbbbbb'), isFalse); // still in transit = real duplicate
+
+    store.markArchived('bbbbbb');
+    expect(store.pendingFor('BBB', null), isEmpty);
+    expect(store.reArm('bbbbbb'), isTrue); // we owe delivery again
+    expect(store.pendingFor('BBB', null).length, 1);
+
+    expect(store.reArm('nosuch'), isFalse); // nothing to re-arm
+  });
+
+  // A custodian carries anyone's mail, so the sorting happens under pressure:
+  // a stranger's frame (prio 0) must be shed before our own (prio 1). Backwards
+  // would quietly delete the user's outgoing messages first.
+  test('under quota pressure a stranger is evicted before our own mail', () {
+    store.quotaBytes = 450; // three 200 B frames will not fit
+    final mine = Uint8List.fromList(List.filled(200, 1));
+    final theirs = Uint8List.fromList(List.filled(200, 2));
+    store.offer(
+        target: 'BBB', sender: 'ME', wire: mine, am: 'mine11', prio: 1);
+    store.offer(
+        target: 'CCC', sender: 'ZZZ', wire: theirs, am: 'theirs', prio: 0);
+    store.offer(
+        target: 'DDD',
+        sender: 'YYY',
+        wire: Uint8List.fromList(List.filled(200, 3)),
+        am: 'other1',
+        prio: 0);
+    store.sweep();
+
+    // Ours survives; a stranger's was shed to make room.
+    expect(
+        store.pendingFor('BBB', null, max: 64).map((e) => e.key), ['mine11']);
+    expect(store.counts().inTransit, lessThan(3));
+  });
+
+  // A device must carry for strangers, but not without limit.
+  test('the in-transit cap refuses a stranger, never our own', () {
+    expect(MeshStore.inTransitMax, 4000);
+    expect(
+        store.offer(
+            target: 'CCC', sender: 'ZZZ', wire: _wire('ZZZ', 'CCC', 'hi'),
+            am: 'str001', prio: 0),
+        isTrue); // far below the cap: carried
+  });
+
   test('have-bloom: built from received, applyPeerBloom purges only the owner',
       () {
     store.offer(

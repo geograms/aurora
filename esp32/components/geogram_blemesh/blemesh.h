@@ -157,6 +157,14 @@ void blemesh_scf_sweep(uint32_t now);
 
 int blemesh_scf_count(void);
 
+/* What is actually being held, for whom, and since when — a count alone cannot
+ * show custody once the store runs at capacity (it evicts the oldest and the
+ * number stops moving). [i] < blemesh_scf_count(). */
+bool blemesh_scf_at(int i, const char **target, const char **am,
+                    int *len, uint32_t *age_sec, uint32_t now);
+/* Drop everything held. For starting a test from a known-empty store. */
+void blemesh_scf_clear(void);
+
 /* GATT custody drain (MSP MSG lane): pop the next parked frame whose target
  * is [peer] itself or is routed via [peer]. Only am-keyed frames are handed
  * over (am-less frames stay broadcast-only — a custody ack couldn't name

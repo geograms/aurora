@@ -21,6 +21,7 @@ import '../../util/media_ref.dart';
 import '../log_service.dart';
 import 'mesh_beacon.dart';
 import 'mesh_bulk_spool.dart';
+import 'mesh_courier.dart';
 import 'mesh_service.dart';
 import 'mesh_session.dart';
 import 'mesh_store.dart';
@@ -192,12 +193,13 @@ class MeshCustodyCounters {
   static int sessionsClean = 0;
   static int sessionsAbrupt = 0;
 
-  static Map<String, int> toJson() => {
+  static Map<String, dynamic> toJson() => {
         'custodyIn': custodyIn,
         'custodyOut': custodyOut,
         'delivered': delivered,
         'purged': purged,
         'parked': parked,
+        'courier': MeshCourierCounters.json(),
         'sessionsClean': sessionsClean,
         'sessionsAbrupt': sessionsAbrupt,
       };
@@ -238,6 +240,10 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
       store.recordReceivedAm(key);
       MeshCustodyCounters.delivered++;
       _log('custody delivery from $peer: $from -> $to');
+      // The core owns delivery: unwrap it and put it in the inbox the wapps
+      // already read. The raw frame still goes down the broadcast stream for
+      // anything listening at the transport level.
+      MeshCourier.instance.ingest(m.wire, via: 'custody');
       MeshSessionManager.instance.hooks.deliverLocal?.call(m.wire);
       return 0;
     }
@@ -395,8 +401,11 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
 
     if (!outbound && to.toUpperCase() == self) {
       // Ours, heard on air — remember the am so our beacon bloom purges
-      // custodians still carrying it.
+      // custodians still carrying it, and deliver it: a re-aired copy from a
+      // custodian is the OTHER half of store-and-forward, and arrives with no
+      // session at all.
       if (am.isNotEmpty) store.recordReceivedAm(am);
+      MeshCourier.instance.ingest(wire, via: 'mesh');
       return;
     }
     if (to.toUpperCase() == self || from.toUpperCase() == self && !outbound) {

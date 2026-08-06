@@ -26,6 +26,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import '../../connections/bluetooth/ble5_radio.dart';
 import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
+import '../mesh/mesh_courier.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
 import '../files/dht/dht_node.dart';
 import '../files/dht/holder_hint.dart';
@@ -1671,6 +1672,21 @@ class RnsService {
         }
       }
     }
+    // Write the peer into the durable directory while we can still hear it —
+    // AFTER every aspect of this announce has been folded in, because the
+    // callsign and the LXMF address arrive on different announces and either
+    // can be the one that completes the pair. The peer a carrier is FOR is by
+    // definition the one that has stopped announcing, so a name learned only
+    // while it was live is a name we no longer have when it matters.
+    {
+      final cs = (n.callsign ?? '').trim().isNotEmpty
+          ? n.callsign!.trim()
+          : (n.lxmfName ?? '').trim();
+      if (cs.isNotEmpty) {
+        final dh = _lxmfDestHexForPub(n.publicKeyHex);
+        if (dh.isNotEmpty) rememberLxmfIdentity(dh, cs);
+      }
+    }
     // Mark for the next periodic flush to disk.
     if (_obStore != null) _obDirty.add(key);
   }
@@ -1919,6 +1935,89 @@ class RnsService {
     } catch (_) {}
     _lxmfDestCache[pubkeyHex] = out;
     return out;
+  }
+
+  /// Who this LXMF destination belongs to: `{callsign, npub}`, both possibly
+  /// empty. NOT liveness-gated — a peer whose radios are off is exactly the one
+  /// the courier needs to name on an envelope.
+  Map<String, String> identityFor(String destHex) {
+    final want = destHex.trim().toLowerCase();
+    if (want.isEmpty) return const {'callsign': '', 'npub': ''};
+    var call = '';
+    var matched = 0;
+    for (final n in _observed.values) {
+      if (_lxmfDestHexForPub(n.publicKeyHex).toLowerCase() != want) continue;
+      matched++;
+      // A geogram device announces its callsign as the LXMF display name, so
+      // either field names the same person. Requiring `callsign` alone made
+      // every peer we know only through its LXMF announce unaddressable.
+      call = (n.callsign ?? '').trim();
+      if (call.isEmpty) call = (n.lxmfName ?? '').trim();
+      if (call.isNotEmpty) break;
+    }
+    if (call.isEmpty && matched == 0) {
+      LogService.instance.add(
+          'RNS: no observed node derives to $want (directory '
+          '${_lxmfNames.length} entries)');
+    }
+    if (!_lxmfDirLoaded) {
+      _lxmfDirLoaded = true;
+      _loadLxmfDirectory();
+    }
+    // The live announce table only holds who is on the air. The peer a carrier
+    // is FOR is by definition the one that stopped announcing, so fall back to
+    // the name this conversation has always had — the same label the thread
+    // header shows.
+    if (call.isEmpty) call = (_lxmfNames[want] ?? '').trim();
+    if (call.isEmpty) return const {'callsign': '', 'npub': ''};
+    final pub = pubkeyForCallsign(call);
+    var npub = '';
+    if (pub != null && pub.isNotEmpty) {
+      try {
+        npub = NostrCrypto.encodeNpub(pub);
+      } catch (_) {}
+    }
+    return {'callsign': call, 'npub': npub};
+  }
+
+  /// The LXMF delivery address of a callsign we have heard announce, or ''.
+  String lxmfDestForCallsign(String callsign) {
+    final want = callsign.trim().toUpperCase();
+    if (want.isEmpty) return '';
+    for (final n in _observed.values) {
+      if ((n.callsign ?? '').trim().toUpperCase() != want) continue;
+      final d = _lxmfDestHexForPub(n.publicKeyHex);
+      if (d.isNotEmpty) return d;
+    }
+    return '';
+  }
+
+  /// Hand the wapps a message that reached us over a path Reticulum knows
+  /// nothing about — carried by a custodian on the mesh (see MeshCourier).
+  /// It enters the SAME inbox a directly-delivered LXMF message does, so the
+  /// wapp that owns the conversation needs no notion of how it travelled.
+  void injectLxmf({
+    required String sourceHex,
+    required String content,
+    String title = '',
+    String via = 'mesh',
+  }) {
+    if (sourceHex.isEmpty || content.isEmpty) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    _lxmfInbox.add({
+      'from': sourceHex,
+      'title': title,
+      'content': content,
+      'hash': '',
+      'ts': nowMs / 1000.0,
+      'via': via,
+    });
+    _recordLxmf(sourceHex,
+        incoming: true, text: content, title: title, tsMs: nowMs);
+    _notifyLxmf();
+    LogService.instance
+        .add('LXMF: carried message from ${sourceHex.substring(0, 8)} '
+            '(via $via)');
   }
 
   /// Other Reticulum devices ALIVE right now — NOT our geogram devices and
@@ -4773,6 +4872,9 @@ class RnsService {
           : 'RNS/lxmf: no direct link to $who — held for relay pickup',
     );
     if (!ok) _queueLxmfRetry(destHex, msg.packed, title, content, fields);
+    // Whether this needed a carrier is not knowable yet — MeshCourier asks the
+    // retry queue twenty seconds from now, when "did it arrive" has an answer.
+    MeshCourier.instance.armLxmf(destHex: destHex, text: content);
     return ok;
   }
 
@@ -5961,6 +6063,7 @@ class RnsService {
   // speak the same LXMF protocol, so one conversation model serves all of them.
   final Map<String, List<Map<String, dynamic>>> _lxmfConvos = {};
   final Map<String, String> _lxmfNames = {}; // destHex -> friendly label
+  bool _lxmfDirLoaded = false;
   final Set<String> _lxmfUnread = {}; // destHex with unseen incoming
   final List<void Function()> _lxmfListeners = [];
   void addLxmfListener(void Function() cb) => _lxmfListeners.add(cb);
@@ -6016,6 +6119,38 @@ class RnsService {
 
   void lxmfMarkRead(String peerHex) {
     if (_lxmfUnread.remove(peerHex.toLowerCase())) _notifyLxmf();
+  }
+
+  /// Remember, on disk, that this LXMF address belongs to this callsign. Called
+  /// for every announce that carries both — a device we can name today is a
+  /// device we can still address for a carrier next week, after it has gone
+  /// quiet and aged out of the live table.
+  void rememberLxmfIdentity(String destHex, String callsign) {
+    final k = destHex.trim().toLowerCase();
+    final c = callsign.trim();
+    if (k.isEmpty || c.isEmpty || _lxmfNames[k] == c) return;
+    _lxmfNames[k] = c;
+    final prefs = PreferencesService.instanceSync;
+    if (prefs == null) return;
+    final keep = <String>[
+      for (final row in prefs.lxmfDirectory)
+        if (!row.startsWith('$k|')) row,
+      '$k|$c',
+    ];
+    // Bounded: a busy hub can announce thousands of peers, and this is a
+    // convenience directory, not a database.
+    prefs.lxmfDirectory =
+        keep.length <= 500 ? keep : keep.sublist(keep.length - 500);
+  }
+
+  void _loadLxmfDirectory() {
+    final prefs = PreferencesService.instanceSync;
+    if (prefs == null) return;
+    for (final row in prefs.lxmfDirectory) {
+      final i = row.indexOf('|');
+      if (i <= 0) continue;
+      _lxmfNames.putIfAbsent(row.substring(0, i), () => row.substring(i + 1));
+    }
   }
 
   /// Attach a friendly label to a peer address (e.g. the graph node's name).

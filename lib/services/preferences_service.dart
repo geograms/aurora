@@ -665,6 +665,15 @@ class PreferencesService {
 
   String get rnsBootstrapHost =>
       _prefs.getString('rns.bootstrapHost') ?? 'rns.beleth.net';
+  /// destHex|callsign pairs the core has heard announce. Persisted because the
+  /// peer a carrier is FOR is the one that stopped announcing: resolving its
+  /// name only from live traffic makes store-and-forward useless exactly when
+  /// it is needed. See MeshCourier.
+  List<String> get lxmfDirectory =>
+      _prefs.getStringList('rns.lxmfDirectory') ?? const [];
+  set lxmfDirectory(List<String> v) =>
+      _prefs.setStringList('rns.lxmfDirectory', v);
+
   set rnsBootstrapHost(String v) => _prefs.setString('rns.bootstrapHost', v);
 
   int get rnsBootstrapPort => _prefs.getInt('rns.bootstrapPort') ?? 4242;

@@ -1,10 +1,18 @@
 # BLE Street Mesh — design & implementation plan
 
-Status: **approved design, not yet implemented**
+Status: **partly implemented** — gossip beacons, DV routing, MSP sessions, GATT
+custody transfer and store-and-forward are live and device-validated; the wider
+congestion/politeness work in this document is not.
 Scope: street / small-village scale (100s of phones), text messages and small
 bursts, no infrastructure. Cellphones are the primary devices; battery matters.
-Owner planes: Aurora host (BLE bus, GATT, storage) + Chat wapp (routing logic,
-gossip, APRS semantics).
+
+**Owner planes (corrected 2026-08-06).** Everything on the wire belongs to the
+core: the BLE bus, GATT/MSP, custody storage, routing AND the store-and-forward
+decision. A wapp is an event-driven consumer and owns none of it — see
+[architecture.md](architecture.md). Where this document says the chat wapp owns
+routing or gossip, it is describing the original plan, not the code:
+`lib/services/mesh/` owns it, and [store-and-forward.md](store-and-forward.md)
+describes what shipped.
 
 ---
 

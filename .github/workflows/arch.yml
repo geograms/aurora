@@ -1,0 +1,38 @@
+name: architecture
+
+# The rules in docs/architecture.md, checked. They exist because the same two
+# mistakes keep coming back months apart — transport logic drifting into a wapp,
+# and blocking work landing on the UI isolate — and neither is visible in review
+# because the feature works.
+#
+# Only NEW violations fail: what already exists is recorded in
+# tool/arch_baseline.txt.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  arch-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aurora
+        uses: actions/checkout@v4
+        with:
+          path: aurora
+
+      # The wapp-side rules only run when the wapps repo is present; without it
+      # the guard silently checks less, so check it out.
+      - name: Checkout wapps (wapp-side rules)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: geograms/wapps
+          path: wapps
+
+      - uses: dart-lang/setup-dart@v1
+
+      - name: Architecture guard
+        working-directory: aurora
+        run: dart tool/arch_guard.dart

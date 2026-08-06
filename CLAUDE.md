@@ -1,5 +1,25 @@
 # Working in this repo
 
+## Architecture — read before writing code
+
+`docs/architecture.md` governs. Two rules break most often, so they are also
+machine-checked by `tool/arch_guard.dart` (pre-commit + CI):
+
+- **Transports are CORE.** BLE5, Reticulum, LXMF, retries, custody and
+  store-and-forward live in `lib/`. A wapp hands the core a payload and is
+  called back when one arrives; it never decides how bytes travel. If a wapp
+  needs a new `hal_*` to make a transport decision, the design is wrong.
+- **Nothing blocking on the UI isolate.** No `*Sync` I/O, no `sleep`, no heavy
+  crypto/sqlite in a widget or a service the UI awaits. Platform channels
+  (`MethodChannel`, `Ble5Bus`) are main-isolate ONLY.
+
+Run `dart tool/arch_guard.dart` before committing (or `./tool/install-hooks.sh`
+once). It fails only on NEW violations; `docs/architecture.md` §5 explains the
+baseline and the `// arch-ignore: <rule> <reason>` escape.
+
+Transport specifics: `docs/ble5.md` (how bytes leave the device, every byte
+budget on the path) and `docs/store-and-forward.md` (delivery to absent peers).
+
 ## Running the Linux desktop app
 
 **Automated GUI testing runs invisibly. Only put it on the user's screen when

@@ -126,13 +126,15 @@ class _ChatViewFieldState extends State<ChatViewField> {
   /// hint) and is appended verbatim on send; [ref] drives the thumbnail.
   final List<({String token, MediaRef ref})> _pending = [];
 
-  /// Lookup of message-id -> message, rebuilt each frame, so a reply can show a
-  /// quoted snippet of the message it answers (threading). Threading ids are
-  /// opaque (the wapp sets `mid`/`parent`); the host only renders the relation.
+  /// Lookup of message-id -> message so a reply can show a quoted snippet of
+  /// the message it answers (threading). Threading ids are opaque (the wapp
+  /// sets `mid`/`parent`); the host only renders the relation. Rebuilt when the
+  /// thread changes — see [_refreshDerived].
   final Map<String, Map<String, dynamic>> _byMid = {};
 
   /// Number of direct replies each message id has (for the "N replies" hint and
-  /// to know which messages are thread-openable). Rebuilt each frame.
+  /// to know which messages are thread-openable). Rebuilt when the thread
+  /// changes — see [_refreshDerived].
   final Map<String, int> _replyCount = {};
 
   /// When non-null, the list shows only one thread (its root id + every reply in
@@ -147,6 +149,49 @@ class _ChatViewFieldState extends State<ChatViewField> {
   /// while this is true, so reading back through history isn't interrupted by
   /// incoming traffic. Becomes true again once the user scrolls back down.
   bool _atBottom = true;
+
+  // ── derived state, computed when the thread changes (NOT every frame) ─────
+  //
+  // Both the reaction filter and the threading indexes are O(number of
+  // messages), and build() runs on every frame the view is involved in: a
+  // message arriving, a scroll, a keyboard, an animation tick. On a long
+  // conversation that turned into a regex match plus two full walks per frame,
+  // allocating maps and strings faster than a slow phone could collect them —
+  // the heap ran away and the app was killed for not answering input. The work
+  // itself was never wrong; doing it again for an unchanged list was.
+  //
+  // The signature is cheap and sufficient: messages are appended, and the
+  // fields these indexes read (`mid`, `parent`, `text`) never change on a
+  // message that is already in the list. Likes and delivery ticks mutate other
+  // fields and correctly do NOT invalidate this.
+  List<Map<String, dynamic>> _visible = const [];
+  int _sigLen = -1;
+  int _sigFirst = 0;
+  int _sigLast = 0;
+
+  void _refreshDerived(List<Map<String, dynamic>> src) {
+    final len = src.length;
+    final first = len == 0 ? 0 : identityHashCode(src.first);
+    final last = len == 0 ? 0 : identityHashCode(src.last);
+    if (len == _sigLen && first == _sigFirst && last == _sigLast) return;
+    _sigLen = len;
+    _sigFirst = first;
+    _sigLast = last;
+    _visible = [
+      for (final m in src)
+        if (!_reactionText.hasMatch((m['text'] ?? '').toString().trim())) m,
+    ];
+    _byMid.clear();
+    _replyCount.clear();
+    for (final m in _visible) {
+      final mid = (m['mid'] ?? '').toString();
+      if (mid.isNotEmpty) _byMid[mid] = m;
+    }
+    for (final m in _visible) {
+      final p = (m['parent'] ?? '').toString();
+      if (p.isNotEmpty) _replyCount[p] = (_replyCount[p] ?? 0) + 1;
+    }
+  }
 
   static const _outColor = ChatPalette.outBubble;
   static const _inColor = ChatPalette.inBubble;
@@ -464,10 +509,8 @@ class _ChatViewFieldState extends State<ChatViewField> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final messages = [
-      for (final m in widget.messages)
-        if (!_reactionText.hasMatch((m['text'] ?? '').toString().trim())) m,
-    ];
+    _refreshDerived(widget.messages);
+    final messages = _visible;
 
     if (messages.length != _lastCount) {
       final grew = messages.length > _lastCount;
@@ -543,17 +586,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
   }
 
   Widget _messageList(ColorScheme cs, List<Map<String, dynamic>> messages) {
-    // Rebuild the id->message index + per-message reply counts (threading).
-    _byMid.clear();
-    _replyCount.clear();
-    for (final m in messages) {
-      final mid = (m['mid'] ?? '').toString();
-      if (mid.isNotEmpty) _byMid[mid] = m;
-    }
-    for (final m in messages) {
-      final p = (m['parent'] ?? '').toString();
-      if (p.isNotEmpty) _replyCount[p] = (_replyCount[p] ?? 0) + 1;
-    }
+    // Indexes are maintained by _refreshDerived (not per frame).
 
     // Focused thread view: the tapped thread shown forum-style — the root
     // message becomes a topic header and the replies stack beneath it.

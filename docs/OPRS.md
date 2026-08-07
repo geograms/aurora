@@ -1,5 +1,7 @@
-# REPR — Reticulum Packet Radio
+# OPRS — Open Packet Reporting System
 
+> APRS is Automatic. This one is Open.
+>
 > An APRS-shaped network for the people who do not have a licence.
 >
 > Companion docs: [aprs.md](aprs.md) (the real APRS transport we speak),
@@ -19,7 +21,7 @@
 APRS is good at what it does. Thirty years of digipeaters, iGates and beacons,
 a working global backbone in APRS-IS, and a culture that maintains it — for a
 licensed amateur it is a proven network and this document is not a complaint
-about it. Where a REPR device meets APRS, it should be a polite guest (§9).
+about it. Where a OPRS device meets APRS, it should be a polite guest (§9).
 
 But APRS stands on two things, and both are doors with a lock:
 
@@ -34,21 +36,28 @@ who never sat an exam — most of the planet — cannot use any of it. Not the
 messaging, not the position reports, not the store-and-forward, not the
 community infrastructure. The technology is not the barrier. The licence is.
 
-**REPR is the same set of ideas built on spectrum and infrastructure that need
+**OPRS is the same set of ideas built on spectrum and infrastructure that need
 no licence at all**: Bluetooth and LoRa in the ISM bands, WiFi, and the
 internet. Identity comes from a keypair the user generates in three seconds
 instead of a national register.
 
 And because we are not on amateur bands, one more rule falls away: **amateur
 radio forbids obscuring the meaning of a message, so APRS is unencrypted by
-regulation.** REPR is not bound by that. It can be public where public is
+regulation.** OPRS is not bound by that. It can be public where public is
 useful, and private where privacy matters (§5).
+
+### The name
+
+APRS is the **Automatic** Packet Reporting System. OPRS is the **Open** one —
+one letter, and it is the only letter that matters here. Everything else in
+this document is an argument that the rest of the system can stay the same
+shape.
 
 ---
 
-## 2. What REPR is, in one paragraph
+## 2. What OPRS is, in one paragraph
 
-REPR is Reticulum, plus the conventions that make it behave like a packet-radio
+OPRS is Reticulum, plus the conventions that make it behave like a packet-radio
 network: every device has a callsign derived from its own public key, announces
 itself, carries other people's traffic when it can, holds mail for peers that
 are out of reach, and speaks the same messages over Bluetooth, over the
@@ -62,7 +71,7 @@ registration, and no server that must stay up for the network to exist.
 The spine of this document. Each row: the APRS concept, our equivalent, and
 whether it exists.
 
-| APRS concept | REPR equivalent | Status |
+| APRS concept | OPRS equivalent | Status |
 |---|---|---|
 | ITU callsign, issued by an authority | `X1`/`X3` callsign derived from a NOSTR npub — `reticulum-dart/.../nostr_key_generator.dart:25-48` | **BUILT** |
 | APRS-IS passcode (derived from the callsign, trivially forgeable) | real signatures: short-Schnorr on frames (`aprx_sign.dart`), Ed25519 on announces and DHT records, BIP-340 on events | **BUILT** |
@@ -95,7 +104,7 @@ Three consequences the network has to live with:
 
 - **It is a 20-bit handle, not an identity.** Four bech32 characters is ~1
   million values; collisions are findable on purpose by anyone who wants one.
-  The rule from [aprs-xt.md](aprs-xt.md) §14.6 stands everywhere in REPR:
+  The rule from [aprs-xt.md](aprs-xt.md) §14.6 stands everywhere in OPRS:
   *the callsign is a label — always verify against the full public key.* This is
   why messages are signed and why the courier drops a frame whose signature
   fails when the sender's key is known (`mesh_courier.dart:315-323`).
@@ -104,12 +113,12 @@ Three consequences the network has to live with:
   `lib/profile/vanity_callsign_page.dart:40`). A callsign with a B in it is not
   one of ours.
 - **Nobody can take it away, and nobody had to grant it.** The flip side is
-  that nobody vouches for it either. Reputation in REPR is built from
+  that nobody vouches for it either. Reputation in OPRS is built from
   signatures and observed behaviour, not from a register.
 
-**Where APRS has a passcode, REPR has cryptography.** The APRS-IS passcode is a
+**Where APRS has a passcode, OPRS has cryptography.** The APRS-IS passcode is a
 16-bit checksum of the callsign — it exists to keep honest software honest, not
-to stop anyone. Every REPR-carried artefact is signed by the key the callsign is
+to stop anyone. Every OPRS-carried artefact is signed by the key the callsign is
 derived from: frames (short-Schnorr, 48 bytes, base85 — `aprs-xt.md` §14),
 announces and DHT provider records (Ed25519), NOSTR events (BIP-340).
 
@@ -117,20 +126,20 @@ announces and DHT provider records (Ed25519), NOSTR events (BIP-340).
 
 ## 5. Public by default, private when it matters
 
-APRS is public because the regulator requires it. REPR is public **because it is
+APRS is public because the regulator requires it. OPRS is public **because it is
 useful** — a position beacon nobody can read is pointless, and a mesh where
-carriers cannot see who a message is for cannot route it. So REPR keeps a
+carriers cannot see who a message is for cannot route it. So OPRS keeps a
 genuinely public plane, and it already exists in the code:
 
 | Primitive | What it is | Where |
 |---|---|---|
-| **Announce app_data** | signed but **cleartext** — carries the callsign, the node's role, capabilities and hardware profile. This is the closest thing REPR has to an APRS beacon. | `rns_announce.dart:3-9`; emitted `rns_service.dart:3475-3501` |
+| **Announce app_data** | signed but **cleartext** — carries the callsign, the node's role, capabilities and hardware profile. This is the closest thing OPRS has to an APRS beacon. | `rns_announce.dart:3-9`; emitted `rns_service.dart:3475-3501` |
 | **`sendPlainTo`** | one connectionless PLAIN packet: no link, no handshake, no Reticulum-layer encryption. Routes multi-hop like anything else. | `rns_transport.dart:520-532` |
 | **NPD** | a probe datagram whose 60-byte header is **deliberately readable** so traffic stays classifiable on the wire, with an encrypted body. Scoped to public data only. | `npd.dart:29-58` |
 | **`hal_rns_broadcast`** | the wapp-facing broadcast: reaches every peer, transits transport nodes. | `wapp_engine.dart:2667-2676` |
 | **The compact `0x41` frame** | `FROM \x1F TO \x1F TEXT` — envelope public so any custodian can route it, body optionally sealed. | [ble5.md](ble5.md) §2 |
 
-And where APRS *cannot* go, REPR does: a 1:1 message is encrypted end to end
+And where APRS *cannot* go, OPRS does: a 1:1 message is encrypted end to end
 (`ENC1:` over ECDH+AES, or LXMF's own encryption), while the envelope stays
 readable so the mesh can still carry it. **Public where it helps, private where
 it matters** — a choice, not a regulation.
@@ -142,7 +151,7 @@ it matters** — a choice, not a regulation.
 APRS-IS is a tier of servers. They are well run, but they are servers: they hold
 the routing, the filters and the traffic, and a client without one is alone.
 
-REPR's equivalent is a **transport node**, and the difference is what it holds:
+OPRS's equivalent is a **transport node**, and the difference is what it holds:
 a transport node forwards packets and keeps no application state. Any device can
 be one. Take it away and the network loses a route, not a record.
 
@@ -163,19 +172,19 @@ Two things make it less load-bearing than an APRS-IS server:
 
 ---
 
-## 7. Where REPR is already ahead
+## 7. Where OPRS is already ahead
 
 Not a boast — these are the parts that justify building a second network rather
 than asking everyone to get licensed:
 
 - **Custody store-and-forward.** APRS has no held mail: if the recipient was not
-  listening, the packet is gone. REPR hands the message to whatever device is
+  listening, the packet is gone. OPRS hands the message to whatever device is
   nearby, which carries it — for days if needed — and delivers it when it meets
   the recipient. Bounded by quota (100 MB), TTL (7 days) and priority so a
   stranger's mail is shed before your own. Validated on hardware: tablet →
   T-Dongle → phone, with the **sender's radio switched off** before delivery, so
   only the custodian could have done it ([store-and-forward.md](store-and-forward.md) §8).
-- **Real authorship.** An APRS callsign in a packet is a claim. A REPR callsign
+- **Real authorship.** An APRS callsign in a packet is a claim. A OPRS callsign
   is checkable against a signature.
 - **Encryption when wanted**, without leaving the network.
 - **One identity across radio and internet.** The same key signs a BLE frame,
@@ -190,7 +199,7 @@ Ordered by how much each one blocks the promise above.
 
 ### 8.1 LoRa on the data path — the number one gap
 
-**REPR has no long-range radio today, and long-range radio is most of what APRS
+**OPRS has no long-range radio today, and long-range radio is most of what APRS
 is.** Bluetooth reaches across a street. LoRa reaches across a valley.
 
 The honest state: the drivers exist and route nothing.
@@ -212,7 +221,7 @@ Heltec boards already initialise the radio at 868 MHz / SF7 / BW125.
 ### 8.2 A position report that is a first-class object
 
 Today a position is a `!`-prefixed compact frame — inherited from APRS, sized
-for APRS, and unsigned in practice. REPR should have a proper position/telemetry
+for APRS, and unsigned in practice. OPRS should have a proper position/telemetry
 object: signed, schema'd, with an explicit accuracy and staleness, carried over
 Reticulum rather than smuggled in a text field. This is what makes maps, "who is
 near me", and emergency beacons trustworthy rather than decorative.
@@ -220,7 +229,7 @@ near me", and emergency beacons trustworthy rather than decorative.
 ### 8.3 Coverage in the announce — "where is the gateway on the hill?"
 
 APRS gets this for free: digipeaters beacon their position, so you can see the
-infrastructure. REPR nodes announce their *capabilities* but not their *reach*.
+infrastructure. OPRS nodes announce their *capabilities* but not their *reach*.
 
 The design already exists and is not built — [NOSTR.md](NOSTR.md) §"Coverage:
 where a node is useful": a coarse geohash `gh` plus **one entry per radio**
@@ -298,6 +307,6 @@ so it is not forgotten.)
 | **LoRa anywhere in the message path** | **NOT BUILT** — drivers exist, nothing routes over them |
 | Objects, items, weather, symbols | **NOT BUILT** |
 
-The one-sentence version: **everything APRS does over licensed radio, REPR does
+The one-sentence version: **everything APRS does over licensed radio, OPRS does
 over radio anyone may use — and it already works, except on the radio that
 reaches furthest.**

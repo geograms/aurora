@@ -855,3 +855,17 @@ the main isolate and the transport isolate each own a worker.
 **Symbols.** Release/profile native libs are stripped, so heapprofd resolves
 only `malloc`/`realloc` leaves; attribute by MAPPING (which `.so`) instead, or
 build with symbols kept if a specific call stack is needed.
+
+### What the device tools could NOT do (2026-08-07)
+
+Save the next person the hours: on this stock tablet `simpleperf` is refused by
+SELinux; **heapprofd sees only ~200 KB net while the process gains 8 MB**, so it
+misses whatever this is; `getCpuSamples` returns zero samples even when the app
+is launched with `--ez enable-dart-profiling true`; and
+`setTraceClassAllocation` never fires for `_Map`, which is VM-internal.
+
+What DID work is `getAllocationProfile` **diffed over time** — that is how the
+runaway was pinned to the Dart heap and to ~330k {Map + index + 2 Lists +
+String} units per 90 s. For the retaining path, reproduce on the Linux desktop
+build and take a DevTools heap-snapshot diff; the device is the wrong place to
+ask that question.

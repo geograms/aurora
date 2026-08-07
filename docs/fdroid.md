@@ -25,23 +25,29 @@ PY
 
 ## 1. Open items (decide before submitting)
 
-### 1.1 `libbarhopper_v3.so` — proprietary Google blob, 4.2 MB
+At the time of writing the only remaining decisions are §1.3 (optional
+non-free services to declare) — §1.1 and §1.2 are done.
 
-Pulled in by **`mobile_scanner`** (Google ML Kit barcode scanning), used for
-exactly one feature: the `qr.scan` GeoUI verb (`lib/wapp/wapp_page.dart`), which
-lets a wapp read a QR code (torrent links, circle short codes).
+### 1.1 ~~`libbarhopper_v3.so`~~ — removed
 
-This is the one hard blocker: F-Droid does not ship non-free binaries. Options,
-best first:
+**Resolved.** `mobile_scanner` (Google ML Kit barcode scanning) shipped
+`libbarhopper_v3.so`, a 4.2 MB proprietary blob, for one feature: the `qr.scan`
+GeoUI verb. The dependency is gone, along with the scanner page, the CAMERA
+permission and the `android.hardware.camera` feature.
 
-| Option | Cost | Result |
-|---|---|---|
-| Swap to **`flutter_zxing`** (zxing-cpp, Apache-2.0) | ~30 lines + camera test on device | Feature keeps working, no blob |
-| **`zxing2`** (pure Dart) + `camera` | more code, slower decode | No native code at all |
-| Drop `qr.scan` in the F-Droid flavour | trivial | Feature missing there |
+`qr.scan` now answers `{"type":"qr.scanned","text":"","error":"nocamera"}` on
+every platform — the reply desktop always gave, and the only consumer
+(`wapps/torrents`) already handled it by falling back to pasting the link.
+Generating QR codes is untouched: that is `qr_flutter`, pure Dart, and it is the
+side of the exchange that matters.
 
-Not changed here: swapping the camera stack needs testing with a real camera,
-which is a decision plus a device session, not a blind edit.
+If reading QR codes is wanted back, use a free decoder — `flutter_zxing`
+(zxing-cpp, Apache-2.0) or pure-Dart `zxing2` with the `camera` plugin — and
+restore the CAMERA permission with it.
+
+Effect on the APK (arm64): **61.4 MB → 55.6 MB**, and the native libraries are
+now only `libapp.so`, `libflutter.so`, `libwasm_run_dart.so`, `libsqlcipher.so`,
+`libdartjni.so` and `libdatastore_shared_counter.so`.
 
 ### 1.2 Self-update
 
@@ -98,7 +104,6 @@ and APRS-IS are proprietary services even though nothing depends on them.
 | `github.com/Baseflow/flutter-permission-handler/issues`, `github.com/flutter/flutter/issues/…` | `classes.dex` | Text inside exception messages. |
 | `schemas.android.com`, `www.unicode.org`, `android.googlesource.com`, `issuetracker.google.com`, `docs.flutter.dev`, `dartbug.com`, `bytecodealliance.org`, `docs.rs`, `youtrack.jetbrains.com`, `ns.adobe.com`, `www.apache.org` | toolchain/runtime libs | XML namespaces, licence headers, doc links in AOSP/Flutter/Kotlin/Rust runtimes. |
 | `cdn.jsdelivr.net` | `browser_wasi_shim.js` | A **web**-target asset of `wasm_run`; never loaded on Android. |
-| `www.tensorflow.org` | `libbarhopper_v3.so` | Inside the blob covered by §1.1 — goes away with it. |
 
 **Not in the APK at all**: no Firebase, no Play Services, no Google Analytics /
 Tag Manager, no Crashlytics, no ad or tracking SDK. (`googletagmanager.com`,
@@ -107,8 +112,8 @@ firmware for external hardware, not part of this build.)
 
 ## 4. Permissions worth explaining in the submission
 
-`INTERNET`, `ACCESS_NETWORK_STATE`, `CAMERA` (QR scanning — see §1.1),
-`BLUETOOTH_*` + `ACCESS_FINE_LOCATION` (BLE mesh: Android ties BLE scanning to
-location), `READ/WRITE_EXTERNAL_STORAGE` (identity backup + shared files),
+`INTERNET`, `ACCESS_NETWORK_STATE`, `BLUETOOTH_*` + `ACCESS_FINE_LOCATION`
+(BLE mesh: Android ties BLE scanning to location; `BLUETOOTH_SCAN` is declared
+`neverForLocation`), `READ/WRITE_EXTERNAL_STORAGE` (identity backup + shared files),
 `FOREGROUND_SERVICE` (the mesh/Reticulum node must survive screen-off),
 `RECEIVE_BOOT_COMPLETED` (restart the node after a reboot).

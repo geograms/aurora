@@ -20,7 +20,6 @@ import 'package:flutter/services.dart'
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:graph3d/graph3d.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:vector_math/vector_math_64.dart' show Quaternion, Vector3;
 
@@ -3162,26 +3161,20 @@ class _WappPageState extends State<WappPage>
     } catch (_) {}
   }
 
-  /// Open the camera QR scanner and deliver the decoded text back to the wapp as
-  /// `qr.scanned {text}`. Android only — on other platforms we reply with an
-  /// empty text + `error:"nocamera"` so the wapp can say so. (Generation works
-  /// everywhere; it is only reading that needs a camera.)
+  /// Answer a wapp's `qr.scan` with `qr.scanned {text:"", error:"nocamera"}`.
+  ///
+  /// Reading a QR code needs a camera decoder, and the only practical one for
+  /// Flutter on Android (mobile_scanner) bundles Google's ML Kit — a 4.2 MB
+  /// proprietary blob (libbarhopper_v3.so). This app ships no non-free
+  /// binaries, so the decoder is gone and every platform now answers the same
+  /// way, which is the reply desktop always gave. Wapps already handle it (see
+  /// wapps/torrents `qr.scanned`): they fall back to pasting the link.
+  ///
+  /// GENERATING QR codes is unaffected — that is qr_flutter, pure Dart, and it
+  /// is what the other side of this exchange actually needs.
   Future<void> _handleQrScan() async {
-    String result = '';
-    if (!kIsWeb && Platform.isAndroid) {
-      try {
-        result = await Navigator.of(context, rootNavigator: true).push<String>(
-              MaterialPageRoute(builder: (_) => const _QrScanPage()),
-            ) ??
-            '';
-      } catch (_) {
-        result = '';
-      }
-    }
-    final msg = (result.isEmpty && !(!kIsWeb && Platform.isAndroid))
-        ? {'type': 'qr.scanned', 'text': '', 'error': 'nocamera'}
-        : {'type': 'qr.scanned', 'text': result};
-    _engine.sendMessage(jsonEncode(msg));
+    _engine.sendMessage(jsonEncode(
+        {'type': 'qr.scanned', 'text': '', 'error': 'nocamera'}));
     _engine.handleEvent();
     _drainOutbox();
   }
@@ -11297,54 +11290,6 @@ class _ForwardPanelState extends State<_ForwardPanel> {
 
 /// Full-screen camera QR scanner. Pops with the first decoded string (empty on
 /// cancel). Android-only path (see _handleQrScan).
-class _QrScanPage extends StatefulWidget {
-  const _QrScanPage();
-  @override
-  State<_QrScanPage> createState() => _QrScanPageState();
-}
-
-class _QrScanPageState extends State<_QrScanPage> {
-  bool _done = false;
-
-  void _onDetect(BarcodeCapture capture) {
-    if (_done || !mounted) return;
-    for (final b in capture.barcodes) {
-      final v = b.rawValue;
-      if (v != null && v.isNotEmpty) {
-        _done = true;
-        Navigator.of(context).pop(v);
-        return;
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // No explicit controller: MobileScanner manages its own and auto-starts the
-    // camera (and requests the permission) on first build.
-    return Scaffold(
-      appBar: AppBar(title: const Text('Scan a QR code')),
-      body: Stack(
-        children: [
-          Positioned.fill(child: MobileScanner(onDetect: _onDetect)),
-          const Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: EdgeInsets.all(24),
-              child: Text(
-                'Point the camera at a torrent QR code',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white, fontSize: 14),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-
 /// A one-line "waiting to deliver" banner for an open LXMF thread. Rebuilds
 /// itself off RnsService's LXMF listener, so it disappears the moment a retry
 /// gets through.

@@ -106,7 +106,21 @@ class UpdateService {
   bool get autoCheck => _autoCheck;
 
   String get currentVersion => kAppVersion;
-  bool get supported => UpdateNative.supported;
+  /// Compile-time kill switch for the whole self-update path.
+  ///
+  /// F-Droid builds every app from source and is the ONLY updater for what it
+  /// ships: an app that downloads and installs its own APK is not accepted
+  /// there. Build the store variant with
+  ///
+  ///     flutter build apk --dart-define=SELF_UPDATE=false
+  ///
+  /// and this reports unsupported, so every check, download and install path
+  /// short-circuits and the Update Center hides itself. Direct-download builds
+  /// (geogram.radio, CI artefacts) keep it on and are unaffected.
+  static const bool selfUpdateEnabled =
+      bool.fromEnvironment('SELF_UPDATE', defaultValue: true);
+
+  bool get supported => selfUpdateEnabled && UpdateNative.supported;
   String? get downloadedPath => _downloadedPath;
 
   Future<void> _prefs(void Function(SharedPreferences p) fn) async {

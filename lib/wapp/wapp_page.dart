@@ -389,8 +389,11 @@ class _WappPageState extends State<WappPage>
   // Map state
   double _mapLat = 0, _mapLon = 0;
   int _mapZoom = 2;
-  String _tileUrl =
-      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  // OpenStreetMap, not Esri/ArcGIS: the default has to be a service whose data
+  // and terms are free (ODbL), because it is what every user hits without
+  // choosing anything. A wapp that wants aerial imagery can still point at its
+  // own tile service with `tile-url`.
+  String _tileUrl = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   bool _hasMap = false;
   // Native graph state (generic `$type:"graph"` GeoUI group). The wapp pushes a
   // {nodes,edges} snapshot via `ui.graph.set`; the host renders it with the

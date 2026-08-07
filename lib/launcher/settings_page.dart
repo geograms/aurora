@@ -346,6 +346,7 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                       ),
                 ),
                 const SizedBox(height: 12),
+                if (UpdateService.selfUpdateEnabled)
                 Card(
                   elevation: 0,
                   shape: RoundedRectangleBorder(
@@ -366,7 +367,11 @@ class _IwiSettingsPageState extends State<IwiSettingsPage> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 24),
+                // Builds made for a store that updates its own apps (F-Droid)
+                // pass --dart-define=SELF_UPDATE=false. There the whole path is
+                // dead, so offering the door is worse than not having it.
+                if (UpdateService.selfUpdateEnabled)
+                  const SizedBox(height: 24),
 
                 // ── Hardware ──
                 //

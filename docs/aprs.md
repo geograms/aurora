@@ -6,7 +6,7 @@ store‑and‑forward backup); APRS‑IS carries chat onto the global amateur ra
 network only when the user opts in with a **government‑issued amateur‑radio
 callsign and its verified passcode**. The *message‑level conventions* (groups,
 threads, reactions, signed/encrypted messages, media references) are the same
-on every transport and are documented separately in [aprx.md](aprx.md); this
+on every transport and are documented separately in [aprs-xt.md](aprs-xt.md); this
 doc is about the APRS **wire + connection** layer as implemented in the Chat
 wapp ([`wapps/chat/`](../../wapps/chat/): `chat.c`, `main.c`).
 
@@ -53,7 +53,7 @@ Builders:
 Long messages are split at word boundaries into ≤`max_len` chunks and sent as
 lines `0,1,2,…` (`aprs_send_*_multi`), reassembled on the receive side. The
 APRX message conventions (the `+<mid>`, `<mid>:like`, `~<sig>`, `ENC1:` markers
-in the payload) are layered on top of this — see [aprx.md](aprx.md).
+in the payload) are layered on top of this — see [aprs-xt.md](aprs-xt.md).
 
 ### Path‑parameterised builders
 
@@ -125,6 +125,11 @@ at a glance which transports are live.
 
 ---
 
-See also: [aprx.md](aprx.md) for the message‑level conventions that ride this
-transport, and [ble.md](ble.md) for the off‑grid transport that the iGate bridges
-to.
+See also: [aprs-xt.md](aprs-xt.md) for the message‑level conventions that ride
+this transport, and [ble.md](ble.md) for the off‑grid transport that the iGate
+bridges to.
+
+**Why we also built something else:** APRS works well for licensed amateurs, and
+this document is how we speak it. [REPR.md](REPR.md) describes the parallel
+network for everyone who does not hold a licence — the same shapes (beacons,
+digipeaters, gateways, bulletins) on spectrum that needs no exam.

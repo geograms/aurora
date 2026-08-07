@@ -95,7 +95,13 @@ class RnsChunkAssembler {
     _sweep();
     final key = '$src/$msgId/$total';
     final p = _partials.putIfAbsent(key, () => _Partial(total, now()));
-    p.parts[idx] = Uint8List.sublistView(frag, kRnsChunkHeader);
+    // COPY, not a view. sublistView keeps the whole parent buffer alive, and
+    // that buffer came from the platform channel — malloc'd memory the Dart GC
+    // does not account for. An incomplete fragment set is held for the TTL, so
+    // a view would pin every advert buffer it ever touched while the heap
+    // looked idle.
+    p.parts[idx] =
+        Uint8List.fromList(Uint8List.sublistView(frag, kRnsChunkHeader));
     if (p.parts.length < total) return null;
     _partials.remove(key);
     final size = p.parts.values.fold<int>(0, (a, b) => a + b.length);

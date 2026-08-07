@@ -816,3 +816,42 @@ because it will.
 > **Rule: assume the transfer will break and the peer will vanish.** Resumable by
 > checkpoint, integrity-checked by hash, idle links closed, liveness swept on a tick.
 > Code that only works while the network stays up doesn't work.
+
+## Profiling native memory on a stock device (recipe)
+
+The Dart VM service and Android's native heap profiler both work on a **profile
+build**, which is what to reach for when `dumpsys meminfo` says Native Heap is
+growing but the Dart heap is not. Neither needs root; `simpleperf` does, and is
+refused by SELinux on stock builds.
+
+```sh
+flutter build apk --profile --target-platform android-arm --build-number=<high>
+adb install -r build/app/outputs/flutter-apk/app-profile.apk
+adb logcat -d | grep "Dart VM service"        # -> http://127.0.0.1:PORT/TOKEN=/
+adb forward tcp:PORT tcp:PORT
+
+# Dart side: heap AND external (malloc-backed typed data), per isolate.
+curl -s http://127.0.0.1:PORT/TOKEN=/getVM
+curl -s "http://127.0.0.1:PORT/TOKEN=/getMemoryUsage?isolateId=isolates/<id>"
+
+# Native side: who malloc'd what, allocations minus frees.
+adb shell "cat <<'EOF' | perfetto --txt -c - -o /data/misc/perfetto-traces/heap.pb
+buffers { size_kb: 32768 }
+data_sources { config { name: \"android.heapprofd\"
+  heapprofd_config { sampling_interval_bytes: 4096 pid: <PID>
+    continuous_dump_config { dump_phase_ms: 10000 dump_interval_ms: 20000 } } } }
+duration_ms: 45000
+EOF"
+adb pull /data/misc/perfetto-traces/heap.pb
+pip install perfetto   # then query heap_profile_allocation (count>0 = alloc,
+                       # negative size rows = frees; net = sum(size))
+```
+
+Isolates spawned with `Isolate.spawn` share one heap, so `getMemoryUsage`
+reports the same numbers for main/rns-crypto/rns-transport/nostr-engine — that
+is the isolate GROUP, not a bug. Two `rns-crypto` entries are also expected:
+the main isolate and the transport isolate each own a worker.
+
+**Symbols.** Release/profile native libs are stripped, so heapprofd resolves
+only `malloc`/`realloc` leaves; attribute by MAPPING (which `.so`) instead, or
+build with symbols kept if a specific call stack is needed.

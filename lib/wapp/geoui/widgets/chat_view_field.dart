@@ -172,10 +172,29 @@ class _ChatViewFieldState extends State<ChatViewField> {
     _atBottom = (pos.maxScrollExtent - pos.pixels) <= 48;
   }
 
-  void _autoScroll() {
+  /// Pin the view to the newest message.
+  ///
+  /// One jump is not enough. `ListView.builder` only ESTIMATES
+  /// maxScrollExtent from the items it has laid out, so on a long thread the
+  /// first jump lands short of the true bottom — which is why a message you
+  /// just sent appeared "buried" and needed a manual scroll. Each jump forces
+  /// more items to lay out and the real extent grows, so keep going until it
+  /// stops growing. Bounded, because a list that never settles must not spin
+  /// frames forever.
+  void _autoScroll({int tries = 8}) {
     if (!_scroll.hasClients) return;
-    _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    final target = _scroll.position.maxScrollExtent;
+    _scroll.jumpTo(target);
     _atBottom = true;
+    if (tries <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      // Also covers the keyboard: opening/closing it changes the viewport
+      // after the frame that added the bubble.
+      if (_scroll.position.maxScrollExtent > target + 1) {
+        _autoScroll(tries: tries - 1);
+      }
+    });
   }
 
   void _send() {
@@ -200,7 +219,14 @@ class _ChatViewFieldState extends State<ChatViewField> {
     // Type, Enter, type again — no click in between. Requested after the frame
     // so it survives the rebuild the new bubble triggers.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _inputFocus.requestFocus();
+      if (!mounted) return;
+      _inputFocus.requestFocus();
+      // Scroll here too, not only when the message count changes: the echoed
+      // bubble can arrive a frame or several later (it goes through the wapp
+      // engine and back), and the composer growing/shrinking moves the bottom
+      // on its own. Landing on the newest message is what the sender asked for
+      // by pressing send.
+      _autoScroll();
     });
   }
 

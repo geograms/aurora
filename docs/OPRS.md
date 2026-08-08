@@ -145,7 +145,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
 | `g` | `sig` | signature |
-| `k` | `bech32` | public key, in `t:id` and `t:chal` |
+| `k` | `bech32` | public key, in `t:id` and `t:challenge` |
 
 ### 4.2 Packet types
 
@@ -160,8 +160,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `trk` | a point in a named track (section 14) |
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
-| `chal` | a challenge to prove a callsign (section 18) |
-| `resp` | the answer to a challenge |
+| `challenge` | a challenge to prove a callsign (section 18) |
+| `response` | the answer to a challenge |
 | `warn` | a warning about a hazard (section 16) |
 | `png` | a reachability test |
 | `pnr` | a reply to `png` |
@@ -1391,7 +1391,7 @@ match. **This does not extend to a callsign issued by a radio authority.**
 `CT1ABC-9` has no arithmetic relationship to any key, so nothing in the format
 prevents a second station from claiming it.
 
-None of them proves the holder is present now. `t:chal` does.
+None of them proves the holder is present now. `t:challenge` does.
 
 ### 18.1 Publishing a key
 
@@ -1409,28 +1409,49 @@ The challenger generates a nonce of at least 16 random bytes, seals it to the
 public key the claimed callsign has announced, and sends it:
 
 ```
-t:chal f:X32DVA d:CT1ABC-9 ts:2026-08-08_14:26:40 k:npub1x32dva7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7hq2mv x:pQ4m9xT2vB8kRt7wYn3LzF6cHjD1sA0eXbQvU5iOgM2p
+t:challenge f:X32DVA d:CT1ABC-9 ts:2026-08-08_14:26:40 k:npub1x32dva7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7hq2mv x:<64 characters>
 ```
 
-162 bytes. `k:` carries the challenger's own key so the answer can be sealed back
+187 bytes. `k:` carries the challenger's own key so the answer can be sealed back
 to it without a prior exchange. Where the responder already holds that key, it
 is omitted:
 
 ```
-t:chal f:X32DVA d:CT1ABC-9 ts:2026-08-08_14:26:40 x:pQ4m9xT2vB8kRt7wYn3LzF6cHjD1sA0eXbQvU5iOgM2p
+t:challenge f:X32DVA d:CT1ABC-9 ts:2026-08-08_14:26:40 x:<64 characters>
 ```
 
-96 bytes.
+121 bytes.
 
 Only the holder of the private key can recover the nonce. The answer is sealed
 to the challenger's key and names the challenge in `r:`:
 
 ```
-t:resp f:CT1ABC-9 d:X32DVA ts:2026-08-08_14:26:40 r:7c31a9 x:Zk8Ln2Qv5TyR9xW3mB7cJdF1aH6sE0uP4gN
+t:response f:CT1ABC-9 d:X32DVA ts:2026-08-08_14:26:40 r:7c31a9 x:<64 characters>
 ```
 
-96 bytes. A challenger that gets back the value it expects has learned that
+129 bytes. A challenger that gets back the value it expects has learned that
 the station it is talking to holds the private key for that callsign, right now.
+
+**The whole exchange fits in single packets**, with room to spare on each. That
+is worth stating because it is the property the design has to have: a challenge
+that had to be split across parts could not be answered by a station that heard
+only some of them, and the stations most worth challenging are the ones at the
+edge of range.
+
+The sizes above are not estimates. Sealing uses AES-256-CBC under a shared
+secret from static-static ECDH, which is what makes `k:` sufficient and an
+ephemeral key unnecessary:
+
+| | Bytes |
+|---|---|
+| challenge plaintext, `oprs-chal ` and a 16-byte nonce | 26 |
+| padded to the block size | 32 |
+| with the initialisation vector | 48 |
+| base64url, no padding | 64 characters |
+
+The answer seals 16 bytes and lands on the same 64 characters, the padding
+absorbing the difference. A public key is 63 characters. Every figure above
+follows from those three.
 
 ### 18.3 What the answer contains
 
@@ -1531,7 +1552,7 @@ because obscured meaning is not permitted on amateur bands.
 ## 21. Reserved
 
 Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `trk`, `sos`,
-`warn`, `info`, `chal`, `resp`, `png`, `pnr`.
+`warn`, `info`, `challenge`, `response`, `png`, `pnr`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `trk`,
@@ -1572,7 +1593,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | `t:sos` calls for help | not implemented; the current wire has an `sos` station symbol, which is a different thing and is not relayed further than any other packet |
 | `t:warn` warnings | not implemented; no source |
 | `t:info` notices | not implemented; no source |
-| `t:chal` and `t:resp` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
+| `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
 | Periodic `t:id` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |
 | `type:` vehicle set | partly; the current wire carries a handful of symbols and none of the rail, air or cycle values |

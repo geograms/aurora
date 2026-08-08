@@ -6,14 +6,14 @@ OPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 6. Section 21 states which parts are implemented.
+Status: DRAFT 7. Section 22 states which parts are implemented.
 
 ---
 
 ## 1. Purpose
 
 APRS is a proven network, and an OPRS station meeting APRS infrastructure
-operates under APRS rules (section 19). APRS has two prerequisites: amateur
+operates under APRS rules (section 20). APRS has two prerequisites: amateur
 spectrum, and a callsign issued by a radio authority. Both are correct for a
 licensed service, and both exclude everyone without a licence.
 
@@ -145,7 +145,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
 | `g` | `sig` | signature |
-| `k` | `bech32` | public key, in `t:id` only |
+| `k` | `bech32` | public key, in `t:id` and `t:chal` |
 
 ### 4.2 Packet types
 
@@ -160,12 +160,14 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `trk` | a point in a named track (section 14) |
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
+| `chal` | a challenge to prove a callsign (section 18) |
+| `resp` | the answer to a challenge |
 | `warn` | a warning about a hazard (section 16) |
 | `png` | a reachability test |
 | `pnr` | a reply to `png` |
 
 An unknown type is ignored. It is never an error and is never displayed as a
-message. Types not listed here are reserved (section 20).
+message. Types not listed here are reserved (section 21).
 
 ### 4.3 Value types
 
@@ -1374,7 +1376,122 @@ is the same key a reaction uses (section 6.5).
 
 ---
 
-## 18. Adding a field, worked
+## 18. Proving a callsign
+
+Anyone can write `f:CT1ABC-9` on a packet. Three things already limit what that
+buys an impostor, and each stops short of the same place.
+
+A signature (section 9.1) proves the packet was written by the holder of a key.
+It is optional, most traffic will not carry one, and a signed packet can be
+replayed later by anyone who heard it.
+
+An `X1` or `X3` callsign is derived from its own public key (section 3), so a
+station cannot announce one it does not hold: the four characters would not
+match. **This does not extend to a callsign issued by a radio authority.**
+`CT1ABC-9` has no arithmetic relationship to any key, so nothing in the format
+prevents a second station from claiming it.
+
+None of them proves the holder is present now. `t:chal` does.
+
+### 18.1 Publishing a key
+
+A station transmits `t:id` (section 9.3) periodically, not only once, because a
+receiver that has never heard the announcement cannot check a signature or issue
+a challenge. Every 30 minutes is a reasonable interval on a quiet channel; a
+station that changes its key announces immediately and does not wait.
+
+`q:id` (section 7) asks for one directly rather than waiting for the next
+period.
+
+### 18.2 The exchange
+
+The challenger generates a nonce of at least 16 random bytes, seals it to the
+public key the claimed callsign has announced, and sends it:
+
+```
+t:chal f:X32DVA d:CT1ABC-9 ts:2026-08-08_14:26:40 k:npub1x32dva7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7hq2mv x:pQ4m9xT2vB8kRt7wYn3LzF6cHjD1sA0eXbQvU5iOgM2p
+```
+
+162 bytes. `k:` carries the challenger's own key so the answer can be sealed back
+to it without a prior exchange. Where the responder already holds that key, it
+is omitted:
+
+```
+t:chal f:X32DVA d:CT1ABC-9 ts:2026-08-08_14:26:40 x:pQ4m9xT2vB8kRt7wYn3LzF6cHjD1sA0eXbQvU5iOgM2p
+```
+
+96 bytes.
+
+Only the holder of the private key can recover the nonce. The answer is sealed
+to the challenger's key and names the challenge in `r:`:
+
+```
+t:resp f:CT1ABC-9 d:X32DVA ts:2026-08-08_14:26:40 r:7c31a9 x:Zk8Ln2Qv5TyR9xW3mB7cJdF1aH6sE0uP4gN
+```
+
+96 bytes. A challenger that gets back the value it expects has learned that
+the station it is talking to holds the private key for that callsign, right now.
+
+### 18.3 What the answer contains
+
+**The answer is never the decrypted nonce.** It is
+
+```
+sha256(nonce | challenger callsign | responder callsign | challenge identifier)
+```
+
+truncated to 16 bytes and sealed to the challenger.
+
+This matters more than it looks. A station that decrypts whatever arrives and
+returns the plaintext is a decryption oracle: an attacker who has intercepted a
+private message can submit that ciphertext as a challenge and have the victim
+decrypt it. Returning a hash instead means an attacker learns nothing it could
+not have computed by already knowing the answer.
+
+For the same reason a station **only answers a challenge whose recovered
+plaintext begins with `oprs-chal`**. Ciphertext that does not decrypt to that
+marker is not a challenge, whatever packet it arrived in, and is discarded
+without a reply.
+
+Binding the callsigns and the challenge identifier into the hash stops an answer
+being relayed as the answer to a different challenge, or to the same challenge
+put by somebody else.
+
+### 18.4 Rules
+
+- A challenge and its answer are **never relayed**. Both are direct, and a
+  station that receives one addressed elsewhere ignores it. Liveness proved
+  through a relay is not liveness.
+- An answer arriving more than 60 seconds after the challenge is refused. The
+  point of the exchange is freshness.
+- A station answers a limited number of challenges per period and ignores the
+  rest. A challenge costs the responder a decryption, and an unlimited right to
+  demand one from a battery-powered station is a way to flatten it.
+- A challenge is never sent on amateur bands, since it cannot work without
+  encryption (section 9.4).
+
+### 18.5 What a failed challenge means
+
+**No answer is not proof of forgery.** A station may be out of range, asleep,
+rate-limiting, running on a radio that cannot encrypt, or simply not
+implementing this section. Treating silence as guilt would make the network
+hostile to exactly the small stations it exists for.
+
+A wrong answer is different, and is the one case that carries weight: something
+claiming that callsign does not hold its key.
+
+| Outcome | What it establishes |
+|---|---|
+| correct answer | the station holds the key, and held it a moment ago |
+| wrong answer | it does not hold the key |
+| no answer | nothing |
+
+A receiver may show that a callsign has been proved recently. It should not show
+that one has failed, unless it failed by answering wrongly.
+
+---
+
+## 19. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -1400,7 +1517,7 @@ negotiation.
 
 ---
 
-## 19. Operating alongside APRS
+## 20. Operating alongside APRS
 
 A licensed amateur may bridge OPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -1411,10 +1528,10 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 20. Reserved
+## 21. Reserved
 
 Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `trk`, `sos`,
-`warn`, `info`, `png`, `pnr`.
+`warn`, `info`, `chal`, `resp`, `png`, `pnr`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `trk`,
@@ -1432,7 +1549,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 21. Implementation status
+## 22. Implementation status
 
 | Element | State |
 |---|---|
@@ -1455,6 +1572,8 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | `t:sos` calls for help | not implemented; the current wire has an `sos` station symbol, which is a different thing and is not relayed further than any other packet |
 | `t:warn` warnings | not implemented; no source |
 | `t:info` notices | not implemented; no source |
+| `t:chal` and `t:resp` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
+| Periodic `t:id` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |
 | `type:` vehicle set | partly; the current wire carries a handful of symbols and none of the rail, air or cycle values |
 | Variable-length and authority-issued callsigns | not implemented; the current wire assumes the six-character `X1`/`X3` form |

@@ -122,7 +122,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `t` | `enum` | packet type, always the first field |
 | `f` | `call` | sending callsign |
 | `d` | `dest` | destination: a callsign, a group name, or absent for a broadcast |
-| `ts` | `time` | when the packet was composed |
+| `ts` | `time` | when the packet was composed, UTC |
+| `tz` | `offset` | the sender's offset from UTC, for display |
 | `q` | `words` | what the sender wants back (section 7) |
 | `s` | `words` | what this packet answers or reports (section 7) |
 | `r` | `hex6` | the identifier of another packet this one refers to |
@@ -166,6 +167,7 @@ The type is fixed by this document and is never transmitted.
 | `dest` | a `call` or a group name | `LISBOA` |
 | `hex6` | exactly 6 lowercase hexadecimal characters | `f6ff8d` |
 | `time` | `YYYY-MM-DD_HH:MM:SS`, UTC | `2026-08-08_14:26:40` |
+| `offset` | `+HH:MM` or `-HH:MM` | `+05:45` |
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
 | `ratio` | two `int` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
@@ -186,8 +188,24 @@ A packet is never rejected as a whole because one field is malformed.
 ts:2026-08-08_14:26:40
 ```
 
-The `_` keeps it one field. No offset is transmitted, because there is no local
-time on the wire.
+The `_` keeps it one field.
+
+`ts:` is always UTC, so two packets from opposite sides of the world are ordered
+by comparing them directly, with nothing to convert first.
+
+`tz:` optionally carries the sender's offset from UTC, so a reader can show the
+local time it was written at:
+
+```
+t:msg f:VK2XYZ d:X1QZ3N ts:2026-08-08_14:26:40 tz:+11:00 m:good morning from Sydney
+```
+
+83 bytes. The receiver reads 14:26 UTC, and knows it was 01:26 the next morning
+where the sender was standing. Offsets of 30 and 45 minutes exist, so the
+minutes are written out rather than assumed to be zero.
+
+`tz:` is presentation only. It never changes `ts:`, never takes part in an
+identifier, and a station that ignores it loses nothing but the courtesy.
 
 A packet that may be relayed or carried **must** have a time field. A carried
 packet can be delivered days later, and an undated position is plotted as
@@ -884,7 +902,7 @@ Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `png`, `pnr`.
 All other lowercase words are reserved.
 
 Assigned tags: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `vi`, `m`, `file`, `x`,
-`g`, `k`, `add`, `remove`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
+`g`, `k`, `add`, `remove`, `tz`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
 `wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `y`, `ag`, `ep`.
 
 Assigned `q:` and `s:` words: section 8.

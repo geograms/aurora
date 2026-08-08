@@ -881,7 +881,8 @@ Every defined weather field plus battery, fourteen fields:
 t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa wind:3.4m/s wdir:210deg gust:7.1m/s rain1:0.4mm rain24:12.6mm solar:640W/m2 batt:96% type:wx ts:2026-08-08_14:26:40
 ```
 
-185 bytes, leaving 121 for fields not yet defined.
+185 bytes, leaving 65 for fields not yet defined. It is the longest packet in
+this document.
 
 Indoor sensor with no position and no clock. Position is omitted rather than
 sent as zero:

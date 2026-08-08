@@ -34,21 +34,21 @@ OPRS is one syntax, readable on sight, with room to grow.
 
 ## 2. Design rules
 
-1. Every packet is a list of `tag:value` fields separated by one space. There
+1. Every packet is a list of `key:value` fields separated by one space. There
    are no positional fields, no binary framing and no escaping.
 2. Every packet declares its type in the first field, so a station never has to
    guess what it is holding.
-3. Every tag has a declared value type (section 4.3). A reader knows the shape
-   of a value before reading it, and a tag's meaning never varies with the
+3. Every key has a declared value type (section 4.3). A reader knows the shape
+   of a value before reading it, and a key's meaning never varies with the
    packet it appears in.
 4. Any field may appear anywhere and any field may be absent. Adding a field
    never changes how an existing field is read.
-5. One packet type carries every kind of observation. New data means a new tag,
+5. One packet type carries every kind of observation. New data means a new key,
    never a new packet type.
 6. Nothing is defined out of band. No receiver requires prior state to read a
    packet.
 7. All values are SI. Units are fixed here and never transmitted.
-8. An unknown tag is skipped and an unknown packet type is ignored, in both
+8. An unknown key is skipped and an unknown packet type is ignored, in both
    cases without error.
 9. A station asks for what it wants in `q:` and answers with the same words in
    `s:`. There is one vocabulary, not one per direction.
@@ -97,14 +97,14 @@ callsign.
 ## 4. Packet
 
 ```
-tag:value tag:value tag:value ...
+key:value key:value key:value ...
 ```
 
-- A tag is 1 to 6 lowercase ASCII letters, followed by `:`.
+- A key is 1 to 6 lowercase ASCII letters, followed by `:`.
 - A value contains no space, and is never empty.
 - Fields are separated by exactly one space.
 - Order is free, except that `t:` is first and `m:`, when present, is last.
-- An unknown tag is skipped along with its value.
+- An unknown key is skipped along with its value.
 
 The maximum packet is **250 bytes on every transport**. This fits one LoRa
 packet, one BLE5 extended advertisement, and the store-and-forward buffer of the
@@ -115,7 +115,7 @@ never compressed.
 everything after `m:` is the message. It needs no delimiter and no escaping, so
 a message may contain spaces, colons, URLs and any punctuation.
 
-### 4.1 Envelope tags
+### 4.1 Envelope keys
 
 | Tag | Type | Meaning |
 |---|---|---|
@@ -128,6 +128,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `s` | `words` | what this packet answers or reports (section 7) |
 | `r` | `hex6` | the identifier of another packet this one refers to |
 | `n` | `ratio` | this packet is part i of n |
+| `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `vi` | `call` | station that relayed this packet (section 13) |
@@ -161,15 +162,16 @@ The type is fixed by this document and is never transmitted.
 |---|---|---|
 | `int` | digits, optional leading `-` | `210` |
 | `dec` | digits, optional leading `-`, optional single `.` and fraction | `-9.1393` |
-| `enum` | one lowercase word from a list given with the tag | `foot` |
+| `enum` | one lowercase word from a list given with the key | `foot` |
 | `words` | one or more lowercase words separated by commas | `ack,read` |
+| `labels` | `words`, but the words are chosen freely and may contain digits and `-` | `field-day,photos` |
 | `call` | uppercase letters, digits, `-` and `/` | `CT1ABC-9` |
 | `dest` | a `call` or a group name | `LISBOA` |
 | `hex6` | exactly 6 lowercase hexadecimal characters | `f6ff8d` |
 | `time` | `YYYY-MM-DD_HH:MM:SS`, UTC | `2026-08-08_14:26:40` |
 | `offset` | `+HH:MM` or `-HH:MM` | `+05:45` |
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
-| `ratio` | two `int` separated by `/`, position then total | `2/3` |
+| `ratio` | two digits `1` to `9` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
 | `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
 | `b64` | base64url, no padding | `pQ4m9xT2vB8kR` |
@@ -177,7 +179,7 @@ The type is fixed by this document and is never transmitted.
 | `sig` | 60 characters, base85, no space | |
 | `text` | any bytes, spaces included | `heading south on the N8` |
 
-A value that does not match its declared type is skipped, as an unknown tag is.
+A value that does not match its declared type is skipped, as an unknown key is.
 A packet is never rejected as a whole because one field is malformed.
 
 ### 4.4 Numbers
@@ -201,7 +203,7 @@ separates words in `q:ack,read`. A station writing `c:14,2` for 14.2, or
 - A negative number carries a leading `-`. A positive number carries no sign.
 - A number has at least one digit before the dot: `0.4`, never `.4`. It never
   ends in a dot.
-- No exponent notation, and no unit suffix. The unit is fixed by the tag.
+- No exponent notation, and no unit suffix. The unit is fixed by the key.
 
 Trailing zeros are significant, because the number of decimal places states the
 precision claimed (section 10.1). `c:14.0` says the reading was measured to a
@@ -212,7 +214,47 @@ overridden before transmission. This is the most likely way for an
 implementation to emit packets that every other station silently misreads,
 since `14,2` is correct in most of Europe and is a different packet here.
 
-### 4.5 Time
+### 4.5 Labels
+
+`tag:` carries topic labels chosen by the sender. They let a receiver file,
+filter or search a packet without reading it.
+
+```
+t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation m:back on Monday, radio off until then
+```
+
+98 bytes. Several labels are separated by commas:
+
+```
+t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation,photos m:the coast near Sagres
+```
+
+90 bytes. There is no limit on how many labels a packet carries beyond the
+250-byte packet itself. It applies to any packet, not only messages:
+
+```
+t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 ts:2026-08-08_14:26:40 tag:field-day
+```
+
+76 bytes.
+
+**A label contains no space.** No field value may contain a space, `m:` alone
+excepted, and `tag:` is not that exception. A label is lowercase letters,
+digits and `-`, at least one character, and words are joined with `-` rather
+than spaces: `tag:field-day`, never `tag:field day`, which would end the field
+at the space and leave `day` to be read as a malformed field and skipped.
+
+Labels are lowercase so that a receiver matching them does not have to decide
+whether `Vacation` and `vacation` are the same label. They are chosen freely
+and this document assigns none: unlike `q:` and `s:`, whose words are a fixed
+vocabulary because both ends must agree on what they mean, a label means
+whatever the people using it agree it means.
+
+A receiver that does not recognise a label keeps it and displays it. Labels are
+never a routing decision: `d:` says where a packet goes, and a label never
+changes that.
+
+### 4.6 Time
 
 `ts:` is written the way a person reads it, in UTC:
 
@@ -243,10 +285,10 @@ A packet that may be relayed or carried **must** have a time field. A carried
 packet can be delivered days later, and an undated position is plotted as
 current. Two alternatives exist for stations without a clock (section 10.5).
 
-### 4.6 Extending the format
+### 4.7 Extending the format
 
-A new field takes an unused tag, declares its type, and is placed anywhere.
-Receivers that do not know the tag skip it and its value. No existing field
+A new field takes an unused key, declares its type, and is placed anywhere.
+Receivers that do not know the key skip it and its value. No existing field
 moves, no packet type is added, and no version is negotiated.
 
 Tags beginning with `z` are reserved for private and experimental use and are
@@ -376,7 +418,11 @@ t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, but on
 - Incomplete sets are held for 10 minutes and then discarded. A partial message
   is never displayed.
 - Parts may arrive in any order. A repeated part number is ignored.
-- A set is limited to 16 parts. Longer content is sent as a file.
+- **A set is limited to 9 parts**, so `n:` is always three characters and the
+  last part is at most `n:9/9`. A message that does not fit in nine parts is
+  sent as a file (section 6.7) rather than split further: at that size the
+  content is a document, and a receiver that loses one of twenty parts has
+  waited a long time to be told it has nothing.
 
 ### 6.7 Files
 
@@ -471,7 +517,7 @@ later delivery discards its copy on hearing the matching `s:ack`.
 `q:` and `s:` words assigned by this document: `ack`, `read`, `pos`, `bat`,
 `id`, `pnr`, `no`. Reactions assigned for `add:` and `remove:`: `like`. All
 other words are reserved. A word
-beginning with `z` is private, as a tag beginning with `z` is.
+beginning with `z` is private, as a key beginning with `z` is.
 
 ---
 
@@ -511,7 +557,7 @@ t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 x:pQ4m9xT2vB8kR g:<60 characters>
 station can route the packet, identify the recipient and release a carried copy
 on the matching receipt, without reading the content.
 
-A later cipher suite takes a new tag rather than changing this one.
+A later cipher suite takes a new key rather than changing this one.
 
 ### 9.3 Identity
 
@@ -620,7 +666,7 @@ receiver infers one. A station holding Fahrenheit converts before transmitting.
 receiver, in a `pnr` reply. A station does not transmit its own received signal
 strength.
 
-An observation carries a note in `m:`, the same tag a message uses.
+An observation carries a note in `m:`, the same key a message uses.
 
 ### 10.5 Stations without a clock
 
@@ -896,7 +942,7 @@ overhears a receipt for a message it is carrying discards its copy.
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
 
-The implementer takes an unused tag, gives it a type and a unit, and transmits
+The implementer takes an unused key, gives it a type and a unit, and transmits
 it:
 
 ```
@@ -904,12 +950,12 @@ t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 zpm:8 ts:2026-08-08_14:26:40
 ```
 
 68 bytes. The new field costs six bytes. Every existing receiver reads `zpm:8`,
-does not recognise the tag, skips it, and continues at `ts:`. Nothing is
+does not recognise the key, skips it, and continues at `ts:`. Nothing is
 versioned, nothing is negotiated, and no other field is affected.
 
-The tag begins with `z` because unassigned tags belong in the private space. If
+The key begins with `z` because unassigned keys belong in the private space. If
 this document later assigns it, the entry is added to the table in section 10.3
-with its type and unit, and a shorter tag may be chosen; nothing else changes.
+with its type and unit, and a shorter key may be chosen; nothing else changes.
 
 The same holds for a new word in `q:` and `s:`. A station asking `q:pos,co2`
 gets `s:pos` from every station built before CO2 existed, with no error and no
@@ -933,15 +979,16 @@ because obscured meaning is not permitted on amateur bands.
 Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `png`, `pnr`.
 All other lowercase words are reserved.
 
-Assigned tags: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `vi`, `m`, `file`, `x`,
+Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `vi`, `tag`, `m`,
+`file`, `x`,
 `g`, `k`, `add`, `remove`, `tz`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
 `wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `y`, `ag`, `ep`.
 
 Assigned `q:` and `s:` words: section 8.
 
-Reserved prefix: `z`, for both tags and words.
+Reserved prefix: `z`, for both keys and words.
 
-A new field takes an unused tag and inherits the skip-unknown rule. A new
+A new field takes an unused key and inherits the skip-unknown rule. A new
 purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
@@ -958,7 +1005,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | Encryption and the band rules | implemented |
 | File references by content hash | implemented |
 | Identity announcement | implemented |
-| `tag:value` fields separated by spaces | not implemented; the current wire has three `0x1F`-separated fields and packs everything else into a trailing string |
+| `key:value` fields separated by spaces | not implemented; the current wire has three `0x1F`-separated fields and packs everything else into a trailing string |
 | `t:` packet type as the first field | not implemented; the current wire infers the purpose from the destination field |
 | Derived identifiers | not implemented; the current wire hashes message content without a timestamp, so every `OK` collides, and carries a separate receipt identifier |
 | `ts:` on messages | not implemented; messages carry no time, although they are the packets most often carried for days |

@@ -1,210 +1,208 @@
-# OPRS data formats — the wire, defined once
+# OPRS data formats
 
-> How an OPRS station says where it is, how fast it is going, what the weather
-> is doing, and what it wants to tell you. Plus messages, receipts, parcels,
-> signing and privacy.
->
-> Companion: [OPRS.md](OPRS.md) — what OPRS is and why it exists.
->
-> This document is self-contained. Everything needed to write an interoperable
-> implementation is here.
+Specification of the OPRS wire format: framing, addressing, messages, receipts,
+parcels, signing, privacy, and observations (position, movement, weather,
+telemetry).
 
----
+Companion document: [OPRS.md](OPRS.md), which describes what OPRS is and why it
+exists. This specification is self-contained and depends on no other document.
 
-## 1. Why this document exists at all
-
-APRS's data formats grew one field at a time for thirty years, and it shows. A
-position can arrive in four incompatible encodings — uncompressed, Base91
-compressed, Mic-E (hidden *inside* the AX.25 destination field), and a `!DAO!`
-extension bolted on later to recover the precision the first encoding threw
-away. Weather takes over the position report as a fixed-width run of
-letter-suffixed fields. Telemetry is worse: numbered packets whose *meaning*
-lives in separate definition messages you must have received earlier and cached
-— lose those and the numbers are unreadable forever. Units are whatever was
-convenient that year: feet, knots, miles per hour, Fahrenheit, hundredths of an
-inch, tenths of a millibar.
-
-None of that was a mistake at the time. It is what happens when every new idea
-has to fit in the gaps left by the last one, in a packet that was already full.
-
-We do not have that problem. We have **250 bytes and a blank page**. So the
-rules are decided once, here, before there are a hundred implementations to keep
-compatible.
-
-**The two goals, in tension, resolved:** short enough for the smallest radio we
-will ever use, and readable by a person looking at a log. Where they conflict,
-readability wins, because we can afford it — see §2.
+Status: DRAFT 1. Section 12 records which parts have a working producer today.
 
 ---
 
-## 2. The packet: 250 bytes, everywhere
+## 1. Scope and design rules
 
-One number for every transport. It is not a compromise; it is roughly what every
-path independently landed on:
+APRS added data formats one at a time over three decades. The result is four
+incompatible position encodings, weather carried as fixed-width fields inside a
+position report, telemetry whose units are defined in separate messages that
+must be received and cached beforehand, and a mix of feet, knots, miles per
+hour, Fahrenheit, hundredths of an inch and tenths of a millibar. Each addition
+was constrained by a packet that was already full.
 
-| Path | Limit | Where |
+OPRS starts with 250 bytes and no legacy. The rules below are fixed once, before
+multiple implementations exist.
+
+1. One frame type carries every kind of report. New data means a new key, never
+   a new packet type.
+2. Every field is self-describing. No definition is sent out of band, and no
+   receiver needs prior state to read a frame.
+3. All values are SI. Units are fixed by this document and never transmitted.
+4. All fields are optional. A station sends what it has.
+5. Field order carries no meaning.
+6. An unknown token is skipped, not rejected. An implementation that discards a
+   frame containing an unrecognised key is non-conforming.
+7. Values are readable as text. Compression is not used.
+
+---
+
+## 2. Packet size
+
+The maximum frame is 250 bytes on every transport.
+
+| Transport | Limit | Source |
 |---|---|---|
-| LoRa (SX1262 / SX1276) | **255 B** in one packet | `esp32/components/geogram_sx1262/sx1262.h:130` — `len` is a `uint8_t`, documented "max 255" |
-| ESP32 custody store | 252 B per parked frame | `BLEMESH_SCF_FRAME_MAX` |
+| LoRa (SX1262, SX1276) | 255 B per packet | `esp32/components/geogram_sx1262/sx1262.h:130`, length is a `uint8_t` documented "max 255" |
+| Custody store (ESP32) | 252 B per parked frame | `BLEMESH_SCF_FRAME_MAX` |
 | Mesh courier | 240 B aired | `MeshCourier.maxWire` |
-| BLE5 extended advert | 184–296 B (controller-dependent, measured) | runtime `leMaximumAdvertisingDataLength` |
+| BLE5 extended advertising | 184 B to 296 B, controller dependent, measured | runtime `leMaximumAdvertisingDataLength` |
 
-**So: a frame that fits 250 bytes goes anywhere.** Longer content is not
-squeezed — it is split into parcels (§5.8).
-
-That budget is generous enough that this format never needs to be cryptic.
-A full weather report with position and a timestamp is 94 bytes (§8).
+A frame within 250 bytes is carried by all of them. Content that does not fit is
+split into parcels (section 5.8), not compressed.
 
 ---
 
-## 3. The frame
+## 3. Frame
 
 ```
 FROM <US> TO <US> TEXT
 ```
 
-`<US>` is the ASCII unit separator, `0x1F` (1 byte). Three fields, two
-separators, no headers, no escaping. Everything else in this document describes
-what goes in `TEXT`.
+`<US>` is the ASCII unit separator, `0x1F`, one byte. There are three fields,
+two separators, no header and no escaping.
 
-`FROM` is the sender's callsign. `TO` decides what the frame *is*:
+`FROM` is the sender callsign. `TO` selects the frame type:
 
-| `TO` | Meaning |
+| `TO` | Frame type |
 |---|---|
-| a callsign | direct message to that station |
-| `#GROUP` | group message (bulletin) |
-| `!` | an observation — position, weather, telemetry (§7) |
-| *(empty)* | area broadcast: text for whoever is nearby |
-| `?…` | control frame (`?ACK`, `?PING`, …) |
+| a callsign | direct message |
+| `#GROUP` | group message |
+| `!` | observation (section 7) |
+| empty | area broadcast |
+| `?NAME` | control frame |
 
-**Reserved first characters: `#`, `!`, `?`.** A callsign never starts with one,
-so the dispatch is a single-byte test.
+The characters `#`, `!` and `?` are reserved as the first character of `TO`. A
+callsign never begins with one, so frame type is determined by a single byte.
 
 ---
 
-## 4. Grammar
+## 4. Token grammar
 
-`TEXT` is a list of **tokens** separated by single spaces:
+`TEXT` is a sequence of tokens separated by single spaces:
 
 ```
 key:value key:value key:value
 ```
 
-- **Keys** are 1–3 lowercase ASCII letters.
-- **Values** contain no space. The one exception is a trailing free-text field,
-  which must come last (§7.6).
-- **Order is free.** No field position carries meaning — that is the mistake we
-  are explicitly not repeating.
-- **Numbers**: optional leading `-`, digits, optional `.` and more digits. No
-  `+`, no exponent, no thousands separator, **and never a unit suffix**. Units
-  are fixed by this document and never appear on the wire.
-- **An unknown token is skipped, never an error.** This single rule is what lets
-  fields be added for the next thirty years without a second format. An
-  implementation that rejects a frame it does not fully understand is
-  non-conforming.
+- Keys are 1 to 3 lowercase ASCII letters.
+- Values contain no space, except a single trailing free-text field (section
+  7.6), which is always last.
+- Numbers are an optional leading `-`, digits, and an optional `.` followed by
+  digits. No leading `+`, no exponent, no digit grouping, no unit suffix.
+- Order is not significant.
+- Unknown tokens are skipped.
 
-A message body that is plain human text is not a token list — see §5.
+The body of a plain message is human text, not a token list. A receiver
+distinguishes the two by the frame type in `TO`.
 
 ---
 
 ## 5. Messages
 
-### 5.1 Direct
+### 5.1 Direct message
 
 ```
 X1QZ3N <US> X1RD89 <US> meet at the bridge at six
 ```
-**39 bytes.** No ceremony: if the text is not a control word, it is the message.
 
-### 5.2 Group
+39 bytes. Text that is not a control word is the message.
+
+### 5.2 Group message
 
 ```
 X1QZ3N <US> #LISBOA <US> net starts in ten minutes
 ```
-**40 bytes.** Group names are 1–16 characters, uppercase letters and digits.
+
+40 bytes. A group name is 1 to 16 characters, uppercase letters and digits.
 
 ### 5.3 Area broadcast
 
-An empty `TO` means "anyone in range", tied to wherever the sender is:
+An empty `TO` addresses any station in range:
 
 ```
 X1QZ3N <US>  <US> anyone near the north gate?
 ```
-**35 bytes.**
 
-### 5.4 Message id — derived, never assigned
+35 bytes.
 
-Every group message has an **id**: the first 4 hex characters of
+### 5.4 Message identifier
+
+Every group message has an identifier: the first 4 hexadecimal characters of
 `SHA-1(FROM + "|" + TEXT)`, lowercase.
 
 ```
-X1QZ3N | net starts in ten minutes   →  SHA-1 → 9c4e…  →  id = 9c4e
+FROM = X1QZ3N
+TEXT = net starts in ten minutes
+id   = first 4 hex characters of SHA-1("X1QZ3N|net starts in ten minutes")
 ```
 
-Nothing is negotiated, nothing is registered, no counter is kept, and every
-receiver independently computes the same id from the bytes it already has. Two
-different messages colliding costs a mis-threaded reply, not a lost message.
+The identifier is derived from the content, so every receiver computes the same
+value without a registry, a counter, or a negotiation. A collision between two
+different messages causes a misplaced reply, not a lost message.
 
-Direct messages do not need ids — they have a receipt id instead (§5.7).
+Direct messages carry a receipt identifier instead (section 5.7).
 
 ### 5.5 Threads
 
-A reply begins with `+<id>` and a space:
+A reply begins with `+`, the parent identifier, and a space:
 
 ```
 X1RD89 <US> #LISBOA <US> +9c4e I'll be late, start without me
 ```
-**51 bytes.** Strip `+9c4e ` before display; keep it for the tree. The reply's
-own id is computed over the *whole* text including the marker, so a reply is
-itself replyable.
+
+51 bytes. The marker is removed before display and retained for threading. The
+reply's own identifier is computed over the complete text including the marker,
+so replies are themselves replyable.
 
 ### 5.6 Reactions
 
-The entire body is `<id>:like` or `<id>:unlike`:
+The whole body is `<id>:like` or `<id>:unlike`:
 
 ```
 X1RD89 <US> #LISBOA <US> 9c4e:like
 ```
-**24 bytes.** Counted once per callsign, idempotent, never shown as a message
-and never notified. Deliberately readable so that a station with no reaction
-support still shows something a human can interpret.
 
-### 5.7 Receipts (ACK)
+24 bytes. A reaction is counted once per callsign and is idempotent. It is not
+displayed as a message and raises no notification. A station without reaction
+support displays the body as text, which remains legible.
 
-A sender that wants confirmation puts a **receipt id** on the message —
-`am:` followed by 6 hex characters, **first in the text**:
+### 5.7 Receipts
+
+A sender requesting confirmation includes a receipt identifier: `am:` followed
+by 6 hexadecimal characters, positioned first in `TEXT`.
 
 ```
 X1QZ3N <US> X1RD89 <US> am:40c124 meet at the bridge at six
 ```
-**49 bytes.**
 
-The recipient answers with a control frame:
+49 bytes.
+
+The recipient replies with a control frame:
 
 ```
 X1RD89 <US> ?ACK <US> 40c124 d
 ```
-**20 bytes.** The state is `d` (delivered to the device) or `r` (read by the
-person). `r` is optional; a station that does not track reading never sends it.
 
-**Any station may act on an overheard receipt.** A node carrying that message
-for someone else (see [OPRS.md](OPRS.md) §7) drops its copy the moment it hears
-the `?ACK`. This is how the mesh cleans up after itself without anybody
-coordinating it.
+20 bytes. The state is `d` for delivered to the device or `r` for read by the
+operator. The `r` state is optional.
 
-`am:` must be first because carriers read it at a fixed offset without parsing
-the rest.
+Any station may act on a receipt it overhears. A station carrying that message
+on behalf of another discards its copy when it hears the matching `?ACK`. This
+is the mechanism by which carried copies are released.
 
-### 5.8 Parcels — content larger than one packet
+`am:` is first in `TEXT` so that a carrying station reads it at a fixed offset
+without parsing the remainder.
 
-A message too long for 250 bytes is split into numbered **parcels**:
+### 5.8 Parcels
+
+Content exceeding 250 bytes is split into parcels. Each part carries:
 
 ```
 p:<id>.<index>/<total>
 ```
 
-`<id>` is 3 hex characters chosen by the sender (enough to keep two concurrent
-parcels from the same station apart), `<index>` counts from 1.
+`<id>` is 3 hexadecimal characters selected by the sender, sufficient to
+distinguish concurrent parcels from the same station. `<index>` starts at 1.
 
 ```
 X1QZ3N <US> #LISBOA <US> p:7a3.1/3 The repeater on the hill is down. We
@@ -213,111 +211,99 @@ X1QZ3N <US> #LISBOA <US> p:7a3.3/3  it is back up, but only just.
 ```
 
 Rules:
-- The token is stripped; the remainder of each part is concatenated **in index
-  order, with no separator added**. A sender that splits on a word boundary
-  keeps its own spaces.
+
+- The token is removed and the remainder of each part is concatenated in index
+  order with no added separator. A sender that splits on a word boundary
+  includes its own spacing.
 - Reassembly is keyed on `(FROM, id)`.
-- A receiver holds incomplete parcels for **10 minutes**, then discards them. A
-  partial message is never displayed — half a sentence is worse than silence.
-- Parts may arrive out of order and may be duplicated; a repeated index is
-  ignored.
-- Signatures (§6.1) cover the **reassembled** text and travel on the last part.
-- A parcel set is bounded to 16 parts. Anything larger belongs in a file
-  transfer, not a message.
+- Incomplete parcels are held for 10 minutes and then discarded. A partial
+  message is never displayed.
+- Parts may arrive out of order. A repeated index is ignored.
+- A signature (section 6.1) covers the reassembled text and is carried on the
+  final part.
+- A parcel set is limited to 16 parts. Larger content is transferred as a file.
 
 ### 5.9 Attachments
 
-A message can point at content instead of carrying it:
+A message references content by hash rather than carrying it:
 
 ```
-X1QZ3N <US> #LISBOA <US> antenna after the storm file:kZ9v…7Qm.jpg
+X1QZ3N <US> #LISBOA <US> antenna after the storm file:kZ9v7Qm.jpg
 ```
 
-`file:` carries the content hash and extension; the bytes are fetched by
-whatever path is available. An optional `ih:` token carries a torrent infohash
-for the same content.
+`file:` carries the content hash and extension. The optional `ih:` token carries
+a torrent infohash for the same content. The transfer path is not specified
+here.
 
 ---
 
 ## 6. Signing and privacy
 
-### 6.1 Signatures — authorship you can check
+### 6.1 Signatures
 
-A callsign in a frame is a claim. A signature makes it checkable. The signature
-is appended last, after a space and a `~`:
+A signature is appended last, preceded by a space and `~`:
 
 ```
-X1QZ3N <US> #LISBOA <US> net starts in ten minutes ~Kf3p…Qz1
+X1QZ3N <US> #LISBOA <US> net starts in ten minutes ~<60 characters>
 ```
 
-It covers `FROM + "|" + <everything before the trailing " ~">`, so both the
-author and the text are bound. The encoding deliberately excludes the space and
-`~` characters, which makes the split unambiguous: the signature is whatever
-follows the **last** ` ~` in the frame.
+The signature covers `FROM + "|" + <all text preceding the trailing " ~">`,
+binding both author and content. The signature encoding excludes the space and
+`~` characters, so the split point is the last occurrence of ` ~` in the frame.
 
-A receiver reports one of four verdicts, and they are not the same thing:
-**verified** (signature present and valid for a known key), **forged**
-(signature present and invalid — show this loudly), **unverified** (signed, but
-the sender's key is unknown), **unsigned**.
+A receiver reports one of four states:
 
-Reactions and key announcements are never signed — they are too small to be
-worth it and carry nothing worth forging.
+| State | Condition |
+|---|---|
+| verified | signature present, valid, signer key known |
+| forged | signature present and invalid |
+| unverified | signature present, signer key unknown |
+| unsigned | no signature |
+
+Reactions and key announcements are not signed.
 
 ### 6.2 Encryption
 
-A private message replaces the body with sealed ciphertext:
+A private message replaces the body with ciphertext:
 
 ```
-X1QZ3N <US> X1RD89 <US> am:40c124 ENC1:pQ4m…9xT ~Kf3p…Qz1
+X1QZ3N <US> X1RD89 <US> am:40c124 ENC1:pQ4m9xT ~<60 characters>
 ```
 
-**The envelope stays readable on purpose.** `FROM` and `TO` are in the clear so
-that a station carrying the message for a peer it may never meet can still route
-it and know whom to hand it to. Only the body is sealed. That is the whole
-design: public routing, private content.
+`ENC1:` is the entire body when present. The envelope fields `FROM` and `TO`
+remain in cleartext so that an intermediate station can route the frame and
+identify the recipient without being able to read the content.
 
-`ENC1:` must be the entire body when present.
+### 6.3 Permitted use by band
 
-### 6.3 Where each is allowed — the rule that matters
-
-OPRS runs on licence-free spectrum, and the point of the project is that anyone
-may use it. But some operators will want to run OPRS on amateur bands, and there
-the rules are different — not worse, different, and they are not ours to bend.
-
-| Where | Signing | Encryption |
+| Spectrum | Signing | Encryption |
 |---|---|---|
-| Licence-free spectrum (Bluetooth / LoRa ISM, WiFi), and the internet | yes | **yes — and it is the default for direct messages** |
-| Amateur bands, under an amateur licence | yes | **no — never transmit `ENC1:` there** |
+| Licence-free (Bluetooth and LoRa ISM, WiFi), and the internet | permitted | permitted, and is the default for direct messages |
+| Amateur bands, under an amateur licence | permitted | not permitted |
 
-Amateur regulations in essentially every country forbid obscuring the meaning of
-a transmission. That rule exists so the bands stay self-policing, and a licensed
-operator using OPRS is bound by it exactly as they are on any other mode.
+Amateur regulations prohibit obscuring the meaning of a transmission. A licensed
+operator using OPRS on amateur bands is bound by that rule as on any other mode,
+and must not transmit `ENC1:` there.
 
-**A signature is not encryption.** It obscures nothing — the text stays in the
-clear and anyone can read it. It only proves who wrote it. Signing is therefore
-entirely legal on amateur bands, and it is precisely what an operator there
-should use: authorship without obscurity.
+A signature is not encryption. It leaves the text in cleartext and establishes
+only authorship, so signing is permitted on amateur bands.
 
-An implementation that can reach amateur infrastructure **must refuse to
-transmit a sealed body onto it**, rather than leaving that to the operator to
-remember. Ours already does.
+An implementation able to reach amateur infrastructure must refuse to transmit a
+sealed body onto it.
 
 ---
 
 ## 7. Observations
 
-Position, movement, weather and device telemetry are **one frame with one
-vocabulary**, addressed to `!`:
+Position, movement, weather and device telemetry share one frame and one
+vocabulary, addressed to `!`:
 
 ```
 FROM <US> ! <US> <tokens>
 ```
 
-There is no separate weather packet and no separate telemetry packet. A weather
-station is not a different kind of station — it is a station that happens to
-report temperature alongside where it is. **This is the single biggest departure
-from APRS**, and it is what stops the format fragmenting later: a new
-measurement is a new key, never a new packet type.
+There is no separate weather frame and no separate telemetry frame. A weather
+station is a station that reports temperature in addition to position.
 
 ### 7.1 Position
 
@@ -325,238 +311,338 @@ measurement is a new key, never a new packet type.
 @<lat>,<lon>
 ```
 
-Decimal degrees, WGS84. Negative is south and west. One token, one comma, no
-hemisphere letters, no degrees-minutes-seconds, no compression:
+Decimal degrees, WGS84. Negative values are south and west. No hemisphere
+letters, no degrees-minutes-seconds, no compression.
 
 ```
 @38.7223,-9.1393
 ```
-**16 bytes**, and you can paste it into any map on earth.
 
-**Precision is a claim about accuracy.** Send only the digits your fix
-justifies:
+16 bytes.
 
-| Decimals | Resolution | Honest for |
-|---|---|---|
-| 2 | ~1.1 km | a town |
-| 3 | ~110 m | a neighbourhood |
-| 4 | ~11 m | a normal GPS fix |
-| 5 | ~1.1 m | a good fix, survey gear |
-| 6 | ~0.11 m | rarely justified |
+The number of decimal places states the precision claimed:
 
-Put the actual uncertainty in `e:` when you know it. A station reporting
-`@38.72231,-9.13934 e:8` is saying "five decimals of arithmetic, eight metres of
-truth", and both halves are useful.
+| Decimals | Resolution |
+|---|---|
+| 2 | 1.1 km |
+| 3 | 110 m |
+| 4 | 11 m |
+| 5 | 1.1 m |
+| 6 | 0.11 m |
 
-**Absence of `@` means the position is unknown.** It does not mean zero. This
-matters: `0,0` is a real place in the Gulf of Guinea, and treating it as a
-sentinel is why so many maps have a mystery cluster there.
+A station sends only the digits its fix supports and reports measured
+uncertainty separately in `e:`.
 
-### 7.2 Motion
+Absence of `@` means the position is unknown. It does not mean zero. `0,0` is a
+valid coordinate in the Gulf of Guinea.
+
+### 7.2 Movement
 
 | Key | Meaning | Unit |
 |---|---|---|
 | `a` | altitude above mean sea level | metres |
 | `e` | horizontal accuracy radius | metres |
-| `s` | speed over ground | metres/second |
-| `c` | course over ground | degrees true, 0–359 |
-| `v` | vertical speed, signed | metres/second |
+| `s` | speed over ground | metres per second |
+| `c` | course over ground | degrees true, 0 to 359 |
+| `v` | vertical speed, signed | metres per second |
 
 ### 7.3 Weather
 
 | Key | Meaning | Unit |
 |---|---|---|
-| `t` | air temperature | °C |
-| `h` | relative humidity | % |
+| `t` | air temperature | degrees Celsius |
+| `h` | relative humidity | percent |
 | `b` | barometric pressure, station level | hPa |
-| `w` | wind speed, sustained | metres/second |
-| `wd` | wind direction it blows **from** | degrees true |
-| `wg` | wind gust, peak | metres/second |
-| `r1` | rainfall, last hour | mm |
-| `r24` | rainfall, last 24 hours | mm |
-| `sr` | solar irradiance | W/m² |
+| `w` | wind speed, sustained | metres per second |
+| `wd` | wind direction, the direction it blows from | degrees true |
+| `wg` | wind gust, peak | metres per second |
+| `r1` | rainfall, previous hour | mm |
+| `r24` | rainfall, previous 24 hours | mm |
+| `sr` | solar irradiance | watts per square metre |
 
-Every value is SI. No station ever transmits a unit, and no receiver ever
-guesses one. If you have Fahrenheit, convert before transmitting — that
-conversion is your problem, once, instead of everyone's problem, forever.
+Conversion to SI is performed by the sender. No unit is transmitted and no
+receiver infers one.
 
 ### 7.4 Device telemetry
 
 | Key | Meaning | Unit |
 |---|---|---|
-| `bt` | battery charge | % |
+| `bt` | battery charge | percent |
 | `vb` | supply voltage | volts |
 | `rs` | received signal strength | dBm |
 | `sn` | signal-to-noise ratio | dB |
 
-`rs` and `sn` describe the link a frame *arrived on*, so they are added by the
-receiver for its own records — a station does not transmit its own RSSI.
+`rs` and `sn` describe the link on which a frame arrived and are recorded by the
+receiver. A station does not transmit its own received signal strength.
 
-### 7.5 Time — three forms, one per capability
+### 7.5 Time
 
-**A time field is required on any observation that may be carried.** Our custody
-lane holds a frame for up to seven days before delivering it; an undated
-position plotted as "here, now" is not merely stale, it is wrong. This is not
-optional politeness — it is what makes carried positions safe to use at all.
+An observation that may be carried by another station must include a time field.
+Custody delivery holds a frame for up to 7 days, and an undated position is
+plotted as current.
 
-| The device can… | Field | Example | Meaning |
+| Station capability | Key | Example | Meaning |
 |---|---|---|---|
-| keep wall-clock time | `ts` | `ts:1780000000` | unix seconds, UTC — **preferred** |
-| neither keep time nor store anything | `ag` | `ag:45` | seconds between the observation and this transmission |
-| not keep time, but **has persistent memory** | `ep` | `ep:7.4210` | boot epoch 7, 4210 seconds into it |
+| keeps wall-clock time | `ts` | `ts:1780000000` | Unix seconds, UTC |
+| no clock, no storage | `ag` | `ag:45` | seconds between observation and transmission |
+| no clock, persistent storage | `ep` | `ep:7.4210` | boot epoch 7, 4210 seconds into that epoch |
 
-**The epoch form solves a real problem.** A small node with no real-time clock —
-most microcontrollers, once the battery has been out — cannot say when anything
-happened. But it can keep a counter in flash. It increments that counter once
-per boot and reports it with its seconds-since-boot:
+The epoch form supports stations without a real-time clock. The station keeps a
+counter in non-volatile storage, increments it once per boot, and reports it
+with its seconds since boot:
 
 ```
 X3WX01 <US> ! <US> @38.7223,-9.1393 t:14.2 ep:7.4210
 ```
 
-Two consequences fall out for free:
+Two properties follow.
 
-- **Ordering with no clock anywhere.** Between two frames from the same station,
-  the one with the higher epoch is later; within an epoch, the higher uptime is
-  later. A receiver can sort a station's history correctly having never known
-  the time.
-- **Anchoring.** Any receiver that *does* have a clock notes the wall time at
-  which it first heard epoch 7 and can then date every frame of that epoch —
-  including ones that reach it days later by custody. One node with a clock
-  dates the whole neighbourhood.
+Ordering without a clock: between two frames from the same station, the higher
+epoch is later, and within one epoch the higher uptime is later.
 
-When a clockless device eventually learns the time (from a peer, a GPS fix, the
-internet), it should send **one** frame carrying both forms:
+Anchoring: a receiver holding a clock records the wall-clock time at which it
+first heard a given epoch, and can then date every frame of that epoch,
+including frames delivered days later by custody.
+
+A station that subsequently obtains the time sends one frame carrying both
+forms, which anchors that epoch for all receivers in range, and thereafter sends
+`ts` only:
 
 ```
 X3WX01 <US> ! <US> @38.7223,-9.1393 ep:7.9930 ts:1780005720
 ```
 
-That single frame anchors epoch 7 for every station in earshot at once. After
-it, the device uses `ts:` and stops sending `ep:`.
-
-### 7.6 Symbol and note
+### 7.6 Station type and note
 
 | Key | Meaning |
 |---|---|
-| `y` | what this station *is* — `y:node` `y:wx` `y:car` `y:boat` `y:foot` `y:balloon` `y:sos` |
-| `n` | free text, **must be the last token** (it may contain spaces) |
+| `y` | station type: `node`, `wx`, `car`, `boat`, `foot`, `balloon`, `sos` |
+| `n` | free text, always the last token, may contain spaces |
 
-`y` replaces APRS's two-character symbol-table codes with something a person can
-read. A receiver that does not know a symbol name shows a default marker and the
-name as text — it never fails.
+A receiver that does not recognise a `y` value displays a default marker and the
+value as text.
 
-### 7.7 Extension
+### 7.7 Private extensions
 
-Keys beginning `x` are reserved for private and experimental use and will never
-be assigned by this document:
+Keys beginning with `x` are reserved for private and experimental use and are
+never assigned by this document:
 
 ```
 xco2:412 xpm25:8
 ```
 
-Because unknown tokens are skipped (§4), an experiment costs other stations
-nothing.
+Unknown tokens are skipped (section 4), so an extension imposes no cost on other
+stations.
 
 ---
 
-## 8. Worked examples
+## 8. Frame examples
 
-Byte counts are the whole frame, both `0x1F` separators included.
+Byte counts are for the complete frame including both `0x1F` separators.
 
-**Minimal beacon** — a phone with a fix and a clock:
+Position beacon, station with a fix and a clock:
+
 ```
 X1QZ3N <US> ! <US> @38.7223,-9.1393 ts:1780000000
 ```
-`6 + 1 + 1 + 1 + 30` = **39 bytes**
 
-**Weather station** — clockless, solar, reporting everything it has:
+`6 + 1 + 1 + 1 + 30` = 39 bytes
+
+Weather station, no clock, reporting all available sensors:
+
 ```
 X3WX01 <US> ! <US> @38.7223,-9.1393 t:14.2 h:78 b:1013.2 w:3.4 wd:210 wg:7.1 r1:0.4 bt:96 y:wx ep:7.4210
 ```
-`6 + 1 + 1 + 1 + 85` = **94 bytes** — well under half the packet.
 
-**Moving vehicle** — position, motion and a note:
+`6 + 1 + 1 + 1 + 85` = 94 bytes
+
+Vehicle in motion:
+
 ```
 X1QZ3N <US> ! <US> @38.7231,-9.1402 a:87 s:13.4 c:212 e:8 y:car ts:1780000060 n:heading south on the N8
 ```
-`6 + 1 + 1 + 1 + 84` = **93 bytes**
 
-**Emergency** — everything that matters, nothing that does not:
+`6 + 1 + 1 + 1 + 84` = 93 bytes
+
+Emergency:
+
 ```
 X1QZ3N <US> ! <US> @38.7223,-9.1393 e:6 y:sos ts:1780000120 n:injured, need help
 ```
-`6 + 1 + 1 + 1 + 61` = **70 bytes**
 
-**Signed group message with a receipt** — the signature is a fixed 60
-characters, so it costs 62 bytes with its leading ` ~`:
+`6 + 1 + 1 + 1 + 61` = 70 bytes
+
+Signed group message with receipt. The signature is a fixed 60 characters and
+costs 62 bytes including the leading ` ~`:
+
 ```
-X1QZ3N <US> #LISBOA <US> am:40c124 net starts in ten minutes ~Kf3pQz1mR8vT2wX5nB7cY4dL9gH6jS3kA0eU1iO8pZ2fN5rV7bM4tC6yW9xQ
+X1QZ3N <US> #LISBOA <US> am:40c124 net starts in ten minutes ~<60 characters>
 ```
-`6 + 1 + 7 + 1 + 97` = **112 bytes**
 
-Every one of these fits a single LoRa packet, a single BLE5 advert and the
-custody store, with room to spare. The largest is under half the budget — which
-is the margin that lets a field be added later without a redesign.
+`6 + 1 + 7 + 1 + 97` = 112 bytes
 
----
+Balloon ascent, altitude and vertical speed:
 
-## 9. Migration from the current position frame
+```
+X3BAL1 <US> ! <US> @38.9012,-9.0021 a:11240 v:4.8 s:9.2 c:47 y:balloon ts:1780001800
+```
 
-Stations today send `lat,lon[,comment]` in the `!` frame. Both forms are
-readable with a one-character test:
+`6 + 1 + 1 + 1 + 65` = 74 bytes
 
-> **If the text begins with a digit, `-` or `.`, it is the legacy form.
-> Otherwise it is tokens.**
+Minimum useful observation, coarse position only:
 
-A token list always begins with a key, and a key always begins with a lowercase
-letter or `@`. Legacy always begins with a number. There is no ambiguity, and no
-version field is needed.
+```
+X1QZ3N <US> ! <US> @38.72,-9.14 ag:30
+```
 
-Receivers should accept both indefinitely. Senders should move to tokens.
+`6 + 1 + 1 + 1 + 18` = 27 bytes
 
----
-
-## 10. Reserved — do not reuse
-
-Assigned tokens: `am:` `sd:` `np:` `ENC1:` `file:` `ih:` `p:` `@` `~` `+`
-`<id>:like` `<id>:unlike`, and the observation keys in §7.
-
-Reserved addressees: `?ACK` `?MAIL` `?IGATE` `?HELLO` `?PING` `?PONG` `?PRIV`
-`?FOLLOW` `?UNFOLLOW` `?RLY`.
-
-Reserved first characters for `TO`: `#` `!` `?`.
-
-Reserved prefix: `x` (private/experimental, §7.7).
-
-A new field takes an unused key and inherits the skip-unknown rule. It never
-takes a new packet type, and it never redefines an existing key.
+All of the above fit one LoRa packet, one BLE5 advertisement, and the custody
+store. The largest is under half the 250-byte limit.
 
 ---
 
-## 11. What exists today
+## 9. Worked exchanges
 
-Honest status, so nobody plans against something that is not there.
+Complete sequences, in transmission order. `<US>` is `0x1F`.
 
-| Field | Producer today |
+### 9.1 Group conversation with a reply and a reaction
+
+```
+1  X1QZ3N <US> #LISBOA <US> net starts in ten minutes
+2  X1RD89 <US> #LISBOA <US> +9c4e I'll be late, start without me
+3  X32DVA <US> #LISBOA <US> 9c4e:like
+```
+
+Frame 1 has identifier `9c4e`, computed by every receiver from
+`SHA-1("X1QZ3N|net starts in ten minutes")`. Frame 2 references it and gains its
+own identifier, so it can be replied to in turn. Frame 3 is a reaction to frame
+1: it is tallied against `9c4e`, counted once for `X32DVA`, and is not displayed
+as a message.
+
+### 9.2 Direct message with delivery and read receipts
+
+```
+1  X1QZ3N <US> X1RD89 <US> am:40c124 meet at the bridge at six
+2  X1RD89 <US> ?ACK <US> 40c124 d
+3  X1RD89 <US> ?ACK <US> 40c124 r
+```
+
+Frame 2 is emitted when the message reaches the device, frame 3 when the
+operator reads it. A station that does not track reading sends frame 2 only.
+
+### 9.3 Private message on licence-free spectrum
+
+```
+X1QZ3N <US> X1RD89 <US> am:5b91e0 ENC1:pQ4m9xT ~<60 characters>
+```
+
+`FROM` and `TO` are readable, so intermediate stations can route and carry the
+frame. Only the body is sealed. This frame must not be transmitted on amateur
+bands (section 6.3).
+
+### 9.4 Store and forward through a station that meets neither party
+
+```
+1  X1QZ3N <US> X1RD89 <US> am:40c124 meet at the bridge at six
+   X1RD89 is out of range. X32DVA hears the frame and retains it.
+
+2  X32DVA <US> X1RD89 <US> am:40c124 meet at the bridge at six
+   Hours later, X32DVA encounters X1RD89 and retransmits.
+
+3  X1RD89 <US> ?ACK <US> 40c124 d
+   X32DVA hears the receipt and discards its copy.
+```
+
+The receipt identifier is unchanged throughout, so the delivered message is
+recognised as the same message and duplicates are suppressed. Any other station
+that retained frame 1 and hears frame 3 also discards its copy.
+
+### 9.5 Parcelled announcement
+
+```
+1  X3RLY7 <US> #LISBOA <US> p:7a3.1/3 The repeater on the hill is down. We
+2  X3RLY7 <US> #LISBOA <US> p:7a3.2/3  swapped the antenna feed this morning and
+3  X3RLY7 <US> #LISBOA <US> p:7a3.3/3  it is back up, but only just.
+```
+
+Reassembly is keyed on `(X3RLY7, 7a3)`. Parts may arrive in any order. If part 2
+never arrives, the set is discarded after 10 minutes and nothing is displayed.
+
+### 9.6 Clockless weather station anchored by a neighbour
+
+```
+1  X3WX01 <US> ! <US> @38.7223,-9.1393 t:14.1 h:80 ep:7.3600
+2  X3WX01 <US> ! <US> @38.7223,-9.1393 t:14.2 h:78 ep:7.4210
+   A receiver holding a clock records: epoch 7 heard at 1780004800.
+
+3  X3WX01 <US> ! <US> @38.7223,-9.1393 ep:7.9930 ts:1780005720
+   The station has obtained the time and anchors epoch 7 for all receivers.
+
+4  X3WX01 <US> ! <US> @38.7223,-9.1393 t:15.0 h:74 ts:1780009320
+```
+
+Frames 1 and 2 are orderable without any clock, since the higher uptime is
+later. A receiver holding a clock dates them from its own observation of epoch
+7. Frame 3 makes that anchor explicit and available to every station in range.
+After it, the station reports wall-clock time.
+
+### 9.7 Position, weather and telemetry in one frame
+
+```
+X3RLY7 <US> ! <US> @38.7810,-9.2043 a:210 t:11.8 h:88 b:1008.4 w:6.1 wd:295 bt:64 vb:12.9 y:node ts:1780003000
+```
+
+`6 + 1 + 1 + 1 + 91` = 100 bytes. A receiver interested only in position reads
+`@` and skips the remaining tokens under the rule in section 4.
+
+---
+
+## 10. Migration from the current position frame
+
+Existing stations transmit `lat,lon[,comment]` in the `!` frame. The two forms
+are distinguished by the first character of `TEXT`:
+
+> If `TEXT` begins with a digit, `-` or `.`, it is the legacy form. Otherwise it
+> is a token list.
+
+A token list begins with a key, and a key begins with a lowercase letter or `@`.
+The legacy form begins with a number. No version field is required.
+
+Receivers should accept both forms. Senders should emit the token form.
+
+---
+
+## 11. Reserved
+
+Assigned tokens: `am:`, `sd:`, `np:`, `ENC1:`, `file:`, `ih:`, `p:`, `@`, `~`,
+`+`, `<id>:like`, `<id>:unlike`, and the observation keys in section 7.
+
+Reserved control addressees: `?ACK`, `?MAIL`, `?IGATE`, `?HELLO`, `?PING`,
+`?PONG`, `?PRIV`, `?FOLLOW`, `?UNFOLLOW`, `?RLY`.
+
+Reserved first characters of `TO`: `#`, `!`, `?`.
+
+Reserved key prefix: `x` (section 7.7).
+
+A new field takes an unused key and inherits the skip-unknown rule of section 4.
+It does not introduce a packet type and does not redefine an existing key.
+
+---
+
+## 12. Implementation status
+
+| Element | Producer today |
 |---|---|
-| `@` position | **yes** — GPS via the location service |
+| `@` position | yes, from the platform location service |
 | `ts` | yes on phones and desktops |
-| `ag`, `ep` | **no** — a clockless node needs an epoch counter kept in flash |
-| `a` `e` `s` `c` `v` | **no** — the platform hands the app a full fix including altitude, accuracy, speed and heading, and the location service currently keeps only latitude and longitude, discarding the rest |
-| `t` `h` | one dormant source — a temperature/humidity sensor exists on a single ESP32 board and reaches only its local screen; the sensor HAL returns "not available" on every platform |
-| `b` `w` `wd` `wg` `r1` `r24` `sr` | **no source anywhere** — pure format definition |
-| `bt` `vb` | **no** — charging state is tracked, charge level is not |
-| `rs` `sn` | yes — RSSI is available on both BLE and LoRa receive paths |
-| messages, threads, reactions, receipts, parcels, signing, encryption | **yes** — all in service today |
+| `ag`, `ep` | no, requires an epoch counter in non-volatile storage |
+| `a`, `e`, `s`, `c`, `v` | no. The platform supplies altitude, accuracy, speed and heading; the location service retains only latitude and longitude |
+| `t`, `h` | one board carries a temperature and humidity sensor reaching a local display only. The sensor HAL reports not-available on every platform |
+| `b`, `w`, `wd`, `wg`, `r1`, `r24`, `sr` | no source |
+| `bt`, `vb` | no. Charging state is tracked, charge level is not |
+| `rs`, `sn` | yes, available on the BLE and LoRa receive paths |
+| messages, threads, reactions, receipts, parcels, signing, encryption | yes, in service |
 
-So the message half of this document describes what runs; the observation half
-mostly describes what to build. That is the point of writing it down first.
-
-**One related bug worth recording while we are here:** enabling *Coverage* in
-the hardware settings stores the literal string `u0` as the node's coverage
-region regardless of where the device actually is
-(`lib/launcher/hardware_page.dart:169`), so a node in Portugal advertises a
-region in the Baltic. That field is separate from everything above — it is a
-coarse region in the node announce, not an observation — but it is the same
-class of error this document exists to prevent.
+Sections 5 and 6 describe behaviour that runs today. Section 7 is mostly a
+format definition awaiting producers.

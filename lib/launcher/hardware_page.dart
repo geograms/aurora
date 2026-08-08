@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:reticulum/src/services/social/listening_schedule.dart';
 import 'package:reticulum/src/services/social/node_profile.dart';
 
+import '../services/location_service.dart';
 import '../services/preferences_service.dart';
 import '../services/social/node_profile_service.dart';
+import '../util/geohash.dart';
 
 /// Settings → Hardware: what this device is made of (docs/NOSTR.md).
 ///
@@ -39,6 +43,46 @@ class _HardwarePageState extends State<HardwarePage> {
 
   void _save(VoidCallback change) {
     setState(change);
+  }
+
+  /// The device's own position, or null when there is no fix.
+  ///
+  /// Coverage has to be derived from where the device actually is. It used to
+  /// store the literal string 'u0' whenever the switch was turned on, so every
+  /// node that enabled Coverage advertised the same region in the Baltic
+  /// regardless of where it stood, and the network was told a location nobody
+  /// had measured.
+  Future<({double lat, double lon})?> _position() async {
+    final loc = LocationService.instance;
+    loc.ensureStarted();
+    final lat = loc.latE7, lon = loc.lonE7;
+    if (lat != null && lon != null) {
+      return (lat: lat / 1e7, lon: lon / 1e7);
+    }
+    return loc.currentPosition();
+  }
+
+  /// Re-encode the coverage region at [precision] from the current fix.
+  ///
+  /// Always re-encoded, never padded: dropping characters coarsens a geohash,
+  /// but appending them names a different place. Refining therefore has to go
+  /// back to the coordinates.
+  Future<void> _setCoverage(int precision) async {
+    final p = _prefs;
+    if (p == null) return;
+    final at = await _position();
+    if (!mounted) return;
+    if (at == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+            'No position fix yet, so there is nothing to publish. Turn '
+            'Coverage on again once the device knows where it is.'),
+      ));
+      _save(() => p.nodeGeohash = '');
+      return;
+    }
+    _save(() => p.nodeGeohash =
+        geohashEncode(at.lat, at.lon, precision: precision));
   }
 
   @override
@@ -166,7 +210,13 @@ class _HardwarePageState extends State<HardwarePage> {
                     ? 'Off — it says nothing about where it is'
                     : 'Region ${p.nodeGeohash} · ${_precisionKm(p.nodeGeohash)}'),
                 value: p.nodeGeohash.isNotEmpty,
-                onChanged: (on) => _save(() => p.nodeGeohash = on ? 'u0' : ''),
+                onChanged: (on) {
+                  if (!on) {
+                    _save(() => p.nodeGeohash = '');
+                    return;
+                  }
+                  unawaited(_setCoverage(4));
+                },
               ),
               if (p.nodeGeohash.isNotEmpty)
                 Padding(
@@ -187,14 +237,7 @@ class _HardwarePageState extends State<HardwarePage> {
                         max: 6,
                         divisions: 4,
                         label: _precisionKm(p.nodeGeohash),
-                        onChanged: (v) => _save(() {
-                          final want = v.round();
-                          var g = p.nodeGeohash;
-                          while (g.length < want) {
-                            g += '0';
-                          }
-                          p.nodeGeohash = g.substring(0, want);
-                        }),
+                        onChanged: (v) => unawaited(_setCoverage(v.round())),
                       ),
                       Text(
                         'A phone should leave this off: a device in your pocket '

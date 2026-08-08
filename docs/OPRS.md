@@ -6,14 +6,14 @@ OPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 5. Section 20 states which parts are implemented.
+Status: DRAFT 6. Section 21 states which parts are implemented.
 
 ---
 
 ## 1. Purpose
 
 APRS is a proven network, and an OPRS station meeting APRS infrastructure
-operates under APRS rules (section 18). APRS has two prerequisites: amateur
+operates under APRS rules (section 19). APRS has two prerequisites: amateur
 spectrum, and a callsign issued by a radio authority. Both are correct for a
 licensed service, and both exclude everyone without a licence.
 
@@ -138,7 +138,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
-| `rad` | `qty` | radius of the area affected (section 16) |
+| `rad` | `qty` | radius of the area affected (sections 16, 17) |
+| `until` | `time` | when the sender expects the condition to end |
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
@@ -157,12 +158,13 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `id` | an identity announcement, binding callsign to public key |
 | `trk` | a point in a named track (section 14) |
 | `sos` | a call for help (section 15) |
+| `info` | a notice about conditions (section 17) |
 | `warn` | a warning about a hazard (section 16) |
 | `png` | a reachability test |
 | `pnr` | a reply to `png` |
 
 An unknown type is ignored. It is never an error and is never displayed as a
-message. Types not listed here are reserved (section 19).
+message. Types not listed here are reserved (section 20).
 
 ### 4.3 Value types
 
@@ -1234,11 +1236,11 @@ t:warn f:X3RLY7 pos:39.4012,-8.2043 rad:5000m kind:fire sev:danger ts:2026-08-08
 `tsunami`, `landslide`, `chemical`, `radiation`, `outage`, `road`, `crowd`,
 `animal`, `other`.
 
-`sev:` takes one of:
+`sev:` takes one of the three below. A condition not serious enough for
+`watch` is a notice rather than a warning (section 17).
 
 | `sev:` | Meaning |
 |---|---|
-| `info` | happening, no action needed |
 | `watch` | may affect you, be ready |
 | `warning` | will affect you, act now |
 | `danger` | life-threatening, leave |
@@ -1261,7 +1263,78 @@ plotted as current, is worse than no warning.
 
 ---
 
-## 17. Adding a field, worked
+## 17. Notices
+
+`t:info` reports something worth knowing that is not yet a hazard: a queue, a
+stopped vehicle, standing water, fog on a bend. It is the same shape as a
+warning and carries the same fields, and it is a separate type for two reasons.
+
+A station filters on it after five bytes, without parsing a severity out of the
+middle of the packet. A subscriber who wants hazards and not road conditions
+gets that by type rather than by reading every packet and deciding.
+
+And it does not inherit the relay budget of an emergency. `sos` and `warn`
+travel nine relays because they are worth spending a shared channel on. A
+traffic queue travels three, like ordinary traffic, because it is not.
+
+```
+t:info f:X1CAR7 pos:38.7231,-9.1402 rad:800m kind:traffic ts:2026-08-08_14:26:40 until:2026-08-08_15:30:00
+```
+
+106 bytes: a queue 800 m around a point, expected to clear by half past.
+
+| Field | Meaning |
+|---|---|
+| `pos:` | where it is |
+| `rad:` | how far it extends, optional |
+| `kind:` | what it is |
+| `ts:` | when it was reported |
+| `until:` | when it is expected to end, optional |
+| `m:` | context the fields cannot carry |
+
+`kind:` takes one of `traffic`, `stopped`, `slow`, `works`, `closure`, `rain`,
+`snow`, `ice`, `fog`, `wind`, `debris`, `animal`, `crowd`, `event`, `other`.
+
+There is no `sev:`. The type is the severity: an `info` is by definition not
+urgent, and a `warn` grades itself from `watch` to `danger`. A notice that turns
+out to matter is re-sent as a `warn`, which is a different packet rather than
+the same one edited.
+
+```
+t:info f:X1CAR7 pos:38.7231,-9.1402 kind:stopped ts:2026-08-08_14:26:40 m:car on the hard shoulder, hazards on
+t:info f:X3WX01 pos:38.7223,-9.1393 rad:5km kind:rain ts:2026-08-08_14:26:40 m:standing water in the underpass
+```
+
+110 and 110 bytes. `rad:` is optional: a stopped car is at a point, and
+standing water covers a stretch of road.
+
+```
+t:info f:X1QZ3N pos:38.7301,-9.1355 kind:fog ts:2026-08-08_14:26:40
+```
+
+67 bytes, which is the whole of it: fog, here, now.
+
+### 17.1 When a notice expires
+
+`until:` is a `time`, like `ts:`, and says when the sender expects the condition
+to end.
+
+A transient hazard with no end is worse than no hazard at all. A queue reported
+at eight in the morning and still on the map at midnight teaches everyone to
+ignore the map, and by then the packet has usually outlived the person who could
+have withdrawn it.
+
+`until:` is optional and applies to `warn` as much as to `info`. When it is
+absent a receiver applies its own expiry rather than showing the notice for
+ever, and this document does not fix that interval: a fog bank and a road
+closure do not expire on the same clock.
+
+A notice may also be withdrawn early by sending `remove:` naming the kind, which
+is the same key a reaction uses (section 6.5).
+
+---
+
+## 18. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -1287,7 +1360,7 @@ negotiation.
 
 ---
 
-## 18. Operating alongside APRS
+## 19. Operating alongside APRS
 
 A licensed amateur may bridge OPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -1298,15 +1371,15 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 19. Reserved
+## 20. Reserved
 
 Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `trk`, `sos`,
-`warn`, `png`, `pnr`.
+`warn`, `info`, `png`, `pnr`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `trk`,
 `seq`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
-`remove`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`, `temp`, `hum`,
+`remove`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`, `temp`, `hum`,
 `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
 
@@ -1319,7 +1392,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 20. Implementation status
+## 21. Implementation status
 
 | Element | State |
 |---|---|
@@ -1341,6 +1414,8 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | `t:trk` tracks | not implemented; no track is recorded or published |
 | `t:sos` calls for help | not implemented; the current wire has an `sos` station symbol, which is a different thing and is not relayed further than any other packet |
 | `t:warn` warnings | not implemented; no source |
+| `t:info` notices | not implemented; no source |
+| `until:` expiry | not implemented; nothing in the current wire expires on its own |
 | `type:` vehicle set | partly; the current wire carries a handful of symbols and none of the rail, air or cycle values |
 | Variable-length and authority-issued callsigns | not implemented; the current wire assumes the six-character `X1`/`X3` form |
 | `pos:` coordinates | implemented in a different encoding |

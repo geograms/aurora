@@ -180,7 +180,39 @@ The type is fixed by this document and is never transmitted.
 A value that does not match its declared type is skipped, as an unknown tag is.
 A packet is never rejected as a whole because one field is malformed.
 
-### 4.4 Time
+### 4.4 Numbers
+
+The decimal separator is a dot. A comma is never part of a number.
+
+```
+c:14.2        14.2 degrees
+c:-3.5        3.5 below zero
+a:11240       eleven thousand two hundred and forty metres
+rh:0.4        four tenths of a millimetre
+```
+
+This is not a preference between conventions. A comma is already structural in
+this format: it separates latitude from longitude in `p:38.7223,-9.1393` and it
+separates words in `q:ack,read`. A station writing `c:14,2` for 14.2, or
+`a:11,240` for eleven thousand, produces a packet that reads as two values.
+
+- The decimal separator is `.`, always, in every field and every locale.
+- **There is no thousands separator.** `a:11240`, never `a:11,240`.
+- A negative number carries a leading `-`. A positive number carries no sign.
+- A number has at least one digit before the dot: `0.4`, never `.4`. It never
+  ends in a dot.
+- No exponent notation, and no unit suffix. The unit is fixed by the tag.
+
+Trailing zeros are significant, because the number of decimal places states the
+precision claimed (section 10.1). `c:14.0` says the reading was measured to a
+tenth; `c:14` says it was not.
+
+Software that formats numbers according to the operator's locale must be
+overridden before transmission. This is the most likely way for an
+implementation to emit packets that every other station silently misreads,
+since `14,2` is correct in most of Europe and is a different packet here.
+
+### 4.5 Time
 
 `ts:` is written the way a person reads it, in UTC:
 
@@ -211,7 +243,7 @@ A packet that may be relayed or carried **must** have a time field. A carried
 packet can be delivered days later, and an undated position is plotted as
 current. Two alternatives exist for stations without a clock (section 10.5).
 
-### 4.5 Extending the format
+### 4.6 Extending the format
 
 A new field takes an unused tag, declares its type, and is placed anywhere.
 Receivers that do not know the tag skip it and its value. No existing field

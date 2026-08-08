@@ -58,10 +58,10 @@ OPRS is one syntax, readable on sight, with room to grow.
 A packet is readable without a decoder:
 
 ```
-t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
 ```
 
-74 bytes. A person reads it, and so does a five-line parser.
+78 bytes. A person reads it, and so does a five-line parser.
 
 ---
 
@@ -82,10 +82,10 @@ Callsigns are **always uppercase** and are **not a fixed length**. A callsign
 issued by a radio authority is equally valid on the wire, including a suffix:
 
 ```
-t:msg f:CT1ABC-9 d:G0XYZ/P ts:2026-08-08_14:26:40 m:gate is closed, use the east path
+t:message f:CT1ABC-9 d:G0XYZ/P ts:2026-08-08_14:26:40 m:gate is closed, use the east path
 ```
 
-85 bytes. Nothing in this format assumes a callsign length.
+89 bytes. Nothing in this format assumes a callsign length.
 
 An OPRS callsign is a label, not an identity. Four characters is approximately
 one million values, and collisions can be produced deliberately. A receiver that
@@ -134,7 +134,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
-| `trk` | `label` | name of a track this packet belongs to (section 14) |
+| `track` | `label` | name of a track this packet belongs to (section 14) |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -145,26 +145,26 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
 | `g` | `sig` | signature |
-| `k` | `bech32` | public key, in `t:id` and `t:challenge` |
+| `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
 
 ### 4.2 Packet types
 
 | `t:` | Purpose |
 |---|---|
-| `msg` | a message, to a station, a group, or anyone in range |
-| `obs` | an observation: position, movement, weather, telemetry |
-| `ack` | a receipt or an answer to a request |
-| `rct` | a reaction to another message |
-| `req` | a request for data another station holds |
-| `id` | an identity announcement, binding callsign to public key |
-| `trk` | a point in a named track (section 14) |
+| `message` | a message, to a station, a group, or anyone in range |
+| `observation` | an observation: position, movement, weather, telemetry |
+| `receipt` | a receipt or an answer to a request |
+| `reaction` | a reaction to another message |
+| `request` | a request for data another station holds |
+| `identity` | an identity announcement, binding callsign to public key |
+| `track` | a point in a named track (section 14) |
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
-| `warn` | a warning about a hazard (section 16) |
-| `png` | a reachability test |
-| `pnr` | a reply to `png` |
+| `warning` | a warning about a hazard (section 16) |
+| `ping` | a reachability test |
+| `pong` | a reply to `ping` |
 
 An unknown type is ignored. It is never an error and is never displayed as a
 message. Types not listed here are reserved (section 21).
@@ -241,23 +241,23 @@ since `14,2` is correct in most of Europe and is a different packet here.
 filter or search a packet without reading it.
 
 ```
-t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation m:back on Monday, radio off until then
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation m:back on Monday, radio off until then
 ```
 
-98 bytes. Several labels are separated by commas:
+102 bytes. Several labels are separated by commas:
 
 ```
-t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation,photos m:the coast near Sagres
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation,photos m:the coast near Sagres
 ```
 
-90 bytes. There is no limit on how many labels a packet carries beyond the
+94 bytes. There is no limit on how many labels a packet carries beyond the
 250-byte packet itself. It applies to any packet, not only messages:
 
 ```
-t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.2C ts:2026-08-08_14:26:40 tag:field-day
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C ts:2026-08-08_14:26:40 tag:field-day
 ```
 
-82 bytes.
+90 bytes.
 
 **A label contains no space.** No field value may contain a space, `m:` alone
 excepted, and `tag:` is not that exception. A label is lowercase letters,
@@ -292,10 +292,10 @@ by comparing them directly, with nothing to convert first.
 local time it was written at:
 
 ```
-t:msg f:VK2XYZ d:X1QZ3N ts:2026-08-08_14:26:40 tz:+11:00 m:good morning from Sydney
+t:message f:VK2XYZ d:X1QZ3N ts:2026-08-08_14:26:40 tz:+11:00 m:good morning from Sydney
 ```
 
-83 bytes. The receiver reads 14:26 UTC, and knows it was 01:26 the next morning
+87 bytes. The receiver reads 14:26 UTC, and knows it was 01:26 the next morning
 where the sender was standing. Offsets of 30 and 45 minutes exist, so the
 minutes are written out rather than assumed to be zero.
 
@@ -316,10 +316,10 @@ Keys beginning with `z` are reserved for private and experimental use and are
 never assigned by this document.
 
 ```
-t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.2C zpm:8 ts:2026-08-08_14:26:40
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C zpm:8 ts:2026-08-08_14:26:40
 ```
 
-74 bytes. Every existing receiver reads `temp:14.2` and `ts:`, skips `zpm:8`, and
+82 bytes. Every existing receiver reads `temp:14.2` and `ts:`, skips `zpm:8`, and
 is otherwise unaffected.
 
 ---
@@ -365,18 +365,18 @@ because none of them changes `f:`, `ts:` or the payload.
 No `d:`. The packet is addressed to whoever is in range.
 
 ```
-t:msg f:X1QZ3N ts:2026-08-08_14:26:40 m:anyone near the north gate?
+t:message f:X1QZ3N ts:2026-08-08_14:26:40 m:anyone near the north gate?
 ```
 
-67 bytes.
+71 bytes.
 
 ### 6.2 Direct
 
 ```
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 m:meet at the bridge at six
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 m:meet at the bridge at six
 ```
 
-74 bytes, identifier `101a23`.
+78 bytes, identifier `101a23`.
 
 ### 6.3 Group
 
@@ -385,31 +385,31 @@ station tells a group from a callsign by the `X1`/`X3` prefix and the four
 characters that follow, so a group may not be named like an OPRS callsign.
 
 ```
-t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
 ```
 
-74 bytes, identifier `f6ff8d`.
+78 bytes, identifier `f6ff8d`.
 
 ### 6.4 Replies
 
 `r:` names the message being replied to.
 
 ```
-t:msg f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:f6ff8d m:I'll be late, start without me
+t:message f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:f6ff8d m:I'll be late, start without me
 ```
 
-88 bytes. The reply has its own identifier, computed the same way, so it can be
+92 bytes. The reply has its own identifier, computed the same way, so it can be
 replied to in turn. A receiver that has not seen the parent still displays the
 reply, marked as answering a message it does not hold.
 
 ### 6.5 Reactions
 
 ```
-t:rct f:X32DVA d:LISBOA r:f6ff8d add:like
-t:rct f:X32DVA d:LISBOA r:f6ff8d remove:like
+t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like
+t:reaction f:X32DVA d:LISBOA r:f6ff8d remove:like
 ```
 
-41 and 44 bytes. `add:` states what is being added and `remove:` withdraws that
+46 and 49 bytes. `add:` states what is being added and `remove:` withdraws that
 same thing, so neither has to be read as the negation of the other. A reaction
 carries no `m:`. It is counted once per callsign, is
 idempotent, is not displayed as a message and raises no notification.
@@ -420,12 +420,12 @@ A message longer than one packet is split into numbered parts. Every part
 carries the same `ts:` and its own `n:`.
 
 ```
-t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:1/3 m:The repeater on the hill is down.
-t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:2/3 m:We swapped the antenna feed this morning
-t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, but only just.
+t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:1/3 m:The repeater on the hill is down.
+t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:2/3 m:We swapped the antenna feed this morning
+t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, but only just.
 ```
 
-88, 95 and 88 bytes.
+92, 99 and 92 bytes.
 
 - Reassembly is keyed on `(f, ts)`. The parts of one message share a timestamp,
   so no identifier has to be transmitted to bind them.
@@ -451,10 +451,10 @@ t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, but on
 characters, a dot, and 1 to 8 lowercase alphanumeric characters giving the type.
 
 ```
-t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:the antenna after the storm
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:the antenna after the storm
 ```
 
-150 bytes. The caption is an ordinary `m:` field.
+154 bytes. The caption is an ordinary `m:` field.
 
 The hash identifies the file exactly, so any station holding those bytes can
 satisfy the reference and a receiver can verify what it obtained. The extension
@@ -476,9 +476,9 @@ physical media.
 q:ack        confirm this reached the device
 q:read       confirm the operator read it
 q:pos        send your position
-q:bat        send your battery level
-q:id         send your public key
-q:pnr        reply to this reachability test
+q:batt       send your battery level
+q:identity   send your public key
+q:pong       reply to this reachability test
 ```
 
 Several are separated by commas. An unknown word is ignored, so `q:pos,bat,co2`
@@ -487,46 +487,46 @@ still returns position and battery from a station that has never heard of CO2.
 Absence of `q:` means nothing is expected back, so silence is never ambiguous.
 
 ```
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack,read m:did you get the keys?
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack,read m:did you get the keys?
 ```
 
-81 bytes, identifier `8ab15f`.
+85 bytes, identifier `8ab15f`.
 
 The answers, naming that identifier in `r:`:
 
 ```
-t:ack f:X1RD89 d:X1QZ3N r:8ab15f s:ack
-t:ack f:X1RD89 d:X1QZ3N r:8ab15f s:read
+t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:ack
+t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:read
 ```
 
-38 and 39 bytes. `s:ack` is sent when the message reaches the device, `s:read`
+42 and 43 bytes. `s:ack` is sent when the message reaches the device, `s:read`
 when the operator reads it. A station that does not track reading sends `s:ack`
 only, and the sender sees exactly which of the two requests was satisfied.
 
 A request for data is the same exchange without a message:
 
 ```
-t:req f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 q:pos,bat
-t:obs f:X3RLY7 d:X1QZ3N pos:38.7810,-9.2043 batt:64% ts:2026-08-08_14:26:40 s:pos,bat
+t:request f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 q:pos,batt
+t:observation f:X3RLY7 d:X1QZ3N pos:38.7810,-9.2043 batt:64% ts:2026-08-08_14:26:40 s:pos,batt
 ```
 
-56 and 85 bytes. A station holding only part of what was asked says so, rather
+61 and 94 bytes. A station holding only part of what was asked says so, rather
 than failing:
 
 ```
-t:obs f:X3RLY7 d:X1QZ3N pos:38.7810,-9.2043 ts:2026-08-08_14:26:40 s:pos
+t:observation f:X3RLY7 d:X1QZ3N pos:38.7810,-9.2043 ts:2026-08-08_14:26:40 s:pos
 ```
 
-72 bytes: position sent, battery not available, no error packet needed.
+80 bytes: position sent, battery not available, no error packet needed.
 
 `s:no` is the one word not in `q:`, for a request a station will not or cannot
 serve at all:
 
 ```
-t:ack f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 s:no
+t:receipt f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 s:no
 ```
 
-51 bytes.
+55 bytes.
 
 Any station may act on a receipt it overhears. A station holding a message for
 later delivery discards its copy on hearing the matching `s:ack`.
@@ -535,8 +535,8 @@ later delivery discards its copy on hearing the matching `s:ack`.
 
 ## 8. Reserved words
 
-`q:` and `s:` words assigned by this document: `ack`, `read`, `pos`, `bat`,
-`id`, `pnr`, `no`. Reactions assigned for `add:` and `remove:`: `like`. All
+`q:` and `s:` words assigned by this document: `ack`, `read`, `pos`, `batt`,
+`identity`, `pong`, `no`. Reactions assigned for `add:` and `remove:`: `like`. All
 other words are reserved. A word
 beginning with `z` is private, as a key beginning with `z` is.
 
@@ -551,10 +551,10 @@ removed. Position in the packet is therefore not significant, and a verifier
 reconstructs the signed text by deletion.
 
 ```
-t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 g:<60 characters> m:net starts in ten minutes
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 g:<60 characters> m:net starts in ten minutes
 ```
 
-137 bytes. The identifier is `f6ff8d`, the same as the unsigned packet in
+141 bytes. The identifier is `f6ff8d`, the same as the unsigned packet in
 section 6.3, because signing changes neither `f:`, `ts:` nor the payload.
 
 | State | Condition |
@@ -571,10 +571,10 @@ Reactions and identity announcements are not signed.
 `x:` carries the sealed body and replaces `m:`.
 
 ```
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 x:pQ4m9xT2vB8kR g:<60 characters>
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 x:pQ4m9xT2vB8kR g:<60 characters>
 ```
 
-125 bytes. `t:`, `f:`, `d:` and `ts:` stay in cleartext, so an intermediate
+129 bytes. `t:`, `f:`, `d:` and `ts:` stay in cleartext, so an intermediate
 station can route the packet, identify the recipient and release a carried copy
 on the matching receipt, without reading the content.
 
@@ -583,11 +583,11 @@ A later cipher suite takes a new key rather than changing this one.
 ### 9.3 Identity
 
 ```
-t:id f:X1QZ3N ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f
+t:identity f:X1QZ3N ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f
 ```
 
-100 bytes. A receiver stores the binding and uses it to verify signed packets
-from that callsign. Answers `q:id`.
+106 bytes. A receiver stores the binding and uses it to verify signed packets
+from that callsign. Answers `q:identity`.
 
 An identity announcement is not signed, because the signature would have to be
 verified with the key the packet is carrying. Trust comes from repetition, from
@@ -663,20 +663,20 @@ pointing, which is what a compass gives. They agree on a road and disagree
 wherever wind or current pushes a vehicle sideways:
 
 ```
-t:obs f:X1BOA3 pos:38.6902,-9.4012 spd:6kt dir:275deg o:262degm type:boat ts:2026-08-08_14:26:40
+t:observation f:X1BOA3 pos:38.6902,-9.4012 spd:6kt dir:275deg o:262degm type:boat ts:2026-08-08_14:26:40
 ```
 
-96 bytes: making 6 knots over the ground towards 275 true, with the bow held
+104 bytes: making 6 knots over the ground towards 275 true, with the bow held
 at 262 magnetic to hold that track against the current.
 
 A station with only a satellite fix sends `dir:` alone, which is the common
 case. A station that is stationary has no course and may still have a heading:
 
 ```
-t:obs f:X1CAR7 pos:38.7231,-9.1402 o:212degm type:car ts:2026-08-08_14:26:40
+t:observation f:X1CAR7 pos:38.7231,-9.1402 o:212degm type:car ts:2026-08-08_14:26:40
 ```
 
-76 bytes.
+84 bytes.
 
 ### 10.3 Weather
 
@@ -759,12 +759,12 @@ reports feet and knots, a European car reports km/h, an American weather station
 reports Fahrenheit and inches of mercury:
 
 ```
-t:obs f:X1BOA3 pos:38.6902,-9.4012 spd:6kt dir:275deg type:boat ts:2026-08-08_14:26:40
-t:trk f:CT1ABC-9 seq:3 pos:38.9012,-9.0021 alt:10000ft spd:250kt dir:47deg type:airplane ts:2026-08-08_14:26:40
-t:obs f:X3WX01 pos:38.7223,-9.1393 temp:57.6F hum:78% press:29.92inHg wind:7.6mph type:wx ts:2026-08-08_14:26:40
+t:observation f:X1BOA3 pos:38.6902,-9.4012 spd:6kt dir:275deg type:boat ts:2026-08-08_14:26:40
+t:track f:CT1ABC-9 seq:3 pos:38.9012,-9.0021 alt:10000ft spd:250kt dir:47deg type:airplane ts:2026-08-08_14:26:40
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:57.6F hum:78% press:29.92inHg wind:7.6mph type:wx ts:2026-08-08_14:26:40
 ```
 
-86, 111 and 112 bytes.
+94, 113 and 120 bytes.
 
 ### 10.7 The permitted units
 
@@ -815,98 +815,98 @@ decimal degrees in WGS84 and no second option exists (section 10.1).
 Coarse position, station with no clock:
 
 ```
-t:obs f:X1QZ3N pos:38.72,-9.14 age:30
+t:observation f:X1QZ3N pos:38.72,-9.14 age:30
 ```
 
-37 bytes.
+45 bytes.
 
 Normal fix with a clock:
 
 ```
-t:obs f:X1QZ3N pos:38.7223,-9.1393 ts:2026-08-08_14:26:40
+t:observation f:X1QZ3N pos:38.7223,-9.1393 ts:2026-08-08_14:26:40
 ```
 
-57 bytes.
+65 bytes.
 
 Five decimals of arithmetic, eight metres of measured accuracy:
 
 ```
-t:obs f:X1QZ3N pos:38.72231,-9.13934 acc:8m ts:2026-08-08_14:26:40
+t:observation f:X1QZ3N pos:38.72231,-9.13934 acc:8m ts:2026-08-08_14:26:40
 ```
 
-66 bytes.
+74 bytes.
 
 ### 11.2 Movement
 
 Person on foot:
 
 ```
-t:obs f:X1QZ3N pos:38.7223,-9.1393 alt:87m type:foot spd:1.4m/s dir:212deg ts:2026-08-08_14:26:40
+t:observation f:X1QZ3N pos:38.7223,-9.1393 alt:87m type:foot spd:1.4m/s dir:212deg ts:2026-08-08_14:26:40
 ```
 
-97 bytes.
+105 bytes.
 
 Vehicle, with a note:
 
 ```
-t:obs f:X1CAR7 pos:38.7231,-9.1402 alt:87m spd:13.4m/s dir:212deg acc:8m type:car ts:2026-08-08_14:26:40 m:heading south on the N8
+t:observation f:X1CAR7 pos:38.7231,-9.1402 alt:87m spd:13.4m/s dir:212deg acc:8m type:car ts:2026-08-08_14:26:40 m:heading south on the N8
 ```
 
-130 bytes.
+138 bytes.
 
 Balloon ascending at 4.8 m/s through 11240 m:
 
 ```
-t:obs f:X3BAL1 pos:38.9012,-9.0021 alt:11240m climb:4.8m/s spd:9.2m/s dir:47deg type:balloon ts:2026-08-08_14:26:40
+t:observation f:X3BAL1 pos:38.9012,-9.0021 alt:11240m climb:4.8m/s spd:9.2m/s dir:47deg type:balloon ts:2026-08-08_14:26:40
 ```
 
-115 bytes.
+123 bytes.
 
 Vessel under way, no altitude:
 
 ```
-t:obs f:X1BOA3 pos:38.6902,-9.4012 spd:3.1m/s dir:275deg type:boat ts:2026-08-08_14:26:40
+t:observation f:X1BOA3 pos:38.6902,-9.4012 spd:3.1m/s dir:275deg type:boat ts:2026-08-08_14:26:40
 ```
 
-89 bytes.
+97 bytes.
 
 ### 11.3 Weather
 
 Station with three sensors:
 
 ```
-t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa type:wx ts:2026-08-08_14:26:40
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa type:wx ts:2026-08-08_14:26:40
 ```
 
-100 bytes.
+108 bytes.
 
 Every defined weather field plus battery, fourteen fields:
 
 ```
-t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa wind:3.4m/s wdir:210deg gust:7.1m/s rain1:0.4mm rain24:12.6mm solar:640W/m2 batt:96% type:wx ts:2026-08-08_14:26:40
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa wind:3.4m/s wdir:210deg gust:7.1m/s rain1:0.4mm rain24:12.6mm solar:640W/m2 batt:96% type:wx ts:2026-08-08_14:26:40
 ```
 
-185 bytes, leaving 65 for fields not yet defined. It is the longest packet in
+193 bytes, leaving 65 for fields not yet defined. It is the longest packet in
 this document.
 
 Indoor sensor with no position and no clock. Position is omitted rather than
 sent as zero:
 
 ```
-t:obs f:X3WX01 temp:14.2C hum:78% age:60
+t:observation f:X3WX01 temp:14.2C hum:78% age:60
 ```
 
-40 bytes.
+48 bytes.
 
 ### 11.4 Telemetry
 
 Unattended node reporting power state:
 
 ```
-t:obs f:X3RLY7 pos:38.7810,-9.2043 alt:210m batt:64% volt:12.9V type:node ts:2026-08-08_14:26:40
+t:observation f:X3RLY7 pos:38.7810,-9.2043 alt:210m batt:64% volt:12.9V type:node ts:2026-08-08_14:26:40
 ```
 
-96 bytes.
+104 bytes.
 
 ### 11.5 Emergency
 
@@ -920,32 +920,32 @@ t:sos f:X1QZ3N pos:38.7223,-9.1393 acc:6m kind:medical ts:2026-08-08_14:26:40 m:
 103 bytes, identifier `2adab3`. Any station may answer:
 
 ```
-t:ack f:X32DVA d:X1QZ3N r:2adab3 s:ack
+t:receipt f:X32DVA d:X1QZ3N r:2adab3 s:ack
 ```
 
-38 bytes.
+42 bytes.
 
 ### 11.6 Reachability
 
 ```
-t:png f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40
-t:pnr f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 rssi:-92dBm snr:7.5dB
+t:ping f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40
+t:pong f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 rssi:-92dBm snr:7.5dB
 ```
 
-46 and 68 bytes. The reply reports the signal the test arrived with, which is
+47 and 69 bytes. The reply reports the signal the test arrived with, which is
 the receiver's measurement, not the sender's.
 
 ### 11.7 Reading a packet
 
 ```
-t:obs f:X3RLY7 pos:38.7810,-9.2043 alt:210m temp:11.8C hum:88% press:1008.4hPa type:node ts:2026-08-08_14:26:40
+t:observation f:X3RLY7 pos:38.7810,-9.2043 alt:210m temp:11.8C hum:88% press:1008.4hPa type:node ts:2026-08-08_14:26:40
 ```
 
-111 bytes.
+119 bytes.
 
 | Field | Type | Reading |
 |---|---|---|
-| `t:obs` | `enum` | an observation; a station filtering for messages stops here |
+| `t:observation` | `enum` | an observation; a station filtering for messages stops here |
 | `f:X3RLY7` | `call` | unattended station |
 | `pos:38.7810,-9.2043` | `coord` | 38.7810 N, 9.2043 W, four decimals, so about 11 m |
 | `alt:210` | `dec` | 210 m above mean sea level |
@@ -965,45 +965,45 @@ so nothing is expected back.
 ### 12.1 Group conversation with a reply and a reaction
 
 ```
-1  t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
-2  t:msg f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:f6ff8d m:I'll be late, start without me
-3  t:rct f:X32DVA d:LISBOA r:f6ff8d add:like
+1  t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
+2  t:message f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:f6ff8d m:I'll be late, start without me
+3  t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like
 ```
 
-74, 88 and 41 bytes. Packet 1 transmits no identifier; every receiver computes
+78, 92 and 46 bytes. Packet 1 transmits no identifier; every receiver computes
 `f6ff8d` from its sender, time and text. Packets 2 and 3 name that value.
 Packet 2 has its own computed identifier and can be replied to in turn.
 
 ### 12.2 Direct message with both receipts
 
 ```
-1  t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack,read m:did you get the keys?
-2  t:ack f:X1RD89 d:X1QZ3N r:8ab15f s:ack
-3  t:ack f:X1RD89 d:X1QZ3N r:8ab15f s:read
+1  t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack,read m:did you get the keys?
+2  t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:ack
+3  t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:read
 ```
 
-81, 38 and 39 bytes. Packet 1 asks for two things by name and packets 2 and 3
+85, 42 and 43 bytes. Packet 1 asks for two things by name and packets 2 and 3
 answer with the same names.
 
 ### 12.3 Request and partial answer
 
 ```
-1  t:req f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 q:pos,bat
-2  t:obs f:X3RLY7 d:X1QZ3N pos:38.7810,-9.2043 ts:2026-08-08_14:26:40 s:pos
+1  t:request f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 q:pos,batt
+2  t:observation f:X3RLY7 d:X1QZ3N pos:38.7810,-9.2043 ts:2026-08-08_14:26:40 s:pos
 ```
 
-56 and 72 bytes. The station has no battery reading. It answers with what it
+61 and 80 bytes. The station has no battery reading. It answers with what it
 has and says which request that satisfied, so the asker is not left waiting.
 
 ### 12.4 A long group message
 
 ```
-1  t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:1/3 m:The repeater on the hill is down.
-2  t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:2/3 m:We swapped the antenna feed this morning
-3  t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, but only just.
+1  t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:1/3 m:The repeater on the hill is down.
+2  t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:2/3 m:We swapped the antenna feed this morning
+3  t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, but only just.
 ```
 
-88, 95 and 88 bytes. Reassembly is keyed on `(X3RLY7, 2026-08-08_14:26:40)`.
+92, 99 and 92 bytes. Reassembly is keyed on `(X3RLY7, 2026-08-08_14:26:40)`.
 Joined with one space between parts:
 
 ```
@@ -1016,14 +1016,14 @@ displayed.
 ### 12.5 Clockless weather station anchored by a neighbour
 
 ```
-1  t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.1C hum:80% epoch:7.3600
-2  t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% epoch:7.4210
+1  t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.1C hum:80% epoch:7.3600
+2  t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% epoch:7.4210
    A receiver holding a clock records: epoch 7 heard at 2026-08-08_14:26:40.
 
-3  t:obs f:X3WX01 pos:38.7223,-9.1393 epoch:7.9930 ts:2026-08-08_14:26:40
+3  t:observation f:X3WX01 pos:38.7223,-9.1393 epoch:7.9930 ts:2026-08-08_14:26:40
    The station has obtained the time and anchors epoch 7 for all receivers.
 
-4  t:obs f:X3WX01 pos:38.7223,-9.1393 temp:15.0C hum:74% ts:2026-08-08_14:36:00
+4  t:observation f:X3WX01 pos:38.7223,-9.1393 temp:15.0C hum:74% ts:2026-08-08_14:36:00
 ```
 
 54, 54, 65 and 67 bytes. Packets 1 and 2 are orderable without any clock, since
@@ -1043,13 +1043,13 @@ first. **A relay never rewrites `f:`.** It appends itself to `via:` and leaves
 the author alone.
 
 ```
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack m:meet at the bridge at six
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA q:ack m:meet at the bridge at six
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA,CT1ABC-9 q:ack m:meet at the bridge at six
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA,CT1ABC-9,X3RLY7 q:ack m:meet at the bridge at six
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack m:meet at the bridge at six
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA q:ack m:meet at the bridge at six
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA,CT1ABC-9 q:ack m:meet at the bridge at six
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA,CT1ABC-9,X3RLY7 q:ack m:meet at the bridge at six
 ```
 
-80, 91, 100 and 107 bytes: as sent, then after each of three relays. The
+84, 95, 104 and 111 bytes: as sent, then after each of three relays. The
 recipient reads that the message came from `X1QZ3N` and travelled through
 `X32DVA`, `CT1ABC-9` and `X3RLY7` in that order.
 
@@ -1107,23 +1107,23 @@ station may record one and publish it as it goes, and a receiver assembles the
 points into a line without having heard the beginning.
 
 ```
-t:trk f:X3BAL1 trk:sagres-2026 seq:1 pos:38.9012,-9.0021 alt:11240m type:balloon ts:2026-08-08_14:26:40
-t:trk f:X3BAL1 trk:sagres-2026 seq:2 pos:38.9104,-8.9772 alt:14980m climb:4.8m/s type:balloon ts:2026-08-08_14:36:00
+t:track f:X3BAL1 track:sagres-2026 seq:1 pos:38.9012,-9.0021 alt:11240m type:balloon ts:2026-08-08_14:26:40
+t:track f:X3BAL1 track:sagres-2026 seq:2 pos:38.9104,-8.9772 alt:14980m climb:4.8m/s type:balloon ts:2026-08-08_14:36:00
 ```
 
-103 and 116 bytes. `trk:` names the track and `seq:` places the point within it.
+107 and 120 bytes. `track:` names the track and `seq:` places the point within it.
 
-- **`trk:` is optional.** A track packet without one belongs to the station's
+- **`track:` is optional.** A track packet without one belongs to the station's
   current track, keyed on `f:` alone. A station that runs one track at a time
   never names it:
 
   ```
-  t:trk f:X1QZ3N seq:7 pos:38.7301,-9.1355 spd:5.2m/s dir:41deg type:bike ts:2026-08-08_14:26:40
+  t:track f:X1QZ3N seq:7 pos:38.7301,-9.1355 spd:5.2m/s dir:41deg type:bike ts:2026-08-08_14:26:40
   ```
 
   Naming becomes worth its bytes when a station runs more than one track, or
   when a track is worth referring to after it ends.
-- When present, `trk:` is a `label`: lowercase letters, digits and `-`, no
+- When present, `track:` is a `label`: lowercase letters, digits and `-`, no
   spaces. It is chosen by the station and is unique only in combination with
   `f:`, so two stations may both run a track called `commute` without
   collision.
@@ -1136,10 +1136,10 @@ t:trk f:X3BAL1 trk:sagres-2026 seq:2 pos:38.9104,-8.9772 alt:14980m climb:4.8m/s
   stops transmitting is indistinguishable from one that is out of range.
 
 ```
-t:trk f:X1QZ3N trk:commute seq:7 pos:38.7301,-9.1355 spd:5.2m/s dir:41deg type:bike ts:2026-08-08_14:26:40
+t:track f:X1QZ3N track:commute seq:7 pos:38.7301,-9.1355 spd:5.2m/s dir:41deg type:bike ts:2026-08-08_14:26:40
 ```
 
-106 bytes.
+110 bytes.
 
 A track packet is an observation with a name attached. It is a separate type
 because a receiver files it differently: an `obs` replaces what it knew about a
@@ -1147,7 +1147,7 @@ station's position, and a `trk` is appended to a line.
 
 ### 14.1 Updating a track
 
-Later points are sent as further `trk` packets carrying the same `trk:` and a
+Later points are sent as further `trk` packets carrying the same `track:` and a
 higher `seq:`. A point sent again with a `seq:` already held replaces it, which
 is how a station corrects a position it later computed more accurately.
 
@@ -1217,15 +1217,15 @@ can. Any station may answer with `s:ack`, and more than one should.
 
 ## 16. Warnings
 
-`t:warn` reports a hazard: a thing happening in a place, rather than a thing
+`t:warning` reports a hazard: a thing happening in a place, rather than a thing
 happening to the sender. A station transmits a warning about a fire it can see;
 it transmits an `sos` about a fire it is caught in.
 
 ```
-t:warn f:X3RLY7 pos:39.4012,-8.2043 rad:5000m kind:fire sev:danger ts:2026-08-08_14:26:40 m:fast moving, wind from the north
+t:warning f:X3RLY7 pos:39.4012,-8.2043 rad:5000m kind:fire sev:danger ts:2026-08-08_14:26:40 m:fast moving, wind from the north
 ```
 
-124 bytes.
+127 bytes.
 
 | Field | Meaning |
 |---|---|
@@ -1254,10 +1254,10 @@ occupies. A receiver knows whether it is inside the circle without asking
 anyone.
 
 ```
-t:warn f:X3RLY7 pos:38.6902,-9.4012 rad:1200m kind:flood sev:watch ts:2026-08-08_14:26:40
+t:warning f:X3RLY7 pos:38.6902,-9.4012 rad:1200m kind:flood sev:watch ts:2026-08-08_14:26:40
 ```
 
-89 bytes: a flood watch 1200 m around a point, with no message, because
+92 bytes: a flood watch 1200 m around a point, with no message, because
 the fields already say it.
 
 A warning is relayed up to nine times and is never encrypted, for the same
@@ -1337,10 +1337,10 @@ been burning for hours before the first warning goes out, and reporting it at
 `ts:` alone makes every receiver believe it started at that moment:
 
 ```
-t:warn f:X3RLY7 pos:39.4012,-8.2043 rad:5km kind:fire sev:danger ts:2026-08-08_14:26:40 since:2026-08-07_23:10:00
+t:warning f:X3RLY7 pos:39.4012,-8.2043 rad:5km kind:fire sev:danger ts:2026-08-08_14:26:40 since:2026-08-07_23:10:00
 ```
 
-113 bytes: reported at 14:26, burning since 23:10 the previous night.
+116 bytes: reported at 14:26, burning since 23:10 the previous night.
 
 `since:` in the future describes something that has not happened yet, which is
 how planned work is announced:
@@ -1395,12 +1395,12 @@ None of them proves the holder is present now. `t:challenge` does.
 
 ### 18.1 Publishing a key
 
-A station transmits `t:id` (section 9.3) periodically, not only once, because a
+A station transmits `t:identity` (section 9.3) periodically, not only once, because a
 receiver that has never heard the announcement cannot check a signature or issue
 a challenge. Every 30 minutes is a reasonable interval on a quiet channel; a
 station that changes its key announces immediately and does not wait.
 
-`q:id` (section 7) asks for one directly rather than waiting for the next
+`q:identity` (section 7) asks for one directly rather than waiting for the next
 period.
 
 ### 18.2 The exchange
@@ -1521,10 +1521,10 @@ The implementer takes an unused key, gives it a type and a unit, and transmits
 it:
 
 ```
-t:obs f:X3WX01 pos:38.7223,-9.1393 temp:14.2C zpm:8 ts:2026-08-08_14:26:40
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C zpm:8 ts:2026-08-08_14:26:40
 ```
 
-74 bytes. The new field costs six bytes. Every existing receiver reads `zpm:8`,
+82 bytes. The new field costs six bytes. Every existing receiver reads `zpm:8`,
 does not recognise the key, skips it, and continues at `ts:`. Nothing is
 versioned, nothing is negotiated, and no other field is affected.
 
@@ -1551,13 +1551,15 @@ because obscured meaning is not permitted on amateur bands.
 
 ## 21. Reserved
 
-Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `trk`, `sos`,
-`warn`, `info`, `challenge`, `response`, `png`, `pnr`.
+Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
+`request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
+`response`, `ping`, `pong`.
 All other lowercase words are reserved.
 
-Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `trk`,
+Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
-`remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`, `temp`, `hum`,
+`remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
+`temp`, `hum`,
 `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
 
@@ -1589,12 +1591,12 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | `q:` and `s:` | not implemented; receipts exist, requests do not |
 | `via:` instead of rewriting `f:` | not implemented; a carrier currently retransmits under its own callsign, which breaks both authorship and the identifier |
 | Relay limit by packet type | not implemented; custody re-airs a fixed three times with no path recorded |
-| `t:trk` tracks | not implemented; no track is recorded or published |
+| `t:track` tracks | not implemented; no track is recorded or published |
 | `t:sos` calls for help | not implemented; the current wire has an `sos` station symbol, which is a different thing and is not relayed further than any other packet |
-| `t:warn` warnings | not implemented; no source |
+| `t:warning` warnings | not implemented; no source |
 | `t:info` notices | not implemented; no source |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
-| Periodic `t:id` | partly; a key is announced but not on a fixed period |
+| Periodic `t:identity` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |
 | `type:` vehicle set | partly; the current wire carries a handful of symbols and none of the rail, air or cycle values |
 | Variable-length and authority-issued callsigns | not implemented; the current wire assumes the six-character `X1`/`X3` form |

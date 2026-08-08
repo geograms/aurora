@@ -47,7 +47,8 @@ OPRS is one syntax, readable on sight, with room to grow.
    never a new packet type.
 6. Nothing is defined out of band. No receiver requires prior state to read a
    packet.
-7. All values are SI. Units are fixed here and never transmitted.
+7. Every measurement carries its unit, so no value on the wire is ambiguous
+   and no receiver has to assume one.
 8. An unknown key is skipped and an unknown packet type is ignored, in both
    cases without error.
 9. A station asks for what it wants in `q:` and answers with the same words in
@@ -117,7 +118,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 
 ### 4.1 Envelope keys
 
-| Tag | Type | Meaning |
+| Key | Type | Meaning |
 |---|---|---|
 | `t` | `enum` | packet type, always the first field |
 | `f` | `call` | sending callsign |
@@ -136,8 +137,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
-| `rad` | `int` | radius of the area affected, metres (section 16) |
-| `unit` | `words` | units the sender prefers values displayed in (section 10.6) |
+| `rad` | `qty` | radius of the area affected (section 16) |
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
@@ -184,6 +184,7 @@ The type is fixed by this document and is never transmitted.
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
 | `ratio` | two digits `1` to `9` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
+| `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
 | `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
 | `b64` | base64url, no padding | `pQ4m9xT2vB8kR` |
 | `bech32` | a bech32 string | `npub1qz3n7...` |
@@ -214,7 +215,10 @@ separates words in `q:ack,read`. A station writing `c:14,2` for 14.2, or
 - A negative number carries a leading `-`. A positive number carries no sign.
 - A number has at least one digit before the dot: `0.4`, never `.4`. It never
   ends in a dot.
-- No exponent notation, and no unit suffix. The unit is fixed by the key.
+- No exponent notation.
+- **A measurement carries its unit** (section 10.6). The number rules above
+  govern the digits; the unit follows them with no space: `a:3048m`,
+  `v:48km/h`, `c:-3.5C`.
 
 Trailing zeros are significant, because the number of decimal places states the
 precision claimed (section 10.1). `c:14.0` says the reading was measured to a
@@ -244,10 +248,10 @@ t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation,photos m:the coast n
 250-byte packet itself. It applies to any packet, not only messages:
 
 ```
-t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 ts:2026-08-08_14:26:40 tag:field-day
+t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2C ts:2026-08-08_14:26:40 tag:field-day
 ```
 
-76 bytes.
+77 bytes.
 
 **A label contains no space.** No field value may contain a space, `m:` alone
 excepted, and `tag:` is not that exception. A label is lowercase letters,
@@ -302,14 +306,14 @@ A new field takes an unused key, declares its type, and is placed anywhere.
 Receivers that do not know the key skip it and its value. No existing field
 moves, no packet type is added, and no version is negotiated.
 
-Tags beginning with `z` are reserved for private and experimental use and are
+Keys beginning with `z` are reserved for private and experimental use and are
 never assigned by this document.
 
 ```
-t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 zpm:8 ts:2026-08-08_14:26:40
+t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2C zpm:8 ts:2026-08-08_14:26:40
 ```
 
-68 bytes. Every existing receiver reads `c:14.2` and `ts:`, skips `zpm:8`, and
+69 bytes. Every existing receiver reads `c:14.2` and `ts:`, skips `zpm:8`, and
 is otherwise unaffected.
 
 ---
@@ -497,10 +501,10 @@ A request for data is the same exchange without a message:
 
 ```
 t:req f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 q:pos,bat
-t:obs f:X3RLY7 d:X1QZ3N p:38.7810,-9.2043 bt:64 ts:2026-08-08_14:26:40 s:pos,bat
+t:obs f:X3RLY7 d:X1QZ3N p:38.7810,-9.2043 bt:64% ts:2026-08-08_14:26:40 s:pos,bat
 ```
 
-56 and 80 bytes. A station holding only part of what was asked says so, rather
+56 and 81 bytes. A station holding only part of what was asked says so, rather
 than failing:
 
 ```
@@ -637,40 +641,40 @@ valid coordinate in the Gulf of Guinea.
 
 ### 10.2 Movement
 
-| Tag | Type | Meaning | Unit |
+| Key | Type | Meaning | Quantity |
 |---|---|---|---|
 | `p` | `coord` | position | degrees |
-| `a` | `dec` | altitude above mean sea level | metres |
-| `e` | `dec` | horizontal accuracy radius | metres |
-| `v` | `dec` | speed over ground | metres per second |
-| `u` | `int` | course over ground, 0 to 359 | degrees true |
-| `vs` | `dec` | vertical speed, signed | metres per second |
+| `a` | `qty` | altitude above mean sea level | distance |
+| `e` | `qty` | horizontal accuracy radius | distance |
+| `v` | `qty` | speed over ground | speed |
+| `u` | `qty` | course over ground, 0 to 359 true | angle |
+| `vs` | `qty` | vertical speed, signed | speed |
 
 ### 10.3 Weather
 
-| Tag | Type | Meaning | Unit |
+| Key | Type | Meaning | Quantity |
 |---|---|---|---|
-| `c` | `dec` | air temperature | degrees Celsius |
-| `h` | `int` | relative humidity | percent |
-| `b` | `dec` | barometric pressure, station level | hPa |
-| `w` | `dec` | wind speed, sustained | metres per second |
-| `wd` | `int` | wind direction, the direction it blows from | degrees true |
-| `wg` | `dec` | wind gust, peak | metres per second |
-| `rh` | `dec` | rainfall, previous hour | mm |
-| `rd` | `dec` | rainfall, previous 24 hours | mm |
-| `sr` | `int` | solar irradiance | watts per square metre |
+| `c` | `qty` | air temperature | temperature |
+| `h` | `qty` | relative humidity | proportion |
+| `b` | `qty` | barometric pressure, station level | pressure |
+| `w` | `qty` | wind speed, sustained | speed |
+| `wd` | `qty` | wind direction, the direction it blows from | angle |
+| `wg` | `qty` | wind gust, peak | speed |
+| `rh` | `qty` | rainfall, previous hour | rainfall |
+| `rd` | `qty` | rainfall, previous 24 hours | rainfall |
+| `sr` | `qty` | solar irradiance | irradiance |
 
 Conversion to SI is performed by the sender. No unit is transmitted and no
 receiver infers one. A station holding Fahrenheit converts before transmitting.
 
 ### 10.4 Telemetry and station type
 
-| Tag | Type | Meaning | Unit |
+| Key | Type | Meaning | Quantity |
 |---|---|---|---|
-| `bt` | `int` | battery charge | percent |
-| `vl` | `dec` | supply voltage | volts |
-| `rs` | `int` | received signal strength | dBm |
-| `sn` | `dec` | signal-to-noise ratio | dB |
+| `bt` | `qty` | battery charge | proportion |
+| `vl` | `qty` | supply voltage | voltage |
+| `rs` | `qty` | received signal strength | signal power |
+| `sn` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
 
 `rs` and `sn` describe the link a packet arrived on and are reported by the
@@ -681,7 +685,7 @@ An observation carries a note in `m:`, the same key a message uses.
 
 ### 10.5 Stations without a clock
 
-| Station capability | Tag | Example | Meaning |
+| Station capability | Key | Example | Meaning |
 |---|---|---|---|
 | keeps wall-clock time | `ts` | `ts:2026-08-08_14:26:40` | UTC |
 | no clock, no storage | `ag` | `ag:30` | seconds between observation and transmission |
@@ -706,61 +710,67 @@ forms, anchoring that epoch for all receivers in range, and thereafter sends
 
 ### 10.6 Units of measure
 
-Every value on the wire is SI, always, in every field. A speed is metres per
-second whether the station is a bicycle or an airliner, and a receiver never
-converts before it can compare two stations.
-
-This is deliberate and it is the single largest departure from APRS, where
-speed arrives in knots or miles per hour, altitude in feet, temperature in
-Fahrenheit and rain in hundredths of an inch, and a receiver that guesses wrong
-is not told.
-
-Operators do not think in SI, and they should not have to. `unit:` carries the
-units the **sender** prefers its values shown in. It changes nothing on the
-wire:
+**Every measurement carries its unit, immediately after the number and with no
+space between them.**
 
 ```
-t:obs f:X1BOA3 p:38.6902,-9.4012 v:3.1 u:275 type:boat unit:kt ts:2026-08-08_14:26:40
+a:3048m      v:48km/h      c:14.2C      b:1013.2hPa      rh:0.4mm
 ```
 
-85 bytes. The speed is 3.1 m/s, and a receiver that honours `unit:` displays
-it as 6.0 knots because that is how the skipper reads it.
+A person reads the value and the unit together, with no table to consult and
+nothing to remember about which key means what.
 
-Several are separated by commas:
+The unit is **required**, not optional. A bare number is not a measurement, it
+is a malformed value, and it is skipped like any other. This is the rule that
+separates OPRS from APRS: APRS units are implicit and positional, so a receiver
+that assumes the wrong one is never told it guessed. Here there is nothing to
+guess.
+
+A sender transmits in the unit it works in. A boat reports knots, an aircraft
+reports feet and knots, a European car reports km/h, an American weather station
+reports Fahrenheit and inches of mercury:
 
 ```
-t:trk f:CT1ABC-9 seq:3 p:38.9012,-9.0021 a:3048 v:128.6 u:47 type:airplane unit:kt,ft ts:2026-08-08_14:26:40
+t:obs f:X1BOA3 p:38.6902,-9.4012 v:6kt u:275deg type:boat ts:2026-08-08_14:26:40
+t:trk f:CT1ABC-9 seq:3 p:38.9012,-9.0021 a:10000ft v:250kt u:47deg type:airplane ts:2026-08-08_14:26:40
+t:obs f:X3WX01 p:38.7223,-9.1393 c:57.6F h:78% b:29.92inHg w:7.6mph type:wx ts:2026-08-08_14:26:40
 ```
 
-108 bytes. Altitude 3048 m shown as 10000 feet, speed 128.6 m/s shown as 250
-knots, which is what a pilot expects to see.
+80, 103 and 98 bytes.
 
-| Word | Quantity | Displayed as |
+### 10.7 The permitted units
+
+| Quantity | Units | Canonical |
 |---|---|---|
-| `ms` | speed | metres per second |
-| `kmh` | speed | kilometres per hour |
-| `mph` | speed | miles per hour |
-| `kt` | speed | knots |
-| `m` | distance, altitude | metres |
-| `ft` | distance, altitude | feet |
-| `km` | distance | kilometres |
-| `mi` | distance | miles |
-| `nmi` | distance | nautical miles |
-| `c` | temperature | degrees Celsius |
-| `f` | temperature | degrees Fahrenheit |
-| `hpa` | pressure | hPa |
-| `inhg` | pressure | inches of mercury |
-| `mm` | rainfall | millimetres |
-| `in` | rainfall | inches |
+| distance, altitude | `m`, `km`, `ft`, `mi`, `nmi` | `m` |
+| speed | `m/s`, `km/h`, `mph`, `kt` | `m/s` |
+| angle | `deg` | `deg` |
+| temperature | `C`, `F` | `C` |
+| pressure | `hPa`, `inHg` | `hPa` |
+| rainfall | `mm`, `in` | `mm` |
+| irradiance | `W/m2` | `W/m2` |
+| voltage | `V` | `V` |
+| proportion | `%` | `%` |
+| signal power | `dBm` | `dBm` |
+| signal ratio | `dB` | `dB` |
 
-Each word names one quantity, so the order does not matter and a word cannot be
-ambiguous about what it applies to. A word for a quantity the packet does not
-carry is harmless, and an unrecognised word is skipped like any other.
+Each key accepts only the units of its own quantity. `c:48km/h` is not a cold
+day, it is a malformed value, and a receiver skips it rather than trying to make
+sense of it.
 
-`unit:` is presentation only, like `tz:`. It never changes a value, never takes
-part in an identifier, and a receiver is free to ignore it and show SI, or to
-override it with what its own operator prefers. It is a courtesy from the sender
-about how the numbers were read where they were taken, not an instruction.
+**A receiver converts to the canonical unit before it compares, stores or plots
+anything.** Two stations reporting `v:6kt` and `v:3.1m/s` are reporting the same
+speed, and a receiver that sorts them by their digits has a bug. Conversion is
+the receiver's job precisely because the sender should not have to do it: a
+skipper who has to convert knots to metres per second before transmitting will
+eventually get it wrong, and nobody will notice.
+
+The unit set is closed. A sender may not invent one, because a unit no receiver
+recognises makes the value unreadable rather than merely unfamiliar, and unlike
+an unknown key it cannot simply be skipped without losing the reading.
+
+Coordinates are the one exception: `p:` carries no unit, because it is always
+decimal degrees in WGS84 and no second option exists (section 10.1).
 
 ---
 
@@ -787,81 +797,81 @@ t:obs f:X1QZ3N p:38.7223,-9.1393 ts:2026-08-08_14:26:40
 Five decimals of arithmetic, eight metres of measured accuracy:
 
 ```
-t:obs f:X1QZ3N p:38.72231,-9.13934 e:8 ts:2026-08-08_14:26:40
+t:obs f:X1QZ3N p:38.72231,-9.13934 e:8m ts:2026-08-08_14:26:40
 ```
 
-61 bytes.
+62 bytes.
 
 ### 11.2 Movement
 
 Person on foot:
 
 ```
-t:obs f:X1QZ3N p:38.7223,-9.1393 a:87 type:foot v:1.4 u:212 ts:2026-08-08_14:26:40
+t:obs f:X1QZ3N p:38.7223,-9.1393 a:87m type:foot v:1.4m/s u:212deg ts:2026-08-08_14:26:40
 ```
 
-82 bytes.
+89 bytes.
 
 Vehicle, with a note:
 
 ```
-t:obs f:X1CAR7 p:38.7231,-9.1402 a:87 v:13.4 u:212 e:8 type:car ts:2026-08-08_14:26:40 m:heading south on the N8
+t:obs f:X1CAR7 p:38.7231,-9.1402 a:87m v:13.4m/s u:212deg e:8m type:car ts:2026-08-08_14:26:40 m:heading south on the N8
 ```
 
-112 bytes.
+120 bytes.
 
 Balloon ascending at 4.8 m/s through 11240 m:
 
 ```
-t:obs f:X3BAL1 p:38.9012,-9.0021 a:11240 vs:4.8 v:9.2 u:47 type:balloon ts:2026-08-08_14:26:40
+t:obs f:X3BAL1 p:38.9012,-9.0021 a:11240m vs:4.8m/s v:9.2m/s u:47deg type:balloon ts:2026-08-08_14:26:40
 ```
 
-94 bytes.
+104 bytes.
 
 Vessel under way, no altitude:
 
 ```
-t:obs f:X1BOA3 p:38.6902,-9.4012 v:3.1 u:275 type:boat ts:2026-08-08_14:26:40
+t:obs f:X1BOA3 p:38.6902,-9.4012 v:3.1m/s u:275deg type:boat ts:2026-08-08_14:26:40
 ```
 
-77 bytes.
+83 bytes.
 
 ### 11.3 Weather
 
 Station with three sensors:
 
 ```
-t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 h:78 b:1013.2 type:wx ts:2026-08-08_14:26:40
+t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2C h:78% b:1013.2hPa type:wx ts:2026-08-08_14:26:40
 ```
 
-84 bytes.
+89 bytes.
 
 Every defined weather field plus battery, fourteen fields:
 
 ```
-t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 h:78 b:1013.2 w:3.4 wd:210 wg:7.1 rh:0.4 rd:12.6 sr:640 bt:96 type:wx ts:2026-08-08_14:26:40
+t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2C h:78% b:1013.2hPa w:3.4m/s wd:210deg wg:7.1m/s rh:0.4mm rd:12.6mm sr:640W/m2 bt:96% type:wx ts:2026-08-08_14:26:40
 ```
 
-132 bytes, leaving 121 for fields not yet defined.
+155 bytes, leaving 121 for fields not yet defined.
 
 Indoor sensor with no position and no clock. Position is omitted rather than
 sent as zero:
 
 ```
-t:obs f:X3WX01 c:14.2 h:78 ag:60
+t:obs f:X3WX01 c:14.2C h:78% ag:60
 ```
 
-32 bytes.
+34 bytes.
 
 ### 11.4 Telemetry
 
 Unattended node reporting power state:
 
 ```
-t:obs f:X3RLY7 p:38.7810,-9.2043 a:210 bt:64 vl:12.9 type:node ts:2026-08-08_14:26:40
+t:obs f:X3RLY7 p:38.7810,-9.2043 a:210m bt:64% vl:12.9V type:node ts:2026-08-08_14:26:40
 ```
 
-85 bytes.
+88 bytes.
 
 ### 11.5 Emergency
 
@@ -869,10 +879,10 @@ A call for help is its own packet type, not an observation with a flag on it
 (section 15):
 
 ```
-t:sos f:X1QZ3N p:38.7223,-9.1393 e:6 kind:medical ts:2026-08-08_14:26:40 m:broken leg, cannot walk
+t:sos f:X1QZ3N p:38.7223,-9.1393 e:6m kind:medical ts:2026-08-08_14:26:40 m:broken leg, cannot walk
 ```
 
-98 bytes, identifier `2adab3`. Any station may answer:
+99 bytes, identifier `2adab3`. Any station may answer:
 
 ```
 t:ack f:X32DVA d:X1QZ3N r:2adab3 s:ack
@@ -884,19 +894,19 @@ t:ack f:X32DVA d:X1QZ3N r:2adab3 s:ack
 
 ```
 t:png f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40
-t:pnr f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 rs:-92 sn:7.5
+t:pnr f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 rs:-92dBm sn:7.5dB
 ```
 
-46 and 60 bytes. The reply reports the signal the test arrived with, which is
+46 and 65 bytes. The reply reports the signal the test arrived with, which is
 the receiver's measurement, not the sender's.
 
 ### 11.7 Reading a packet
 
 ```
-t:obs f:X3RLY7 p:38.7810,-9.2043 a:210 c:11.8 h:88 b:1008.4 type:node ts:2026-08-08_14:26:40
+t:obs f:X3RLY7 p:38.7810,-9.2043 a:210m c:11.8C h:88% b:1008.4hPa type:node ts:2026-08-08_14:26:40
 ```
 
-92 bytes.
+98 bytes.
 
 | Field | Type | Reading |
 |---|---|---|
@@ -971,14 +981,14 @@ displayed.
 ### 12.5 Clockless weather station anchored by a neighbour
 
 ```
-1  t:obs f:X3WX01 p:38.7223,-9.1393 c:14.1 h:80 ep:7.3600
-2  t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 h:78 ep:7.4210
+1  t:obs f:X3WX01 p:38.7223,-9.1393 c:14.1C h:80% ep:7.3600
+2  t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2C h:78% ep:7.4210
    A receiver holding a clock records: epoch 7 heard at 2026-08-08_14:26:40.
 
 3  t:obs f:X3WX01 p:38.7223,-9.1393 ep:7.9930 ts:2026-08-08_14:26:40
    The station has obtained the time and anchors epoch 7 for all receivers.
 
-4  t:obs f:X3WX01 p:38.7223,-9.1393 c:15.0 h:74 ts:2026-08-08_14:36:00
+4  t:obs f:X3WX01 p:38.7223,-9.1393 c:15.0C h:74% ts:2026-08-08_14:36:00
 ```
 
 54, 54, 65 and 67 bytes. Packets 1 and 2 are orderable without any clock, since
@@ -1062,18 +1072,18 @@ station may record one and publish it as it goes, and a receiver assembles the
 points into a line without having heard the beginning.
 
 ```
-t:trk f:X3BAL1 trk:sagres-2026 seq:1 p:38.9012,-9.0021 a:11240 type:balloon ts:2026-08-08_14:26:40
-t:trk f:X3BAL1 trk:sagres-2026 seq:2 p:38.9104,-8.9772 a:14980 vs:4.8 type:balloon ts:2026-08-08_14:36:00
+t:trk f:X3BAL1 trk:sagres-2026 seq:1 p:38.9012,-9.0021 a:11240m type:balloon ts:2026-08-08_14:26:40
+t:trk f:X3BAL1 trk:sagres-2026 seq:2 p:38.9104,-8.9772 a:14980m vs:4.8m/s type:balloon ts:2026-08-08_14:36:00
 ```
 
-98 and 105 bytes. `trk:` names the track and `seq:` places the point within it.
+99 and 109 bytes. `trk:` names the track and `seq:` places the point within it.
 
 - **`trk:` is optional.** A track packet without one belongs to the station's
   current track, keyed on `f:` alone. A station that runs one track at a time
   never names it:
 
   ```
-  t:trk f:X1QZ3N seq:7 p:38.7301,-9.1355 v:5.2 u:41 type:bike ts:2026-08-08_14:26:40
+  t:trk f:X1QZ3N seq:7 p:38.7301,-9.1355 v:5.2m/s u:41deg type:bike ts:2026-08-08_14:26:40
   ```
 
   Naming becomes worth its bytes when a station runs more than one track, or
@@ -1091,10 +1101,10 @@ t:trk f:X3BAL1 trk:sagres-2026 seq:2 p:38.9104,-8.9772 a:14980 vs:4.8 type:ballo
   stops transmitting is indistinguishable from one that is out of range.
 
 ```
-t:trk f:X1QZ3N trk:commute seq:7 p:38.7301,-9.1355 v:5.2 u:41 type:bike ts:2026-08-08_14:26:40
+t:trk f:X1QZ3N trk:commute seq:7 p:38.7301,-9.1355 v:5.2m/s u:41deg type:bike ts:2026-08-08_14:26:40
 ```
 
-94 bytes.
+100 bytes.
 
 A track packet is an observation with a name attached. It is a separate type
 because a receiver files it differently: an `obs` replaces what it knew about a
@@ -1136,10 +1146,10 @@ observation, so that a station can act on it after reading three bytes and
 without understanding anything else in the packet.
 
 ```
-t:sos f:X1QZ3N p:38.7223,-9.1393 e:6 kind:medical ts:2026-08-08_14:26:40 m:broken leg, cannot walk
+t:sos f:X1QZ3N p:38.7223,-9.1393 e:6m kind:medical ts:2026-08-08_14:26:40 m:broken leg, cannot walk
 ```
 
-98 bytes.
+99 bytes.
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -1176,10 +1186,10 @@ happening to the sender. A station transmits a warning about a fire it can see;
 it transmits an `sos` about a fire it is caught in.
 
 ```
-t:warn f:X3RLY7 p:39.4012,-8.2043 rad:5000 kind:fire sev:danger ts:2026-08-08_14:26:40 m:fast moving, wind from the north
+t:warn f:X3RLY7 p:39.4012,-8.2043 rad:5000m kind:fire sev:danger ts:2026-08-08_14:26:40 m:fast moving, wind from the north
 ```
 
-121 bytes.
+122 bytes.
 
 | Field | Meaning |
 |---|---|
@@ -1208,10 +1218,10 @@ occupies. A receiver knows whether it is inside the circle without asking
 anyone.
 
 ```
-t:warn f:X3RLY7 p:38.6902,-9.4012 rad:1200 kind:flood sev:watch ts:2026-08-08_14:26:40
+t:warn f:X3RLY7 p:38.6902,-9.4012 rad:1200m kind:flood sev:watch ts:2026-08-08_14:26:40
 ```
 
-86 bytes: a flood watch 1200 m around a point, with no message, because
+87 bytes: a flood watch 1200 m around a point, with no message, because
 the fields already say it.
 
 A warning is relayed up to nine times and is never encrypted, for the same
@@ -1230,10 +1240,10 @@ The implementer takes an unused key, gives it a type and a unit, and transmits
 it:
 
 ```
-t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2 zpm:8 ts:2026-08-08_14:26:40
+t:obs f:X3WX01 p:38.7223,-9.1393 c:14.2C zpm:8 ts:2026-08-08_14:26:40
 ```
 
-68 bytes. The new field costs six bytes. Every existing receiver reads `zpm:8`,
+69 bytes. The new field costs six bytes. Every existing receiver reads `zpm:8`,
 does not recognise the key, skips it, and continues at `ts:`. Nothing is
 versioned, nothing is negotiated, and no other field is affected.
 
@@ -1264,7 +1274,7 @@ Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `trk`, `sos`,
 `warn`, `png`, `pnr`.
 All other lowercase words are reserved.
 
-Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `via`, `trk`, `seq`, `kind`, `sev`, `rad`, `unit`, `tag`, `m`,
+Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `via`, `trk`, `seq`, `kind`, `sev`, `rad`, `tag`, `m`,
 `file`, `x`,
 `g`, `k`, `add`, `remove`, `tz`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
 `wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `type`, `ag`, `ep`.

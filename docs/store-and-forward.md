@@ -1,138 +1,145 @@
-# Store-and-forward — delivering to someone who is not there
+# Store-and-forward
 
-A message to a person no path reaches should not sit in a queue until they
-happen to come back. It should be handed to whatever device is nearby and
-delivered when *that* device meets them. Any geogram-capable device can carry
-it: a phone, a tablet, an ESP32 dongle on a windowsill.
+A message to a station that no path reaches is handed to a nearby device, which
+carries it and delivers it on meeting the recipient. Any capable device can act
+as a carrier: a phone, a tablet, or an ESP32 dongle.
 
-This is a **core** service. No wapp participates: a wapp sends a message and is
+This is a core service. No wapp participates: a wapp sends a message and is
 called back when one arrives ([architecture.md](architecture.md)).
 
-Code: `lib/services/mesh/mesh_courier.dart` (decide + air + ingest),
-`mesh_custody.dart` (the taps), `mesh_store.dart` (the parked-mail database),
-`esp32/components/geogram_blemesh/blemesh_scf.c` (the dongle's half).
+Implementation: `lib/services/mesh/mesh_courier.dart` (decision, transmission,
+ingest), `mesh_custody.dart` (taps), `mesh_store.dart` (parked mail database),
+`esp32/components/geogram_blemesh/blemesh_scf.c` (ESP32 side).
 
 ---
 
-## 1. The decision: "is there no path?"
+## 1. Determining that no path exists
 
-**Every up-front test lies**, and both were measured against a phone with both
-radios switched off:
+Every reachability test available before transmission returns an incorrect
+answer. Both were measured against a device with both radios switched off:
 
-| Test | What it said | Why |
+| Test | Result returned | Cause |
 |---|---|---|
-| `hal_rns_nodes` / observed-node list | "seen, recently" | a hub replays its whole announce cache on link-up, stamping every node it ever heard |
-| transport `hasPath(dest)` | `path = 1` | a learned Reticulum path outlives the peer that taught it by hours |
+| `hal_rns_nodes`, observed-node list | recently seen | a hub replays its entire announce cache on link-up, timestamping every node it has ever heard |
+| transport `hasPath(dest)` | path present | a learned Reticulum path outlives the station that taught it by hours |
 
-What does not lie is **delivery**. A peer on the LAN, or reachable through a
-hub, acknowledges in well under a second. So:
+Delivery is the reliable signal. A station on the LAN, or reachable through a
+hub, acknowledges in well under one second.
 
 ```
 sendLxmf(dest, text)
-  └─ MeshCourier.armLxmf(dest, text)        // unconditional, cheap
-        … 20 s later …
-        lxmfPendingFor(dest) == 0  → delivered; drop it
-        lxmfPendingFor(dest)  > 0  → there is no path; air a copy
+  MeshCourier.armLxmf(dest, text)      unconditional
+  after 20 s:
+    lxmfPendingFor(dest) == 0   delivered, discard
+    lxmfPendingFor(dest)  > 0   no path, transmit a carried copy
 ```
 
-Twenty seconds because `sendLxmf` gives up on a direct link at 10 s: this is
-"the send has definitively failed", not a guess. After 15 minutes the courier
-stops caring and the ordinary retry ladder owns the message.
+The interval is 20 seconds because `sendLxmf` abandons a direct link at 10
+seconds, so the send has definitively failed rather than merely not yet
+succeeded. After 15 minutes the courier releases the message to the ordinary
+retry ladder.
 
-## 2. The wire
+## 2. Wire format
 
 ```
-FROM \x1F TO \x1F  am:<6hex> [sd:<32hex>] <body> [~<sig>]
+FROM 0x1F TO 0x1F am:<6hex> [sd:<32hex>] <body> [~<sig>]
 ```
 
-- **`FROM` / `TO`** — public, always. A carrier that cannot read the recipient
-  cannot decide whom to hand it to. This is the whole reason custody works
-  without anyone trusting anyone.
-- **`am:`** — receipt id, and it must come **first**: both custody layers (the
-  phones' `MeshCustodyDelegate.onAirFrame` and the dongle's
-  `blemesh_scf_offer`) read it at the very start of the text. A frame without
-  one is carried but can never be handed on inside a session.
-- **`sd:`** — the sender's LXMF delivery address, so the receiving side can key
-  the conversation by *identity*. Without it a carried message can only be
-  keyed by callsign, and a callsign-keyed conversation is one the rail refuses
-  to render — that is exactly where the first implementation dead-ended.
-- **body** — `ENC1:<base64url>` sealed to the recipient's key when we hold one,
-  plaintext otherwise. Refusing to send without a key would leave the message
-  nowhere, and the envelope is public either way.
-- **`~<sig>`** — short-Schnorr over `sha256("<FROM>|<everything before ~>")`,
-  base85. Checked on arrival **when we know the sender's key**: a carried
-  message passed through hands we do not control, so a bad signature is a
-  forgery and stops there. Unsigned or unknown-key mail is still delivered —
-  most peers have never beaconed us a key.
+`FROM` and `TO` are always public. A carrier that cannot read the recipient
+cannot determine where to relay the frame, which is what allows custody to
+operate between stations that do not trust each other.
 
-No `np:` (recipient npub) token: it costs 66 of the 240 bytes a carrier can
-hold and proves nothing a sealed body does not, since only the holder of that
-key can open it.
+`am:` is the receipt identifier and is always first. Both custody layers, the
+phone's `MeshCustodyDelegate.onAirFrame` and the ESP32's `blemesh_scf_offer`,
+read it at a fixed offset. A frame without one is carried but cannot be handed
+over within a session.
 
-**240 bytes, hard.** Over that, the courier refuses and says so. See the budget
-table in [ble5.md](ble5.md#3-the-size-router).
+`sd:` is the sender's LXMF delivery address, allowing the receiver to key the
+conversation by identity. Without it a carried message can only be keyed by
+callsign, and a callsign-keyed conversation is not renderable.
 
-## 3. Airing
+The body is `ENC1:<base64url>` sealed to the recipient's key when one is known,
+and plaintext otherwise. Refusing to transmit without a key would leave the
+message undeliverable, and the envelope is public in both cases.
 
-Through `BleService.enqueueAdvert`, the same pipe a wapp broadcast uses — so
-the custody tap parks our own copy exactly as it parks a stranger's.
+`~<sig>` is a short-Schnorr signature over `sha256("<FROM>|<text preceding the
+signature>")`, base85 encoded. It is verified on arrival when the sender's key
+is known, since a carried message has passed through stations outside the
+sender's control. Unsigned mail and mail from unknown keys are still delivered,
+as most stations have not published a key.
 
-**Aired three times**: at 0, +90 s and +180 s, TTL 300 s. A receiver scans in
-bursts, so a single advert window is a lottery — the same dongle two metres
-away parked six frames from one run and zero from the next.
+There is no `np:` recipient token. It consumes 66 of the 240 available bytes and
+establishes nothing that a sealed body does not, since only the holder of that
+key can open the body.
+
+The limit is 240 bytes. Larger frames are refused with a logged reason. See the
+budget table in [ble5.md](ble5.md).
+
+## 3. Transmission
+
+Carried copies are transmitted through `BleService.enqueueAdvert`, the same path
+used by a wapp broadcast, so the custody tap parks the local copy exactly as it
+parks a frame from another station.
+
+Each copy is transmitted three times: at 0, +90 s and +180 s, with a 300 s TTL.
+A receiver scans in bursts, so a single advertisement window is unreliable: in
+one measurement an ESP32 two metres away parked six frames from one run and none
+from the next.
 
 ## 4. Carrying
 
-Any device that overhears a 1:1 frame for someone else parks it.
+Any device that receives a direct frame addressed to another station parks it.
 
-- **Store for anyone.** A custodian that only holds mail for people it already
-  knows is no use to the person who most needs one: someone out of range of
-  everybody. Sorting happens under pressure, not at the door — our own mail and
-  mail for a target inside our mesh horizon get `prio 1`, a stranger's gets
-  `prio 0`, and the quota sweep evicts `ORDER BY prio, ts`.
-- **Bounded.** 100 MB or 7 days, whichever comes first; `maxWire` 480 B per
-  frame; a hard `inTransitMax = 4000` in-transit rows so a busy street cannot
-  fill the disk with mail this device may never be able to deliver. Own mail is
-  never refused.
-- **Never carried**: groups, positions, `?`-control frames, ack/receipt lines.
+Mail is stored for any recipient. A carrier that holds mail only for stations it
+already knows is of no use to a station that is out of range of everyone.
+Prioritisation occurs under storage pressure rather than at admission: local mail
+and mail for a target within the mesh horizon receive `prio 1`, mail for unknown
+targets receives `prio 0`, and the quota sweep evicts in `ORDER BY prio, ts`.
 
-The ESP32 does the same in 24 slots (`BLEMESH_SCF_MAX`), 252 B per frame,
-persisted to `/sdcard/mesh/pending.bin` so a power cycle does not lose parked
-mail.
+Storage is bounded at 100 MB or 7 days, whichever is reached first, with
+`maxWire` of 480 bytes per frame and `inTransitMax` of 4000 in-transit rows, so
+that a busy location cannot fill the disk with mail the device may never
+deliver. Local mail is never refused.
 
-## 5. Delivering
+Groups, observations, `?` control frames and receipts are never carried.
 
-Two independent paths, either of which completes the loop:
+The ESP32 implements the same behaviour in 24 slots (`BLEMESH_SCF_MAX`) at 252
+bytes per frame, persisted to `/sdcard/mesh/pending.bin` so that a power cycle
+does not discard parked mail.
 
-**A — re-air on sighting.** The custodian hears the target's beacon and puts
-the parked frames back on the air (dongle: max 4 per sighting, one re-air per
-frame per 60 s).
+## 5. Delivery
+
+Two independent paths complete delivery.
+
+**Re-transmission on sighting.** The carrier receives the target's beacon and
+re-transmits the parked frames. The ESP32 sends at most 4 per sighting, with one
+re-transmission per frame per 60 seconds.
 
 ```
 SCF: X1RD89 back in range -> re-airing 4 parked frame(s)
 ```
 
-**B — MSP custody handover.** The target opens a GATT/MSP session and the
-custodian hands over everything keyed to it, then archives its copy.
+**MSP custody handover.** The target opens a GATT and MSP session, the carrier
+transfers every frame addressed to it, and then archives its copy.
 
 ```
 custody of 7b0d6e -> X1RD89 (purged)
 ```
 
-On the receiving device both land in `MeshCourier.ingest`, which verifies the
-signature, decrypts, dedups (by `am`, else by content), and injects the message
-into the LXMF inbox through `RnsService.injectLxmf` — **the same inbox a
-directly-delivered message lands in**. The wapp cannot tell the difference, and
-that is the design: it renders the thread it always had with that person.
+On the receiving device both paths reach `MeshCourier.ingest`, which verifies
+the signature, decrypts, deduplicates by `am` or by content, and injects the
+message into the LXMF inbox through `RnsService.injectLxmf`. This is the same
+inbox used by directly delivered messages, so the receiving wapp renders the
+existing conversation without distinguishing the delivery path.
 
-## 6. Closing the loop
+## 6. Releasing carried copies
 
-The recipient's `?ACK <am>` purges custodians that still hold a copy, and the
-have-bloom in each mesh beacon does the same for anything the ack missed. A
-custodian that hands a message on archives its copy rather than deleting it, so
-that if the handover is later rejected the message still belongs to somebody.
+The recipient's `?ACK <am>` purges carriers still holding a copy. The have-bloom
+in each mesh beacon covers frames the receipt did not reach. A carrier that
+completes a handover archives its copy rather than deleting it, so that a
+subsequently rejected handover leaves the message owned by a station.
 
-## 7. Watching it work
+## 7. Instrumentation
 
 ```sh
 curl -s localhost:3458/api/status | jq '.mesh.courier'
@@ -140,52 +147,50 @@ curl -s localhost:3458/api/status | jq '.mesh.courier'
 #  "ingested":0,"ingestDropped":0}
 ```
 
-| Counter | Means |
+| Counter | Meaning |
 |---|---|
-| `armed` | 1:1 sends the courier is watching |
-| `aired` | copies handed to the mesh (no path existed) |
-| `refusedNoIdentity` | no callsign to address a carrier with |
-| `refusedTooLong` | over 240 B — nothing was aired |
+| `armed` | direct sends the courier is tracking |
+| `aired` | copies transmitted for carriage, no path existed |
+| `refusedNoIdentity` | no callsign available to address a carrier |
+| `refusedTooLong` | over 240 bytes, nothing transmitted |
 | `ingested` | carried messages unwrapped and delivered to a wapp |
-| `ingestDropped` | forged signature, undecryptable, or not ours |
+| `ingestDropped` | invalid signature, undecryptable, or addressed elsewhere |
 
-Log lines worth grepping: `Courier: no path to …`, `Courier: delivered a
-carried message …`, `Mesh: parked … for custody`, `LXMF: carried message …`.
+Relevant log lines: `Courier: no path to`, `Courier: delivered a carried
+message`, `Mesh: parked ... for custody`, `LXMF: carried message`.
 
-## 8. Validating it honestly
+## 8. Validation procedure
 
-The test that proves nothing: send with the recipient's Bluetooth off, turn it
-on, watch the message arrive — **the sender was in range the whole time**, so a
-direct link explains it just as well.
+A test in which the sender remains in range proves nothing, because a direct
+link explains the delivery equally well.
 
-The test that proves it, run 2026-08-06 (tablet → T-Dongle → TANK2):
+The following procedure was run on 2026-08-06, tablet to T-Dongle to TANK2:
 
-1. Recipient dark: `svc bluetooth disable`, WiFi off. Dongle store cleared
-   (`scfclear`).
-2. Send. Expect `courier.aired` to rise and the dongle to log
-   `SCF: parked 129B for X1RD89 (am=…)`. Confirm with `scf` — **not** with the
-   `scf=` count in `status`, which is capacity-bound.
-3. **Switch the SENDER's Bluetooth off.** This is the step that makes the
-   result mean something: now only the custodian can deliver.
-4. Recipient's Bluetooth on. Expect re-air and/or `custody of … -> … (purged)`,
-   the dongle store back to 0, `courier.ingested` up by the number sent and
-   `ingestDropped` at 0, and the messages **visible in the thread** on the
-   recipient's screen.
+1. Recipient dark: `svc bluetooth disable`, WiFi off. ESP32 store cleared with
+   `scfclear`.
+2. Send. `courier.aired` increases and the ESP32 logs
+   `SCF: parked 129B for X1RD89 (am=...)`. Confirm with the `scf` command rather
+   than the `scf=` count in `status`, which is capacity-bound.
+3. Switch the sender's Bluetooth off. Only the carrier can now deliver.
+4. Enable the recipient's Bluetooth. Expect re-transmission or
+   `custody of ... -> ... (purged)`, the ESP32 store returning to 0,
+   `courier.ingested` increasing by the number sent, `ingestDropped` at 0, and
+   the messages visible in the conversation on the recipient's screen.
 
-Result: 4 aired, 4 parked, 4 handed over, `ingested: 4`, `ingestDropped: 0`,
-all four rendered. See also [validation.md](validation.md) — a log line is not
-a delivered message until it is on the screen.
+Result: 4 transmitted, 4 parked, 4 handed over, `ingested: 4`,
+`ingestDropped: 0`, all four rendered. See [validation.md](validation.md): a log
+line is not a delivered message until it appears on screen.
 
-## 9. Known limits
+## 9. Limits
 
-- Carried payloads are capped at 240 B — long messages and attachments still
-  wait for a real path (the bulk lane moves the bytes separately once one
-  exists).
-- A peer with **no known callsign** cannot be addressed on an envelope; the
-  courier says `refusedNoIdentity` rather than airing something no carrier can
-  route. The callsign↔LXMF-address pairs the core hears are persisted
-  (`rns.lxmfDirectory`) precisely because the peer that needs a carrier is the
-  one that has stopped announcing.
-- Custody is per-frame, not per-conversation: ordering across carriers is not
-  guaranteed, and the recipient may see a carried message after a later
-  directly-delivered one.
+- Carried payloads are limited to 240 bytes. Longer messages and attachments
+  wait for a direct path; the bulk lane transfers the bytes separately once one
+  exists.
+- A station with no known callsign cannot be addressed on an envelope. The
+  courier reports `refusedNoIdentity` rather than transmitting a frame no
+  carrier can route. Callsign and LXMF-address pairs are persisted in
+  `rns.lxmfDirectory`, because the station requiring a carrier is by definition
+  the one that has stopped announcing.
+- Custody operates per frame rather than per conversation. Ordering across
+  carriers is not guaranteed, and a carried message may arrive after a message
+  sent later over a direct path.

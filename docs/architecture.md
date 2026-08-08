@@ -1,173 +1,180 @@
-# Aurora architecture — what belongs where
+# Aurora architecture
 
-This is the governing document. When another doc, a comment or a habit
-disagrees with this one, this one wins.
+This is the governing document. Where another document, a comment or a habit
+disagrees with it, this document takes precedence.
 
-It exists because the same two mistakes keep being made, by people and by
-assistants, months apart:
+It exists because two mistakes recur:
 
-1. **Transport logic drifting into a wapp.** Store-and-forward was first built
-   inside `wapps/chat/main.c` (`bh_arm`/`bh_pump`/`best_hope_wire`). It worked,
-   and it was still wrong: every other wapp had no offline delivery at all, and
-   the wapp needed HAL endpoints invented purely so it could guess at
-   reachability.
-2. **Work landing on the UI isolate.** Reticulum crypto and transport used to
-   run on the main isolate; the app froze under load. They were moved out (see
-   [performance.md](performance.md)), and the pull to move them back is
-   constant, because calling a service directly is always the shortest patch.
+1. **Transport logic placed in a wapp.** Store-and-forward was first built
+   inside `wapps/chat/main.c` as `bh_arm`, `bh_pump` and `best_hope_wire`. It
+   functioned, but every other wapp had no offline delivery, and the wapp
+   required HAL endpoints added solely so that it could estimate reachability.
+2. **Work placed on the UI isolate.** Reticulum crypto and transport formerly
+   ran on the main isolate and the application froze under load. They were moved
+   out (see [performance.md](performance.md)); calling a service directly
+   remains the shortest available patch, so the pressure to move them back is
+   continuous.
 
-Both are invisible in review — the feature works — and expensive later. So they
-are now **machine-checked**: see [§5](#5-enforcement).
+Neither is visible in review, because the feature works in both cases. Both are
+now checked mechanically: see section 5.
 
 ---
 
-## 1. The layers
+## 1. Layers
 
 ```
-   ┌────────────────────────────────────────────────────────────────┐
-   │ wapps (.wapp, WASM)          chat · social · files · torrents  │
-   │   presentation + domain rules for ONE application               │
-   │   talks only to hal_* ; owns no radio, no key, no store         │
-   └───────────────▲───────────────────────────┬────────────────────┘
-                   │ events in                 │ hal_* calls out
-   ┌───────────────┴───────────────────────────▼────────────────────┐
-   │ core (lib/)                                                    │
-   │   identity + keys      profiles, nsec, signing, encryption      │
-   │   transports           Reticulum, BLE5, LAN, WiFi-Direct, I2P   │
-   │   delivery             LXMF, MeshCourier, custody, retries      │
-   │   storage              sqlite, media archive, folders, spool    │
-   └────────────────────────────────────────────────────────────────┘
+  +--------------------------------------------------------------+
+  | wapps (.wapp, WASM)        chat, social, files, torrents      |
+  |   presentation and domain rules for one application           |
+  |   calls hal_* only; owns no radio, no key, no store           |
+  +----------------^---------------------------+-----------------+
+                   | events in                 | hal_* calls out
+  +----------------+---------------------------v-----------------+
+  | core (lib/)                                                   |
+  |   identity and keys   profiles, nsec, signing, encryption     |
+  |   transports          Reticulum, BLE5, LAN, WiFi-Direct, I2P  |
+  |   delivery            LXMF, MeshCourier, custody, retries     |
+  |   storage             sqlite, media archive, folders, spool   |
+  +--------------------------------------------------------------+
 ```
 
-**A wapp is an event-driven consumer.** It hands the core a message and is
-called back when one arrives. It never learns which radio carried it, whether a
-stranger held it for ten minutes, or how many times it was retried.
+A wapp is an event-driven consumer. It hands the core a message and is called
+back when one arrives. It is not told which radio carried the message, whether
+another station held it, or how many delivery attempts were made.
 
-### What this means in practice
+### Allocation of responsibility
 
-| Question | Answer | Lives in |
+| Question | Owner | Location |
 |---|---|---|
-| Should this message go over BLE, Reticulum, or both? | core decides | `lib/services/` |
-| Is the recipient reachable? | core knows; a wapp must not ask | `RnsService`, `MeshService` |
+| Should this message go over BLE, Reticulum, or both? | core | `lib/services/` |
+| Is the recipient reachable? | core; a wapp does not ask | `RnsService`, `MeshService` |
 | Who carries a message for an absent peer? | core | `MeshCourier`, `MeshStore` |
-| What does a message *mean* (a like, a room post, a room's moderation rules)? | wapp | `wapps/<name>/` |
-| How is a conversation drawn? | wapp | `wapps/<name>/` |
-| Which key signs/encrypts? | core (a wapp asks, never holds) | `hal_identity_sign`, `hal_encrypt` |
+| What does a message mean (a like, a room post, a moderation rule)? | wapp | `wapps/<name>/` |
+| How is a conversation rendered? | wapp | `wapps/<name>/` |
+| Which key signs or encrypts? | core; a wapp requests, never holds | `hal_identity_sign`, `hal_encrypt` |
 
-### The smell test
+### Test for misplacement
 
-> If a wapp needs a new `hal_*` endpoint in order to make a *transport
-> decision*, the logic is on the wrong side of the line.
+> If a wapp requires a new `hal_*` endpoint in order to make a transport
+> decision, the logic is on the wrong side of the boundary.
 
-`hal_encrypt` is fine — the wapp asks the core to do a thing with a key it does
-not hold. `hal_lxmf_pending` + `hal_rns_has_path`, added so a wapp could decide
-whether to air a copy, were the symptom that led to this document. They survive
-only as read-only diagnostics.
+`hal_encrypt` is correct usage: the wapp asks the core to act with a key the
+wapp does not hold. `hal_lxmf_pending` and `hal_rns_has_path` were added so that
+a wapp could decide whether to transmit a redundant copy, which is the case that
+prompted this document. They remain only as read-only diagnostics.
 
 ---
 
-## 2. Isolates: what may run where
+## 2. Isolates
 
 Measured layout and rationale: [performance.md](performance.md).
 
-| Isolate | Runs | Never runs |
+| Isolate | Permitted | Not permitted |
 |---|---|---|
-| **main / UI** | widgets, `setState`, wapp page engines, MethodChannel calls | crypto over big buffers, sqlite scans, file hashing, blocking I/O, busy loops |
-| **rns-crypto** | Reticulum sign/verify/encrypt | UI, platform channels |
-| **rns-transport** | packet routing, links, resources | UI, platform channels |
-| **wapp background engines** | `module_tick` for background wapps | anything expecting a UI |
+| main / UI | widgets, `setState`, wapp page engines, MethodChannel calls | crypto over large buffers, sqlite scans, file hashing, blocking I/O, unbounded loops |
+| rns-crypto | Reticulum sign, verify, encrypt | UI, platform channels |
+| rns-transport | packet routing, links, resources | UI, platform channels |
+| wapp background engines | `module_tick` for background wapps | anything requiring a UI |
 
-Two hard rules:
+Two rules are absolute.
 
-- **Platform channels are main-isolate only.** `Ble5Bus`, `MethodChannel`,
-  plugin calls. A background isolate calling them fails silently or throws —
-  which is why `MeshCourier` airs from the main isolate and does its heavy work
-  (encryption) on payloads that are ~200 bytes.
-- **Nothing blocking on the UI isolate.** No `*Sync` file I/O, no `sleep`, no
-  unbounded loop in a widget or a service the UI awaits. If a job can take more
-  than a few milliseconds, it belongs in an isolate or a `compute`.
+**Platform channels are main-isolate only.** This covers `Ble5Bus`,
+`MethodChannel` and plugin calls. A background isolate calling them fails
+silently or throws. `MeshCourier` therefore transmits from the main isolate, and
+its heavy work is encryption over payloads of about 200 bytes.
 
----
-
-## 3. Where a new feature goes
-
-Ask in this order:
-
-1. **Does it move bytes between devices?** → core. Always. Transports,
-   retries, custody, encryption in transit, addressing.
-2. **Does it need a key, the profile, or the databases?** → core, exposed to
-   wapps through a narrow `hal_*` verb.
-3. **Is it about what a message *means* to one application?** → wapp.
-4. **Is it a screen?** → wapp (or `lib/ui/` when it is a core surface like
-   Settings, the launcher, or the profile).
-
-A generic core service must not know a wapp exists. If `lib/` grows a special
-case for chat, that is the wrong shape: give the core a generic capability and
-let the wapp use it. (`keep-host-generic`, and it is why `MeshCourier` carries
-*payloads*, not "chat messages".)
+**Nothing blocking runs on the UI isolate.** No `*Sync` file I/O, no `sleep`, no
+unbounded loop in a widget or in a service the UI awaits. Work that can exceed a
+few milliseconds belongs in an isolate or a `compute` call.
 
 ---
 
-## 4. Transports, concretely
+## 3. Placing a new feature
 
-Read [ble5.md](ble5.md) for how bytes actually leave the device, and
-[store-and-forward.md](store-and-forward.md) for what happens when nobody is
-listening. Short version:
+Evaluate in order:
 
-- **Reticulum** is the primary transport everywhere. LXMF is the message layer.
-- **BLE5 connectionless advertising** is the off-grid broadcast plane: small
-  frames, one-to-many, no pairing.
-- **GATT/MSP** is the bulk and custody plane: a transient link for things too
-  big for an advert, and for handing parked mail to the peer it belongs to.
-- **Store-and-forward** is a core service (`MeshCourier`), armed by the core on
-  every 1:1 send, and it hands arrivals back through the ordinary LXMF inbox.
+1. Does it move bytes between devices? Core, without exception. This covers
+   transports, retries, custody, encryption in transit and addressing.
+2. Does it require a key, the profile, or the databases? Core, exposed to wapps
+   through a single narrow `hal_*` verb.
+3. Is it about what a message means to one application? Wapp.
+4. Is it a screen? Wapp, or `lib/ui/` for a core surface such as Settings, the
+   launcher or the profile.
+
+A core service does not know that any particular wapp exists. A special case for
+chat in `lib/` indicates the wrong shape: the core should provide a generic
+capability that the wapp uses. `MeshCourier` therefore carries payloads, not
+chat messages.
+
+---
+
+## 4. Transports
+
+See [ble5.md](ble5.md) for transmission budgets and
+[store-and-forward.md](store-and-forward.md) for delivery to absent stations.
+
+- Reticulum is the primary transport on every platform. LXMF is the message
+  layer.
+- BLE5 connectionless advertising is the off-grid broadcast plane: small frames,
+  one-to-many, no pairing.
+- GATT and MSP form the bulk and custody plane: a transient link for payloads
+  too large for an advertisement, and for transferring parked mail to its
+  recipient.
+- Store-and-forward is a core service, `MeshCourier`, armed by the core on every
+  direct send. Arrivals are returned through the ordinary LXMF inbox.
 
 ---
 
 ## 5. Enforcement
 
-`tool/arch_guard.dart` checks the rules above on every push (`.github/workflows/
-arch.yml`) and, if installed, on every commit.
+`tool/arch_guard.dart` checks the rules above on every push, via
+`.github/workflows/arch.yml`, and on every commit once the hook is installed.
 
 ```sh
-dart tool/arch_guard.dart            # check (exit 1 on a new violation)
-dart tool/arch_guard.dart --list     # every violation, including the baseline
-dart tool/arch_guard.dart --baseline # re-record the baseline (deliberate act)
-./tool/install-hooks.sh              # run it as a pre-commit hook
+dart tool/arch_guard.dart            # check; exit 1 on a new violation
+dart tool/arch_guard.dart --list     # all violations, including the baseline
+dart tool/arch_guard.dart --baseline # re-record the baseline
+./tool/install-hooks.sh              # install as a pre-commit hook
 ```
 
-It is a **baseline** checker: the violations that already exist are recorded in
-`tool/arch_baseline.txt` and do not fail the build; anything *new* does. That
-keeps it honest — a guard that fails on day one gets disabled on day two.
+The guard is a baseline checker. Violations recorded in
+`tool/arch_baseline.txt` do not fail the build; new violations do. A guard that
+fails on first use is disabled shortly afterwards, so the baseline exists to
+keep it in service.
 
-The baseline is keyed on the **offending line**, not on the file: forgiving a
-whole file also forgives the next violation added to it, which is how a guard
-quietly stops guarding. It was caught doing exactly that during its own
-self-test, before it shipped. There are 23 entries today; the file is meant to
-shrink.
+The baseline is keyed on the offending line rather than the file. Keying on the
+file would also forgive the next violation added to that file, which was
+observed during the guard's own self-test before release.
 
-Rules it enforces (each with the reason it exists):
+The baseline is currently empty. Every violation it originally recorded has been
+fixed or annotated, so any new violation fails the build immediately.
 
-| Rule | What it catches |
+Rules enforced:
+
+| Rule | Detects |
 |---|---|
-| `no-blocking-io-on-ui` | `*Sync` file I/O, `sleep()` on the UI isolate |
-| `no-transport-in-wapp-layer` | `lib/wapp/**` reaching into radios/transport internals instead of a service facade |
+| `no-blocking-io-on-ui` | `*Sync` file I/O and `sleep()` on the UI isolate |
+| `no-transport-in-wapp-layer` | `lib/wapp/**` reaching into radio or transport internals instead of a service facade |
 | `no-app-logic-in-core` | `lib/services/**` and `lib/connections/**` naming a specific wapp |
-| `no-transport-logic-in-wapps-repo` | a wapp's C source reimplementing custody/retry/reachability |
-| `no-platform-channel-off-main` | `MethodChannel`/`Ble5Bus` from isolate entrypoints |
-| `hal-budget` | a new `hal_*` endpoint whose NAME describes a transport decision (reach/path/pending/custody/forward) rather than a capability |
+| `no-transport-logic-in-wapps-repo` | wapp C source reimplementing custody, retry or reachability |
+| `no-platform-channel-off-main` | `MethodChannel` or `Ble5Bus` in isolate entry points |
+| `hal-budget` | a `hal_*` endpoint whose name describes a transport decision (reach, path, pending, custody, forward) rather than a capability |
 
-To add a rule, add it to the table in `tool/arch_guard.dart` — it is one Dart
-file with no dependencies, deliberately, so it keeps working.
+To add a rule, extend the table in `tool/arch_guard.dart`. It is a single Dart
+file with no dependencies, which is deliberate.
 
-### When the guard is wrong
+### Exceptions
 
-It will be, sometimes. Two escapes, both of which leave a trace:
+Two mechanisms exist, both leaving a record.
+
+An inline annotation, which requires a stated reason:
 
 ```dart
-// arch-ignore: no-blocking-io-on-ui reading a 40-byte flag at startup, before the first frame
+// arch-ignore: no-blocking-io-on-ui reads a 40-byte flag at startup, before the first frame
 ```
 
-or re-baseline with `--baseline` and say why in the commit message. What you
-must not do is delete the rule because it is inconvenient — the rules encode
-bugs that already cost days.
+Or re-recording the baseline with `--baseline`, with the reason given in the
+commit message.
+
+Deleting a rule is not an accepted response to it firing. Each rule encodes a
+defect that has already occurred.

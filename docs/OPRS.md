@@ -131,7 +131,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
-| `vi` | `call` | station that relayed this packet (section 13) |
+| `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
+| `hop` | `int` | further relays permitted, 0 to 9 (section 13) |
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
@@ -167,6 +168,7 @@ The type is fixed by this document and is never transmitted.
 | `labels` | `words`, but the words are chosen freely and may contain digits and `-` | `field-day,photos` |
 | `call` | uppercase letters, digits, `-` and `/` | `CT1ABC-9` |
 | `dest` | a `call` or a group name | `LISBOA` |
+| `path` | one or more `call`, separated by commas | `X32DVA,CT1ABC-9` |
 | `hex6` | exactly 6 lowercase hexadecimal characters | `f6ff8d` |
 | `time` | `YYYY-MM-DD_HH:MM:SS`, UTC | `2026-08-08_14:26:40` |
 | `offset` | `+HH:MM` or `-HH:MM` | `+05:45` |
@@ -913,27 +915,76 @@ the higher uptime is later. Packet 3 makes the anchor explicit.
 
 ---
 
-## 13. Relaying and carried messages
+## 13. Relaying, hops and carried messages
 
-A message to a station that no path reaches is handed to a nearby station, which
-carries it and delivers it on meeting the recipient.
+A packet may travel further than the radio that sent it. A message to a station
+no path reaches is handed to a nearby station, which carries it and delivers it
+on meeting the recipient; a digipeater repeats what it hears so that stations
+beyond the sender's range receive it.
 
-**A carrier never rewrites `f:`.** It retransmits the packet as received and
-adds `vi:` naming itself:
+Two fields govern this. `hop:` limits how far a packet may travel. `via:`
+records where it has been.
+
+### 13.1 The hop budget
+
+`hop:` is a single digit, 0 to 9: how many further relays are permitted.
+
+- A sender that wants its packet relayed sets `hop:`. **Absent means the packet
+  is not relayed at all**, so a station never propagates traffic its author did
+  not ask to have propagated.
+- A relay decrements `hop:` by one and appends itself to `via:`.
+- A packet with `hop:0` is delivered and displayed, but never repeated.
+
+Three hops covers a town through two digipeaters. Nine is the ceiling because a
+larger budget on a shared channel costs everyone else airtime, and a packet that
+has not arrived in nine hops is not going to.
+
+### 13.2 The path
+
+`via:` is the list of callsigns that relayed the packet, in order, oldest
+first. Its length is the number of hops taken, and its contents are who took
+them.
+
+**A relay never rewrites `f:`.** It appends itself to `via:` and leaves the
+author alone.
 
 ```
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 vi:X32DVA q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:3 q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:2 via:X32DVA q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:1 via:X32DVA,CT1ABC-9 q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:0 via:X32DVA,CT1ABC-9,X3RLY7 q:ack m:meet at the bridge at six
 ```
 
-90 bytes. `f:` still names the author, so the identifier is still `101a23`, any
-signature still verifies, and the recipient sees the original time rather than
-the time it was finally handed over.
+86, 97, 106 and 113 bytes: as sent, then after each of three relays. The
+recipient reads that the message came from `X1QZ3N`, took three hops, and
+travelled through `X32DVA`, `CT1ABC-9` and `X3RLY7` in that order. `X3RLY7` will
+not repeat it further.
 
-`vi:` records who carried it. Where more than one station relays a packet, each
-appends its callsign to the existing `vi:` value with a comma.
+The identifier is `101a23` in all four. `f:`, `ts:` and the payload never
+change, so relaying alters neither the identifier nor a signature, and a station
+that already holds the message recognises the repeat and does not display it
+twice.
 
-The recipient's `s:ack` releases carriers still holding a copy: a station that
-overhears a receipt for a message it is carrying discards its copy.
+### 13.3 Loops
+
+**A station that finds its own callsign in `via:` does not relay the packet**,
+whatever `hop:` says. The budget bounds how far a packet travels; the path
+prevents it from travelling in a circle, and neither substitutes for the other.
+
+A relay also drops a packet it has already relayed within the last few minutes,
+identified by `f:`, `ts:` and the payload. Two digipeaters in range of each
+other otherwise trade the same packet until the budget runs out, which is legal
+under the rules above and still a waste of the channel.
+
+### 13.4 Carried messages
+
+A carrier holding a message for a station that is not currently reachable
+follows the same rules: it appends itself to `via:` when it finally transmits,
+and it decrements `hop:`.
+
+The recipient's `s:ack` releases carriers still holding a copy. A station that
+overhears a receipt for a message it is carrying discards its copy, which is why
+a receipt is worth repeating even after the sender has seen it.
 
 ---
 
@@ -979,7 +1030,7 @@ because obscured meaning is not permitted on amateur bands.
 Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `png`, `pnr`.
 All other lowercase words are reserved.
 
-Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `vi`, `tag`, `m`,
+Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `via`, `hop`, `tag`, `m`,
 `file`, `x`,
 `g`, `k`, `add`, `remove`, `tz`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
 `wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `y`, `ag`, `ep`.
@@ -1010,7 +1061,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | Derived identifiers | not implemented; the current wire hashes message content without a timestamp, so every `OK` collides, and carries a separate receipt identifier |
 | `ts:` on messages | not implemented; messages carry no time, although they are the packets most often carried for days |
 | `q:` and `s:` | not implemented; receipts exist, requests do not |
-| `vi:` instead of rewriting `f:` | not implemented; a carrier currently retransmits under its own callsign, which breaks both authorship and the identifier |
+| `via:` and `hop:` instead of rewriting `f:` | not implemented; a carrier currently retransmits under its own callsign, which breaks both authorship and the identifier |
 | Variable-length and authority-issued callsigns | not implemented; the current wire assumes the six-character `X1`/`X3` form |
 | `p:` coordinates | implemented in a different encoding |
 | `ag:` and `ep:` time | not implemented; requires an epoch counter in non-volatile storage |

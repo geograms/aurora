@@ -100,7 +100,7 @@ callsign.
 tag:value tag:value tag:value ...
 ```
 
-- A tag is 1 to 3 lowercase ASCII letters, followed by `:`.
+- A tag is 1 to 6 lowercase ASCII letters, followed by `:`.
 - A value contains no space, and is never empty.
 - Fields are separated by exactly one space.
 - Order is free, except that `t:` is first and `m:`, when present, is last.
@@ -127,6 +127,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `s` | `words` | what this packet answers or reports (section 7) |
 | `r` | `hex6` | the identifier of another packet this one refers to |
 | `n` | `ratio` | this packet is part i of n |
+| `add` | `enum` | something this packet adds (section 6.5) |
+| `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `vi` | `call` | station that relayed this packet (section 13) |
 | `m` | `text` | human-readable content, always last |
 | `fl` | `ref` | content hash and type of a referenced file |
@@ -290,11 +292,13 @@ reply, marked as answering a message it does not hold.
 ### 6.5 Reactions
 
 ```
-t:rct f:X32DVA d:LISBOA r:f6ff8d s:like
-t:rct f:X32DVA d:LISBOA r:f6ff8d s:unlike
+t:rct f:X32DVA d:LISBOA r:f6ff8d add:like
+t:rct f:X32DVA d:LISBOA r:f6ff8d remove:like
 ```
 
-39 and 41 bytes. A reaction carries no `m:`. It is counted once per callsign, is
+41 and 44 bytes. `add:` states what is being added and `remove:` withdraws that
+same thing, so neither has to be read as the negation of the other. A reaction
+carries no `m:`. It is counted once per callsign, is
 idempotent, is not displayed as a message and raises no notification.
 
 ### 6.6 Long messages
@@ -415,7 +419,8 @@ later delivery discards its copy on hearing the matching `s:ack`.
 ## 8. Reserved words
 
 `q:` and `s:` words assigned by this document: `ack`, `read`, `pos`, `bat`,
-`id`, `pnr`, `like`, `unlike`, `no`. All other words are reserved. A word
+`id`, `pnr`, `no`. Reactions assigned for `add:` and `remove:`: `like`. All
+other words are reserved. A word
 beginning with `z` is private, as a tag beginning with `z` is.
 
 ---
@@ -748,10 +753,10 @@ so nothing is expected back.
 ```
 1  t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
 2  t:msg f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:f6ff8d m:I'll be late, start without me
-3  t:rct f:X32DVA d:LISBOA r:f6ff8d s:like
+3  t:rct f:X32DVA d:LISBOA r:f6ff8d add:like
 ```
 
-74, 88 and 39 bytes. Packet 1 transmits no identifier; every receiver computes
+74, 88 and 41 bytes. Packet 1 transmits no identifier; every receiver computes
 `f6ff8d` from its sender, time and text. Packets 2 and 3 name that value.
 Packet 2 has its own computed identifier and can be replied to in turn.
 
@@ -879,8 +884,8 @@ Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `png`, `pnr`.
 All other lowercase words are reserved.
 
 Assigned tags: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `vi`, `m`, `fl`, `x`,
-`g`, `k`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`, `wd`, `wg`, `rh`,
-`rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `y`, `ag`, `ep`.
+`g`, `k`, `add`, `remove`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
+`wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `y`, `ag`, `ep`.
 
 Assigned `q:` and `s:` words: section 8.
 

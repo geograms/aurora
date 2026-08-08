@@ -139,6 +139,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
 | `rad` | `qty` | radius of the area affected (sections 16, 17) |
+| `since` | `time` | when the condition started, or will start |
 | `until` | `time` | when the sender expects the condition to end |
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
@@ -1189,6 +1190,7 @@ t:sos f:X1QZ3N pos:38.7223,-9.1393 acc:6m kind:medical ts:2026-08-08_14:26:40 m:
 | `acc:` | no | how well that position is known, metres |
 | `kind:` | no | what is wrong |
 | `ts:` | yes | when the call was made |
+| `since:` | no | when the situation began |
 | `m:` | no | anything a rescuer should know |
 
 `kind:` takes one of `medical`, `trapped`, `lost`, `fire`, `water`, `cold`,
@@ -1289,6 +1291,7 @@ t:info f:X1CAR7 pos:38.7231,-9.1402 rad:800m kind:traffic ts:2026-08-08_14:26:40
 | `rad:` | how far it extends, optional |
 | `kind:` | what it is |
 | `ts:` | when it was reported |
+| `since:` | when it started, or will start, optional |
 | `until:` | when it is expected to end, optional |
 | `m:` | context the fields cannot carry |
 
@@ -1314,20 +1317,57 @@ t:info f:X1QZ3N pos:38.7301,-9.1355 kind:fog ts:2026-08-08_14:26:40
 
 67 bytes, which is the whole of it: fog, here, now.
 
-### 17.1 When a notice expires
+### 17.1 When the condition starts and ends
 
-`until:` is a `time`, like `ts:`, and says when the sender expects the condition
-to end.
+Three times may appear on one packet and they answer three different questions.
 
-A transient hazard with no end is worse than no hazard at all. A queue reported
-at eight in the morning and still on the map at midnight teaches everyone to
-ignore the map, and by then the packet has usually outlived the person who could
-have withdrawn it.
+| Key | Question |
+|---|---|
+| `ts:` | when was this packet written |
+| `since:` | when did the condition start, or when will it start |
+| `until:` | when is it expected to end |
 
-`until:` is optional and applies to `warn` as much as to `info`. When it is
-absent a receiver applies its own expiry rather than showing the notice for
-ever, and this document does not fix that interval: a fog bank and a road
-closure do not expire on the same clock.
+`ts:` is a property of the packet. `since:` and `until:` are properties of the
+thing the packet describes, and both are optional `time` values.
+
+A condition rarely begins when someone gets around to reporting it. A fire has
+been burning for hours before the first warning goes out, and reporting it at
+`ts:` alone makes every receiver believe it started at that moment:
+
+```
+t:warn f:X3RLY7 pos:39.4012,-8.2043 rad:5km kind:fire sev:danger ts:2026-08-08_14:26:40 since:2026-08-07_23:10:00
+```
+
+113 bytes: reported at 14:26, burning since 23:10 the previous night.
+
+`since:` in the future describes something that has not happened yet, which is
+how planned work is announced:
+
+```
+t:info f:X3RLY7 pos:38.7231,-9.1402 rad:2km kind:works ts:2026-08-08_14:26:40 since:2026-08-15_07:00:00 until:2026-08-22_18:00:00
+```
+
+129 bytes: roadworks, announced on the 8th, starting on the 15th and
+expected to finish on the 22nd. **A receiver does not show a condition as
+current before its `since:`.** It is a plan until then, and a station that plots
+it as a live hazard a week early is worse than one that never received it.
+
+`since:` applies to any packet describing something with a duration, including a
+call for help:
+
+```
+t:sos f:X1QZ3N pos:38.7223,-9.1393 kind:trapped ts:2026-08-08_14:26:40 since:2026-08-08_11:40:00
+```
+
+96 bytes: trapped since 11:40, reported at 14:26. The difference between
+those two is the first thing a rescuer wants to know.
+
+A transient condition with no end is worse than no condition at all. A queue
+reported at eight and still on the map at midnight teaches everyone to ignore
+the map, and by then the packet has usually outlived the person who could
+withdraw it. When `until:` is absent a receiver applies its own expiry, and this
+document does not fix that interval: a fog bank and a road closure do not expire
+on the same clock.
 
 A notice may also be withdrawn early by sending `remove:` naming the kind, which
 is the same key a reaction uses (section 6.5).
@@ -1379,7 +1419,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `trk`,
 `seq`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
-`remove`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`, `temp`, `hum`,
+`remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`, `temp`, `hum`,
 `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
 
@@ -1415,7 +1455,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | `t:sos` calls for help | not implemented; the current wire has an `sos` station symbol, which is a different thing and is not relayed further than any other packet |
 | `t:warn` warnings | not implemented; no source |
 | `t:info` notices | not implemented; no source |
-| `until:` expiry | not implemented; nothing in the current wire expires on its own |
+| `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |
 | `type:` vehicle set | partly; the current wire carries a handful of symbols and none of the rail, air or cycle values |
 | Variable-length and authority-issued callsigns | not implemented; the current wire assumes the six-character `X1`/`X3` form |
 | `pos:` coordinates | implemented in a different encoding |

@@ -131,7 +131,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `vi` | `call` | station that relayed this packet (section 13) |
 | `m` | `text` | human-readable content, always last |
-| `fl` | `ref` | content hash and type of a referenced file |
+| `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
 | `g` | `sig` | signature |
 | `k` | `bech32` | public key, in `t:id` only |
@@ -221,7 +221,7 @@ id = first 6 hex characters of sha256("<f>|<ts>|<payload>")
 ```
 
 where `<payload>` is the value of `m:`, or of `x:` if there is no `m:`, or of
-`fl:` if there is neither.
+`file:` if there is neither.
 
 Nothing announces its own identifier. A packet already carries who sent it and
 when, so the identifier is free.
@@ -330,14 +330,14 @@ t:msg f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, but on
 
 ### 6.7 Files
 
-`fl:` is the SHA-256 digest of the file contents as 64 lowercase hexadecimal
+`file:` is the SHA-256 digest of the file contents as 64 lowercase hexadecimal
 characters, a dot, and 1 to 8 lowercase alphanumeric characters giving the type.
 
 ```
-t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 fl:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:the antenna after the storm
+t:msg f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:the antenna after the storm
 ```
 
-148 bytes. The caption is an ordinary `m:` field.
+150 bytes. The caption is an ordinary `m:` field.
 
 The hash identifies the file exactly, so any station holding those bytes can
 satisfy the reference and a receiver can verify what it obtained. The extension
@@ -883,7 +883,7 @@ because obscured meaning is not permitted on amateur bands.
 Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `png`, `pnr`.
 All other lowercase words are reserved.
 
-Assigned tags: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `vi`, `m`, `fl`, `x`,
+Assigned tags: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `vi`, `m`, `file`, `x`,
 `g`, `k`, `add`, `remove`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
 `wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `y`, `ag`, `ep`.
 

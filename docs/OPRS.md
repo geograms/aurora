@@ -6,7 +6,7 @@ OPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 7. Section 22 states which parts are implemented.
+Status: DRAFT 7. Section 23 states which parts are implemented.
 
 ---
 
@@ -692,8 +692,9 @@ t:observation f:X1CAR7 pos:38.7231,-9.1402 o:212degm type:car ts:2026-08-08_14:2
 | `rain24` | `qty` | rainfall, previous 24 hours | rainfall |
 | `solar` | `qty` | solar irradiance | irradiance |
 
-Conversion to SI is performed by the sender. No unit is transmitted and no
-receiver infers one. A station holding Fahrenheit converts before transmitting.
+A station reports in the unit it works in and says which it is (section 10.6).
+A station holding Fahrenheit sends `temp:57.6F`; it does not convert, and the
+receiver does.
 
 ### 10.4 Telemetry and station type
 
@@ -705,8 +706,8 @@ receiver infers one. A station holding Fahrenheit converts before transmitting.
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
 
-`rs` and `sn` describe the link a packet arrived on and are reported by the
-receiver, in a `pnr` reply. A station does not transmit its own received signal
+`rssi` and `snr` describe the link a packet arrived on and are reported by the
+receiver, in a `pong` reply. A station does not transmit its own received signal
 strength.
 
 An observation carries a note in `m:`, the same key a message uses.
@@ -1572,7 +1573,216 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 22. Implementation status
+## 22. Cheat sheet
+
+Everything the format defines, on one page. Each entry is stated in full in the
+section it belongs to; nothing here is new.
+
+```
+key:value key:value key:value ...
+```
+
+Fields separated by one space. `t:` first, `m:` last, and only `m:` may contain
+spaces. Keys are 1 to 6 characters, lowercase letters and digits, beginning with
+a letter. An unknown key or an unknown type is skipped, never an error. Maximum
+packet **250 bytes**, on every transport.
+
+### Packet types
+
+| `t:` | Purpose |
+|---|---|
+| `message` | a message, to a station, a group, or anyone in range |
+| `observation` | an observation: position, movement, weather, telemetry |
+| `receipt` | a receipt or an answer to a request |
+| `reaction` | a reaction to another message |
+| `request` | a request for data another station holds |
+| `identity` | an identity announcement, binding callsign to public key |
+| `track` | a point in a named track (section 14) |
+| `sos` | a call for help (section 15) |
+| `info` | a notice about conditions (section 17) |
+| `challenge` | a challenge to prove a callsign (section 18) |
+| `response` | the answer to a challenge |
+| `warning` | a warning about a hazard (section 16) |
+| `ping` | a reachability test |
+| `pong` | a reply to `ping` |
+
+### Envelope keys
+
+| Key | Type | Meaning |
+|---|---|---|
+| `t` | `enum` | packet type, always the first field |
+| `f` | `call` | sending callsign |
+| `d` | `dest` | destination: a callsign, a group name, or absent for a broadcast |
+| `ts` | `time` | when the packet was composed, UTC |
+| `tz` | `offset` | the sender's offset from UTC, for display |
+| `q` | `words` | what the sender wants back (section 7) |
+| `s` | `words` | what this packet answers or reports (section 7) |
+| `r` | `hex6` | the identifier of another packet this one refers to |
+| `n` | `ratio` | this packet is part i of n |
+| `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
+| `add` | `enum` | something this packet adds (section 6.5) |
+| `remove` | `enum` | something this packet withdraws (section 6.5) |
+| `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
+| `track` | `label` | name of a track this packet belongs to (section 14) |
+| `seq` | `int` | position of this point within that track |
+| `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
+| `sev` | `enum` | severity of a warning (section 16) |
+| `rad` | `qty` | radius of the area affected (sections 16, 17) |
+| `since` | `time` | when the condition started, or will start |
+| `until` | `time` | when the sender expects the condition to end |
+| `m` | `text` | human-readable content, always last |
+| `file` | `ref` | content hash and type of a referenced file |
+| `x` | `b64` | sealed body |
+| `g` | `sig` | signature |
+| `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
+
+### Position and movement
+
+| Key | Type | Meaning | Quantity |
+|---|---|---|---|
+| `pos` | `coord` | position | degrees |
+| `alt` | `qty` | altitude above mean sea level | distance |
+| `acc` | `qty` | horizontal accuracy radius | distance |
+| `spd` | `qty` | speed over ground | speed |
+| `dir` | `qty` | course over ground, the direction it is travelling | angle |
+| `o` | `qty` | heading, the direction it is pointing | angle |
+| `climb` | `qty` | vertical speed, signed | speed |
+
+### Weather
+
+| Key | Type | Meaning | Quantity |
+|---|---|---|---|
+| `temp` | `qty` | air temperature | temperature |
+| `hum` | `qty` | relative humidity | proportion |
+| `press` | `qty` | barometric pressure, station level | pressure |
+| `wind` | `qty` | wind speed, sustained | speed |
+| `wdir` | `qty` | wind direction, the direction it blows from | angle |
+| `gust` | `qty` | wind gust, peak | speed |
+| `rain1` | `qty` | rainfall, previous hour | rainfall |
+| `rain24` | `qty` | rainfall, previous 24 hours | rainfall |
+| `solar` | `qty` | solar irradiance | irradiance |
+
+### Telemetry and station type
+
+| Key | Type | Meaning | Quantity |
+|---|---|---|---|
+| `batt` | `qty` | battery charge | proportion |
+| `volt` | `qty` | supply voltage | voltage |
+| `rssi` | `qty` | received signal strength | signal power |
+| `snr` | `qty` | signal-to-noise ratio | signal ratio |
+| `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
+
+### Time
+
+| Station capability | Key | Example | Meaning |
+|---|---|---|---|
+| keeps wall-clock time | `ts` | `ts:2026-08-08_14:26:40` | UTC |
+| no clock, no storage | `age` | `age:30` | seconds between observation and transmission |
+| no clock, persistent storage | `epoch` | `epoch:7.4210` | boot epoch 7, 4210 seconds into that epoch |
+
+`ts:` is when the packet was written; `since:` and `until:` are when the thing
+it describes begins and ends. All are `YYYY-MM-DD_HH:MM:SS` in UTC. `tz:`
+carries the sender's offset, for display only.
+
+### Units
+
+Every measurement carries its unit, immediately after the number, with no space.
+
+| Quantity | Units | Canonical |
+|---|---|---|
+| distance, altitude | `m`, `km`, `ft`, `mi`, `nmi` | `m` |
+| speed | `m/s`, `km/h`, `mph`, `kt` | `m/s` |
+| angle | `deg`, `degm` | `deg` |
+| temperature | `C`, `F` | `C` |
+| pressure | `hPa`, `inHg` | `hPa` |
+| rainfall | `mm`, `in` | `mm` |
+| irradiance | `W/m2` | `W/m2` |
+| voltage | `V` | `V` |
+| proportion | `%` | `%` |
+| signal power | `dBm` | `dBm` |
+| signal ratio | `dB` | `dB` |
+
+`deg` is true and `degm` is magnetic. A receiver converts to the canonical unit
+before comparing, storing or plotting. `pos:` is the one measurement with no
+unit: always decimal degrees, WGS84.
+
+### Numbers
+
+The decimal separator is `.`, never `,`, because a comma already separates
+latitude from longitude and words in a list. No thousands separator:
+`alt:11240m`. Leading `-` for negative, no `+`, no exponent. A digit before the
+dot, never a trailing dot. Trailing zeros are significant.
+
+### Asking and answering
+
+`q:` asks and `s:` answers with the same words, several separated by commas.
+
+Assigned: `ack`, `read`, `pos`, `batt`, `identity`, `pong`, `no`.
+
+`s:no` means the request will not be served at all. A partial answer names only
+what it satisfied.
+
+### What a station is, or is riding on
+
+`type:`
+
+| Group | Values |
+|---|---|
+| On foot | `foot`, `run`, `ski`, `horse` |
+| Cycles | `bike`, `ebike`, `motorcycle` |
+| Road | `car`, `bus`, `truck`, `tractor`, `emergency` |
+| Rail | `train`, `tram` |
+| Water | `boat`, `sailboat`, `ship`, `kayak` |
+| Air | `airplane`, `helicopter`, `glider`, `balloon`, `drone` |
+| Fixed | `node`, `digi`, `wx`, `home`, `portable` |
+
+### What an event is
+
+`kind:`, scoped to the packet type it appears in.
+
+| Packet | Values |
+|---|---|
+| `sos` | `medical`, `trapped`, `lost`, `fire`, `water`, `cold`, `assault`, `vehicle`, `other` |
+| `warning` | `fire`, `flood`, `storm`, `wind`, `snow`, `ice`, `quake`, `tsunami`, `landslide`, `chemical`, `radiation`, `outage`, `road`, `crowd`, `animal`, `other` |
+| `info` | `traffic`, `stopped`, `slow`, `works`, `closure`, `rain`, `snow`, `ice`, `fog`, `wind`, `debris`, `animal`, `crowd`, `event`, `other` |
+
+`sev:`, on a `warning` only:
+
+| `sev:` | Meaning |
+|---|---|
+| `watch` | may affect you, be ready |
+| `warning` | will affect you, act now |
+| `danger` | life-threatening, leave |
+
+### Identifiers
+
+Never transmitted. Both ends compute `sha256("<f>|<ts>|<payload>")` and take the
+first 6 hexadecimal characters, where the payload is `m:`, or `x:` if there is
+no `m:`, or `file:` if there is neither. `r:` carries an identifier only when
+referring to a packet the sender did not write. Signing and relaying do not
+change it.
+
+### Limits
+
+| Thing | Limit |
+|---|---|
+| packet, every transport | 250 bytes |
+| parts in one message | 9, `n:1/9` to `n:9/9` |
+| relays, `sos` and `warning` | 9 |
+| relays, everything else | 3 |
+| incomplete set of parts held | 10 minutes |
+| challenge answered within | 60 seconds |
+| group name | 1 to 16 characters, uppercase |
+| callsign | any length, uppercase |
+
+### Private use
+
+Keys, and `q:` and `s:` words, beginning with `z` are never assigned by this
+document.
+
+---
+
+## 23. Implementation status
 
 | Element | State |
 |---|---|
@@ -1606,4 +1816,4 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | `c`, `h` weather | one hardware sensor exists and reaches a local display only |
 | `b`, `w`, `wd`, `wg`, `rh`, `rd`, `sr` weather | no source |
 | `bt`, `vl` telemetry | not implemented; charging state is tracked, charge level is not |
-| `rs`, `sn` telemetry | implemented on the receive paths |
+| `rssi`, `snr` telemetry | implemented on the receive paths |

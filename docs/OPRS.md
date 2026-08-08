@@ -647,8 +647,30 @@ valid coordinate in the Gulf of Guinea.
 | `a` | `qty` | altitude above mean sea level | distance |
 | `e` | `qty` | horizontal accuracy radius | distance |
 | `v` | `qty` | speed over ground | speed |
-| `u` | `qty` | course over ground, 0 to 359 true | angle |
+| `dir` | `qty` | course over ground, the direction it is travelling | angle |
+| `o` | `qty` | heading, the direction it is pointing | angle |
 | `vs` | `qty` | vertical speed, signed | speed |
+
+`dir:` and `o:` are different measurements and a station may report both. `dir:`
+is where it is going, which is what a satellite fix gives. `o:` is where it is
+pointing, which is what a compass gives. They agree on a road and disagree
+wherever wind or current pushes a vehicle sideways:
+
+```
+t:obs f:X1BOA3 p:38.6902,-9.4012 v:6kt dir:275deg o:262degm type:boat ts:2026-08-08_14:26:40
+```
+
+92 bytes: making 6 knots over the ground towards 275 true, with the bow held
+at 262 magnetic to hold that track against the current.
+
+A station with only a satellite fix sends `dir:` alone, which is the common
+case. A station that is stationary has no course and may still have a heading:
+
+```
+t:obs f:X1CAR7 p:38.7231,-9.1402 o:212degm type:car ts:2026-08-08_14:26:40
+```
+
+74 bytes.
 
 ### 10.3 Weather
 
@@ -731,12 +753,12 @@ reports feet and knots, a European car reports km/h, an American weather station
 reports Fahrenheit and inches of mercury:
 
 ```
-t:obs f:X1BOA3 p:38.6902,-9.4012 v:6kt u:275deg type:boat ts:2026-08-08_14:26:40
-t:trk f:CT1ABC-9 seq:3 p:38.9012,-9.0021 a:10000ft v:250kt u:47deg type:airplane ts:2026-08-08_14:26:40
+t:obs f:X1BOA3 p:38.6902,-9.4012 v:6kt dir:275deg type:boat ts:2026-08-08_14:26:40
+t:trk f:CT1ABC-9 seq:3 p:38.9012,-9.0021 a:10000ft v:250kt dir:47deg type:airplane ts:2026-08-08_14:26:40
 t:obs f:X3WX01 p:38.7223,-9.1393 c:57.6F h:78% b:29.92inHg w:7.6mph type:wx ts:2026-08-08_14:26:40
 ```
 
-80, 103 and 98 bytes.
+82, 105 and 98 bytes.
 
 ### 10.7 The permitted units
 
@@ -744,7 +766,7 @@ t:obs f:X3WX01 p:38.7223,-9.1393 c:57.6F h:78% b:29.92inHg w:7.6mph type:wx ts:2
 |---|---|---|
 | distance, altitude | `m`, `km`, `ft`, `mi`, `nmi` | `m` |
 | speed | `m/s`, `km/h`, `mph`, `kt` | `m/s` |
-| angle | `deg` | `deg` |
+| angle | `deg`, `degm` | `deg` |
 | temperature | `C`, `F` | `C` |
 | pressure | `hPa`, `inHg` | `hPa` |
 | rainfall | `mm`, `in` | `mm` |
@@ -753,6 +775,12 @@ t:obs f:X3WX01 p:38.7223,-9.1393 c:57.6F h:78% b:29.92inHg w:7.6mph type:wx ts:2
 | proportion | `%` | `%` |
 | signal power | `dBm` | `dBm` |
 | signal ratio | `dB` | `dB` |
+
+`deg` is degrees true and `degm` is degrees magnetic. The difference is not
+cosmetic: magnetic declination exceeds 20 degrees in parts of the world and
+changes with the year, so a bearing whose reference is assumed is a bearing that
+is wrong by an amount nobody can recover. A station reports whichever its
+instrument gives it and says which that was.
 
 Each key accepts only the units of its own quantity. `c:48km/h` is not a cold
 day, it is a malformed value, and a receiver skips it rather than trying to make
@@ -807,34 +835,34 @@ t:obs f:X1QZ3N p:38.72231,-9.13934 e:8m ts:2026-08-08_14:26:40
 Person on foot:
 
 ```
-t:obs f:X1QZ3N p:38.7223,-9.1393 a:87m type:foot v:1.4m/s u:212deg ts:2026-08-08_14:26:40
+t:obs f:X1QZ3N p:38.7223,-9.1393 a:87m type:foot v:1.4m/s dir:212deg ts:2026-08-08_14:26:40
 ```
 
-89 bytes.
+91 bytes.
 
 Vehicle, with a note:
 
 ```
-t:obs f:X1CAR7 p:38.7231,-9.1402 a:87m v:13.4m/s u:212deg e:8m type:car ts:2026-08-08_14:26:40 m:heading south on the N8
+t:obs f:X1CAR7 p:38.7231,-9.1402 a:87m v:13.4m/s dir:212deg e:8m type:car ts:2026-08-08_14:26:40 m:heading south on the N8
 ```
 
-120 bytes.
+122 bytes.
 
 Balloon ascending at 4.8 m/s through 11240 m:
 
 ```
-t:obs f:X3BAL1 p:38.9012,-9.0021 a:11240m vs:4.8m/s v:9.2m/s u:47deg type:balloon ts:2026-08-08_14:26:40
+t:obs f:X3BAL1 p:38.9012,-9.0021 a:11240m vs:4.8m/s v:9.2m/s dir:47deg type:balloon ts:2026-08-08_14:26:40
 ```
 
-104 bytes.
+106 bytes.
 
 Vessel under way, no altitude:
 
 ```
-t:obs f:X1BOA3 p:38.6902,-9.4012 v:3.1m/s u:275deg type:boat ts:2026-08-08_14:26:40
+t:obs f:X1BOA3 p:38.6902,-9.4012 v:3.1m/s dir:275deg type:boat ts:2026-08-08_14:26:40
 ```
 
-83 bytes.
+85 bytes.
 
 ### 11.3 Weather
 
@@ -1083,7 +1111,7 @@ t:trk f:X3BAL1 trk:sagres-2026 seq:2 p:38.9104,-8.9772 a:14980m vs:4.8m/s type:b
   never names it:
 
   ```
-  t:trk f:X1QZ3N seq:7 p:38.7301,-9.1355 v:5.2m/s u:41deg type:bike ts:2026-08-08_14:26:40
+  t:trk f:X1QZ3N seq:7 p:38.7301,-9.1355 v:5.2m/s dir:41deg type:bike ts:2026-08-08_14:26:40
   ```
 
   Naming becomes worth its bytes when a station runs more than one track, or
@@ -1101,10 +1129,10 @@ t:trk f:X3BAL1 trk:sagres-2026 seq:2 p:38.9104,-8.9772 a:14980m vs:4.8m/s type:b
   stops transmitting is indistinguishable from one that is out of range.
 
 ```
-t:trk f:X1QZ3N trk:commute seq:7 p:38.7301,-9.1355 v:5.2m/s u:41deg type:bike ts:2026-08-08_14:26:40
+t:trk f:X1QZ3N trk:commute seq:7 p:38.7301,-9.1355 v:5.2m/s dir:41deg type:bike ts:2026-08-08_14:26:40
 ```
 
-100 bytes.
+102 bytes.
 
 A track packet is an observation with a name attached. It is a separate type
 because a receiver files it differently: an `obs` replaces what it knew about a
@@ -1276,7 +1304,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `via`, `trk`, `seq`, `kind`, `sev`, `rad`, `tag`, `m`,
 `file`, `x`,
-`g`, `k`, `add`, `remove`, `tz`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
+`g`, `k`, `add`, `remove`, `tz`, `p`, `a`, `e`, `v`, `dir`, `o`, `vs`, `c`, `h`, `b`, `w`,
 `wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `type`, `ag`, `ep`.
 
 Assigned `q:` and `s:` words: section 8.

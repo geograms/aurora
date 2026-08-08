@@ -6,14 +6,14 @@ OPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 4. Section 17 states which parts are implemented.
+Status: DRAFT 5. Section 20 states which parts are implemented.
 
 ---
 
 ## 1. Purpose
 
 APRS is a proven network, and an OPRS station meeting APRS infrastructure
-operates under APRS rules (section 15). APRS has two prerequisites: amateur
+operates under APRS rules (section 18). APRS has two prerequisites: amateur
 spectrum, and a callsign issued by a radio authority. Both are correct for a
 licensed service, and both exclude everyone without a licence.
 
@@ -132,7 +132,11 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
-| `hop` | `int` | further relays permitted, 0 to 9 (section 13) |
+| `trk` | `label` | name of a track this packet belongs to (section 14) |
+| `seq` | `int` | position of this point within that track |
+| `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
+| `sev` | `enum` | severity of a warning (section 16) |
+| `rad` | `int` | radius of the area affected, metres (section 16) |
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
@@ -149,11 +153,14 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `rct` | a reaction to another message |
 | `req` | a request for data another station holds |
 | `id` | an identity announcement, binding callsign to public key |
+| `trk` | a point in a named track (section 14) |
+| `sos` | a call for help (section 15) |
+| `warn` | a warning about a hazard (section 16) |
 | `png` | a reachability test |
 | `pnr` | a reply to `png` |
 
 An unknown type is ignored. It is never an error and is never displayed as a
-message. Types not listed here are reserved (section 16).
+message. Types not listed here are reserved (section 19).
 
 ### 4.3 Value types
 
@@ -165,7 +172,8 @@ The type is fixed by this document and is never transmitted.
 | `dec` | digits, optional leading `-`, optional single `.` and fraction | `-9.1393` |
 | `enum` | one lowercase word from a list given with the key | `foot` |
 | `words` | one or more lowercase words separated by commas | `ack,read` |
-| `labels` | `words`, but the words are chosen freely and may contain digits and `-` | `field-day,photos` |
+| `label` | lowercase letters, digits and `-`, at least one character | `field-day` |
+| `labels` | one or more `label`, separated by commas | `field-day,photos` |
 | `call` | uppercase letters, digits, `-` and `/` | `CT1ABC-9` |
 | `dest` | a `call` or a group name | `LISBOA` |
 | `path` | one or more `call`, separated by commas | `X32DVA,CT1ABC-9` |
@@ -662,7 +670,7 @@ receiver infers one. A station holding Fahrenheit converts before transmitting.
 | `vl` | `dec` | supply voltage | volts |
 | `rs` | `int` | received signal strength | dBm |
 | `sn` | `dec` | signal-to-noise ratio | dB |
-| `y` | `enum` | `node`, `wx`, `car`, `boat`, `foot`, `balloon`, `sos` | |
+| `y` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
 
 `rs` and `sn` describe the link a packet arrived on and are reported by the
 receiver, in a `pnr` reply. A station does not transmit its own received signal
@@ -796,15 +804,17 @@ t:obs f:X3RLY7 p:38.7810,-9.2043 a:210 bt:64 vl:12.9 y:node ts:2026-08-08_14:26:
 
 ### 11.5 Emergency
 
-```
-t:obs f:X1QZ3N p:38.7223,-9.1393 e:6 y:sos ts:2026-08-08_14:26:40 q:ack m:injured, need help
-```
-
-92 bytes, identifier `4db89b`. `q:ack` asks any station that hears it to
-confirm, and any station may answer:
+A call for help is its own packet type, not an observation with a flag on it
+(section 15):
 
 ```
-t:ack f:X32DVA d:X1QZ3N r:4db89b s:ack
+t:sos f:X1QZ3N p:38.7223,-9.1393 e:6 kind:medical ts:2026-08-08_14:26:40 m:broken leg, cannot walk
+```
+
+98 bytes, identifier `2adab3`. Any station may answer:
+
+```
+t:ack f:X32DVA d:X1QZ3N r:2adab3 s:ack
 ```
 
 38 bytes.
@@ -915,72 +925,68 @@ the higher uptime is later. Packet 3 makes the anchor explicit.
 
 ---
 
-## 13. Relaying, hops and carried messages
+## 13. Relaying and carried messages
 
 A packet may travel further than the radio that sent it. A message to a station
 no path reaches is handed to a nearby station, which carries it and delivers it
 on meeting the recipient; a digipeater repeats what it hears so that stations
 beyond the sender's range receive it.
 
-Two fields govern this. `hop:` limits how far a packet may travel. `via:`
-records where it has been.
-
-### 13.1 The hop budget
-
-`hop:` is a single digit, 0 to 9: how many further relays are permitted.
-
-- A sender that wants its packet relayed sets `hop:`. **Absent means the packet
-  is not relayed at all**, so a station never propagates traffic its author did
-  not ask to have propagated.
-- A relay decrements `hop:` by one and appends itself to `via:`.
-- A packet with `hop:0` is delivered and displayed, but never repeated.
-
-Three hops covers a town through two digipeaters. Nine is the ceiling because a
-larger budget on a shared channel costs everyone else airtime, and a packet that
-has not arrived in nine hops is not going to.
-
-### 13.2 The path
-
 `via:` is the list of callsigns that relayed the packet, in order, oldest
-first. Its length is the number of hops taken, and its contents are who took
-them.
-
-**A relay never rewrites `f:`.** It appends itself to `via:` and leaves the
-author alone.
+first. **A relay never rewrites `f:`.** It appends itself to `via:` and leaves
+the author alone.
 
 ```
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:3 q:ack m:meet at the bridge at six
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:2 via:X32DVA q:ack m:meet at the bridge at six
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:1 via:X32DVA,CT1ABC-9 q:ack m:meet at the bridge at six
-t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 hop:0 via:X32DVA,CT1ABC-9,X3RLY7 q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA,CT1ABC-9 q:ack m:meet at the bridge at six
+t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 via:X32DVA,CT1ABC-9,X3RLY7 q:ack m:meet at the bridge at six
 ```
 
-86, 97, 106 and 113 bytes: as sent, then after each of three relays. The
-recipient reads that the message came from `X1QZ3N`, took three hops, and
-travelled through `X32DVA`, `CT1ABC-9` and `X3RLY7` in that order. `X3RLY7` will
-not repeat it further.
+80, 91, 100 and 107 bytes: as sent, then after each of three relays. The
+recipient reads that the message came from `X1QZ3N` and travelled through
+`X32DVA`, `CT1ABC-9` and `X3RLY7` in that order.
+
+The hop count is not transmitted. It is the number of callsigns in `via:`, which
+every station can count for itself, and a packet with no `via:` has taken no
+hops.
 
 The identifier is `101a23` in all four. `f:`, `ts:` and the payload never
 change, so relaying alters neither the identifier nor a signature, and a station
 that already holds the message recognises the repeat and does not display it
 twice.
 
-### 13.3 Loops
+### 13.1 How far a packet travels
+
+A relay forwards a packet only while `via:` holds fewer callsigns than the limit
+for that packet type:
+
+| Packet type | Relays |
+|---|---|
+| `sos`, `warn` | 9 |
+| everything else | 3 |
+
+The limit belongs to the type rather than to a field. A sender cannot ask the
+network for more of its airtime than its traffic warrants, and an emergency does
+not have to remember to ask: `sos` and `warn` travel nine relays because they
+are the packets worth spending a shared channel on, and a chat message travels
+three because it is not.
+
+### 13.2 Loops
 
 **A station that finds its own callsign in `via:` does not relay the packet**,
-whatever `hop:` says. The budget bounds how far a packet travels; the path
+whatever the count says. The limit bounds how far a packet travels; the path
 prevents it from travelling in a circle, and neither substitutes for the other.
 
 A relay also drops a packet it has already relayed within the last few minutes,
 identified by `f:`, `ts:` and the payload. Two digipeaters in range of each
-other otherwise trade the same packet until the budget runs out, which is legal
+other otherwise trade the same packet until the limit is reached, which is legal
 under the rules above and still a waste of the channel.
 
-### 13.4 Carried messages
+### 13.3 Carried messages
 
 A carrier holding a message for a station that is not currently reachable
-follows the same rules: it appends itself to `via:` when it finally transmits,
-and it decrements `hop:`.
+follows the same rules: it appends itself to `via:` when it finally transmits.
 
 The recipient's `s:ack` releases carriers still holding a copy. A station that
 overhears a receipt for a message it is carrying discards its copy, which is why
@@ -988,7 +994,162 @@ a receipt is worth repeating even after the sender has seen it.
 
 ---
 
-## 14. Adding a field, worked
+## 14. Tracks
+
+A track is a named sequence of positions: a flight, a ride, a crossing. Any
+station may record one and publish it as it goes, and a receiver assembles the
+points into a line without having heard the beginning.
+
+```
+t:trk f:X3BAL1 trk:sagres-2026 seq:1 p:38.9012,-9.0021 a:11240 y:balloon ts:2026-08-08_14:26:40
+t:trk f:X3BAL1 trk:sagres-2026 seq:2 p:38.9104,-8.9772 a:14980 vs:4.8 y:balloon ts:2026-08-08_14:36:00
+```
+
+95 and 102 bytes. `trk:` names the track and `seq:` places the point within it.
+
+- `trk:` is a `label`: lowercase letters, digits and `-`, no spaces. It is
+  chosen by the station and is unique only in combination with `f:`, so two
+  stations may both run a track called `commute` without collision.
+- `seq:` counts from 1 and increases by one per point. A receiver that sees
+  `seq:1` then `seq:4` knows two points are missing and draws the gap rather
+  than a straight line through it.
+- A track point carries any observation field. Altitude, speed, course and
+  vertical speed describe the movement; `ts:` dates it.
+- A track is never complete. There is no final packet, because a station that
+  stops transmitting is indistinguishable from one that is out of range.
+
+```
+t:trk f:X1QZ3N trk:commute seq:7 p:38.7301,-9.1355 v:5.2 u:41 y:bike ts:2026-08-08_14:26:40
+```
+
+91 bytes.
+
+A track packet is an observation with a name attached. It is a separate type
+because a receiver files it differently: an `obs` replaces what it knew about a
+station's position, and a `trk` is appended to a line.
+
+### 14.1 Updating a track
+
+Later points are sent as further `trk` packets carrying the same `trk:` and a
+higher `seq:`. A point sent again with a `seq:` already held replaces it, which
+is how a station corrects a position it later computed more accurately.
+
+### 14.2 What the station is riding on
+
+`y:` names what is moving, from this set. It applies to `obs` and `trk` alike.
+
+| Group | Values |
+|---|---|
+| On foot | `foot`, `run`, `ski`, `horse` |
+| Cycles | `bike`, `ebike`, `motorcycle` |
+| Road | `car`, `bus`, `truck`, `tractor`, `emergency` |
+| Rail | `train`, `tram` |
+| Water | `boat`, `sailboat`, `ship`, `kayak` |
+| Air | `airplane`, `helicopter`, `glider`, `balloon`, `drone` |
+| Fixed | `node`, `digi`, `wx`, `home`, `portable` |
+
+The words are English and are not translated on the wire. A receiver displays
+them in the operator's own language from this fixed set, which is the reason the
+set is fixed: a value invented by one station cannot be translated by another.
+
+A receiver that does not recognise a value displays a default marker and the
+value as text.
+
+---
+
+## 15. Calls for help
+
+`t:sos` is a call for help. It is a packet type rather than a flag on an
+observation, so that a station can act on it after reading three bytes and
+without understanding anything else in the packet.
+
+```
+t:sos f:X1QZ3N p:38.7223,-9.1393 e:6 kind:medical ts:2026-08-08_14:26:40 m:broken leg, cannot walk
+```
+
+98 bytes.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `p:` | yes, if known | where the person is |
+| `e:` | no | how well that position is known, metres |
+| `kind:` | no | what is wrong |
+| `ts:` | yes | when the call was made |
+| `m:` | no | anything a rescuer should know |
+
+`kind:` takes one of `medical`, `trapped`, `lost`, `fire`, `water`, `cold`,
+`assault`, `vehicle`, `other`.
+
+Everything except `ts:` is optional, and a call with no position is still
+transmitted. A person who cannot get a fix is exactly the person who needs
+help, and a format that refuses to carry the call because a field is missing has
+failed at the only moment that matters.
+
+```
+t:sos f:X1QZ3N p:38.7223,-9.1393 kind:trapped ts:2026-08-08_14:26:40
+```
+
+68 bytes: no accuracy, no message, and still actionable.
+
+An `sos` is relayed up to nine times (section 13.1). It is never encrypted:
+a call for help that only one station can read is worth less than one anybody
+can. Any station may answer with `s:ack`, and more than one should.
+
+---
+
+## 16. Warnings
+
+`t:warn` reports a hazard: a thing happening in a place, rather than a thing
+happening to the sender. A station transmits a warning about a fire it can see;
+it transmits an `sos` about a fire it is caught in.
+
+```
+t:warn f:X3RLY7 p:39.4012,-8.2043 rad:5000 kind:fire sev:danger ts:2026-08-08_14:26:40 m:fast moving, wind from the north
+```
+
+121 bytes.
+
+| Field | Meaning |
+|---|---|
+| `p:` | centre of the affected area |
+| `rad:` | radius of the affected area, in metres |
+| `kind:` | what the hazard is |
+| `sev:` | how bad it is |
+| `ts:` | when the warning was issued |
+| `m:` | context a person needs and the fields cannot carry |
+
+`kind:` takes one of `fire`, `flood`, `storm`, `wind`, `snow`, `ice`, `quake`,
+`tsunami`, `landslide`, `chemical`, `radiation`, `outage`, `road`, `crowd`,
+`animal`, `other`.
+
+`sev:` takes one of:
+
+| `sev:` | Meaning |
+|---|---|
+| `info` | happening, no action needed |
+| `watch` | may affect you, be ready |
+| `warning` | will affect you, act now |
+| `danger` | life-threatening, leave |
+
+`p:` with `rad:` states an area rather than a point, which is what a hazard
+occupies. A receiver knows whether it is inside the circle without asking
+anyone.
+
+```
+t:warn f:X3RLY7 p:38.6902,-9.4012 rad:1200 kind:flood sev:watch ts:2026-08-08_14:26:40
+```
+
+86 bytes: a flood watch 1200 m around a point, with no message, because
+the fields already say it.
+
+A warning is relayed up to nine times and is never encrypted, for the same
+reason an `sos` is not. `ts:` matters more here than anywhere else in this
+document: a fire warning that arrives by carrier three days later, and is
+plotted as current, is worse than no warning.
+
+---
+
+## 17. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -1014,7 +1175,7 @@ negotiation.
 
 ---
 
-## 15. Operating alongside APRS
+## 18. Operating alongside APRS
 
 A licensed amateur may bridge OPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -1025,12 +1186,13 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 16. Reserved
+## 19. Reserved
 
-Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `png`, `pnr`.
+Assigned packet types: `msg`, `obs`, `ack`, `rct`, `req`, `id`, `trk`, `sos`,
+`warn`, `png`, `pnr`.
 All other lowercase words are reserved.
 
-Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `via`, `hop`, `tag`, `m`,
+Assigned keys: `t`, `f`, `d`, `ts`, `q`, `s`, `r`, `n`, `via`, `trk`, `seq`, `kind`, `sev`, `rad`, `tag`, `m`,
 `file`, `x`,
 `g`, `k`, `add`, `remove`, `tz`, `p`, `a`, `e`, `v`, `u`, `vs`, `c`, `h`, `b`, `w`,
 `wd`, `wg`, `rh`, `rd`, `sr`, `bt`, `vl`, `rs`, `sn`, `y`, `ag`, `ep`.
@@ -1044,7 +1206,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 17. Implementation status
+## 20. Implementation status
 
 | Element | State |
 |---|---|
@@ -1061,7 +1223,12 @@ purpose takes an unused type. Neither redefines an existing assignment.
 | Derived identifiers | not implemented; the current wire hashes message content without a timestamp, so every `OK` collides, and carries a separate receipt identifier |
 | `ts:` on messages | not implemented; messages carry no time, although they are the packets most often carried for days |
 | `q:` and `s:` | not implemented; receipts exist, requests do not |
-| `via:` and `hop:` instead of rewriting `f:` | not implemented; a carrier currently retransmits under its own callsign, which breaks both authorship and the identifier |
+| `via:` instead of rewriting `f:` | not implemented; a carrier currently retransmits under its own callsign, which breaks both authorship and the identifier |
+| Relay limit by packet type | not implemented; custody re-airs a fixed three times with no path recorded |
+| `t:trk` tracks | not implemented; no track is recorded or published |
+| `t:sos` calls for help | not implemented; the current wire has an `sos` station symbol, which is a different thing and is not relayed further than any other packet |
+| `t:warn` warnings | not implemented; no source |
+| `y:` vehicle set | partly; the current wire carries a handful of symbols and none of the rail, air or cycle values |
 | Variable-length and authority-issued callsigns | not implemented; the current wire assumes the six-character `X1`/`X3` form |
 | `p:` coordinates | implemented in a different encoding |
 | `ag:` and `ep:` time | not implemented; requires an epoch counter in non-volatile storage |

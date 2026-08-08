@@ -4,7 +4,9 @@
 >
 > An APRS-shaped network for the people who do not have a licence.
 >
-> Companion docs: [aprs.md](aprs.md) (the real APRS transport we speak),
+> Companion docs: [oprs-data.md](oprs-data.md) (**the wire format**: messages,
+> receipts, parcels, signing, position, weather, telemetry),
+> [aprs.md](aprs.md) (the real APRS transport we speak),
 > [aprs-xt.md](aprs-xt.md) (the message conventions), [mesh.md](mesh.md) (the
 > BLE street mesh), [store-and-forward.md](store-and-forward.md) (custody),
 > [ble5.md](ble5.md) (how bytes leave the device), [NOSTR.md](NOSTR.md) (the
@@ -82,7 +84,7 @@ whether it exists.
 | *(APRS has no equivalent)* | **custody store-and-forward** — a device carries a stranger's message until it meets the recipient: `mesh_courier.dart`, `mesh_store.dart`, dongle SCF on SD | **BUILT**, device-validated |
 | Message + `{seq` / `ackN` | LXMF (wire-compatible with Sideband/NomadNet) + `am:` receipts + `?ACK` | **BUILT** |
 | Bulletin `BLN<n><GROUP>` | `#group` broadcast over Reticulum + BLE — `wapps/chat/main.c:3044` | **BUILT** |
-| Position report `!lat/lon` | compact `0x41` `!` frame over BLE, `rns_tx_bulletin` over RNS | **PARTIAL** — the weakest area (§8.2) |
+| Position report `!lat/lon` | one observation frame — position, motion, weather and telemetry in one token vocabulary ([oprs-data.md](oprs-data.md)) | **SPECIFIED**, mostly unbuilt (§8.2) |
 | aprs.fi / findu — "where is this station?" | DHT + Indexers — `dht_node.dart`, `publishAuthorProvider` (`rns_service.dart:4296`) | **BUILT** for keys; no *people/place* query (§8.3) |
 | q-constructs (`qAR`, `qAC`) — who gated this | provenance: `HolderHint` (first-hand vs told-by-another), `relayerHex`, `hops`, `via` | **PARTIAL** |
 | Objects, Items, telemetry, weather | — | **NOT BUILT** |
@@ -220,11 +222,13 @@ Heltec boards already initialise the radio at 868 MHz / SF7 / BW125.
 
 ### 8.2 A position report that is a first-class object
 
-Today a position is a `!`-prefixed compact frame — inherited from APRS, sized
-for APRS, and unsigned in practice. OPRS should have a proper position/telemetry
-object: signed, schema'd, with an explicit accuracy and staleness, carried over
-Reticulum rather than smuggled in a text field. This is what makes maps, "who is
-near me", and emergency beacons trustworthy rather than decorative.
+**The format is now defined — see [oprs-data.md](oprs-data.md).** Position,
+movement, weather and device telemetry share one token vocabulary in one frame:
+decimal coordinates, SI units, an explicit accuracy, and a mandatory time field
+(including an epoch form for nodes with no clock, so a message carried for days
+is still datable). What remains is to build it — the platform already hands the
+app altitude, accuracy, speed and heading and the location service discards
+them, and the sensor HAL reports "not available" on every platform.
 
 ### 8.3 Coverage in the announce — "where is the gateway on the hill?"
 
@@ -302,7 +306,7 @@ so it is not forgotten.)
 | Directory: DHT, Indexers, provider records | **BUILT** for keys; "where is a person/place" missing |
 | Public plaintext plane (announce, PLAIN, NPD) | **BUILT** |
 | Interest filtering | **PARTIAL** — topics and authors, no geography |
-| Position / telemetry as a real object | **PARTIAL** — inherited APRS-shaped frames |
+| Position / telemetry as a real object | **SPECIFIED** ([oprs-data.md](oprs-data.md)); producers mostly missing |
 | Node coverage in the announce | **NOT BUILT** — designed in NOSTR.md |
 | **LoRa anywhere in the message path** | **NOT BUILT** — drivers exist, nothing routes over them |
 | Objects, items, weather, symbols | **NOT BUILT** |

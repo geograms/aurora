@@ -682,8 +682,10 @@ t:observation f:X1CAR7 pos:38.7231,-9.1402 o:212degm type:car ts:2026-08-08_14:2
 
 | Key | Type | Meaning | Quantity |
 |---|---|---|---|
-| `temp` | `qty` | air temperature | temperature |
-| `hum` | `qty` | relative humidity | proportion |
+| `temp` | `qty` | air temperature, outdoors | temperature |
+| `hum` | `qty` | relative humidity, outdoors | proportion |
+| `intemp` | `qty` | air temperature, indoors | temperature |
+| `inhum` | `qty` | relative humidity, indoors | proportion |
 | `press` | `qty` | barometric pressure, station level | pressure |
 | `wind` | `qty` | wind speed, sustained | speed |
 | `wdir` | `qty` | wind direction, the direction it blows from | angle |
@@ -695,6 +697,36 @@ t:observation f:X1CAR7 pos:38.7231,-9.1402 o:212degm type:car ts:2026-08-08_14:2
 A station reports in the unit it works in and says which it is (section 10.6).
 A station holding Fahrenheit sends `temp:57.6F`; it does not convert, and the
 receiver does.
+
+**`temp:` and `hum:` are outdoors. `intemp:` and `inhum:` are indoors.** A key
+beginning with `in` is the indoor counterpart of the key that follows it.
+
+They are separate keys rather than one key with a flag saying where the sensor
+sat, because a station commonly has both and would otherwise need two packets to
+report what it measured at one moment:
+
+```
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% intemp:21.5C inhum:54% press:1013.2hPa type:wx ts:2026-08-08_14:26:40
+```
+
+131 bytes: 14.2 outside, 21.5 in the room, one timestamp, one transmission.
+
+A station with only an indoor sensor sends only the indoor keys, and the reading
+is no longer mistaken for outside air:
+
+```
+t:observation f:X3WX01 intemp:21.5C inhum:54% age:60
+```
+
+52 bytes.
+
+A station with one sensor that does not know where it sits sends `temp:`.
+Outdoors is the default because it is the reading another station can use: an
+outdoor temperature describes the air a neighbour is standing in, an indoor one
+describes a room only its owner cares about.
+
+Pressure has no indoor form. The difference across a wall is smaller than the
+instrument's error, and `press:` is already defined at station level.
 
 ### 10.4 Telemetry and station type
 
@@ -890,14 +922,15 @@ t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa wi
 193 bytes, leaving 65 for fields not yet defined. It is the longest packet in
 this document.
 
-Indoor sensor with no position and no clock. Position is omitted rather than
-sent as zero:
+Indoor sensor with no position and no clock, using the indoor keys so the
+reading is not taken for outside air. Position is omitted rather than sent as
+zero:
 
 ```
-t:observation f:X3WX01 temp:14.2C hum:78% age:60
+t:observation f:X3WX01 intemp:21.5C inhum:54% age:60
 ```
 
-48 bytes.
+52 bytes.
 
 ### 11.4 Telemetry
 
@@ -1070,12 +1103,12 @@ for that packet type:
 
 | Packet type | Relays |
 |---|---|
-| `sos`, `warn` | 9 |
+| `sos`, `warning` | 9 |
 | everything else | 3 |
 
 The limit belongs to the type rather than to a field. A sender cannot ask the
 network for more of its airtime than its traffic warrants, and an emergency does
-not have to remember to ask: `sos` and `warn` travel nine relays because they
+not have to remember to ask: `sos` and `warning` travel nine relays because
 are the packets worth spending a shared channel on, and a chat message travels
 three because it is not.
 
@@ -1143,18 +1176,19 @@ t:track f:X1QZ3N track:commute seq:7 pos:38.7301,-9.1355 spd:5.2m/s dir:41deg ty
 110 bytes.
 
 A track packet is an observation with a name attached. It is a separate type
-because a receiver files it differently: an `obs` replaces what it knew about a
-station's position, and a `trk` is appended to a line.
+because a receiver files it differently: an `observation` replaces what it knew
+station's position, and a `track` is appended to a line.
 
 ### 14.1 Updating a track
 
-Later points are sent as further `trk` packets carrying the same `track:` and a
+Later points are sent as further `track` packets carrying the same `track:` and a
 higher `seq:`. A point sent again with a `seq:` already held replaces it, which
 is how a station corrects a position it later computed more accurately.
 
 ### 14.2 What the station is riding on
 
-`type:` names what is moving, from this set. It applies to `obs` and `trk` alike.
+`type:` names what is moving, from this set. It applies to `observation` and
+`track` alike.
 
 | Group | Values |
 |---|---|
@@ -1278,7 +1312,7 @@ A station filters on it after five bytes, without parsing a severity out of the
 middle of the packet. A subscriber who wants hazards and not road conditions
 gets that by type rather than by reading every packet and deciding.
 
-And it does not inherit the relay budget of an emergency. `sos` and `warn`
+And it does not inherit the relay budget of an emergency. `sos` and `warning`
 travel nine relays because they are worth spending a shared channel on. A
 traffic queue travels three, like ordinary traffic, because it is not.
 
@@ -1302,8 +1336,8 @@ t:info f:X1CAR7 pos:38.7231,-9.1402 rad:800m kind:traffic ts:2026-08-08_14:26:40
 `snow`, `ice`, `fog`, `wind`, `debris`, `animal`, `crowd`, `event`, `other`.
 
 There is no `sev:`. The type is the severity: an `info` is by definition not
-urgent, and a `warn` grades itself from `watch` to `danger`. A notice that turns
-out to matter is re-sent as a `warn`, which is a different packet rather than
+urgent, and a `warning` grades itself from `watch` to `danger`. A notice that
+turns out to matter is re-sent as a `warning`, which is a different packet
 the same one edited.
 
 ```
@@ -1561,7 +1595,7 @@ Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
-`press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
+`intemp`, `inhum`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
 
 Assigned `q:` and `s:` words: section 8.
@@ -1652,8 +1686,10 @@ packet **250 bytes**, on every transport.
 
 | Key | Type | Meaning | Quantity |
 |---|---|---|---|
-| `temp` | `qty` | air temperature | temperature |
-| `hum` | `qty` | relative humidity | proportion |
+| `temp` | `qty` | air temperature, outdoors | temperature |
+| `hum` | `qty` | relative humidity, outdoors | proportion |
+| `intemp` | `qty` | air temperature, indoors | temperature |
+| `inhum` | `qty` | relative humidity, indoors | proportion |
 | `press` | `qty` | barometric pressure, station level | pressure |
 | `wind` | `qty` | wind speed, sustained | speed |
 | `wdir` | `qty` | wind direction, the direction it blows from | angle |
@@ -1812,8 +1848,9 @@ document.
 | Variable-length and authority-issued callsigns | not implemented; the current wire assumes the six-character `X1`/`X3` form |
 | `pos:` coordinates | implemented in a different encoding |
 | `age:` and `epoch:` time | not implemented; requires an epoch counter in non-volatile storage |
-| `a`, `e`, `v`, `u`, `vs` movement | not implemented; the platform supplies these values and the location layer currently retains only latitude and longitude |
-| `c`, `h` weather | one hardware sensor exists and reaches a local display only |
-| `b`, `w`, `wd`, `wg`, `rh`, `rd`, `sr` weather | no source |
-| `bt`, `vl` telemetry | not implemented; charging state is tracked, charge level is not |
+| `alt`, `acc`, `spd`, `dir`, `o`, `climb` movement | not implemented; the platform supplies these values and the location layer currently retains only latitude and longitude |
+| `temp`, `hum` weather | one hardware sensor exists and reaches a local display only |
+| `intemp`, `inhum` weather | not implemented; the one sensor that exists is indoors and is reported as if it were outdoors |
+| `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar` weather | no source |
+| `batt`, `volt` telemetry | not implemented; charging state is tracked, charge level is not |
 | `rssi`, `snr` telemetry | implemented on the receive paths |

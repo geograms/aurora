@@ -460,8 +460,9 @@ X1RD89  2026-08-08_14:26:40  OK   ->  db8cdf
 
 Sender, second and text together are unique in practice.
 
-`r:` carries an identifier only when a packet refers to a message **it did not
-send**: a reply, a reaction, or a receipt. Adding, removing or checking a
+`r:` carries an identifier when a packet refers to another: a reply, a
+reaction, a receipt, or a withdrawal of the sender's own earlier packet
+(section 17.2). Adding, removing or checking a
 signature does not change an identifier, and neither does relaying (section 13),
 because none of them changes `f:`, `ts:` or the payload.
 
@@ -1549,8 +1550,36 @@ withdraw it. When `until:` is absent a receiver applies its own expiry, and this
 document does not fix that interval: a fog bank and a road closure do not expire
 on the same clock.
 
-A notice may also be withdrawn early by sending `remove:` naming the kind, which
-is the same key a reaction uses (section 6.5).
+### 17.2 Withdrawing a notice or a warning
+
+A condition that ends before its `until:` is withdrawn by naming the packet that
+reported it:
+
+```
+t:warning f:X3RLY7 pos:39.4012,-8.2043 rad:5km kind:fire sev:danger ts:2026-08-08_02:10:00
+t:warning f:X3RLY7 pos:39.5511,-8.1002 rad:2km kind:fire sev:watch ts:2026-08-08_09:40:00
+t:warning f:X3RLY7 ts:2026-08-08_14:26:40 r:33a6de remove:warning
+```
+
+90, 89 and 65 bytes. Two fires from one station, then the first one out.
+
+`r:` carries the identifier of the packet being withdrawn and `remove:` says
+what is being withdrawn. The identifier is computed, not transmitted
+(section 5), so both ends already have it: the first fire is `33a6de` and the
+second `35b600`, from the sender and the second they were reported.
+
+This is why neither a warning nor a notice needs a name of its own. Naming the
+kind would not do: a station that has reported two fires and withdraws `fire`
+has said nothing a receiver can act on. Naming the packet is exact, and the
+mechanism is the one replies, reactions and receipts already use.
+
+`remove:` takes the type being withdrawn: `warning`, `info`, `event`, `offer`,
+`need`, `channel`, `passage`, `blog`, or `like` for a reaction. It is stated
+even though `t:` repeats it, so that a receiver can filter withdrawals of any
+type on one key, and so that a later revision can withdraw part of a packet
+rather than all of it.
+
+A withdrawal carries no `pos:`, no `kind:` and no `m:`. It says one thing.
 
 ---
 
@@ -2538,9 +2567,9 @@ an offset or `input:` outright, the latter for cross-band.
 
 Never transmitted. Both ends compute `sha256("<f>|<ts>|<payload>")` and take the
 first 6 hexadecimal characters, where the payload is `m:`, or `x:` if there is
-no `m:`, or `file:` if there is neither. `r:` carries an identifier only when
-referring to a packet the sender did not write. Signing and relaying do not
-change it.
+no `m:`, or `file:` if there is neither. `r:` carries an identifier when referring to
+another packet, including the sender's own when withdrawing it. Signing and
+relaying do not change it.
 
 ### Limits
 

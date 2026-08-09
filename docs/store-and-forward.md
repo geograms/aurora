@@ -113,6 +113,40 @@ The ESP32 implements the same behaviour in 24 slots (`BLEMESH_SCF_MAX`) at 252
 bytes per frame, persisted to `/sdcard/mesh/pending.bin` so that a power cycle
 does not discard parked mail.
 
+### 4.1 Carrying toward a place, which is not implemented
+
+Everything above carries mail to a **callsign**: a carrier holds a frame until it
+meets the station it is addressed to. That works when the two are in the same
+region and never completes when they are not, because nothing tells a carrier
+which direction helps.
+
+[OPRS.md](OPRS.md) sections 13.4 to 13.10 specify the missing half. A packet
+carries `dest:` (where it is bound) and `near:` (how close counts as arrived),
+and a carrier accepts a copy **only if it expects to reduce the distance to
+`dest:`**. That single rule turns custody from "wait until I happen to meet you"
+into a route across a continent, moved by people going that way anyway.
+
+The parts of it this document already provides, and which do not change:
+
+- the quota and eviction policy above, which is why OPRS specifies no copy limit
+- `via:`, which prevents a carrier taking the same packet twice
+- release on receipt, section 6
+
+The parts that are specified and not built:
+
+| Element | Status |
+|---|---|
+| `dest:` and `near:` on a carried packet | not implemented; custody is keyed on callsign only |
+| the closer-to-destination admission rule | not implemented; admission is currently "park anything for anyone" |
+| `urg:` as the eviction key | not implemented; eviction uses `prio 0/1` as above |
+| `until:` as a carry deadline, capped at a year | not implemented; the 7-day quota is the only bound |
+| regional delivery, `dest:` with no recipient | not implemented |
+| `route:` copied into a signed receipt | not implemented |
+
+`urg:` and `prio` are the same idea at different resolutions, and joining them is
+the smallest useful step: four sender-stated levels instead of two inferred ones,
+sorted the same way by the same sweep.
+
 ## 5. Delivery
 
 Two independent paths complete delivery.

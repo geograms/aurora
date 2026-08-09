@@ -117,8 +117,50 @@ permitted modes differ. Channel 9 is the emergency channel almost everywhere and
 must not be used for data.
 
 **PMR446, 446.0-446.2 MHz, 16 channels, 500 mW ERP.** Europe and CEPT only.
-Channel 1 is 446.00625 MHz and channels are spaced 12.5 kHz, so channel 3 is
-446.03125 MHz.
+Channel 1 is 446.00625 MHz and channels are spaced 12.5 kHz.
+
+The band has two halves with very different populations:
+
+| Channels | Range | Traffic |
+|---|---|---|
+| 1 to 8 | 446.00625 - 446.09375 MHz | the original 1998 allocation; almost all of it |
+| 9 to 16 | 446.10625 - 446.19375 MHz | added by ECC Decision (15)05 in 2015; quiet, and many older handsets cannot reach it |
+
+**Channel 16, 446.19375 MHz, is the proposed OPRS calling channel.**
+
+Deliberately not channel 3. Channel 3 is the 3-3-3 convention -- channel 3, three
+minutes, every three hours -- and people *listen* on it for voice. Putting data
+bursts on a channel monitored for human calls is antisocial in both directions,
+and the whole value of 3-3-3 is that someone is listening. Channel 16 is the top
+of the 2015 extension: legal across CEPT for analogue and digital alike, and
+inaudible to the legacy eight-channel radios that make up most of the traffic.
+
+### 5.1 Whether data is permitted here at all
+
+Unresolved, and stated as such rather than assumed.
+
+The ECC decisions describe PMR446 as carrying voice, tones, and limited data
+through digital modes such as DMR Tier 1 and dPMR Tier 1. They do not plainly
+address arbitrary packet data sent as audio through an analogue channel, which
+is how APRS works on amateur bands and how OPRS would most cheaply work here.
+
+| Path | Standing |
+|---|---|
+| data inside DMR Tier 1 or dPMR Tier 1 | clearly contemplated |
+| AFSK packet data through an analogue voice channel | not clearly addressed |
+
+National administrations may differ, and an operator is responsible for their
+own. **Do not read this document as permission.** Until somebody establishes the
+answer for a given country, the digital-mode path is the defensible one.
+
+Two further constraints bind harder than the frequency:
+
+- **No external antenna is permitted.** Unlike LoRa there is no legal way to
+  improve the link; what the handset gives is what there is. Roughly 1 to 3 km
+  in a town, 5 to 8 km over open ground, considerably more hilltop to hilltop.
+- **A 250-byte packet is about two seconds of airtime** at 1200 baud AFSK, or
+  under a second at 9600. That is APRS's own model and it works, but it is slow
+  enough that the channel must be shared politely rather than beaconed into.
 
 PMR446 has no worldwide equivalent, and this is the clearest example of the
 problem this document opens with:
@@ -130,6 +172,10 @@ problem this document opens with:
 | United States | MURS | 151.820-154.600 MHz |
 | Japan | Specified Low Power | 421-422 MHz |
 | Australia | UHF CB | 476.425-477.4125 MHz |
+
+None of those has an agreed OPRS channel. Proposing one for a service this
+document's authors cannot test would be guessing, and a wrong guess here puts
+somebody on a channel their regulator reserved for something else.
 
 A radio legal in Lisbon is illegal in Chicago and vice versa. Nothing in
 software fixes that.
@@ -251,6 +297,7 @@ work.
 
 | Element | State |
 |---|---|
+| PMR446 channel 16 as the calling channel | not implemented; no bearer carries OPRS over an audio channel |
 | Regional LoRa plans | not implemented; `lib/connections/lora/lora_connection.dart` sets no frequency, and the SX1262 and SX1276 drivers accept one from a caller that does not yet exist |
 | Calling frequencies | not implemented; proposed here for the first time |
 | `t:channel` announcements | not implemented ([OPRS.md](OPRS.md) section 28) |

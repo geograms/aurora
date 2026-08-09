@@ -173,6 +173,63 @@ narrower and slower by regulation rather than by design.
 HaLow shares its band with LoRa in most regions. The two do not interoperate and
 will interfere, and a station running both should not run them at once.
 
+### 3.1 Range over water, and why Europe loses it
+
+Same physics as LoRa in section 2.2: sub-gigahertz, no ionospheric path, limited
+by the horizon rather than by the radio. What differs is how much budget there is
+to spend, and here the regulator decides the answer rather than the engineering.
+
+Taking 1 MHz MCS10, the most sensitive mode, at a receiver sensitivity of
+-100 dBm and 2 dBi antennas at both ends:
+
+| | Transmit | Budget | Free-space limit |
+|---|---|---|---|
+| HaLow, United States | 1 W | 134 dB | 133 km |
+| HaLow, Europe | 25 mW | 118 dB | 21 km |
+| LoRa SF9, Europe | 500 mW | 161 dB | 2977 km |
+
+Against the horizons from section 2.2:
+
+| Path | Horizon | HaLow US | HaLow EU | LoRa |
+|---|---|---|---|---|
+| deck to deck, 2 m | 12 km | +21 dB | +5 dB | +48 dB |
+| masthead to masthead, 15 m | 32 km | +12 dB | **-4 dB** | +39 dB |
+| masthead to coastal 100 m | 57 km | +7 dB | **-9 dB** | +34 dB |
+| masthead to mountain 500 m | 108 km | +2 dB | **-14 dB** | +29 dB |
+
+**In the United States HaLow covers the whole over-water horizon**, out to about
+100 km, and runs out of budget only past the point where the sea has already
+blocked it. It is a genuine maritime bearer there.
+
+**In Europe it does not reach masthead to masthead.** Twenty-one kilometres of
+budget against a thirty-two kilometre horizon: the sea is not the limit, the
+power limit is. Deck to deck it works with five decibels to spare, which is a
+harbour, not a passage.
+
+The reason is worth stating exactly, because it is not fixable by choosing a
+better radio. Europe's only generous sub-band is 869.4-869.65 MHz at 500 mW,
+which is **250 kHz wide, and HaLow's narrowest channel is 1 MHz**. HaLow
+physically cannot fit in the one window that would make it work. It is confined
+to the 25 mW parts of 863-868 MHz, and 25 mW is what gives 21 km.
+
+So the same silicon, the same antenna and the same firmware make a usable
+maritime link in Florida and a harbour toy in Portugal. This is the clearest
+example in this document of the argument in section 8: the only difference
+between the two is a number in a table.
+
+Where it does work, HaLow is worth having. A 250-byte packet is 13 ms at MCS10
+against 364 ms for LoRa at SF9 -- roughly twenty-seven times the throughput for
+comparable range. HaLow is the bearer for moving a file between two boats in an
+anchorage; LoRa is the bearer for reaching the one that left yesterday.
+
+Receiver sensitivity varies by vendor, with some parts claiming -105 dBm at this
+rate. Those five decibels matter more than they look: they move the European
+figure from 21 km to 37 km, which does clear the 32 km masthead horizon, though
+with only about 1.4 dB in hand. With the best available receiver Europe gets a
+marginal boat-to-boat link and still cannot reach a coastal station at 57 km,
+where it remains 4 dB short. The conclusion holds either way; the best case is
+"just barely" rather than "not at all".
+
 ---
 
 ## 4. WiFi, 2.4 GHz

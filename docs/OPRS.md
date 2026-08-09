@@ -132,7 +132,9 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `n` | `ratio` | this packet is part i of n |
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
-| `urg` | `enum` | how much this is worth carrying (section 13.4) |
+| `urg` | `enum` | how much this is worth carrying (section 13.5) |
+| `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
+| `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
@@ -1282,44 +1284,48 @@ a receipt is worth repeating even after the sender has seen it.
 
 ### 13.4 Carrying toward a place
 
-A message can be addressed to a person no path reaches and no carrier knows,
-and still get there, if it says where it is going.
+A message addressed to someone no path reaches, and whom no carrier knows, can
+still arrive if it says where it is going.
 
 ```
-t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 rad:50km urg:normal until:2026-09-08_00:00:00 q:sign m:are you still in Athens in September?
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 near:50km until:2026-09-08_00:00:00 q:sign m:are you still in Athens in September?
 ```
 
-160 bytes: Lisbon to Athens, 2852 km, with nothing in between.
+150 bytes: Lisbon to Athens, 2852 km, with nothing in between.
 
 | Key | Meaning here |
 |---|---|
 | `dest:` | where the packet is bound |
-| `rad:` | how close counts as arrived |
+| `near:` | how close counts as arrived |
 | `until:` | when it stops being worth carrying |
 | `urg:` | how much it is worth carrying |
 | `via:` | who has carried it, as everywhere else |
 
+`near:` is a separate key from `rad:` and not a second meaning for it. `rad:`
+always describes the area a subject occupies -- a fire, a flood, how far a
+station will travel to deliver. `near:` always describes how close to `dest:` is
+close enough. A warning about a fire being carried to a town needs both at once
+and they are different numbers (section 13.8).
+
 **A carrier accepts a copy only if it expects to reduce the distance to
 `dest:`.** That is the whole routing rule. A station driving to Madrid is 483 km
 closer to Athens and takes it; one sailing to the Azores is not and does not. A
-carrier already in `via:` does not take it again, and a carrier inside `rad:`
+carrier already in `via:` does not take it again, and a carrier inside `near:`
 stops carrying and starts airing it normally, because it has arrived.
-
-```
-t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 rad:50km urg:normal until:2026-09-08_00:00:00 q:sign via:X32DVA,CT1ABC-9 m:are you still in Athens in September?
-```
-
-180 bytes after two carriers.
 
 A packet with `dest:` is **not** bound by the three-relay limit of section 13.1.
 Three relays do not cross a continent. It is bound by `until:` instead, which is
 why `until:` is required here and optional everywhere else: a carried packet with
 no expiry is litter that outlives the reason it was sent.
 
+**`until:` is never more than one year after `ts:`.** A packet still being
+carried a year later is not in transit, it is lost, and a network that cannot
+say so accumulates the difference for ever.
+
 There is no copy limit in the format. Each carrier decides what to hold, and
-`docs/store-and-forward.md` already bounds that with a per-device quota and
-eviction by priority, so a limit here would duplicate one the carrier already
-enforces and cannot be trusted to obey anyway.
+`store-and-forward.md` already bounds that with a per-device quota and eviction
+by priority, so a limit here would duplicate one the carrier already enforces and
+cannot be trusted to obey anyway.
 
 ### 13.5 Urgency
 
@@ -1340,10 +1346,10 @@ A carried packet passes through strangers. The envelope is what they need and
 the body is not:
 
 ```
-t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:38,24 rad:200km urg:high until:2026-09-08_00:00:00 x:<64 characters> g:<60 characters>
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:38,24 near:200km urg:high until:2026-09-08_00:00:00 x:<64 characters> g:<60 characters>
 ```
 
-236 bytes. `dest:`, `rad:`, `urg:` and `until:` stay in cleartext because a
+237 bytes. `dest:`, `near:`, `urg:` and `until:` stay in cleartext because a
 carrier cannot route without them. `m:` is replaced by `x:`, sealed to the
 recipient's key, so every carrier can decide whether to carry it and none can
 read it. This is the same rule as section 9.2 and needs no new mechanism.
@@ -1353,7 +1359,7 @@ split into parts (section 6.6). Every part repeats the routing keys, since a
 carrier may hold one part and not another.
 
 **`dest:` tells every carrier roughly where your correspondent is**, and `d:`
-already told them who. Coarsen it deliberately: `dest:38,24 rad:200km` says
+already told them who. Coarsen it deliberately: `dest:38,24 near:200km` says
 "somewhere around Athens" and is 2 decimal places short of a street. Section 10.1
 ties decimal places to precision, and here that is a privacy control rather than
 an accuracy claim.
@@ -1364,10 +1370,10 @@ an accuracy claim.
 that they read something, not a device reporting that bytes arrived:
 
 ```
-t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign dest:38.72,-9.14 rad:50km until:2026-10-01_00:00:00 g:<60 characters>
+t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 g:<60 characters>
 ```
 
-181 bytes. `r:` names the original message -- `87e209`, computed from its sender,
+182 bytes. `r:` names the original message -- `87e209`, computed from its sender,
 timestamp and text -- and `g:` signs the receipt, which covers `f:` and `r:`
 together (section 9.1). The result is evidence that the holder of `X1RD89`'s key
 acknowledged that exact message, and it is checkable by anyone holding the
@@ -1390,6 +1396,83 @@ than no state at all.
 A signed receipt can be replayed by anyone who heard it, and that is harmless: it
 names one message and says one thing, so a second copy asserts exactly what the
 first did.
+
+### 13.8 Delivering to a region
+
+A message with `dest:` and **no `d:`** is addressed to whoever is in that region
+rather than to a person. Carriers take it there and stations already there air
+it locally.
+
+```
+t:message f:X3RLY7 ts:2026-08-08_14:26:40 dest:38.72,-9.14 near:30km urg:high until:2026-08-15_00:00:00 m:water is off in the old town until Friday
+```
+
+147 bytes: get this to within 30 km of Lisbon, and it stops mattering on Friday.
+
+Nothing new is needed for this. `d:` absent already meant "anyone in range"
+(section 6.1); adding `dest:` and `near:` moves which range. The same rules
+apply: a carrier takes it only if it gets closer, `until:` is required and is
+never more than a year out, and `urg:` decides what survives a full store.
+
+There is no recipient, so nothing is acknowledged. `q:sign` on a regional message
+is meaningless and ignored.
+
+Any packet type can be delivered this way, and for a warning the two circles are
+genuinely different things:
+
+```
+t:warning f:X3RLY7 pos:39.40,-8.20 rad:5km dest:38.72,-9.14 near:40km urg:urgent kind:fire sev:danger until:2026-08-10_00:00:00 ts:2026-08-08_14:26:40
+```
+
+150 bytes: a fire five kilometres across at `pos:`, to be delivered within 40 km
+of a town 80 km away. `pos:` and `rad:` describe the fire; `dest:` and `near:`
+describe where people need to hear about it. Collapsing those into one key would
+have made this packet unsayable.
+
+### 13.9 The same message by two routes
+
+Two copies that travelled differently are still one message:
+
+```
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 near:50km until:2026-09-08_00:00:00 q:sign via:X32DVA,CT1ABC-9,SV1XYZ m:are you still in Athens in September?
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 near:50km until:2026-09-08_00:00:00 q:sign via:X3RLY7,IT9ABC,SV2QRP m:are you still in Athens in September?
+```
+
+177 and 175 bytes. Both are identifier `87e209`, because an identifier is computed
+from `f:`, `ts:` and the payload (section 5) and `via:` is none of those.
+
+So the recipient recognises the second copy as one it already holds, shows it
+once, and does not answer twice. This is not a rule that had to be added: it
+falls out of deriving identifiers from the message rather than the journey.
+
+The difference between the copies is worth keeping rather than discarding. Each
+`via:` is a route that actually worked, which is knowledge no single copy
+carries: the recipient learns that both `SV1XYZ` and `SV2QRP` can reach it, and a
+reply can be sent back along the one that arrived first.
+
+### 13.10 Recording the route in the receipt
+
+`via:` on a carried packet is appended to by each carrier, so on arrival it names
+everyone who moved it. A signed receipt copies that list into `route:` and signs
+it:
+
+```
+t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign route:X32DVA,CT1ABC-9,SV1XYZ dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 g:<60 characters>
+```
+
+211 bytes. `via:` on this packet is the receipt's own journey home, which is a
+different list and is still being written. `route:` is the journey the message
+made, fixed at the moment it arrived.
+
+Because `g:` covers everything except itself (section 9.1), the signature binds
+the signer, the message identifier and the route together. The sender gets back
+a statement that this person read this message and that it came by these hands,
+which nobody along the way can alter without breaking the signature.
+
+A carrier that finds itself in a signed `route:` has evidence it delivered
+something, which is the only durable record any of this produces.
+
+---
 
 ## 14. Tracks
 
@@ -2388,7 +2471,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`urg`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`urg`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2457,7 +2540,9 @@ packet **250 bytes**, on every transport.
 | `n` | `ratio` | this packet is part i of n |
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
-| `urg` | `enum` | how much this is worth carrying (section 13.4) |
+| `urg` | `enum` | how much this is worth carrying (section 13.5) |
+| `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
+| `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
@@ -2679,14 +2764,25 @@ an offset or `input:` outright, the latter for cross-band.
 
 ### Carrying toward a place
 
-`dest:` where it is bound, `rad:` how close counts as arrived, `until:` when to
-stop (required), `urg:` `low` `normal` `high` `urgent`. A carrier takes a copy
-only if it expects to get closer. Not bound by the three-relay limit.
+`dest:` where it is bound, `near:` how close counts as arrived, `until:` when to
+stop (required, never more than a year out), `urg:` `low` `normal` `high`
+`urgent`. A carrier takes a copy only if it expects to get closer. Not bound by
+the three-relay limit.
+
+`near:` is not `rad:`. `rad:` is the area a subject occupies; `near:` is how
+close to `dest:` is close enough. A warning carried to a town uses both.
+
+`dest:` with no `d:` delivers to a region rather than a person; nothing is
+acknowledged.
+
+Two copies by different routes share one identifier, so the recipient sees the
+message once and keeps both `via:` lists as routes that work.
 
 Seal the body with `x:` and leave the routing keys in cleartext. Coarsen
 `dest:` -- it geolocates your correspondent.
 
-`q:sign` asks for a signed receipt; `s:sign` without a valid `g:` is discarded.
+`q:sign` asks for a signed receipt; it copies the arrival `via:` into `route:`
+and signs it. `s:sign` without a valid `g:` is discarded.
 
 ### Identifiers
 
@@ -2748,6 +2844,7 @@ document.
 | `t:channel` | not implemented |
 | Carrying toward a place (`dest:` on a message) | not implemented; custody currently carries only to a known callsign |
 | `urg:` | not implemented |
+| `near:`, regional delivery, `route:` in a receipt | not implemented |
 | `q:sign` and signed receipts | not implemented |
 | Recurring windows, `site:`, `supply:`, `range:` | not implemented |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |

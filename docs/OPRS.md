@@ -6,7 +6,7 @@ OPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 9. Section 27 states which parts are implemented.
+Status: DRAFT 10. Section 28 states which parts are implemented.
 
 ---
 
@@ -140,6 +140,12 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `dest` | `coord` | where a passage is bound (section 20) |
 | `onboard` | `int` | how many people are aboard |
 | `price` | `money` | what is being asked or offered (section 22.1) |
+| `freq` | `qty` | a frequency (section 23) |
+| `bw` | `qty` | bandwidth |
+| `shift` | `qty` | repeater input offset, signed |
+| `tone` | `qty` | access tone |
+| `power` | `qty` | transmit power |
+| `mode` | `enum` | how a channel is modulated |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -170,6 +176,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `event` | something happening at a time and place (section 21) |
 | `offer` | what a station has (section 22) |
 | `need` | what a station wants (section 22) |
+| `channel` | a frequency a station uses (section 23) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -934,6 +941,8 @@ t:observation f:X3WX01 pos:38.7223,-9.1393 temp:57.6F hum:78% press:29.92inHg wi
 | pressure | `hPa`, `inHg` | `hPa` |
 | rainfall | `mm`, `in` | `mm` |
 | duration | `s`, `min`, `h` | `s` |
+| frequency | `Hz`, `kHz`, `MHz`, `GHz` | `Hz` |
+| transmit power | `W`, `mW`, `kW`, `dBm` | `W` |
 | irradiance | `W/m2` | `W/m2` |
 | voltage | `V` | `V` |
 | proportion | `%` | `%` |
@@ -1972,7 +1981,100 @@ alternative is a receiver wondering whether the price was left out by accident.
 
 ---
 
-## 23. Adding a field, worked
+## 23. Channels
+
+`t:channel` announces a frequency a station uses: what it is, how it is
+modulated, whether the station transmits there, and when it is listening.
+
+```
+t:channel f:X1QZ3N freq:145.500MHz mode:fm kind:listen since:2026-08-08_18:00:00 until:2026-08-08_22:00:00 ts:2026-08-08_14:26:40
+```
+
+129 bytes: monitoring two metres this evening, receive only.
+
+| Key | Meaning |
+|---|---|
+| `freq:` | the frequency |
+| `mode:` | how it is modulated |
+| `bw:` | bandwidth, where the mode does not imply it |
+| `shift:` | repeater input offset, signed |
+| `tone:` | access tone |
+| `power:` | transmit power |
+| `kind:` | what the channel is for |
+| `pos:` | where the station or repeater is |
+| `since:`, `until:` | the listening window |
+| `m:` | anything else |
+
+`kind:` takes one of `listen`, `simplex`, `repeater`, `beacon`, `net`,
+`gateway`, `emergency`, `other`.
+
+`mode:` takes one of `fm`, `am`, `usb`, `lsb`, `cw`, `ssb`, `packet`, `aprs`,
+`lora`, `ft8`, `psk31`, `rtty`, `dmr`, `dstar`, `c4fm`, `m17`, `dv`, `other`.
+
+### 23.1 Listening, or transmitting
+
+**`power:` present means the station transmits on that channel. Absent means it
+only listens.** There is no separate flag, because a transmit power is the thing
+a listener would have had to state anyway, and a station that will not say its
+power has not told you it transmits.
+
+```
+t:channel f:X1QZ3N freq:145.500MHz mode:fm power:25W kind:simplex ts:2026-08-08_14:26:40
+```
+
+88 bytes.
+
+`since:` and `until:` are the listening window, and mean what they mean
+everywhere else (section 17.1). Their absence says the station listens whenever
+it is on, not that it never listens.
+
+A recurring schedule is not expressed here. A weekly net is a `t:event`
+(section 21) that names the frequency, and this packet describes the channel
+itself rather than the calendar around it.
+
+### 23.2 One channel per packet
+
+A station that uses several frequencies sends several packets, one each.
+
+This is not a limitation worked around. A key appears at most once in a packet,
+so two frequencies would need either `freq1:` and `freq2:`, or one value packing
+frequency, mode and power together in a fixed order. The second is how APRS
+encodes almost everything and the reason a receiver there cannot skip a field it
+does not understand.
+
+One packet each also means a station adding a band re-sends one packet rather
+than all of them, a receiver can filter on `mode:lora` without parsing the
+others, and a repeater's entry stays correct when the operator's handheld
+changes.
+
+```
+t:channel f:X3RLY7 pos:38.7810,-9.2043 freq:145.600MHz mode:fm shift:-600kHz tone:123.0Hz power:50W kind:repeater ts:2026-08-08_14:26:40
+t:channel f:X3RLY7 freq:433.775MHz mode:lora bw:125kHz power:22dBm kind:gateway ts:2026-08-08_14:26:40
+```
+
+136 and 102 bytes: a two-metre repeater with its offset and access tone, and a
+LoRa gateway whose power is quoted in dBm because that is how the module is
+specified.
+
+```
+t:channel f:CT1ABC freq:14.300MHz mode:usb power:100W kind:net since:2026-08-11_20:00:00 until:2026-08-11_21:00:00 ts:2026-08-08_14:26:40 m:maritime mobile net
+t:channel f:X3RLY7 freq:156.800MHz mode:fm kind:emergency ts:2026-08-08_14:26:40 m:channel 16, monitored continuously
+```
+
+159 and 117 bytes.
+
+### 23.3 Transmitting is regulated
+
+A `t:channel` packet says what a station does; it does not make it lawful. A
+frequency, a power and a mode together describe a transmission that in most of
+the world requires a licence, an allocation, or both, and neither this document
+nor a receiver can tell whether the sender holds one. Announcing a channel is
+not a claim of authority to use it, and section 9.4 continues to govern what may
+be transmitted where.
+
+---
+
+## 24. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -1998,7 +2100,7 @@ negotiation.
 
 ---
 
-## 24. Operating alongside APRS
+## 25. Operating alongside APRS
 
 A licensed amateur may bridge OPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -2009,15 +2111,17 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 25. Reserved
+## 26. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
-`response`, `blog`, `passage`, `event`, `offer`, `need`, `ping`, `pong`.
+`response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `ping`,
+`pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
-`seq`, `title`, `dest`, `onboard`, `price`, `cw`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
+`tone`, `power`, `mode`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2032,7 +2136,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 26. Cheat sheet
+## 27. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -2064,6 +2168,7 @@ packet **250 bytes**, on every transport.
 | `event` | something happening at a time and place (section 21) |
 | `offer` | what a station has (section 22) |
 | `need` | what a station wants (section 22) |
+| `channel` | a frequency a station uses (section 23) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -2093,6 +2198,12 @@ packet **250 bytes**, on every transport.
 | `dest` | `coord` | where a passage is bound (section 20) |
 | `onboard` | `int` | how many people are aboard |
 | `price` | `money` | what is being asked or offered (section 22.1) |
+| `freq` | `qty` | a frequency (section 23) |
+| `bw` | `qty` | bandwidth |
+| `shift` | `qty` | repeater input offset, signed |
+| `tone` | `qty` | access tone |
+| `power` | `qty` | transmit power |
+| `mode` | `enum` | how a channel is modulated |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -2177,6 +2288,8 @@ Every measurement carries its unit, immediately after the number, with no space.
 | pressure | `hPa`, `inHg` | `hPa` |
 | rainfall | `mm`, `in` | `mm` |
 | duration | `s`, `min`, `h` | `s` |
+| frequency | `Hz`, `kHz`, `MHz`, `GHz` | `Hz` |
+| transmit power | `W`, `mW`, `kW`, `dBm` | `W` |
 | irradiance | `W/m2` | `W/m2` |
 | voltage | `V` | `V` |
 | proportion | `%` | `%` |
@@ -2267,6 +2380,16 @@ free          nothing       (absent)      not stated
 Currency is an ISO 4217 code, three uppercase letters, never a symbol. Periods:
 `h`, `day`, `week`, `month`, `year`.
 
+### Channels
+
+`t:channel`, one packet per frequency. `power:` present means the station
+transmits there; absent means it only listens.
+
+```
+kind:   listen simplex repeater beacon net gateway emergency other
+mode:   fm am usb lsb cw ssb packet aprs lora ft8 psk31 rtty dmr dstar c4fm m17 dv other
+```
+
 ### Identifiers
 
 Never transmitted. Both ends compute `sha256("<f>|<ts>|<payload>")` and take the
@@ -2296,7 +2419,7 @@ document.
 
 ---
 
-## 27. Implementation status
+## 28. Implementation status
 
 | Element | State |
 |---|---|
@@ -2324,6 +2447,7 @@ document.
 | `t:passage`, `t:event`, `t:offer`, `t:need` | not implemented |
 | `price:` | not implemented |
 | `cw:` content warnings | not implemented |
+| `t:channel` | not implemented |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
 | Periodic `t:identity` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |

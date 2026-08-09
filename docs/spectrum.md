@@ -144,6 +144,33 @@ Unlike 27 MHz there is no ionospheric path at 869 MHz, ever. LoRa reaches the
 horizon and stops, and everything beyond it is carried (OPRS.md section 13.4)
 rather than transmitted.
 
+### 2.3 433 MHz, the other LoRa band
+
+433.05-434.79 MHz is licence-exempt in Europe and cheap LoRa modules for it are
+everywhere. It is worth knowing why this document does not propose it as the
+default.
+
+| | Power permitted | Budget at SF9 | Free space | Margin at the 32 km sea horizon |
+|---|---|---|---|---|
+| 868 MHz | 500 mW | 161 dB | 3087 km | 39.7 dB |
+| 433 MHz | 10 mW | 144 dB | 874 km | 28.7 dB |
+
+433 MHz propagates better -- 6 dB less path loss than 868 for the same power,
+and noticeably better diffraction around buildings and through trees, which is
+where sub-gigahertz links are actually lost. But Europe permits 10 mW there
+against 500 mW at 868, and 17 dB of power beats 6 dB of physics. The net is
+about 11 dB worse.
+
+It still clears the horizon at sea with 29 dB to spare, so a boat using 433 MHz
+loses nothing over water. The place it wins is dense obstruction at short range:
+a town, a forest, inside a marina. The place it loses is everywhere the extra
+power would have mattered.
+
+The band is also crowded with key fobs, weather stations, garage doors and
+doorbells, and in the United States 433 MHz is inside the amateur 70 cm
+allocation, where Part 15 permits only periodic transmissions rather than a
+continuous data link. It is a European option and a secondary one.
+
 **Duty cycle is the binding constraint in Europe, not power.** Ten percent means
 a station transmitting for one second is silent for nine, and the table above is
 what that costs in practice. A mesh that ignores this is both illegal and
@@ -439,7 +466,9 @@ software fixes that.
 
 ---
 
-## 8. Amateur bands, licensed operators only
+## 8. Licensed bands: HF, VHF and UHF
+
+### 8.1 VHF and UHF
 
 An `X1` or `X3` callsign is self-generated and must never be originated onto
 amateur spectrum ([OPRS.md](OPRS.md) section 25). Everything here applies to a
@@ -482,6 +511,40 @@ And the channel is shared with a live network that was there first. 144.800 MHz
 in Europe carries real traffic; OPRS beaconing at APRS rates would degrade a
 service other people depend on. Same etiquette, same duty, and no assumption
 that the band is empty because your own software cannot hear anything on it.
+
+### 8.2 HF, the only bearer that crosses an ocean
+
+Everything else in this document stops at the horizon. HF does not, because
+3 to 30 MHz refracts off the ionosphere instead of running into the sea.
+
+| Service | Bands | Licence |
+|---|---|---|
+| Marine SSB | ITU maritime allocations, 2-26 MHz | ship station licence and operator certificate |
+| Amateur HF | 3.5, 7, 14, 18, 21, 24, 28 MHz | amateur licence |
+
+There is no licence-exempt HF. Both routes require paperwork, and the amateur
+route additionally forbids encryption (section 9.4 of [OPRS.md](OPRS.md)) and
+requires the operator's own callsign, never a self-generated `X1` or `X3` one.
+
+Which band depends on the hour and the distance. 14 MHz carries 2000 km and more
+in daylight; 7 MHz does the same after dark; 3.5 MHz fills the gap underneath at
+a few hundred kilometres by near-vertical incidence. A station wanting one
+frequency all day will not find one.
+
+Data on HF is established rather than experimental: VARA HF, JS8Call, Winlink and
+FT8 all move traffic over thousands of kilometres at a few hundred bits per
+second, and Winlink in particular exists to carry email to vessels at sea. An
+OPRS packet is 250 bytes, which is a comfortable payload for any of them.
+
+On a boat the antenna is usually already there. An insulated backstay is the
+standard marine HF radiator, and a hull in salt water is the best RF ground
+available, which is why HF from a vessel outperforms the same rig ashore.
+
+The honest position: HF is the only bearer here that reaches 2000 km on demand,
+and it is out of reach for an unlicensed station. For everyone else that distance
+is covered by carrying the packet (section 13.4 of [OPRS.md](OPRS.md)) rather
+than transmitting it, which trades days of latency for needing no licence, no
+antenna and no ionosphere.
 
 ---
 
@@ -582,6 +645,8 @@ work.
 |---|---|
 | Bluetooth LE | **implemented**; the off-grid plane today, see [ble5.md](ble5.md) |
 | Marine VHF | deliberately not implemented and must not be |
+| 433 MHz LoRa | not implemented; documented as a secondary European option |
+| HF | not implemented; no HF hardware in this project |
 | PMR446 channel 16, CB channel 24 | not implemented; no bearer carries OPRS over an audio channel |
 | Regional LoRa plans | not implemented; `lib/connections/lora/lora_connection.dart` sets no frequency, and the SX1262 and SX1276 drivers accept one from a caller that does not yet exist |
 | Calling frequencies | not implemented; proposed here for the first time |

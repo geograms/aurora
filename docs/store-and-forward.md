@@ -98,9 +98,22 @@ Any device that receives a direct frame addressed to another station parks it.
 
 Mail is stored for any recipient. A carrier that holds mail only for stations it
 already knows is of no use to a station that is out of range of everyone.
-Prioritisation occurs under storage pressure rather than at admission: local mail
-and mail for a target within the mesh horizon receive `prio 1`, mail for unknown
-targets receives `prio 0`, and the quota sweep evicts in `ORDER BY prio, ts`.
+Prioritisation occurs under storage pressure rather than at admission. Each
+parked frame carries an urgency, and the quota sweep evicts in
+`ORDER BY urg, ts`:
+
+| `urg` | Given to |
+|---|---|
+| `low` | a stranger's mail, when the frame states nothing |
+| `normal` | mail we originated, or whose target is inside the mesh horizon |
+| `high` | the most a stranger's frame may claim |
+| `urgent` | ours only |
+
+The four levels are OPRS `urg:` ([OPRS.md](OPRS.md) section 13.5), so a level
+stated on the wire needs no translation. **A sender states what it wants and the
+carrier decides what it may have**: a stranger's frame is capped below `urgent`,
+because stations will mark everything urgent and no device should be able to
+push its host's own traffic out of its host's own store.
 
 Storage is bounded at 100 MB or 7 days, whichever is reached first, with
 `maxWire` of 480 bytes per frame and `inTransitMax` of 4000 in-transit rows, so
@@ -138,14 +151,15 @@ The parts that are specified and not built:
 |---|---|
 | `dest:` and `near:` on a carried packet | not implemented; custody is keyed on callsign only |
 | the closer-to-destination admission rule | not implemented; admission is currently "park anything for anyone" |
-| `urg:` as the eviction key | not implemented; eviction uses `prio 0/1` as above |
+| `urg:` as the eviction key | **implemented**; four levels, capped per source, `ORDER BY urg, ts` |
 | `until:` as a carry deadline, capped at a year | not implemented; the 7-day quota is the only bound |
 | regional delivery, `dest:` with no recipient | not implemented |
 | `route:` copied into a signed receipt | not implemented |
 
-`urg:` and `prio` are the same idea at different resolutions, and joining them is
-the smallest useful step: four sender-stated levels instead of two inferred ones,
-sorted the same way by the same sweep.
+The carrier already reads `urg:` from a frame that carries one
+(`MeshCustodyDelegate._urgOf`). No frame does yet, so the default holds and the
+behaviour is identical to the two-level scheme it replaced: ours `normal`, a
+stranger's `low`. The moment senders start writing `urg:`, carriers honour it.
 
 ## 5. Delivery
 

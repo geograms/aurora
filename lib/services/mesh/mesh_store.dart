@@ -16,7 +16,7 @@
  *
  * Quota: 7 days OR the message quota (default 100 MB), whichever first —
  * sweep drops expired rows, then archives oldest-first, then in-transit
- * lowest-prio-oldest-first.
+ * lowest-urgency-oldest-first ([MeshUrgency]).
  */
 import 'dart:io';
 import 'dart:typed_data';
@@ -29,6 +29,35 @@ import 'mesh_beacon.dart';
 import 'mesh_bloom.dart';
 import 'mesh_session.dart';
 import 'mesh_table.dart';
+
+/// How much a carried message is worth keeping when the store is full.
+///
+/// The four levels are OPRS `urg:` (docs/OPRS.md §13.5), so a level stated on
+/// the wire maps straight onto the eviction order with nothing to translate.
+/// This replaced a two-level `prio 0/1` that meant the same thing at half the
+/// resolution and could only ever be *inferred* by the carrier.
+///
+/// It is ordered lowest-first: [MeshStore.sweep] evicts `ORDER BY urg, ts`.
+enum MeshUrgency {
+  low,
+  normal,
+  high,
+  urgent;
+
+  /// Parse an OPRS `urg:` value. Anything unrecognised is [normal] — an
+  /// unknown word is skipped everywhere else in OPRS, and silently dropping a
+  /// message because its urgency did not parse would be worse than carrying it.
+  static MeshUrgency fromWire(String? v) => switch (v?.trim().toLowerCase()) {
+        'low' => MeshUrgency.low,
+        'high' => MeshUrgency.high,
+        'urgent' => MeshUrgency.urgent,
+        _ => MeshUrgency.normal,
+      };
+
+  /// The highest level this may be raised to. A sender states what it wants;
+  /// the carrier decides what it is allowed to have.
+  MeshUrgency cappedAt(MeshUrgency cap) => index <= cap.index ? this : cap;
+}
 
 class MeshStoreCounts {
   final int inTransit;
@@ -66,9 +95,10 @@ class MeshStore {
           wire BLOB NOT NULL,
           ts INTEGER NOT NULL,
           size INTEGER NOT NULL,
-          prio INTEGER NOT NULL DEFAULT 0,
+          urg INTEGER NOT NULL DEFAULT 1,
           state INTEGER NOT NULL DEFAULT 0
         )''');
+      _migratePrioToUrg(db);
       db.execute(
           'CREATE INDEX IF NOT EXISTS idx_store_target ON mesh_store(target, state)');
       db.execute('''
@@ -127,7 +157,7 @@ class MeshStore {
     required String sender,
     required Uint8List wire,
     String am = '',
-    int prio = 0,
+    MeshUrgency urg = MeshUrgency.normal,
     bool inTransit = true,
   }) {
     final db = _db;
@@ -136,13 +166,14 @@ class MeshStore {
     // A frame whose am we've already seen delivered is not worth carrying.
     if (am.isNotEmpty && wasReceived(am)) return false;
     // A stranger's mail is carried, but never at the cost of our own: past this
-    // many rows in transit we stop accepting it. Ours (prio > 0) still gets in,
-    // and the sweep sheds the strangers first — see [sweep].
-    if (prio <= 0 && countPending() >= inTransitMax) return false;
+    // many rows in transit we stop accepting the lowest level. Anything the
+    // carrier itself cares about is above [MeshUrgency.low] and still gets in,
+    // and the sweep sheds the bottom first — see [sweep].
+    if (urg == MeshUrgency.low && countPending() >= inTransitMax) return false;
     final dup = db.select('SELECT 1 FROM mesh_store WHERE am = ?', [key]);
     if (dup.isNotEmpty) return false;
     db.execute(
-      'INSERT INTO mesh_store(am,target,sender,wire,ts,size,prio,state) '
+      'INSERT INTO mesh_store(am,target,sender,wire,ts,size,urg,state) '
       'VALUES(?,?,?,?,?,?,?,?)',
       [
         key,
@@ -151,11 +182,30 @@ class MeshStore {
         wire,
         _now(),
         wire.length,
-        prio,
+        urg.index,
         inTransit ? 0 : 1,
       ],
     );
     return true;
+  }
+
+  /// Carry forward a store written before urgency replaced `prio 0/1`.
+  ///
+  /// The old column only ever held 0 (a stranger's mail) or 1 (ours, or a
+  /// target inside the mesh horizon), so it maps onto the bottom two levels
+  /// exactly and the eviction order across the upgrade does not change.
+  static void _migratePrioToUrg(Database db) {
+    final cols = db
+        .select('PRAGMA table_info(mesh_store)')
+        .map((r) => r['name'] as String)
+        .toSet();
+    if (!cols.contains('prio')) return;
+    if (!cols.contains('urg')) {
+      db.execute(
+          'ALTER TABLE mesh_store ADD COLUMN urg INTEGER NOT NULL DEFAULT 1');
+    }
+    db.execute('UPDATE mesh_store SET urg = CASE WHEN prio > 0 THEN ? ELSE ? END',
+        [MeshUrgency.normal.index, MeshUrgency.low.index]);
   }
 
   /// End-to-end receipt / peer have-bloom hit: the target has [am] — drop
@@ -360,7 +410,7 @@ class MeshStore {
       while (total > quotaBytes) {
         final r = db.select(
             'SELECT am, size FROM mesh_store WHERE $phase '
-            'ORDER BY prio, ts LIMIT 1');
+            'ORDER BY urg, ts LIMIT 1');
         if (r.isEmpty) break;
         db.execute('DELETE FROM mesh_store WHERE am = ?', [r.first['am']]);
         total -= r.first['size'] as int;

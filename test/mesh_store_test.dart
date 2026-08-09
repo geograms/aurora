@@ -137,22 +137,30 @@ void main() {
   });
 
   // A custodian carries anyone's mail, so the sorting happens under pressure:
-  // a stranger's frame (prio 0) must be shed before our own (prio 1). Backwards
+  // a stranger's frame (low) must be shed before our own (normal). Backwards
   // would quietly delete the user's outgoing messages first.
   test('under quota pressure a stranger is evicted before our own mail', () {
     store.quotaBytes = 450; // three 200 B frames will not fit
     final mine = Uint8List.fromList(List.filled(200, 1));
     final theirs = Uint8List.fromList(List.filled(200, 2));
     store.offer(
-        target: 'BBB', sender: 'ME', wire: mine, am: 'mine11', prio: 1);
+        target: 'BBB',
+        sender: 'ME',
+        wire: mine,
+        am: 'mine11',
+        urg: MeshUrgency.normal);
     store.offer(
-        target: 'CCC', sender: 'ZZZ', wire: theirs, am: 'theirs', prio: 0);
+        target: 'CCC',
+        sender: 'ZZZ',
+        wire: theirs,
+        am: 'theirs',
+        urg: MeshUrgency.low);
     store.offer(
         target: 'DDD',
         sender: 'YYY',
         wire: Uint8List.fromList(List.filled(200, 3)),
         am: 'other1',
-        prio: 0);
+        urg: MeshUrgency.low);
     store.sweep();
 
     // Ours survives; a stranger's was shed to make room.
@@ -161,14 +169,61 @@ void main() {
     expect(store.counts().inTransit, lessThan(3));
   });
 
+  // Four levels, not two: the sweep must shed strictly bottom-up, or a level
+  // is decorative. This is what `prio 0/1` could not express.
+  test('eviction runs lowest urgency first, across all four levels', () {
+    store.quotaBytes = 450; // only two 200 B frames fit
+    for (final (am, u) in [
+      ('lo0000', MeshUrgency.low),
+      ('no0000', MeshUrgency.normal),
+      ('hi0000', MeshUrgency.high),
+      ('ur0000', MeshUrgency.urgent),
+    ]) {
+      store.offer(
+          target: 'BBB',
+          sender: 'AAA',
+          wire: Uint8List.fromList(List.filled(200, am.codeUnitAt(0))),
+          am: am,
+          urg: u);
+    }
+    store.sweep();
+
+    final left = store.pendingFor('BBB', null, max: 64).map((e) => e.key).toSet();
+    expect(left, containsAll(['ur0000', 'hi0000'])); // the top two survive
+    expect(left, isNot(contains('lo0000'))); // the bottom went first
+    expect(left, isNot(contains('no0000')));
+  });
+
   // A device must carry for strangers, but not without limit.
-  test('the in-transit cap refuses a stranger, never our own', () {
+  test('the in-transit cap refuses the bottom level, never our own', () {
     expect(MeshStore.inTransitMax, 4000);
     expect(
         store.offer(
             target: 'CCC', sender: 'ZZZ', wire: _wire('ZZZ', 'CCC', 'hi'),
-            am: 'str001', prio: 0),
+            am: 'str001', urg: MeshUrgency.low),
         isTrue); // far below the cap: carried
+  });
+
+  // The wire vocabulary is OPRS `urg:` (docs/OPRS.md §13.5), so a word that
+  // parses wrong must not cost the message: unknown falls back to normal.
+  test('urgency parses the OPRS words and never drops on a bad one', () {
+    expect(MeshUrgency.fromWire('low'), MeshUrgency.low);
+    expect(MeshUrgency.fromWire('normal'), MeshUrgency.normal);
+    expect(MeshUrgency.fromWire('high'), MeshUrgency.high);
+    expect(MeshUrgency.fromWire('urgent'), MeshUrgency.urgent);
+    expect(MeshUrgency.fromWire('URGENT'), MeshUrgency.urgent);
+    expect(MeshUrgency.fromWire('banana'), MeshUrgency.normal);
+    expect(MeshUrgency.fromWire(null), MeshUrgency.normal);
+    // Ordered lowest-first, which is what `ORDER BY urg, ts` relies on.
+    expect(MeshUrgency.low.index < MeshUrgency.normal.index, isTrue);
+    expect(MeshUrgency.high.index < MeshUrgency.urgent.index, isTrue);
+  });
+
+  // A sender states what it wants; the carrier decides what it may have.
+  test('a stated urgency is capped, so nobody talks their way to the front', () {
+    expect(MeshUrgency.urgent.cappedAt(MeshUrgency.high), MeshUrgency.high);
+    expect(MeshUrgency.low.cappedAt(MeshUrgency.high), MeshUrgency.low);
+    expect(MeshUrgency.urgent.cappedAt(MeshUrgency.urgent), MeshUrgency.urgent);
   });
 
   test('have-bloom: built from received, applyPeerBloom purges only the owner',

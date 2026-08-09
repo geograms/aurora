@@ -416,18 +416,31 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     // A custodian that only holds mail for people it already knows is no use to
     // the person who most needs one — someone out of range of everybody. So a
     // stranger's message is parked too, and the sorting happens under pressure
-    // rather than at the door: mail we originated or whose target is in our mesh
-    // horizon gets prio 1, a stranger's gets prio 0, and [MeshStore.sweep]
-    // evicts `ORDER BY prio, ts` — the strangers go first, our own last. A hard
-    // in-transit cap in [MeshStore.offer] stops a busy street from filling the
-    // disk with mail this device may never be able to deliver.
+    // rather than at the door: [MeshStore.sweep] evicts `ORDER BY urg, ts`, so
+    // the bottom level goes first and our own last. A hard in-transit cap in
+    // [MeshStore.offer] stops a busy street from filling the disk with mail
+    // this device may never be able to deliver.
     final t = MeshService.instance.table;
     final known = from.toUpperCase() == self ||
         (t != null &&
             (t.neighbors.keys.any((n) => n.toUpperCase() == to.toUpperCase()) ||
                 t.routes.containsKey(meshHashHex(meshHash(to)))));
+    // The sender states what it wants and the carrier decides what it may have.
+    // Mail we originated, or whose target we can reach, may claim any level; a
+    // stranger's is capped below `urgent` so that marking everything urgent —
+    // which stations will — cannot push our own traffic out of our own store.
+    //
+    // The wire does not carry `urg:` yet (docs/OPRS.md §13.5 specifies it,
+    // §28 lists it as unbuilt), so the default holds and this reproduces the
+    // previous two-level behaviour exactly: ours `normal`, a stranger's `low`.
+    final stated = MeshUrgency.fromWire(_urgOf(wire));
+    final urg = known
+        ? stated.cappedAt(MeshUrgency.urgent)
+        : (_urgOf(wire) == null
+            ? MeshUrgency.low
+            : stated.cappedAt(MeshUrgency.high));
     if (store.offer(
-        target: to, sender: from, wire: wire, am: am, prio: known ? 1 : 0)) {
+        target: to, sender: from, wire: wire, am: am, urg: urg)) {
       MeshCustodyCounters.parked++;
       LogService.instance.add('Mesh: parked ${am.isEmpty ? "msg" : am} '
           '$from -> $to for custody${known ? "" : " (stranger)"}');
@@ -464,6 +477,21 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
         }
       }
     } catch (_) {}
+  }
+
+  /// The sender-stated `urg:` value, or null when the frame carries none.
+  ///
+  /// Today no frame does: the compact wire has no such field and OPRS §13.5
+  /// is not built yet. Reading it here rather than later means the carrier
+  /// honours it the moment senders start writing it, and costs one scan of a
+  /// string already decoded.
+  static String? _urgOf(Uint8List wire) {
+    final t = _splitWire(wire)?.$3;
+    if (t == null) return null;
+    for (final tok in t.split(' ')) {
+      if (tok.startsWith('urg:') && tok.length > 4) return tok.substring(4);
+    }
+    return null;
   }
 
   /// Split a compact frame `from\x1Fto\x1Ftext` (returns null when not one).

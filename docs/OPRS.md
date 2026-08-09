@@ -6,7 +6,7 @@ OPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 7. Section 23 states which parts are implemented.
+Status: DRAFT 8. Section 24 states which parts are implemented.
 
 ---
 
@@ -135,6 +135,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
+| `title` | `label` | name of a post, stable across revisions (section 19) |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -160,6 +161,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `track` | a point in a named track (section 14) |
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
+| `blog` | a published post (section 19) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -1547,7 +1549,86 @@ that one has failed, unless it failed by answering wrongly.
 
 ---
 
-## 19. Adding a field, worked
+## 19. Blog posts
+
+`t:blog` publishes a piece of writing rather than sending a message. The
+difference is not the length. A message is addressed to someone and expects to
+be read once; a post is published, kept, listed and read later by people who
+were not listening when it went out.
+
+```
+t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes tag:radio m:The wire ends are the whole job. Everything else is decoration.
+```
+
+134 bytes. `d:` is absent, so it is published to anyone in range; a post to a
+group carries `d:` like any other packet.
+
+### 19.1 Title
+
+`title:` is a `label`: lowercase letters, digits and `-`, no spaces. It names
+the post so that it can be listed, filtered and revised, and it is unique only
+in combination with `f:`, so two stations may both publish `antenna-notes`.
+
+A later post from the same station with the same `title:` and a newer `ts:`
+**replaces** the earlier one. That is how a post is corrected. A message cannot
+be edited and a post can, which is the second real difference between them.
+
+`title:` is a slug rather than a sentence because no value except `m:` may
+contain a space. The human title is the first line of the text, where a reader
+expects it.
+
+### 19.2 How long a post can be
+
+A post is split across up to 9 parts like any other text (section 6.6), so its
+length follows from the packet limit and what the envelope costs:
+
+| Post | Bytes per part | Whole post |
+|---|---|---|
+| untitled, broadcast | 203 | **1827 characters** |
+| titled | 183 | **1647 characters** |
+| titled, one tag | 173 | 1557 characters |
+| titled, signed | 183, less 63 on the last part | 1584 characters |
+
+**About 1650 characters for a normal titled post**, which is three or four
+paragraphs. That is a short essay, not an article.
+
+```
+t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes n:1/3 m:I rebuilt the dipole this weekend and measured it properly for once.
+t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes n:2/3 m:The feed point was three centimetres off centre, which cost about a decibel.
+```
+
+135 and 143 bytes, parts 1 and 2 of 3.
+
+### 19.3 Posts longer than that
+
+A longer post is carried as a file, and the packet carries its opening:
+
+```
+t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.md m:I rebuilt the dipole and measured it properly. The full write-up runs to eight pages.
+```
+
+219 bytes. `m:` holds as much of the beginning as fits and `file:` holds the
+whole thing, content-addressed like any other file (section 6.7).
+
+This is deliberate rather than a limitation worked around. A post split across
+40 packets is unreadable until every one of them arrives, and on a channel where
+a single advertisement is already a lottery that is a poor way to publish. With
+a file reference the packet stands on its own: a reader gets the title, the
+opening and the author immediately, and fetches the rest if it wants it and can.
+
+The 9-part limit is not raised for posts. A receiver that loses one part of
+forty has waited a long time to be told it has nothing.
+
+### 19.4 Signing
+
+A post should be signed. A message is usually one of many between two stations
+that know each other, but a post is read later, by strangers, after being
+relayed by stations the author never met, and authorship is the only thing a
+reader has to go on. A signature costs 63 bytes on the last part.
+
+---
+
+## 20. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -1573,7 +1654,7 @@ negotiation.
 
 ---
 
-## 20. Operating alongside APRS
+## 21. Operating alongside APRS
 
 A licensed amateur may bridge OPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -1584,15 +1665,15 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 21. Reserved
+## 22. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
-`response`, `ping`, `pong`.
+`response`, `blog`, `ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
-`seq`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`seq`, `title`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -1607,7 +1688,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 22. Cheat sheet
+## 23. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -1634,6 +1715,7 @@ packet **250 bytes**, on every transport.
 | `track` | a point in a named track (section 14) |
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
+| `blog` | a published post (section 19) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -1658,6 +1740,7 @@ packet **250 bytes**, on every transport.
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
+| `title` | `label` | name of a post, stable across revisions (section 19) |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -1803,7 +1886,8 @@ change it.
 | Thing | Limit |
 |---|---|
 | packet, every transport | 250 bytes |
-| parts in one message | 9, `n:1/9` to `n:9/9` |
+| parts in one message or post | 9, `n:1/9` to `n:9/9` |
+| titled post, inline | about 1650 characters |
 | relays, `sos` and `warning` | 9 |
 | relays, everything else | 3 |
 | incomplete set of parts held | 10 minutes |
@@ -1818,7 +1902,7 @@ document.
 
 ---
 
-## 23. Implementation status
+## 24. Implementation status
 
 | Element | State |
 |---|---|
@@ -1841,6 +1925,7 @@ document.
 | `t:sos` calls for help | not implemented; the current wire has an `sos` station symbol, which is a different thing and is not relayed further than any other packet |
 | `t:warning` warnings | not implemented; no source |
 | `t:info` notices | not implemented; no source |
+| `t:blog` posts | not implemented |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
 | Periodic `t:identity` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |

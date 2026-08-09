@@ -94,6 +94,56 @@ A denser urban network may prefer SF8 -- more orthogonal still, 17% of the
 airtime, about half the range. A long rural link may prefer SF11 and accept the
 contention. Both are legitimate; the station says which it uses in `t:channel`.
 
+### 2.2 Range over water
+
+**LoRa at sea is not limited by signal strength. It is limited by the horizon.**
+
+At 500 mW and SF9 the budget is 161 dB, which is three thousand kilometres of
+free space. At the distances a boat actually works, most of that is unused:
+
+| Path | Horizon | Budget left there |
+|---|---|---|
+| deck to deck, 2 m | 12 km | 48 dB |
+| masthead to masthead, 15 m | 32 km | 40 dB |
+| kite to kite, 30 m | 45 km | 37 dB |
+| masthead to a coastal station at 100 m | 57 km | 35 dB |
+| masthead to a mountain at 500 m | 108 km | 29 dB |
+
+So roughly **30 km boat to boat and 60 km boat to shore**, and the radio is never
+the reason. Adding power to a link with 40 dB spare changes nothing. Adding
+height changes everything, because what stops the signal is the sea getting in
+the way:
+
+| Path | Earth bulge at midpoint | First Fresnel radius |
+|---|---|---|
+| 20 km | 5.9 m | 1.3 m |
+| 30 km | 13.3 m | 1.6 m |
+| 50 km | 36.9 m | 2.1 m |
+| 80 km | 94.4 m | 2.6 m |
+
+A 15 m masthead barely clears the bulge at 30 km. Reaching 50 km needs about 37 m
+at both ends, which is why every long over-water result involves a hill, a cliff
+or a lighthouse somewhere in it. This is the one bearer where lifting an antenna
+on a kite pays for itself: the margin is already there and only geometry is in
+the way.
+
+Two effects belong to water specifically.
+
+**Sea-surface reflection causes deep fades.** The direct and reflected rays
+interfere, so signal strength oscillates with distance and with swell: a solid
+link, then nothing, then solid again over a few hundred metres of motion. Forty
+decibels of margin rides through most of it, but it explains links that work
+from one anchorage and not from another two cables away.
+
+**Evaporation ducting is the wildcard.** Over warm water a duct forms in the
+first five to forty metres and traps UHF inside it, occasionally giving hundreds
+of kilometres far beyond the horizon. Common in the Mediterranean and the
+tropics, entirely unschedulable, and it happens at exactly masthead height.
+
+Unlike 27 MHz there is no ionospheric path at 869 MHz, ever. LoRa reaches the
+horizon and stops, and everything beyond it is carried (OPRS.md section 13.4)
+rather than transmitted.
+
 **Duty cycle is the binding constraint in Europe, not power.** Ten percent means
 a station transmitting for one second is silent for nine, and the table above is
 what that costs in practice. A mesh that ignores this is both illegal and

@@ -6,7 +6,7 @@ OPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 8. Section 24 states which parts are implemented.
+Status: DRAFT 9. Section 27 states which parts are implemented.
 
 ---
 
@@ -101,7 +101,7 @@ callsign.
 key:value key:value key:value ...
 ```
 
-- A key is 1 to 6 characters, lowercase letters and digits, beginning with a
+- A key is 1 to 8 characters, lowercase letters and digits, beginning with a
   letter, followed by `:`.
 - A value contains no space, and is never empty.
 - Fields are separated by exactly one space.
@@ -135,7 +135,10 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
-| `title` | `label` | name of a post, stable across revisions (section 19) |
+| `title` | `label` | name of a post or event, stable across revisions |
+| `dest` | `coord` | where a passage is bound (section 20) |
+| `onboard` | `int` | how many people are aboard |
+| `price` | `money` | what is being asked or offered (section 22.1) |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -162,6 +165,10 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
+| `passage` | where a vessel is going (section 20) |
+| `event` | something happening at a time and place (section 21) |
+| `offer` | what a station has (section 22) |
+| `need` | what a station wants (section 22) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -192,6 +199,7 @@ The type is fixed by this document and is never transmitted.
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
 | `ratio` | two digits `1` to `9` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
+| `money` | an amount, an ISO 4217 code, optionally `/` and a period, or `free` | `25EUR/day` |
 | `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
 | `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
 | `b64` | base64url, no padding | `pQ4m9xT2vB8kR` |
@@ -730,6 +738,37 @@ describes a room only its owner cares about.
 Pressure has no indoor form. The difference across a wall is smaller than the
 instrument's error, and `press:` is already defined at station level.
 
+### 10.4 At sea
+
+| Key | Type | Meaning | Quantity |
+|---|---|---|---|
+| `wave` | `qty` | significant wave height | distance |
+| `swell` | `qty` | swell period | duration |
+| `seatemp` | `qty` | sea surface temperature | temperature |
+| `vis` | `qty` | horizontal visibility | distance |
+
+```
+t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m swell:9s seatemp:18.4C vis:2km wind:11m/s type:sailboat ts:2026-08-08_14:26:40
+```
+
+131 bytes.
+
+These decide whether a passage happens, and nothing else in the format carries
+them. Wind and pressure describe the air; a two-metre swell at nine seconds is a
+different sea from a two-metre swell at four, and the number that tells them
+apart is the period.
+
+`vis:` is a distance rather than a category, so `vis:200m` in fog and `vis:20km`
+on a clear day are the same measurement rather than two vocabularies.
+
+A vessel sends what its instruments give it and omits the rest:
+
+```
+t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m seatemp:18.4C type:boat ts:2026-08-08_14:26:40
+```
+
+99 bytes.
+
 ### 10.4 Telemetry and station type
 
 | Key | Type | Meaning | Quantity |
@@ -811,6 +850,7 @@ t:observation f:X3WX01 pos:38.7223,-9.1393 temp:57.6F hum:78% press:29.92inHg wi
 | temperature | `C`, `F` | `C` |
 | pressure | `hPa`, `inHg` | `hPa` |
 | rainfall | `mm`, `in` | `mm` |
+| duration | `s`, `min`, `h` | `s` |
 | irradiance | `W/m2` | `W/m2` |
 | voltage | `V` | `V` |
 | proportion | `%` | `%` |
@@ -1627,7 +1667,176 @@ reader has to go on. A signature costs 63 bytes on the last part.
 
 ---
 
-## 20. Adding a field, worked
+## 20. Passages
+
+`t:passage` says where a vessel is going and when it expects to arrive. It is a
+float plan: filed before leaving so that somebody knows when to start worrying.
+
+```
+t:passage f:X1BOA3 pos:38.6902,-9.4012 dest:38.5241,-8.8931 since:2026-08-09_06:00:00 until:2026-08-09_18:00:00 onboard:3 type:sailboat ts:2026-08-08_14:26:40
+```
+
+158 bytes.
+
+| Field | Meaning |
+|---|---|
+| `pos:` | where it is departing from |
+| `dest:` | where it is bound |
+| `since:` | when it leaves, or left |
+| `until:` | when it expects to arrive |
+| `onboard:` | how many people are aboard |
+| `type:` | what kind of vessel |
+| `m:` | anything else worth knowing |
+
+`since:` and `until:` are the ordinary keys (section 17.1) and are not renamed
+for this packet: a passage is a thing with a start and an end like any other.
+`until:` is the estimated arrival, and being an estimate is what makes it
+useful. A vessel that has not arrived and has not cancelled by then is a vessel
+worth asking about.
+
+```
+t:passage f:X1BOA3 dest:38.5241,-8.8931 until:2026-08-09_18:00:00 onboard:3 ts:2026-08-08_14:26:40
+```
+
+98 bytes: bound there, back by six, three aboard. That is the whole of a float
+plan, and it fits in a third of a packet.
+
+A passage is closed by sending another with the same `dest:` and a `since:` in
+the past, or is superseded by any later passage from the same station. Arriving
+and saying nothing is the case the format cannot fix, and no format can.
+
+`onboard:` is a count and carries no unit, like `seq:` and `n:`. It is the
+number a rescue coordinator asks for first.
+
+---
+
+## 21. Events
+
+`t:event` announces something happening at a time and a place: a net, a market,
+a meeting, a working party.
+
+```
+t:event f:X3RLY7 pos:38.7223,-9.1393 title:tuesday-net kind:net since:2026-08-11_20:00:00 until:2026-08-11_21:00:00 ts:2026-08-08_14:26:40 m:weekly net, all welcome
+```
+
+164 bytes.
+
+`title:` names it, as it names a post, so an event can be revised: a later
+`event` from the same station with the same `title:` replaces the earlier one,
+which is how a time changes or a meeting is cancelled.
+
+`kind:` takes one of `net`, `meeting`, `market`, `class`, `work`, `social`,
+`race`, `service`, `other`.
+
+`since:` and `until:` are when it starts and ends. `pos:` is where, and `rad:`
+may give the area it covers when a point would mislead.
+
+An event is a separate type from a notice because a receiver files it
+differently. A notice is a condition that is true now and expires; an event is
+an appointment, and belongs in a calendar rather than on a map.
+
+---
+
+## 22. Offers and needs
+
+`t:offer` says what a station has. `t:need` says what it wants. They carry the
+same fields and differ only in direction.
+
+```
+t:need f:X1BOA3 pos:38.6902,-9.4012 kind:crew rad:50km ts:2026-08-08_14:26:40 m:two for a delivery to Madeira, leaving Friday
+t:offer f:X1QZ3N pos:38.6902,-9.4012 kind:crew until:2026-08-20_12:00:00 ts:2026-08-08_14:26:40 m:deckhand, some night watch experience
+```
+
+125 and 135 bytes.
+
+`kind:` takes one of `crew`, `transport`, `water`, `food`, `fuel`, `power`,
+`shelter`, `berth`, `mooring`, `gear`, `room`, `tools`, `repair`, `medical`,
+`childcare`, `internet`, `storage`, `labour`, `other`.
+
+`crew` is in that list because it is the most common thing asked for and offered
+where boats gather, in both directions: `t:need kind:crew` is a skipper short of
+hands for a passage, and `t:offer kind:crew` is somebody willing to sail. The
+same pair of types covers a village after a storm and a marina in October
+without needing separate vocabularies.
+
+| Field | Meaning |
+|---|---|
+| `kind:` | what is offered or wanted |
+| `pos:` | where |
+| `rad:` | how far the sender can travel or deliver |
+| `since:` | when it becomes available or needed |
+| `until:` | when the offer or need lapses |
+| `price:` | what is asked or offered, if any (section 22.1) |
+| `m:` | the detail no vocabulary can carry |
+
+```
+t:need f:X1QZ3N pos:38.7223,-9.1393 kind:water rad:2km ts:2026-08-08_14:26:40
+```
+
+77 bytes, which is all a request for water needs to be.
+
+`until:` matters here as much as on a notice. An offer of a spare battery that
+was taken three weeks ago and never withdrawn is worse than no offer, because
+somebody will travel for it. A station that cannot say when its offer lapses
+should re-send it rather than let a receiver guess.
+
+Neither type is relayed further than ordinary traffic (section 13.1). A need is
+not an emergency; a need that is an emergency is an `sos`.
+
+---
+
+### 22.1 Price
+
+`price:` states what is being asked. It is optional: an offer without one is
+free, or negotiable, or none of the receiver's business until they ask.
+
+```
+price:120EUR          once, for the thing itself
+price:25EUR/day       per day
+price:150EUR/week     per week
+price:12.50EUR/h      per hour
+price:free            nothing
+```
+
+An amount, an ISO 4217 currency code in uppercase, and optionally `/` and a
+period. No period means a single price for the whole thing; a period means it
+repeats, which is the difference between selling and renting.
+
+Periods: `h`, `day`, `week`, `month`, `year`.
+
+```
+t:offer f:X1QZ3N pos:38.6902,-9.4012 kind:gear price:120EUR ts:2026-08-08_14:26:40 m:Aries windvane, needs a new bearing
+t:offer f:X3RLY7 pos:38.6902,-9.4012 kind:berth price:25EUR/day rad:1km ts:2026-08-08_14:26:40
+t:offer f:X1QZ3N pos:38.7223,-9.1393 kind:repair price:12.50EUR/h rad:20km ts:2026-08-08_14:26:40 m:diesel and rigging
+```
+
+120, 94 and 118 bytes: a windvane for sale, a berth by the day, and a
+mechanic by the hour.
+
+The currency is always written out. A bare number would be read as euros by half
+the network and as dollars by the other half, and this format does not leave a
+unit to be assumed anywhere else either (section 10.6). The amount follows the
+ordinary number rules, so a decimal point and never a comma: `price:12.50EUR`.
+
+`price:` works on a `need` as well, where it is what the sender will pay:
+
+```
+t:need f:X1BOA3 pos:38.6902,-9.4012 kind:berth price:30EUR/day since:2026-08-15_00:00:00 until:2026-08-22_00:00:00 ts:2026-08-08_14:26:40
+```
+
+137 bytes: wanted, a berth for a week in the middle of the month, at up to 30
+a day.
+
+```
+t:offer f:X1QZ3N pos:38.7223,-9.1393 kind:crew price:free ts:2026-08-08_14:26:40
+```
+
+80 bytes. `price:free` says so explicitly, which is worth doing when the
+alternative is a receiver wondering whether the price was left out by accident.
+
+---
+
+## 23. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -1653,7 +1862,7 @@ negotiation.
 
 ---
 
-## 21. Operating alongside APRS
+## 24. Operating alongside APRS
 
 A licensed amateur may bridge OPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -1664,18 +1873,18 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 22. Reserved
+## 25. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
-`response`, `blog`, `ping`, `pong`.
+`response`, `blog`, `passage`, `event`, `offer`, `need`, `ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
-`seq`, `title`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`seq`, `title`, `dest`, `onboard`, `price`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
-`intemp`, `inhum`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
+`intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
 
 Assigned `q:` and `s:` words: section 8.
@@ -1687,7 +1896,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 23. Cheat sheet
+## 26. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -1715,6 +1924,10 @@ packet **250 bytes**, on every transport.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
+| `passage` | where a vessel is going (section 20) |
+| `event` | something happening at a time and place (section 21) |
+| `offer` | what a station has (section 22) |
+| `need` | what a station wants (section 22) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -1739,7 +1952,10 @@ packet **250 bytes**, on every transport.
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
-| `title` | `label` | name of a post, stable across revisions (section 19) |
+| `title` | `label` | name of a post or event, stable across revisions |
+| `dest` | `coord` | where a passage is bound (section 20) |
+| `onboard` | `int` | how many people are aboard |
+| `price` | `money` | what is being asked or offered (section 22.1) |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -1780,6 +1996,15 @@ packet **250 bytes**, on every transport.
 | `rain24` | `qty` | rainfall, previous 24 hours | rainfall |
 | `solar` | `qty` | solar irradiance | irradiance |
 
+### At sea
+
+| Key | Type | Meaning | Quantity |
+|---|---|---|---|
+| `wave` | `qty` | significant wave height | distance |
+| `swell` | `qty` | swell period | duration |
+| `seatemp` | `qty` | sea surface temperature | temperature |
+| `vis` | `qty` | horizontal visibility | distance |
+
 ### Telemetry and station type
 
 | Key | Type | Meaning | Quantity |
@@ -1814,6 +2039,7 @@ Every measurement carries its unit, immediately after the number, with no space.
 | temperature | `C`, `F` | `C` |
 | pressure | `hPa`, `inHg` | `hPa` |
 | rainfall | `mm`, `in` | `mm` |
+| duration | `s`, `min`, `h` | `s` |
 | irradiance | `W/m2` | `W/m2` |
 | voltage | `V` | `V` |
 | proportion | `%` | `%` |
@@ -1901,7 +2127,7 @@ document.
 
 ---
 
-## 24. Implementation status
+## 27. Implementation status
 
 | Element | State |
 |---|---|
@@ -1925,6 +2151,9 @@ document.
 | `t:warning` warnings | not implemented; no source |
 | `t:info` notices | not implemented; no source |
 | `t:blog` posts | not implemented |
+| `wave`, `swell`, `seatemp`, `vis` | not implemented; no source |
+| `t:passage`, `t:event`, `t:offer`, `t:need` | not implemented |
+| `price:` | not implemented |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
 | Periodic `t:identity` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |

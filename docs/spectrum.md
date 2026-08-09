@@ -113,8 +113,48 @@ station's `t:channel` announcements will name them and because operators ask.
 **CB, 26.965-27.405 MHz, 40 channels.** The most internationally consistent
 allocation on this page: the same 40 channels are licence-free across CEPT
 Europe, the United States, and much of South America and Asia, though power and
-permitted modes differ. Channel 9 is the emergency channel almost everywhere and
-must not be used for data.
+permitted modes differ. Typically 4 W for AM and FM, 12 W PEP for SSB.
+
+**Channel 24, 27.235 MHz, is the proposed OPRS calling channel, in Europe only.**
+
+That is not an invention. Germany designates channels 24 and 25 as the digital
+CB channels, and channel 24 has carried 1200 baud AFSK packet radio for years.
+Aligning with an existing convention costs nothing and puts OPRS where operators
+already expect to hear data.
+
+Channels to keep clear of: **9 (27.065 MHz) is the emergency channel** almost
+everywhere, and **19 (27.185 MHz) is the road channel**. Neither is ever a
+candidate.
+
+Beware the channel table. Channels 23, 24 and 25 are out of numeric order --
+23 is 27.255 MHz, above both 24 at 27.235 and 25 at 27.245 -- because the
+frequencies between were allocated to radio control. Any code that computes a
+frequency from a channel number by arithmetic is wrong for exactly these three.
+
+### 5.1 CB is Europe-only for OPRS
+
+In the United States it is unlawful. 47 CFR 95.931 permits a CB station to
+transmit "two-way plain language voice communications" and nothing else, and
+every authorised emission -- A3E, F3E, J3E, R3E, H3E -- is a voice emission.
+There is no digital mode to fall back on, as there is on PMR446. 95.933 also
+prohibits communicating with stations in other countries, Canada excepted.
+
+| Jurisdiction | Data on CB |
+|---|---|
+| Germany | channels 24 and 25 designated digital; packet established |
+| Other CEPT countries | varies; check the national interface requirement |
+| United States | **not permitted**; voice emissions only, 47 CFR 95.931 |
+
+**27 MHz is not a local band.** At solar maximum the 11 m band propagates by
+skywave and a 4 W transmission is regularly heard across an ocean. That is a
+genuine opportunity for a format designed around carrying messages toward a
+place, and a genuine hazard: a beacon that is polite in Lisbon is interference
+in Brazil, where nobody agreed to any of this. A station using CB should treat
+airtime as a continental resource, not a local one.
+
+A 250-byte packet is 1.67 seconds at 1200 baud and 6.7 seconds at 300. The
+slower rates that survive HF noise are slow enough that CB suits carried,
+low-urgency traffic rather than anything interactive.
 
 **PMR446, 446.0-446.2 MHz, 16 channels, 500 mW ERP.** Europe and CEPT only.
 Channel 1 is 446.00625 MHz and channels are spaced 12.5 kHz.
@@ -135,7 +175,7 @@ and the whole value of 3-3-3 is that someone is listening. Channel 16 is the top
 of the 2015 extension: legal across CEPT for analogue and digital alike, and
 inaudible to the legacy eight-channel radios that make up most of the traffic.
 
-### 5.1 Whether data is permitted here at all
+### 5.2 Whether data is permitted on PMR446 at all
 
 Unresolved, and stated as such rather than assumed.
 
@@ -297,7 +337,7 @@ work.
 
 | Element | State |
 |---|---|
-| PMR446 channel 16 as the calling channel | not implemented; no bearer carries OPRS over an audio channel |
+| PMR446 channel 16, CB channel 24 | not implemented; no bearer carries OPRS over an audio channel |
 | Regional LoRa plans | not implemented; `lib/connections/lora/lora_connection.dart` sets no frequency, and the SX1262 and SX1276 drivers accept one from a caller that does not yet exist |
 | Calling frequencies | not implemented; proposed here for the first time |
 | `t:channel` announcements | not implemented ([OPRS.md](OPRS.md) section 28) |

@@ -131,6 +131,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `r` | `hex6` | the identifier of another packet this one refers to |
 | `n` | `ratio` | this packet is part i of n |
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
+| `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
@@ -285,7 +286,89 @@ A receiver that does not recognise a label keeps it and displays it. Labels are
 never a routing decision: `d:` says where a packet goes, and a label never
 changes that.
 
-### 4.6 Time
+### 4.6 Content warnings
+
+`cw:` warns a receiver what a packet contains before it renders it.
+
+```
+t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:haulout cw:injury m:the hand is fine now, photos below
+```
+
+99 bytes. `cw:` costs nine bytes and takes one or more words, separated by
+commas:
+
+| Word | Contents |
+|---|---|
+| `adult` | sexual content |
+| `nudity` | nudity that is not sexual |
+| `violence` | violence |
+| `injury` | graphic injury, blood, surgery |
+| `death` | death, human or animal |
+| `drugs` | drug or alcohol use |
+| `language` | profanity |
+| `spoiler` | spoils something the reader may not have seen |
+| `flashing` | rapid flashing or strobing |
+| `other` | something else the sender thinks needs a warning |
+
+`flashing` is not a matter of taste. Rapid flashing triggers seizures in
+photosensitive epilepsy, and a receiver that autoplays is the case the warning
+exists for:
+
+```
+t:info f:X3RLY7 pos:38.7223,-9.1393 kind:event cw:flashing ts:2026-08-08_14:26:40 m:fireworks over the harbour at ten
+```
+
+117 bytes.
+
+It is a closed vocabulary rather than a `tag:`. A label means whatever the people
+using it agree it means (section 4.5), which is fine for a topic and useless for
+a filter: a receiver cannot hide adult content reliably if the word for it is
+whatever each sender chose, in whatever language. These ten words a receiver can
+act on, and translate.
+
+It is several words rather than one rating, because a single scale cannot say
+why. Somebody avoiding graphic injury is not the same person as somebody
+avoiding sexual content, and neither is the reader who needs `flashing`.
+
+Four rules, each covering a way this otherwise fails without anyone noticing.
+
+**It covers the whole packet, including any `file:`.** The attachment is usually
+the thing that needed warning about:
+
+```
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 cw:adult,nudity file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:not for the group chat
+```
+
+165 bytes.
+
+**It is repeated on every part** of a split message, not only the first. Parts
+arrive in any order (section 6.6), so a warning carried once is a warning the
+receiver may read after it has already displayed part two.
+
+**It stays in cleartext when the body is sealed.** `cw:` is an envelope field
+and is never moved inside `x:`, because a receiver has to decide whether to
+render before it decrypts:
+
+```
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 cw:adult x:<64 characters> g:<60 characters>
+```
+
+189 bytes. What the packet contains is disclosed; the content itself is not.
+
+**A relay never strips it**, and **its absence is not a guarantee**. An unmarked
+packet is unmarked, not safe. A receiver that treats a missing `cw:` as a
+promise has built a filter on the honesty of strangers.
+
+`cw:` marks content. It does not regulate it: what is lawful to send or offer
+differs by country, and that is the operator's business and not the format's.
+
+```
+t:offer f:X1QZ3N pos:38.6902,-9.4012 kind:other cw:adult price:~40EUR/h ts:2026-08-08_14:26:40 m:massage, by appointment
+```
+
+120 bytes.
+
+### 4.7 Time
 
 `ts:` is written the way a person reads it, in UTC:
 
@@ -316,7 +399,7 @@ A packet that may be relayed or carried **must** have a time field. A carried
 packet can be delivered days later, and an undated position is plotted as
 current. Two alternatives exist for stations without a clock (section 10.5).
 
-### 4.7 Extending the format
+### 4.8 Extending the format
 
 A new field takes an unused key, declares its type, and is placed anywhere.
 Receivers that do not know the key skip it and its value. No existing field
@@ -1934,7 +2017,7 @@ Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
-`seq`, `title`, `dest`, `onboard`, `price`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`seq`, `title`, `dest`, `onboard`, `price`, `cw`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2001,6 +2084,7 @@ packet **250 bytes**, on every transport.
 | `r` | `hex6` | the identifier of another packet this one refers to |
 | `n` | `ratio` | this packet is part i of n |
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
+| `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
@@ -2151,6 +2235,26 @@ what it satisfied.
 | `warning` | will affect you, act now |
 | `danger` | life-threatening, leave |
 
+### Content warnings
+
+`cw:`, one or more words separated by commas.
+
+| Word | Contents |
+|---|---|
+| `adult` | sexual content |
+| `nudity` | nudity that is not sexual |
+| `violence` | violence |
+| `injury` | graphic injury, blood, surgery |
+| `death` | death, human or animal |
+| `drugs` | drug or alcohol use |
+| `language` | profanity |
+| `spoiler` | spoils something the reader may not have seen |
+| `flashing` | rapid flashing or strobing |
+| `other` | something else the sender thinks needs a warning |
+
+Repeated on every part, covers any `file:`, stays in cleartext when the body is
+sealed, never stripped by a relay. Absence is not a guarantee.
+
 ### Prices
 
 ```
@@ -2219,6 +2323,7 @@ document.
 | `wave`, `swell`, `seatemp`, `vis` | not implemented; no source |
 | `t:passage`, `t:event`, `t:offer`, `t:need` | not implemented |
 | `price:` | not implemented |
+| `cw:` content warnings | not implemented |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
 | Periodic `t:identity` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |

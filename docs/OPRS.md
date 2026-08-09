@@ -142,7 +142,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `price` | `money` | what is being asked or offered (section 22.1) |
 | `freq` | `qty` | a frequency (section 23) |
 | `bw` | `qty` | bandwidth |
-| `shift` | `qty` | repeater input offset, signed |
+| `shift` | `qty` | repeater input, as an offset from `freq` |
+| `input` | `qty` | repeater input frequency, stated outright |
 | `tone` | `qty` | access tone |
 | `power` | `qty` | transmit power |
 | `mode` | `enum` | how a channel is modulated |
@@ -2002,11 +2003,12 @@ t:channel f:X1QZ3N freq:145.500MHz mode:fm kind:listen since:2026-08-08_18:00:00
 
 | Key | Meaning |
 |---|---|
-| `freq:` | the frequency |
+| `freq:` | the frequency to tune to hear this station |
 | `ch:` | its number in a band plan, where it has one |
 | `mode:` | how it is modulated |
 | `bw:` | bandwidth, where the mode does not imply it |
-| `shift:` | repeater input offset, signed |
+| `shift:` | repeater input, as an offset from `freq:` |
+| `input:` | repeater input, stated outright (section 23.4) |
 | `tone:` | access tone |
 | `power:` | transmit power |
 | `range:` | how far the operator expects it to reach |
@@ -2116,7 +2118,46 @@ t:channel f:X1BOA3 pos:38.6902,-9.4012 freq:156.800MHz ch:16 mode:fm power:25W r
 
 154 bytes: a vessel on channel 16, battery powered, about 15 km on a good day.
 
-### 23.4 One channel per packet
+### 23.4 Repeaters that listen elsewhere
+
+`freq:` is **the frequency to tune to hear this station**. On a simplex or
+listen-only channel that is the whole story. A repeater has a second frequency:
+the one it listens on, which is the one a user transmits on.
+
+`shift:` gives it as an offset, which is how repeaters are conventionally
+listed and is shorter:
+
+```
+shift:-600kHz     the input is 600 kHz below the output
+```
+
+`input:` gives it outright, for when it is not a simple offset:
+
+```
+t:channel f:X3RLY7 pos:38.7810,-9.2043 freq:145.750MHz input:433.000MHz mode:fm tone:123.0Hz power:25W range:30km kind:repeater ts:2026-08-08_14:26:40
+```
+
+150 bytes: listens on 70 centimetres, transmits on 2 metres. No offset can
+express that, because the two frequencies are not in the same band and the
+number would be larger than either.
+
+The two forms describe the same thing and a packet carries one, not both:
+
+```
+t:channel f:X3RLY7 freq:145.600MHz input:145.000MHz mode:fm kind:repeater ts:2026-08-08_14:26:40
+```
+
+96 bytes, which is `shift:-600kHz` written out. Where a station sends both
+anyway, `input:` is authoritative, being the measurement rather than the
+arithmetic.
+
+If the input differs by more than its frequency -- a different mode, a different
+bandwidth, a gateway that hears DMR and speaks FM -- it is not one channel with
+two frequencies. Send two `t:channel` packets with `kind:gateway`, one for each
+side, and let each carry its own `mode:` and `bw:`. Cramming a second mode into
+this packet would mean a second `mode:` key, and a key appears once.
+
+### 23.5 One channel per packet
 
 A station that uses several frequencies sends several packets, one each.
 
@@ -2147,7 +2188,7 @@ t:channel f:X3RLY7 freq:156.800MHz mode:fm kind:emergency ts:2026-08-08_14:26:40
 
 159 and 117 bytes.
 
-### 23.5 Transmitting is regulated
+### 23.6 Transmitting is regulated
 
 A `t:channel` packet says what a station does; it does not make it lawful. A
 frequency, a power and a mode together describe a transmission that in most of
@@ -2205,7 +2246,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`tone`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2284,7 +2325,8 @@ packet **250 bytes**, on every transport.
 | `price` | `money` | what is being asked or offered (section 22.1) |
 | `freq` | `qty` | a frequency (section 23) |
 | `bw` | `qty` | bandwidth |
-| `shift` | `qty` | repeater input offset, signed |
+| `shift` | `qty` | repeater input, as an offset from `freq` |
+| `input` | `qty` | repeater input frequency, stated outright |
 | `tone` | `qty` | access tone |
 | `power` | `qty` | transmit power |
 | `mode` | `enum` | how a channel is modulated |
@@ -2486,6 +2528,9 @@ supply:  grid solar wind hydro battery generator fuel mixed
 Recurring windows: `every:` between them, `for:` how long each lasts, `at:` the
 UTC time of day the cycle is anchored to, default `00:00:00`. The 3-3-3 plan is
 `ch:3 every:3h for:3min`. `since:` and `until:` bound the schedule itself.
+
+`freq:` is what you tune to hear the station. A repeater's input is `shift:` as
+an offset or `input:` outright, the latter for cross-band.
 
 `range:` is the operator's estimate, not a guarantee.
 

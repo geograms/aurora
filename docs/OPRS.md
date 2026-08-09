@@ -199,7 +199,7 @@ The type is fixed by this document and is never transmitted.
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
 | `ratio` | two digits `1` to `9` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
-| `money` | an amount, an ISO 4217 code, optionally `/` and a period, or `free` | `25EUR/day` |
+| `money` | an amount with an ISO 4217 code, optional leading `~` and `/` period, or one of `offers`, `swap`, `free` (section 22.2) | `~25EUR/day` |
 | `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
 | `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
 | `b64` | base64url, no padding | `pQ4m9xT2vB8kR` |
@@ -1787,8 +1787,8 @@ not an emergency; a need that is an emergency is an `sos`.
 
 ### 22.1 Price
 
-`price:` states what is being asked. It is optional: an offer without one is
-free, or negotiable, or none of the receiver's business until they ask.
+`price:` states what is being asked. It is optional: an offer without one has
+simply not named a price.
 
 ```
 price:120EUR          once, for the thing itself
@@ -1798,25 +1798,78 @@ price:12.50EUR/h      per hour
 price:free            nothing
 ```
 
-An amount, an ISO 4217 currency code in uppercase, and optionally `/` and a
-period. No period means a single price for the whole thing; a period means it
-repeats, which is the difference between selling and renting.
+An amount, a currency, and optionally `/` and a period. No period means a single
+price for the whole thing; a period means it repeats, which is the difference
+between selling and renting.
 
 Periods: `h`, `day`, `week`, `month`, `year`.
 
+### 22.2 Currencies
+
+The currency is an **ISO 4217 code**: three uppercase letters, from the official
+list and never invented.
+
 ```
-t:offer f:X1QZ3N pos:38.6902,-9.4012 kind:gear price:120EUR ts:2026-08-08_14:26:40 m:Aries windvane, needs a new bearing
-t:offer f:X3RLY7 pos:38.6902,-9.4012 kind:berth price:25EUR/day rad:1km ts:2026-08-08_14:26:40
-t:offer f:X1QZ3N pos:38.7223,-9.1393 kind:repair price:12.50EUR/h rad:20km ts:2026-08-08_14:26:40 m:diesel and rigging
+EUR  USD  GBP  CHF  JPY  CAD  AUD  NZD  SEK  NOK  DKK  PLN  CZK
+BRL  MXN  ARS  ZAR  INR  CNY  IDR  PHP  THB  TRY  MAD  XOF  XPF
 ```
 
-120, 94 and 118 bytes: a windvane for sale, a berth by the day, and a
-mechanic by the hour.
+Those are examples, not the list. Any code in ISO 4217 is valid, and nothing
+outside it is: a receiver that meets `price:120XYZ` skips the field rather than
+displaying a number in a currency it cannot name.
 
-The currency is always written out. A bare number would be read as euros by half
-the network and as dollars by the other half, and this format does not leave a
-unit to be assumed anywhere else either (section 10.6). The amount follows the
-ordinary number rules, so a decimal point and never a comma: `price:12.50EUR`.
+No symbols. `EUR` and not the euro sign, because the format is ASCII, and `USD`
+rather than a dollar sign, because a dollar sign is the currency of about twenty
+different countries and says which one only by context a packet does not carry.
+
+The amount follows the ordinary number rules (section 4.4): a decimal point and
+never a comma, so `price:12.50EUR`, and no thousands separator, so
+`price:12000EUR`.
+
+### 22.3 When the price is not fixed
+
+Not every price is a figure, and a seller who has not decided is common enough
+to deserve saying rather than leaving the field out.
+
+| `price:` | Meaning |
+|---|---|
+| `120EUR` | firm, this is the price |
+| `~120EUR` | negotiable, about that |
+| `~25EUR/day` | negotiable, and per day |
+| `offers` | no figure, make one |
+| `swap` | wants a trade, not money |
+| `free` | nothing |
+
+A leading `~` means the figure is a starting point rather than a demand:
+
+```
+t:offer f:X1QZ3N pos:38.6902,-9.4012 kind:gear price:~120EUR ts:2026-08-08_14:26:40 m:Aries windvane, needs a new bearing
+```
+
+121 bytes, one more than the firm version. It reads as "about 120 euros" to a
+person and parses as an amount with a negotiable flag to everything else, which
+is what a sorted list of prices needs.
+
+`offers` says the seller wants to hear a number first:
+
+```
+t:offer f:X1QZ3N pos:38.6902,-9.4012 kind:gear price:offers until:2026-08-20_12:00:00 ts:2026-08-08_14:26:40 m:folding bike, working order
+```
+
+138 bytes. There is nothing to sort by, and a receiver showing it in a price
+column shows the word rather than inventing a zero.
+
+`swap` says money is not what is wanted:
+
+```
+t:offer f:X1BOA3 pos:38.6902,-9.4012 kind:gear price:swap ts:2026-08-08_14:26:40 m:spare anchor for a good dinghy pump
+```
+
+118 bytes.
+
+Leaving `price:` out entirely still means what it always meant: the sender has
+not said. That is different from `offers`, which is an invitation, and from
+`free`, which is a price.
 
 `price:` works on a `need` as well, where it is what the sender will pay:
 
@@ -2097,6 +2150,18 @@ what it satisfied.
 | `watch` | may affect you, be ready |
 | `warning` | will affect you, act now |
 | `danger` | life-threatening, leave |
+
+### Prices
+
+```
+120EUR        firm          ~120EUR       negotiable
+25EUR/day     per day       ~25EUR/day    negotiable, per day
+offers        make one      swap          wants a trade
+free          nothing       (absent)      not stated
+```
+
+Currency is an ISO 4217 code, three uppercase letters, never a symbol. Periods:
+`h`, `day`, `week`, `month`, `year`.
 
 ### Identifiers
 

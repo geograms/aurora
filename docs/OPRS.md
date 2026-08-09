@@ -1599,25 +1599,24 @@ t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes n:2/3 m:The feed poin
 
 135 and 143 bytes, parts 1 and 2 of 3.
 
-### 19.3 Posts longer than that
+### 19.3 Files and images
 
-A longer post is carried as a file, and the packet carries its opening:
+`file:` attaches one file to a post, content-addressed like any other
+(section 6.7):
 
 ```
-t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.md m:I rebuilt the dipole and measured it properly. The full write-up runs to eight pages.
+t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:The finished dipole, feed point centred at last.
 ```
 
-219 bytes. `m:` holds as much of the beginning as fits and `file:` holds the
-whole thing, content-addressed like any other file (section 6.7).
+183 bytes, of which 73 are the file reference and 64 of those the digest itself. The post reads on its own and the image
+is fetched by whoever wants it and can.
 
-This is deliberate rather than a limitation worked around. A post split across
-40 packets is unreadable until every one of them arrives, and on a channel where
-a single advertisement is already a lottery that is a poor way to publish. With
-a file reference the packet stands on its own: a reader gets the title, the
-opening and the author immediately, and fetches the rest if it wants it and can.
-
-The 9-part limit is not raised for posts. A receiver that loses one part of
-forty has waited a long time to be told it has nothing.
+About 1500 characters is a generous budget once a title, a few tags and an image
+reference are paid for, and it is the same 9 parts every other kind of text
+gets. The limit is not raised for posts. A post split across forty packets would
+be unreadable until every one of them arrived, and on a channel where a single
+advertisement is already a lottery that is a poor way to publish. A post that
+genuinely needs more room is a document, and a document is a file.
 
 ### 19.4 Signing
 

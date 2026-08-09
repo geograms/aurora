@@ -35,28 +35,69 @@ anything else by saying so.
 ## 2. LoRa
 
 The regional bands are those of the LoRa Alliance regional parameters, which
-national regulators and every LoRa device already follow. The calling frequency
-is this document's proposal.
+national regulators and every LoRa device already follow. The frequency and
+modulation are this document's proposal.
 
-| Region | Band | Calling frequency | Typical limit |
+| Region | Band | OPRS frequency | Typical limit |
 |---|---|---|---|
 | Europe, UK, Africa, Middle East | 863-870 MHz | 869.525 MHz | 500 mW ERP, 10% duty in 869.4-869.65 |
-| United States, Canada, Mexico, Brazil | 902-928 MHz | 906.875 MHz | 1 W, frequency hopping or wideband |
-| Australia, New Zealand | 915-928 MHz | 917.0 MHz | 1 W |
-| Japan, Singapore, Malaysia, Thailand, Vietnam, Indonesia | 920-925 MHz | 923.2 MHz | 13 dBm, listen-before-talk |
-| South Korea | 920-923 MHz | 922.1 MHz | 10 mW, listen-before-talk |
-| India | 865-867 MHz | 865.0625 MHz | 30 dBm |
-| China | 470-510 MHz | 470.3 MHz | 19 dBm |
-| Russia | 864-870 MHz | 868.9 MHz | 25 mW |
+| United States, Canada, Mexico, Brazil | 902-928 MHz | 918.875 MHz | 1 W |
+| Australia, New Zealand | 915-928 MHz | 919.900 MHz | 1 W |
+| Japan, Singapore, Malaysia, Thailand, Vietnam, Indonesia | 920-925 MHz | 923.400 MHz | 13 dBm, listen-before-talk |
+| South Korea | 920-923 MHz | 922.300 MHz | 10 mW, listen-before-talk |
+| India | 865-867 MHz | 865.4025 MHz | 30 dBm |
+| China | 470-510 MHz | 470.500 MHz | 19 dBm |
+| Russia | 864-870 MHz | 869.100 MHz | 25 mW |
 
-**Duty cycle is the binding constraint in Europe, not power.** Ten percent in the
-high-power sub-band means a station transmitting for one second is silent for
-nine, and a mesh that ignores this is both illegal and self-defeating: the band
-is shared with everyone else's meters and alarms.
+**Modulation: SF9, 250 kHz bandwidth, coding rate 4/5.** Everywhere. A network
+that does not agree on this cannot hear itself, and it is the setting that makes
+the frequency choice work.
 
-Modulation is not fixed here. Spreading factor, bandwidth and coding rate trade
-range against airtime, and a network chooses them together or its members cannot
-hear each other. A station states what it uses in `t:channel`.
+### 2.1 Sharing with Meshtastic and MeshCore
+
+Outside Europe the frequencies above are chosen at least a megahertz clear of the
+Meshtastic regional defaults, because the band has room and there is no reason
+to fight over a channel.
+
+Europe has no room. The only sub-band offering 500 mW and 10% duty is
+869.4-869.65 MHz, which is **250 kHz wide -- exactly one LoRa channel**. There is
+no second slot to move to. Meshtastic sits there because there is nowhere else,
+and so does everything else: regulators in Norway have measured heavy smart-meter
+activity across 869.525 MHz and above.
+
+So in Europe OPRS shares the channel deliberately, and separates itself by
+modulation instead. Meshtastic's default preset is SF11 at 250 kHz; OPRS is SF9.
+
+Different spreading factors are quasi-orthogonal, so each network rejects much of
+the other's signal rather than being deafened by it. **That is a partial defence
+and this document does not pretend otherwise**: LoRa exhibits capture, so a
+strong interferer wins whatever its spreading factor, and two networks in one
+250 kHz channel will cost each other packets.
+
+The stronger argument for SF9 is not orthogonality but airtime:
+
+| | 250 B packet | Silence owed at 10% duty | Airtime vs LongFast |
+|---|---|---|---|
+| SF9, 250 kHz | 615 ms | 5.5 s | 30% |
+| SF11, 250 kHz (Meshtastic) | 2050 ms | 18.5 s | 100% |
+
+OPRS occupies the channel for **less than a third** of the time Meshtastic needs
+for the same 250 bytes. Sharing a channel politely means being on it briefly, and
+that does more for the neighbours than any choice of spreading factor.
+
+The cost is sensitivity: SF9 is 5 dB below SF11, which is roughly two thirds of
+the range in typical suburban propagation. OPRS accepts that, because a 250-byte
+packet format designed around relaying and carrying is better served by many
+short transmissions than by few long ones.
+
+A denser urban network may prefer SF8 -- more orthogonal still, 17% of the
+airtime, about half the range. A long rural link may prefer SF11 and accept the
+contention. Both are legitimate; the station says which it uses in `t:channel`.
+
+**Duty cycle is the binding constraint in Europe, not power.** Ten percent means
+a station transmitting for one second is silent for nine, and the table above is
+what that costs in practice. A mesh that ignores this is both illegal and
+self-defeating: the band is shared with everyone else's meters and alarms.
 
 ---
 

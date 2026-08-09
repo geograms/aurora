@@ -3,7 +3,7 @@
 Where OPRS packets go on each bearer, and why the answer is not one number.
 
 Status: PROPOSAL. Nothing in this document is blessed by a regulator or by any
-other project. Section 9 states what is implemented, which today is none of it.
+other project. Section 11 states what is implemented, which today is none of it.
 
 ---
 
@@ -214,7 +214,7 @@ to the 25 mW parts of 863-868 MHz, and 25 mW is what gives 21 km.
 
 So the same silicon, the same antenna and the same firmware make a usable
 maritime link in Florida and a harbour toy in Portugal. This is the clearest
-example in this document of the argument in section 8: the only difference
+example in this document of the argument in section 10: the only difference
 between the two is a number in a table.
 
 Where it does work, HaLow is worth having. A 250-byte packet is 13 ms at MCS10
@@ -248,11 +248,86 @@ it is worth using despite being crowded.
 **Channel 6 is the proposed OPRS calling channel**, being available everywhere
 and clear of the 1 and 11 that consumer access points default to.
 
-Section 7 covers using this band connectionlessly.
+Section 9 covers using this band connectionlessly.
 
 ---
 
-## 5. Licence-free voice bands
+## 5. Bluetooth LE
+
+The only bearer in this document that ships today, and the only one with nothing
+to configure.
+
+2400-2483.5 MHz, forty channels of 2 MHz, the same everywhere. Three of them
+carry primary advertising:
+
+| Channel | Centre |
+|---|---|
+| 37 | 2402 MHz |
+| 38 | 2426 MHz |
+| 39 | 2480 MHz |
+
+**An operator sets no frequency and picks no region.** There is no table to look
+up, no duty cycle to budget and no national variant, because the controller does
+adaptive frequency hopping and the regulatory work was done by the chipset
+vendor. Every other section of this document exists because that is not true
+elsewhere.
+
+Range, with the antennas a phone actually has:
+
+| Mode | Budget | Free space |
+|---|---|---|
+| 1M PHY, 10 dBm | 105 dB | 1.7 km |
+| Coded PHY S=8, 10 dBm | 113 dB | 4.4 km |
+| Coded PHY S=8, 20 dBm | 123 dB | 13.8 km |
+
+Those are ceilings and a body in the way costs 10 to 20 dB of them. In practice
+BLE5 is tens to hundreds of metres between phones and a kilometre or two between
+fixed nodes with clear line of sight. At sea it is budget-limited long before the
+horizon: 32 km masthead to masthead is well past anything in the table above.
+
+So BLE5 is the bearer for the boat alongside, not the boat over the horizon.
+That is exactly the role it plays: [ble5.md](ble5.md) covers the framing, the
+advertising rotation and every byte budget on the path, and
+[store-and-forward.md](store-and-forward.md) covers what happens when the peer is
+not there at all.
+
+---
+
+## 6. Marine VHF, which OPRS does not use
+
+Listed to rule it out, as the United States is ruled out for CB.
+
+156-174 MHz is on every vessel, is internationally harmonised, and would be an
+obvious carrier for a maritime packet format. OPRS does not use it, and no
+station should be built that does.
+
+**These channels must never carry data under any circumstances:**
+
+| Channel | Frequency | Purpose |
+|---|---|---|
+| 16 | 156.800 MHz | distress, safety and calling |
+| 70 | 156.525 MHz | digital selective calling |
+| AIS 1 | 161.975 MHz | AIS position reporting |
+| AIS 2 | 162.025 MHz | AIS position reporting |
+
+Channel 70 and the AIS channels are the dangerous ones precisely because they
+are already digital, so a transmitter that can generate an OPRS packet can
+generate something that lands there. AIS is how ships avoid collisions and
+channel 16 is how people are found alive. Interference on either is a
+safety-of-life matter and not a spectrum-etiquette one.
+
+Marine VHF also requires a ship station licence and an operator certificate in
+most jurisdictions, and permitted emissions are specified per channel. Whatever
+room exists for data is not room this project should be exploring.
+
+A station may legitimately *state* that it monitors a marine channel, using
+`t:channel` with `kind:emergency` and no `power:` field, which says it listens
+and does not transmit. That is a claim about the operator's attention, not a
+transmission plan.
+
+---
+
+## 7. Licence-free voice bands
 
 These carry OPRS only as audio-frequency modulation over a voice channel, which
 is slow and which this document does not specify. They are listed because a
@@ -279,7 +354,7 @@ Beware the channel table. Channels 23, 24 and 25 are out of numeric order --
 frequencies between were allocated to radio control. Any code that computes a
 frequency from a channel number by arithmetic is wrong for exactly these three.
 
-### 5.1 CB is Europe-only for OPRS
+### 7.1 CB is Europe-only for OPRS
 
 In the United States it is unlawful. 47 CFR 95.931 permits a CB station to
 transmit "two-way plain language voice communications" and nothing else, and
@@ -317,7 +392,7 @@ and the whole value of 3-3-3 is that someone is listening. Channel 16 is the top
 of the 2015 extension: legal across CEPT for analogue and digital alike, and
 inaudible to the legacy eight-channel radios that make up most of the traffic.
 
-### 5.2 Whether data is permitted on PMR446 at all
+### 7.2 Whether data is permitted on PMR446 at all
 
 Unresolved, and stated as such rather than assumed.
 
@@ -364,7 +439,7 @@ software fixes that.
 
 ---
 
-## 6. Amateur bands, licensed operators only
+## 8. Amateur bands, licensed operators only
 
 An `X1` or `X3` callsign is self-generated and must never be originated onto
 amateur spectrum ([OPRS.md](OPRS.md) section 25). Everything here applies to a
@@ -410,9 +485,9 @@ that the band is empty because your own software cannot hear anything on it.
 
 ---
 
-## 7. WiFi without association
+## 9. WiFi without association
 
-### 7.1 What monitor mode does and does not buy
+### 9.1 What monitor mode does and does not buy
 
 **Monitor mode does not increase range.** Range on a WiFi bearer comes from data
 rate, band and power: 802.11b at 1 Mbps is roughly 10 to 20 dB more sensitive
@@ -435,7 +510,7 @@ shape for OPRS: a packet is 250 bytes addressed to a callsign, not a session.
 So the honest framing is that this is a **bandwidth and topology** improvement
 over BLE5, not a range improvement over anything.
 
-### 7.2 The obstacle
+### 9.2 The obstacle
 
 Most Android phones cannot do it. The Broadcom and Qualcomm chipsets in mainstream
 handsets ship without monitor mode or frame injection; enabling either needs a
@@ -446,7 +521,7 @@ none of it is something an application can rely on.
 Aurora is primarily an Android application. A bearer that requires root is not a
 bearer, it is a laboratory.
 
-### 7.3 The plan
+### 9.3 The plan
 
 Four steps, in order of what is possible today.
 
@@ -474,7 +549,7 @@ mode is being asked to do badly: kilometres, sub-gigahertz, connectionless by
 configuration rather than by subversion. The bearer abstraction should be written
 so that adding it later is a driver, not a redesign.
 
-### 7.4 What not to do
+### 9.4 What not to do
 
 Do not transmit raw frames from a phone by patching its driver and ship that.
 Beyond needing root, altering the radio behaviour of a type-approved device is
@@ -483,7 +558,7 @@ their behalf inside an app store build is not defensible.
 
 ---
 
-## 8. On harmonisation
+## 10. On harmonisation
 
 Aligning national allocations is a decade of committee work and a specification
 does not move it. What a specification can do is remove every excuse that is not
@@ -501,10 +576,12 @@ work.
 
 ---
 
-## 9. Implementation status
+## 11. Implementation status
 
 | Element | State |
 |---|---|
+| Bluetooth LE | **implemented**; the off-grid plane today, see [ble5.md](ble5.md) |
+| Marine VHF | deliberately not implemented and must not be |
 | PMR446 channel 16, CB channel 24 | not implemented; no bearer carries OPRS over an audio channel |
 | Regional LoRa plans | not implemented; `lib/connections/lora/lora_connection.dart` sets no frequency, and the SX1262 and SX1276 drivers accept one from a caller that does not yet exist |
 | Calling frequencies | not implemented; proposed here for the first time |

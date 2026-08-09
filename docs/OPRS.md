@@ -123,7 +123,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 |---|---|---|
 | `t` | `enum` | packet type, always the first field |
 | `f` | `call` | sending callsign |
-| `d` | `dest` | destination: a callsign, a group name, or absent for a broadcast |
+| `d` | `addr` | recipient: a callsign, a group name, or absent for a broadcast |
 | `ts` | `time` | when the packet was composed, UTC |
 | `tz` | `offset` | the sender's offset from UTC, for display |
 | `q` | `words` | what the sender wants back (section 7) |
@@ -132,6 +132,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `n` | `ratio` | this packet is part i of n |
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
+| `urg` | `enum` | how much this is worth carrying (section 13.4) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
@@ -207,7 +208,7 @@ The type is fixed by this document and is never transmitted.
 | `label` | lowercase letters, digits and `-`, at least one character | `field-day` |
 | `labels` | one or more `label`, separated by commas | `field-day,photos` |
 | `call` | uppercase letters, digits, `-` and `/` | `CT1ABC-9` |
-| `dest` | a `call` or a group name | `LISBOA` |
+| `addr` | a `call` or a group name | `LISBOA` |
 | `path` | one or more `call`, separated by commas | `X32DVA,CT1ABC-9` |
 | `hex6` | exactly 6 lowercase hexadecimal characters | `f6ff8d` |
 | `time` | `YYYY-MM-DD_HH:MM:SS`, UTC | `2026-08-08_14:26:40` |
@@ -588,6 +589,7 @@ q:read       confirm the operator read it
 q:pos        send your position
 q:batt       send your battery level
 q:identity   send your public key
+q:sign       sign a receipt confirming you read this
 q:pong       reply to this reachability test
 ```
 
@@ -645,10 +647,10 @@ later delivery discards its copy on hearing the matching `s:ack`.
 
 ## 8. Reserved words
 
-`q:` and `s:` words assigned by this document: `ack`, `read`, `pos`, `batt`,
-`identity`, `pong`, `no`. Reactions assigned for `add:` and `remove:`: `like`. All
-other words are reserved. A word
-beginning with `z` is private, as a key beginning with `z` is.
+`q:` and `s:` words assigned by this document: `ack`, `read`, `sign`, `pos`,
+`batt`, `identity`, `pong`, `no`. Reactions assigned for `add:` and `remove:`:
+`like`. All other words are reserved. A word beginning with `z` is private, as a
+key beginning with `z` is.
 
 ---
 
@@ -1253,7 +1255,7 @@ for that packet type:
 The limit belongs to the type rather than to a field. A sender cannot ask the
 network for more of its airtime than its traffic warrants, and an emergency does
 not have to remember to ask: `sos` and `warning` travel nine relays because
-are the packets worth spending a shared channel on, and a chat message travels
+they are the packets worth spending a shared channel on, and a chat message travels
 three because it is not.
 
 ### 13.2 Loops
@@ -1277,6 +1279,117 @@ overhears a receipt for a message it is carrying discards its copy, which is why
 a receipt is worth repeating even after the sender has seen it.
 
 ---
+
+### 13.4 Carrying toward a place
+
+A message can be addressed to a person no path reaches and no carrier knows,
+and still get there, if it says where it is going.
+
+```
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 rad:50km urg:normal until:2026-09-08_00:00:00 q:sign m:are you still in Athens in September?
+```
+
+160 bytes: Lisbon to Athens, 2852 km, with nothing in between.
+
+| Key | Meaning here |
+|---|---|
+| `dest:` | where the packet is bound |
+| `rad:` | how close counts as arrived |
+| `until:` | when it stops being worth carrying |
+| `urg:` | how much it is worth carrying |
+| `via:` | who has carried it, as everywhere else |
+
+**A carrier accepts a copy only if it expects to reduce the distance to
+`dest:`.** That is the whole routing rule. A station driving to Madrid is 483 km
+closer to Athens and takes it; one sailing to the Azores is not and does not. A
+carrier already in `via:` does not take it again, and a carrier inside `rad:`
+stops carrying and starts airing it normally, because it has arrived.
+
+```
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 rad:50km urg:normal until:2026-09-08_00:00:00 q:sign via:X32DVA,CT1ABC-9 m:are you still in Athens in September?
+```
+
+180 bytes after two carriers.
+
+A packet with `dest:` is **not** bound by the three-relay limit of section 13.1.
+Three relays do not cross a continent. It is bound by `until:` instead, which is
+why `until:` is required here and optional everywhere else: a carried packet with
+no expiry is litter that outlives the reason it was sent.
+
+There is no copy limit in the format. Each carrier decides what to hold, and
+`docs/store-and-forward.md` already bounds that with a per-device quota and
+eviction by priority, so a limit here would duplicate one the carrier already
+enforces and cannot be trusted to obey anyway.
+
+### 13.5 Urgency
+
+`urg:` takes one of `low`, `normal`, `high`, `urgent`. It is what a carrier
+sorts by when its store is full and something has to be dropped.
+
+It is a request, not an instruction. A carrier is free to ignore it, to carry
+only `low` traffic for its own reasons, or to distrust a station that marks
+everything `urgent` -- and stations will. `urg:` earns its byte because the
+alternative is a carrier choosing by arrival order, which is worse for everyone.
+
+An `sos` is not marked `urgent`; it is an `sos`, and section 13.1 already gives
+it nine relays. `urg:` is for ordinary traffic that happens to matter.
+
+### 13.6 What a carrier can read
+
+A carried packet passes through strangers. The envelope is what they need and
+the body is not:
+
+```
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:38,24 rad:200km urg:high until:2026-09-08_00:00:00 x:<64 characters> g:<60 characters>
+```
+
+236 bytes. `dest:`, `rad:`, `urg:` and `until:` stay in cleartext because a
+carrier cannot route without them. `m:` is replaced by `x:`, sealed to the
+recipient's key, so every carrier can decide whether to carry it and none can
+read it. This is the same rule as section 9.2 and needs no new mechanism.
+
+A sealed body is longer than the text it replaces, so a long carried message is
+split into parts (section 6.6). Every part repeats the routing keys, since a
+carrier may hold one part and not another.
+
+**`dest:` tells every carrier roughly where your correspondent is**, and `d:`
+already told them who. Coarsen it deliberately: `dest:38,24 rad:200km` says
+"somewhere around Athens" and is 2 decimal places short of a street. Section 10.1
+ties decimal places to precision, and here that is a privacy control rather than
+an accuracy claim.
+
+### 13.7 Signed receipts
+
+`q:sign` asks the recipient to sign an acknowledgement. It is a person agreeing
+that they read something, not a device reporting that bytes arrived:
+
+```
+t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign dest:38.72,-9.14 rad:50km until:2026-10-01_00:00:00 g:<60 characters>
+```
+
+181 bytes. `r:` names the original message -- `87e209`, computed from its sender,
+timestamp and text -- and `g:` signs the receipt, which covers `f:` and `r:`
+together (section 9.1). The result is evidence that the holder of `X1RD89`'s key
+acknowledged that exact message, and it is checkable by anyone holding the
+public key, not only by the sender.
+
+The receipt carries its own `dest:` and `until:`, because it has to hitchhike
+home the same way the message came.
+
+| `s:` | Means | Signed |
+|---|---|---|
+| `ack` | it reached a device | no |
+| `read` | it was opened | no |
+| `sign` | a person acknowledged it | **required** |
+
+**An `s:sign` receipt without a valid `g:` is not a signed receipt.** A receiver
+discards it rather than showing it as one, because the whole point of the state
+is the signature, and a state that can be claimed without proof is worth less
+than no state at all.
+
+A signed receipt can be replayed by anyone who heard it, and that is harmless: it
+names one message and says one thing, so a second copy asserts exactly what the
+first did.
 
 ## 14. Tracks
 
@@ -2275,7 +2388,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`urg`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2335,7 +2448,7 @@ packet **250 bytes**, on every transport.
 |---|---|---|
 | `t` | `enum` | packet type, always the first field |
 | `f` | `call` | sending callsign |
-| `d` | `dest` | destination: a callsign, a group name, or absent for a broadcast |
+| `d` | `addr` | recipient: a callsign, a group name, or absent for a broadcast |
 | `ts` | `time` | when the packet was composed, UTC |
 | `tz` | `offset` | the sender's offset from UTC, for display |
 | `q` | `words` | what the sender wants back (section 7) |
@@ -2344,6 +2457,7 @@ packet **250 bytes**, on every transport.
 | `n` | `ratio` | this packet is part i of n |
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
+| `urg` | `enum` | how much this is worth carrying (section 13.4) |
 | `add` | `enum` | something this packet adds (section 6.5) |
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
@@ -2473,7 +2587,7 @@ dot, never a trailing dot. Trailing zeros are significant.
 
 `q:` asks and `s:` answers with the same words, several separated by commas.
 
-Assigned: `ack`, `read`, `pos`, `batt`, `identity`, `pong`, `no`.
+Assigned: `ack`, `read`, `sign`, `pos`, `batt`, `identity`, `pong`, `no`.
 
 `s:no` means the request will not be served at all. A partial answer names only
 what it satisfied.
@@ -2563,6 +2677,17 @@ an offset or `input:` outright, the latter for cross-band.
 
 `range:` is the operator's estimate, not a guarantee.
 
+### Carrying toward a place
+
+`dest:` where it is bound, `rad:` how close counts as arrived, `until:` when to
+stop (required), `urg:` `low` `normal` `high` `urgent`. A carrier takes a copy
+only if it expects to get closer. Not bound by the three-relay limit.
+
+Seal the body with `x:` and leave the routing keys in cleartext. Coarsen
+`dest:` -- it geolocates your correspondent.
+
+`q:sign` asks for a signed receipt; `s:sign` without a valid `g:` is discarded.
+
 ### Identifiers
 
 Never transmitted. Both ends compute `sha256("<f>|<ts>|<payload>")` and take the
@@ -2621,6 +2746,9 @@ document.
 | `price:` | not implemented |
 | `cw:` content warnings | not implemented |
 | `t:channel` | not implemented |
+| Carrying toward a place (`dest:` on a message) | not implemented; custody currently carries only to a known callsign |
+| `urg:` | not implemented |
+| `q:sign` and signed receipts | not implemented |
 | Recurring windows, `site:`, `supply:`, `range:` | not implemented |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
 | Periodic `t:identity` | partly; a key is announced but not on a fixed period |

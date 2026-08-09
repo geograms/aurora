@@ -146,6 +146,13 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `tone` | `qty` | access tone |
 | `power` | `qty` | transmit power |
 | `mode` | `enum` | how a channel is modulated |
+| `ch` | `label` | channel number in a band plan |
+| `range` | `qty` | expected usable range, an estimate |
+| `site` | `enum` | whether the station stays where it is |
+| `supply` | `enum` | what powers the station |
+| `every` | `qty` | how long between recurring windows |
+| `for` | `qty` | how long each window lasts |
+| `at` | `clock` | time of day a cycle is anchored to, UTC |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -207,6 +214,7 @@ The type is fixed by this document and is never transmitted.
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
 | `ratio` | two digits `1` to `9` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
+| `clock` | `HH:MM:SS`, a time of day in UTC | `20:00:00` |
 | `money` | an amount with an ISO 4217 code, optional leading `~` and `/` period, or one of `offers`, `swap`, `free` (section 22.2) | `~25EUR/day` |
 | `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
 | `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
@@ -940,7 +948,7 @@ t:observation f:X3WX01 pos:38.7223,-9.1393 temp:57.6F hum:78% press:29.92inHg wi
 | temperature | `C`, `F` | `C` |
 | pressure | `hPa`, `inHg` | `hPa` |
 | rainfall | `mm`, `in` | `mm` |
-| duration | `s`, `min`, `h` | `s` |
+| duration | `s`, `min`, `h`, `day`, `week` | `s` |
 | frequency | `Hz`, `kHz`, `MHz`, `GHz` | `Hz` |
 | transmit power | `W`, `mW`, `kW`, `dBm` | `W` |
 | irradiance | `W/m2` | `W/m2` |
@@ -1995,14 +2003,19 @@ t:channel f:X1QZ3N freq:145.500MHz mode:fm kind:listen since:2026-08-08_18:00:00
 | Key | Meaning |
 |---|---|
 | `freq:` | the frequency |
+| `ch:` | its number in a band plan, where it has one |
 | `mode:` | how it is modulated |
 | `bw:` | bandwidth, where the mode does not imply it |
 | `shift:` | repeater input offset, signed |
 | `tone:` | access tone |
 | `power:` | transmit power |
+| `range:` | how far the operator expects it to reach |
 | `kind:` | what the channel is for |
 | `pos:` | where the station or repeater is |
-| `since:`, `until:` | the listening window |
+| `site:` | whether it stays there |
+| `supply:` | what powers it |
+| `every:`, `for:`, `at:` | a recurring listening window (section 23.2) |
+| `since:`, `until:` | when the whole schedule starts and stops |
 | `m:` | anything else |
 
 `kind:` takes one of `listen`, `simplex`, `repeater`, `beacon`, `net`,
@@ -2032,7 +2045,78 @@ A recurring schedule is not expressed here. A weekly net is a `t:event`
 (section 21) that names the frequency, and this packet describes the channel
 itself rather than the calendar around it.
 
-### 23.2 One channel per packet
+### 23.2 Recurring windows
+
+Three keys describe a schedule that repeats.
+
+| Key | Meaning |
+|---|---|
+| `every:` | how long between windows |
+| `for:` | how long each window lasts |
+| `at:` | the time of day the cycle is anchored to, UTC |
+
+The 3-3-3 plan is channel 3, for 3 minutes, every 3 hours:
+
+```
+t:channel f:X1QZ3N freq:446.03125MHz ch:3 mode:fm every:3h for:3min kind:listen ts:2026-08-08_14:26:40
+```
+
+102 bytes.
+
+`at:` defaults to `00:00:00`, so `every:3h` alone means 00:00, 03:00, 06:00 and
+so on in UTC, which is what makes the plan work: every station calculates the
+same windows without anyone coordinating. A schedule anchored to local time
+would put two neighbours an hour apart on different minutes.
+
+Give `at:` when the cycle is not anchored to midnight:
+
+```
+t:channel f:CT1ABC freq:14.300MHz mode:usb every:1day at:20:00:00 for:1h power:100W kind:net ts:2026-08-08_14:26:40
+```
+
+115 bytes: every day at eight in the evening, for an hour.
+
+`since:` and `until:` bound the schedule itself, and are a different thing from
+the windows inside it: `since:` says when the arrangement begins, `until:` when
+it lapses. A net that runs weekly through the summer has both.
+
+Absent `every:`, there is no schedule. `since:` and `until:` alone are a single
+window, and neither means the station is deaf the rest of the time.
+
+### 23.3 Where the station is, and whether it stays
+
+```
+t:channel f:X3RLY7 pos:38.7810,-9.2043 freq:145.600MHz mode:fm shift:-600kHz tone:123.0Hz power:50W range:40km site:fixed supply:solar kind:repeater ts:2026-08-08_14:26:40
+```
+
+171 bytes: a solar repeater on a hill, reaching about 40 km.
+
+`site:` takes one of `fixed`, `mobile`, `portable`, `temporary`. It answers a
+question `type:` does not: whether the channel will still be there tomorrow.
+A repeater is `fixed`, a handheld carried up a hill is `portable`, a vessel is
+`mobile`, and a set installed for a weekend is `temporary`.
+
+`supply:` takes one of `grid`, `solar`, `wind`, `hydro`, `battery`, `generator`,
+`fuel`, `mixed`. It is what tells a reader whether a station survives a power
+cut, which is the moment its frequency matters most. A `solar` repeater is
+reachable after the grid drops and a `grid` one is not.
+
+`range:` is the operator's own estimate of usable range, as a radius from
+`pos:`.
+
+**It is an estimate and the document says so.** Terrain, weather and the other
+station's antenna decide what actually happens, and a hill between two stations
+30 km apart beats a `range:40km` every time. It is published because the person
+who installed the antenna knows better than anyone else what it usually does,
+and a reader 200 km away can rule the channel out without trying.
+
+```
+t:channel f:X1BOA3 pos:38.6902,-9.4012 freq:156.800MHz ch:16 mode:fm power:25W range:15km site:mobile supply:battery kind:emergency ts:2026-08-08_14:26:40
+```
+
+154 bytes: a vessel on channel 16, battery powered, about 15 km on a good day.
+
+### 23.4 One channel per packet
 
 A station that uses several frequencies sends several packets, one each.
 
@@ -2063,7 +2147,7 @@ t:channel f:X3RLY7 freq:156.800MHz mode:fm kind:emergency ts:2026-08-08_14:26:40
 
 159 and 117 bytes.
 
-### 23.3 Transmitting is regulated
+### 23.5 Transmitting is regulated
 
 A `t:channel` packet says what a station does; it does not make it lawful. A
 frequency, a power and a mode together describe a transmission that in most of
@@ -2121,7 +2205,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`tone`, `power`, `mode`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`tone`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2204,6 +2288,13 @@ packet **250 bytes**, on every transport.
 | `tone` | `qty` | access tone |
 | `power` | `qty` | transmit power |
 | `mode` | `enum` | how a channel is modulated |
+| `ch` | `label` | channel number in a band plan |
+| `range` | `qty` | expected usable range, an estimate |
+| `site` | `enum` | whether the station stays where it is |
+| `supply` | `enum` | what powers the station |
+| `every` | `qty` | how long between recurring windows |
+| `for` | `qty` | how long each window lasts |
+| `at` | `clock` | time of day a cycle is anchored to, UTC |
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
@@ -2287,7 +2378,7 @@ Every measurement carries its unit, immediately after the number, with no space.
 | temperature | `C`, `F` | `C` |
 | pressure | `hPa`, `inHg` | `hPa` |
 | rainfall | `mm`, `in` | `mm` |
-| duration | `s`, `min`, `h` | `s` |
+| duration | `s`, `min`, `h`, `day`, `week` | `s` |
 | frequency | `Hz`, `kHz`, `MHz`, `GHz` | `Hz` |
 | transmit power | `W`, `mW`, `kW`, `dBm` | `W` |
 | irradiance | `W/m2` | `W/m2` |
@@ -2386,9 +2477,17 @@ Currency is an ISO 4217 code, three uppercase letters, never a symbol. Periods:
 transmits there; absent means it only listens.
 
 ```
-kind:   listen simplex repeater beacon net gateway emergency other
-mode:   fm am usb lsb cw ssb packet aprs lora ft8 psk31 rtty dmr dstar c4fm m17 dv other
+kind:    listen simplex repeater beacon net gateway emergency other
+mode:    fm am usb lsb cw ssb packet aprs lora ft8 psk31 rtty dmr dstar c4fm m17 dv other
+site:    fixed mobile portable temporary
+supply:  grid solar wind hydro battery generator fuel mixed
 ```
+
+Recurring windows: `every:` between them, `for:` how long each lasts, `at:` the
+UTC time of day the cycle is anchored to, default `00:00:00`. The 3-3-3 plan is
+`ch:3 every:3h for:3min`. `since:` and `until:` bound the schedule itself.
+
+`range:` is the operator's estimate, not a guarantee.
 
 ### Identifiers
 
@@ -2448,6 +2547,7 @@ document.
 | `price:` | not implemented |
 | `cw:` content warnings | not implemented |
 | `t:channel` | not implemented |
+| Recurring windows, `site:`, `supply:`, `range:` | not implemented |
 | `t:challenge` and `t:response` | not implemented; no challenge exists, and a spoofed authority-issued callsign is currently undetectable |
 | Periodic `t:identity` | partly; a key is announced but not on a fixed period |
 | `since:` and `until:` | not implemented; nothing in the current wire carries an event duration, and nothing expires on its own |

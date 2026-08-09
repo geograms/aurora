@@ -145,16 +145,10 @@ prohibits communicating with stations in other countries, Canada excepted.
 | Other CEPT countries | varies; check the national interface requirement |
 | United States | **not permitted**; voice emissions only, 47 CFR 95.931 |
 
-**27 MHz is not a local band.** At solar maximum the 11 m band propagates by
-skywave and a 4 W transmission is regularly heard across an ocean. That is a
-genuine opportunity for a format designed around carrying messages toward a
-place, and a genuine hazard: a beacon that is polite in Lisbon is interference
-in Brazil, where nobody agreed to any of this. A station using CB should treat
-airtime as a continental resource, not a local one.
-
-A 250-byte packet is 1.67 seconds at 1200 baud and 6.7 seconds at 300. The
-slower rates that survive HF noise are slow enough that CB suits carried,
-low-urgency traffic rather than anything interactive.
+**27 MHz is not a local band.** The 11 m band propagates by skywave, so a
+transmission that is polite locally can be interference on another continent
+where nobody agreed to any of this. Treat airtime here as a shared resource well
+beyond the horizon, and beacon sparingly.
 
 **PMR446, 446.0-446.2 MHz, 16 channels, 500 mW ERP.** Europe and CEPT only.
 Channel 1 is 446.00625 MHz and channels are spaced 12.5 kHz.
@@ -234,11 +228,37 @@ licensed operator using their own callsign, and encryption is not permitted
 | 2 m | 144-146 MHz | 144-148 MHz | 144-148 MHz |
 | 70 cm | 430-440 MHz | 420-450 MHz | 430-440 MHz |
 
-For data, use the regional APRS frequency rather than a new one: 144.800 MHz in
-Europe and most of Region 1, 144.390 MHz in North America, 145.175 MHz in
-Australia, 144.640 MHz in Japan. OPRS is APRS-shaped and shares its channel
-etiquette; adding a second frequency would split a working network to no
-purpose.
+**Use the regional APRS frequency. Do not allocate a new one.**
+
+| Region | Frequency |
+|---|---|
+| Europe and most of Region 1 | 144.800 MHz |
+| North America | 144.390 MHz |
+| Australia | 145.175 MHz |
+| Japan | 144.640 MHz |
+
+OPRS on VHF is an AX.25 UI frame at 1200 baud AFSK, which is what APRS has been
+for thirty years. That is the whole argument: **an existing TNC, an existing
+radio and an existing digipeater network carry OPRS unmodified**, because at the
+link layer there is nothing to change. A station needs new software and no new
+hardware.
+
+Allocating a separate OPRS frequency would throw that away, split a working
+network, and leave both halves worse.
+
+Two things follow from sharing a channel with APRS.
+
+An OPRS packet must be distinguishable from an APRS one, so that APRS software
+ignores it rather than misparsing it. The AX.25 destination address is the field
+that does this, and **OPRS should register its own** with the tocall registry
+before anybody transmits. This document does not assign one, because inventing
+an unregistered destination address is how two projects end up colliding in a
+namespace built to prevent exactly that.
+
+And the channel is shared with a live network that was there first. 144.800 MHz
+in Europe carries real traffic; OPRS beaconing at APRS rates would degrade a
+service other people depend on. Same etiquette, same duty, and no assumption
+that the band is empty because your own software cannot hear anything on it.
 
 ---
 

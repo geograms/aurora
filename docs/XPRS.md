@@ -3376,7 +3376,7 @@ everyone who belongs -- including members who never speak -- and a complete
 history of who suspended whom and when, gatewayed to the internet like anything
 else. That is **more** exposure than an open group, where only the people who
 talk are visible. A group that needs its membership kept secret cannot have it
-this way; use `x:` for the content, and see `circles.md` in this repository for
+this way; use `x:` for the content, and see [circles.md](circles.md) for
 groups where membership itself is encrypted.
 
 None of this contradicts section 13.11.3. A group is still an address and not a

@@ -13,6 +13,21 @@ rooms). **Phase 2 shipped** (user-created sub-rooms with an approval flow, see
 below). Phase 3 (members-only
 rooms) are planned.
 
+**A second, incompatible design for the same problem exists on paper.**
+[XPRS.md](XPRS.md) section 26 specifies closed groups for the packet radio
+format: the group holds its own keypair and is addressed by the `X5` callsign
+derived from it, authority is rooted in that key rather than in the author of a
+kind-34550 event, membership is a log of signed `t:moderate` grants, and
+succession is handing the group's private key over. None of it is implemented.
+
+The two differ on more than encoding, so anyone building Phase 3 should read it
+before choosing: rooms here have no roster at all, take their global admin from
+a compile-time `ROOM_MAIN_ADMIN`, and have no message-removal op; section 26 has
+a roster, a cryptographic root of trust that needs no pinned constant, and
+`hide:message`. Nothing here needs to change today, and nothing here should be
+extended toward members-only rooms without deciding which of the two models the
+wapp is implementing.
+
 ## Events
 
 | Purpose | Kind | Key tags |

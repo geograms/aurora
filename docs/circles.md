@@ -4,6 +4,13 @@ Private, encrypted group chat over Reticulum. This documents how it actually
 works (verified by reading the code in `../wapps/circles`), what is solid, and
 the gaps found while building the short-id-join end-to-end test.
 
+Circles is the design where **membership itself is confidential**, which is what
+[XPRS.md](XPRS.md) section 26 cannot offer: a closed XPRS group publishes its
+roster in clear because grants have to reach strangers to bootstrap. The two
+share the same root idea -- the group is a keypair, and whoever holds the
+private half administers it -- and diverge on whether the member list is a
+secret. Section 26.6 points here for anyone who needs it to be one.
+
 Source of truth: `geogram/wapps/circles/` (C → wasm). Host HAL: `lib/wapp/wapp_engine.dart`.
 
 ## 1. Where the code lives

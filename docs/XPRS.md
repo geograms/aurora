@@ -261,7 +261,7 @@ The type is fixed by this document and is never transmitted.
 | `nick` | 1 to 16 ASCII letters, digits, `-` and `_` | `joao-brito` |
 | `clock` | `HH:MM:SS`, a time of day in UTC | `20:00:00` |
 | `money` | an amount with an ISO 4217 code, optional leading `~` and `/` period, or one of `offers`, `swap`, `free` (section 22.2) | `~25EUR/day` |
-| `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
+| `qty` | a number followed immediately by its unit (section 10.9) | `48km/h` |
 | `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
 | `b64` | base64url, no padding | `pQ4m9xT2vB8kR` |
 | `bech32` | a bech32 string | `npub1qz3n7...` |
@@ -293,7 +293,7 @@ separates words in `q:ack,read`. A station writing `temp:14,2` for 14.2, or
 - A number has at least one digit before the dot: `0.4`, never `.4`. It never
   ends in a dot.
 - No exponent notation.
-- **A measurement carries its unit** (section 10.6). The number rules above
+- **A measurement carries its unit** (section 10.8). The number rules above
   govern the digits; the unit follows them with no space: `alt:3048m`,
   `spd:48km/h`, `temp:-3.5C`.
 
@@ -492,7 +492,7 @@ identifier, and a station that ignores it loses nothing but the courtesy.
 
 A packet that may be relayed or carried **must** have a time field. A carried
 packet can be delivered days later, and an undated position is plotted as
-current. Two alternatives exist for stations without a clock (section 10.5).
+current. Two alternatives exist for stations without a clock (section 10.7).
 
 ### 4.9 Extending the format
 
@@ -1288,7 +1288,7 @@ t:observation f:X1CAR7 pos:38.7231,-9.1402 o:212degm type:car ts:2026-08-08_14:2
 | `rain24` | `qty` | rainfall, previous 24 hours | rainfall |
 | `solar` | `qty` | solar irradiance | irradiance |
 
-A station reports in the unit it works in and says which it is (section 10.6).
+A station reports in the unit it works in and says which it is (section 10.8).
 A station holding Fahrenheit sends `temp:57.6F`; it does not convert, and the
 receiver does.
 
@@ -1353,12 +1353,15 @@ t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m seatemp:18.4C type:boat ts:
 
 99 bytes.
 
-### 10.4 Telemetry and station type
+### 10.5 Telemetry and station type
 
 | Key | Type | Meaning | Quantity |
 |---|---|---|---|
 | `batt` | `qty` | battery charge | proportion |
 | `volt` | `qty` | supply voltage | voltage |
+| `busy` | `qty` | proportion of the last hour the channel was occupied (section 10.6) | proportion |
+| `txtime` | `qty` | proportion of the last hour this station transmitted | proportion |
+| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.2) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
@@ -1369,7 +1372,82 @@ strength.
 
 An observation carries a note in `m:`, the same key a message uses.
 
-### 10.5 Stations without a clock
+### 10.6 The radio itself
+
+A station can measure the air, its battery and where it is. It can also measure
+**the channel it is sitting on and the stations it can hear**, and those two
+readings are what the rest of this format quietly assumes somebody has.
+
+```
+t:observation f:X3RLY7 ts:2026-08-08_14:26:40 busy:41% txtime:6%
+t:observation f:X3RLY7 ts:2026-08-08_14:26:40 hears:X1QZ3N,X32DVA,CT1ABC-9
+t:observation f:X3RLY7 ts:2026-08-08_14:26:40 busy:41% txtime:6% hears:X1QZ3N,X32DVA,CT1ABC-9 batt:82%
+```
+
+64, 74 and 102 bytes. No new packet type, because design rule 5 settles it: one
+type carries every kind of observation, and how busy a channel is is an
+observation about a radio exactly as temperature is one about the air.
+
+| Key | Reading |
+|---|---|
+| `busy` | proportion of the last hour the channel was occupied by anybody |
+| `txtime` | proportion of the last hour **this station** was transmitting |
+| `hears` | callsigns heard directly in the last hour, strongest first |
+
+**The window is one hour and is not stated on the wire**, because two stations
+reporting `busy:41%` have to mean the same thing for the number to be worth
+transmitting. A station that has been listening for less than an hour reports
+what it has and does not scale it up.
+
+### 10.6.1 Why `busy:` matters more than it looks
+
+Section 31 asks every station to be disciplined about airtime and gives it
+nothing to measure. `busy:` is that measurement, and it changes politeness from a
+rule of thumb into a decision.
+
+A duty cycle is a legal limit on **one** transmitter. It says nothing about
+whether forty other stations are already using the channel, and a station obeying
+its own 1 percent perfectly can still be the packet that collides with a call for
+help. A shared channel is a shared resource and the only station that can see the
+whole of it is the one listening to it.
+
+So a station that hears `busy:` climbing should slow down what is discretionary
+-- beacons, status posts, history replays -- before the channel stops working for
+what is not. **`urg:` (section 13.5) decides what survives that decision**, and
+this is the reading that tells a station when to start making it.
+
+`txtime:` is the honest half of the same measurement. A station reporting
+`busy:60%` while contributing `txtime:45%` of it has identified the problem, and
+it is itself.
+
+### 10.6.2 `hears:` is what makes a mesh diagnosable
+
+`hears:` is one station's answer to "who can you actually reach right now",
+directly, without a relay.
+
+It is worth its bytes three times over. It says **why a mesh is broken** -- a
+station nobody lists is a station nobody hears, which is a different fault from
+one that is heard but never answers. It says **who to route through**, since a
+carrier that lists the recipient is one hop from delivering. And it is the best
+evidence there is for choosing `hold:` in a `t:mailbox` declaration (section
+13.12): the right mailbox is a station that other people list as heard.
+
+Three limits, stated because a topology map invites over-reading:
+
+- **Directly heard only.** A callsign reached through a relay does not belong in
+  `hears:`, or the list stops meaning anything.
+- **Strongest first**, so a truncated list still carries the useful half. Signal
+  per callsign is deliberately not carried: it would need a compound value this
+  format does not have, and the order says most of it.
+- **It is a claim like any other.** A station may list callsigns it cannot hear,
+  and nothing here detects that. What it buys an attacker is being chosen as a
+  carrier, which is why `hears:` informs a choice and never compels one.
+
+Hearing is also often **asymmetric** -- a handheld hears a hilltop repeater that
+cannot hear it back. Two stations listing each other is a link; one listing the
+other is not, and a client drawing a map should show the difference.
+
+### 10.7 Stations without a clock
 
 | Station capability | Key | Example | Meaning |
 |---|---|---|---|
@@ -1394,7 +1472,7 @@ forms, anchoring that epoch for all receivers in range, and thereafter sends
 
 ---
 
-### 10.6 Units of measure
+### 10.8 Units of measure
 
 **Every measurement carries its unit, immediately after the number and with no
 space between them.**
@@ -1424,7 +1502,7 @@ t:observation f:X3WX01 pos:38.7223,-9.1393 temp:57.6F hum:78% press:29.92inHg wi
 
 94, 113 and 120 bytes.
 
-### 10.7 The permitted units
+### 10.9 The permitted units
 
 | Quantity | Units | Canonical |
 |---|---|---|
@@ -4272,7 +4350,7 @@ Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `opt`, `vote`, `root`, `size`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
-`rssi`, `snr`, `age`, `epoch`.
+`rssi`, `snr`, `busy`, `txtime`, `hears`, `age`, `epoch`.
 
 Assigned `q:` and `s:` words: section 8.
 
@@ -4444,6 +4522,9 @@ packet **250 bytes**, on every transport.
 |---|---|---|---|
 | `batt` | `qty` | battery charge | proportion |
 | `volt` | `qty` | supply voltage | voltage |
+| `busy` | `qty` | proportion of the last hour the channel was occupied (section 10.6) | proportion |
+| `txtime` | `qty` | proportion of the last hour this station transmitted | proportion |
+| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.2) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
@@ -4664,6 +4745,27 @@ everything beneath it.
 topics, `m:` the description. `size:` is what lets a station decline before
 starting a fetch it cannot finish, and the description is the only thing that
 makes a file findable by words rather than by hash.
+
+### The radio itself
+
+```
+t:observation f:X3RLY7 ts:... busy:41% txtime:6% hears:X1QZ3N,X32DVA,CT1ABC-9
+```
+
+`busy:` how much of the last hour the channel was occupied by anybody, `txtime:`
+how much of it was **this** station, `hears:` callsigns heard **directly**, strongest
+first. Window is one hour and is never stated on the wire, so the numbers compare.
+Keys on `t:observation`, never a new type -- design rule 5.
+
+`busy:` is what section 31 was missing: a duty cycle limits one transmitter and
+says nothing about the forty others already on the channel. Rising `busy:` means
+slow down what is discretionary -- beacons, statuses, history replays -- and let
+`urg:` decide what survives. A station reporting `busy:60%` with
+`txtime:45%` has found the problem and it is itself.
+
+`hears:` says why a mesh is broken, who to route through, and who is worth naming
+in `hold:`. Hearing is often asymmetric -- two stations listing each other is a
+link, one listing the other is not.
 
 ### Reporting
 
@@ -4903,6 +5005,8 @@ document.
 | `@CALLSIGN` mentions | not implemented; no wapp scans `m:` for them and nothing notifies on being named |
 | `root:` on a reply | not implemented; the chat wapp threads by parent pointer only (`docs/aprs-xt.md`), so a lost middle orphans the rest |
 | `t:file` and `size:` | not implemented as a packet; the equivalent exists as NOSTR kind-1063 metadata indexed in FTS5 (`reticulum-dart/doc/file-sharing.md`) |
+| `busy:` and `txtime:` | not implemented; the Reticulum side tracks announce cadence and the LoRa drivers know the duty cycle, but nothing measures or publishes channel occupancy |
+| `hears:` | not implemented; `hal_rns_nodes` lists observed nodes but, per `docs/store-and-forward.md`, a hub replays its whole announce cache so the list is not "heard directly" |
 | `t:report` | not implemented; the chat wapp has moderation ops but no way for an ordinary station to flag anything |
 | `add:repost` | not implemented; the chat wapp has reactions (`add:like`) and no repost |
 | `t:place` | not implemented; nothing in the codebase reports a thing that is not the sender |

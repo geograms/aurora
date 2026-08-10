@@ -159,6 +159,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `revoke` | `path` | callsigns removed or suspended (section 26) |
 | `role` | `enum` | what a grant confers: `mod`, `sub`, or absent for a member |
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
+| `mood` | `enum` | how the sender feels (section 27.1) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -205,6 +206,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
+| `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
 | `offer` | what a station has (section 22) |
@@ -618,7 +620,7 @@ differs is whether naming it means anything:
 
 | Packet type | Reply | React |
 |---|---|---|
-| `message`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `warning`, `info` | yes | yes |
+| `message`, `status`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `warning`, `info` | yes | yes |
 | `sos` | yes | **no** |
 | `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `command`, `result`, `moderate`, `ping`, `pong` | no | no |
 
@@ -3448,7 +3450,122 @@ of section 13.1 and does not earn a fresh three hops by being re-signed.
 
 ---
 
-## 27. Adding a field, worked
+## 27. Status
+
+`t:status` is a short post about the sender, now. It is the packet a townhall is
+made of: everybody publishes, everybody sees, and a client renders them in a
+timeline newest first.
+
+```
+t:status f:X1QZ3N ts:2026-08-08_14:26:40 m:tied up in Sagres, the wind finally dropped
+```
+
+86 bytes. `d:` is absent, so it is published to anyone in range. A status
+carrying `d:` goes to that group's timeline instead of the global one, whether
+the group is an open name or a closed `X5` (section 26).
+
+**Neither existing type would do.** A `t:blog` post is a document: it has a
+`title:`, and a later post with the same title replaces it (section 19.1). Two
+statuses an hour apart are two moments and not a correction of each other, so a
+status has no title and never replaces anything. A broadcast `t:message` is
+conversational and spoken to whoever is listening now; a status is published,
+kept, and read later by people who were not, which is the distinction section 19
+already draws between a message and a post.
+
+Everything else a status needs already exists. `pos:` says where it was written,
+`file:` attaches a photograph, `tag:` files it, `lang:` names its language, `cw:`
+warns what it contains, `scope:` keeps it off the internet, `n:` splits a long
+one across up to nine parts (section 6.6), and `sig:` signs it. A status takes
+replies and reactions, which is most of the point of publishing one.
+
+### 27.1 Mood
+
+`mood:` says how the sender feels, so that a client can dress itself to match --
+a colour, a background, an icon beside the post.
+
+```
+t:status f:X1QZ3N ts:2026-08-08_14:26:40 mood:becalmed m:no wind since dawn, going nowhere
+```
+
+90 bytes. It is optional, and the four bytes it costs beyond the word itself buy
+a client everything it needs to theme a screen without parsing the text.
+
+The value is one word from the list below and nothing else. A receiver that does
+not recognise a value skips it (section 4.3) and shows the post plainly, which
+is the correct outcome: the post is the content and the mood is decoration.
+
+| Family | Word | What it says |
+|---|---|---|
+| general | `blessed` | fortunate, and aware of it |
+| general | `grateful` | thankful to somebody in particular |
+| general | `happy` | plainly glad |
+| general | `sad` | plainly not |
+| general | `tired` | worn down rather than sleepy |
+| general | `lonely` | alone and minding it |
+| general | `proud` | pleased with something done |
+| general | `worried` | expecting trouble |
+| general | `calm` | settled, nothing pressing |
+| general | `determined` | set on finishing something |
+| sea | `becalmed` | no wind, going nowhere |
+| sea | `adrift` | unmoored, in the head or the hull |
+| sea | `anchored` | held somewhere safe |
+| sea | `seasick` | exactly that |
+| sea | `salty` | weathered and cheerful about it |
+| sea | `stormbound` | kept in shelter by weather |
+| sea | `landsick` | ashore and missing the sea |
+| sea | `soaked` | wet through |
+| sea | `homebound` | on the way back |
+| sea | `windblown` | battered by a long day on deck |
+| mountain | `summited` | on top, and it was worth it |
+| mountain | `breathless` | thin air, not fear |
+| mountain | `snowbound` | cannot move for snow |
+| mountain | `frostbitten` | cold has done damage |
+| mountain | `footsore` | too many miles today |
+| mountain | `exposed` | on a face, nothing between you and the weather |
+| mountain | `sheltered` | out of it at last |
+| mountain | `benighted` | caught out by darkness |
+| mountain | `acclimatised` | the altitude has stopped mattering |
+| mountain | `whiteout` | cannot see, cannot navigate |
+
+Thirty words in three families. The families are there so a client can theme by
+family and refine later, rather than needing thirty palettes on the first day.
+
+```
+t:status f:X1QZ3N ts:2026-08-08_14:26:40 mood:summited pos:42.6390,0.6560 m:top of Aneto, clear all the way to France
+t:status f:X1QZ3N d:X5A3F2 ts:2026-08-08_14:26:40 mood:stormbound m:staying put another day sig:<60 characters>
+```
+
+117 and 156 bytes.
+
+**A closed list is not a cage.** Section 4.9 reserves every key beginning with
+`z` for private use, so a community that wants a mood this document does not
+have writes `zmood:stoked` beside the standard one, and every other receiver
+skips it without error.
+
+`mood:` is defined here and, like any key, may appear on any packet the sender
+chooses -- on a `t:blog` post it reads perfectly well. What it must never do is
+change how a packet is treated. A mood is not a priority, does not earn a relay,
+and does not raise a notification; `urg:` (section 13.5) is the field that speaks
+to the network, and `sev:` (section 16) is the one that speaks to danger.
+
+### 27.2 What a status is not
+
+**Not carried.** Store-and-forward (section 13.4) delivers to a recipient, and a
+broadcast status has none. A status that missed its audience is simply a post
+nobody read, which is an ordinary thing for a post.
+
+**Not privileged.** Three relays, the default of section 13.1. A townhall post
+is not an emergency and must not compete with one.
+
+**No follow packet.** A client keeps its own list of the callsigns whose
+statuses it shows, and that list stays on the device. Publishing it would put a
+permanent public record of who reads whom on the air -- the same leak section
+26.7 describes for rosters -- and buys nothing that a local list does not already
+give.
+
+---
+
+## 28. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -3474,7 +3591,7 @@ negotiation.
 
 ---
 
-## 28. Operating alongside APRS
+## 29. Operating alongside APRS
 
 A licensed amateur may bridge XPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -3485,18 +3602,18 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 29. Reserved
+## 30. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
 `response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `mailbox`,
-`service`, `command`, `result`, `moderate`, `ping`, `pong`.
+`service`, `command`, `result`, `moderate`, `status`, `ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
 `urg`, `scope`, `lang`, `nick`, `hold`, `serve`, `cmd`, `arg`, `code`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
-`remove`, `grant`, `revoke`, `role`, `hide`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
+`remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
@@ -3510,7 +3627,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 30. Cheat sheet
+## 31. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -3538,6 +3655,7 @@ packet **250 bytes**, on every transport.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
+| `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
 | `offer` | what a station has (section 22) |
@@ -3585,6 +3703,7 @@ packet **250 bytes**, on every transport.
 | `revoke` | `path` | callsigns removed or suspended (section 26) |
 | `role` | `enum` | what a grant confers: `mod`, `sub`, or absent for a member |
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
+| `mood` | `enum` | how the sender feels (section 27.1) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -3846,6 +3965,28 @@ when `local`, and binding on gateways. Reception is never restricted, only
 relaying. A group is an address, not a boundary -- only `x:` keeps content
 private.
 
+### Status
+
+`t:status` is a short post about the sender, now -- the townhall packet. No
+`title:` and it never replaces an earlier one, which is what separates it from
+`t:blog`. `d:` absent publishes to anyone in range; `d:` on a group makes it that
+group's timeline. Three relays, never carried, replies and reactions both.
+Following is a list on the client and never a packet.
+
+`mood:` is optional and one word from this list, for theming only:
+
+```
+general   blessed grateful happy sad tired lonely proud worried calm determined
+sea       becalmed adrift anchored seasick salty stormbound landsick soaked
+          homebound windblown
+mountain  summited breathless snowbound frostbitten footsore exposed sheltered
+          benighted acclimatised whiteout
+```
+
+An unrecognised mood is skipped and the post shown plainly. A mood never earns a
+relay, a priority or a notification -- `urg:` speaks to the network and `sev:` to
+danger. For a mood this list does not have, `zmood:` is private by section 4.9.
+
 ### Closed groups
 
 A group holds a keypair and is addressed by the `X5` callsign derived from it.
@@ -3940,7 +4081,7 @@ document.
 
 ---
 
-## 31. Implementation status
+## 32. Implementation status
 
 | Element | State |
 |---|---|
@@ -3981,6 +4122,8 @@ document.
 | Several mailboxes with windows, and cancellation | not implemented |
 | `t:service` | not implemented; no station advertises what it does |
 | `t:command` and `t:result` | not implemented; nothing acts on a received packet |
+| `t:status` | not implemented; the Social wapp has a feed, but it is NOSTR kind-1 notes over the internet and Reticulum rather than XPRS packets (`docs/social.md`) |
+| `mood:` and client theming | not implemented; nothing reads a mood and no client changes appearance for one |
 | `X5` group callsigns and `t:moderate` | not implemented; groups are plain names with no member list anywhere |
 | Subgroups, `role:sub` nested five levels deep | not implemented; the chat wapp has a sub-room tree, but on NOSTR rooms and with authority inherited down the tree rather than stopping at each key |
 | Never filtering `sos`, `warning` and `info` by membership | not implemented; there is no membership filter to exempt them from |

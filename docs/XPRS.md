@@ -157,7 +157,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `grant` | `path` | callsigns admitted to a group (section 26) |
 | `revoke` | `path` | callsigns removed or suspended (section 26) |
-| `role` | `enum` | what a grant confers: `mod`, or absent for a member |
+| `role` | `enum` | what a grant confers: `mod`, `sub`, or absent for a member |
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
@@ -3240,7 +3240,54 @@ Section 3 already says this and the answer is the same here: the group is its
 that key has identified nothing. Two groups with the same four characters are
 two groups, and a client that holds the key of one is not fooled by the other.
 
-### 26.2 Membership
+### 26.2 Subgroups
+
+A large group wants smaller rooms inside it: a club with a VHF section and a
+contest section, a marina with one channel per pontoon. **A subgroup is not a
+new kind of thing.** It is an ordinary closed group, with its own keypair, its
+own `X5` callsign, its own admin and its own roster, that some other group has
+listed as part of itself.
+
+Listing one is a grant like any other, and `role:sub` is what it grants:
+
+```
+138  t:moderate f:X5A3F2 d:X5A3F2 ts:2026-08-08_14:26:40 grant:X5K2M9 role:sub sig:<60 characters>
+145  t:moderate f:X5A3F2 d:X5A3F2 ts:2026-08-08_14:26:40 grant:X5K2M9,X5T4WD role:sub sig:<60 characters>
+130  t:moderate f:X5A3F2 d:X5A3F2 ts:2026-08-08_14:26:40 revoke:X5K2M9 sig:<60 characters>
+```
+
+Delisting is `revoke:`, the same packet that removes a person. A client that
+follows `X5A3F2` reads its listings and shows the tree; each subgroup announces
+its own name with its own `t:identity`, exactly as its parent does.
+
+**Listing confers no authority.** This is the rule that keeps subgroups simple,
+and it follows from the group being its key: `X5A3F2` saying that `X5K2M9` is
+part of it does not let `X5A3F2` grant, revoke or hide anything inside
+`X5K2M9`, because those acts are signed by `X5K2M9`'s key and nothing else will
+verify. Nor does membership travel down: belonging to a parent is not belonging
+to a subgroup, and each roster is read on its own.
+
+That is a deliberate difference from moderation systems that walk a tree to
+decide who may act, and it costs the parent admin nothing in practice: an admin
+who wants authority over a subgroup creates it and keeps its key, which is the
+ordinary case. Handing that key to somebody else is how a section gets its own
+administration, and section 26.6 already describes what handing a group key over
+means.
+
+**Five levels, counting the root.** A client ignores a listing that would place
+a group deeper than that, so a root has at most four generations beneath it. It
+also ignores a listing that names a group already in its own ancestry, because a
+cycle is not a tree and two groups listing each other must not become an
+infinite one.
+
+A listing is a claim by the parent and nothing more. Any group may list any `X5`
+callsign, whether or not that group agreed, and there is no packet to prevent
+it -- the same limit section 3 states about callsigns, for the same reason. What
+bounds the damage is the rule above: a false listing borrows a name into a menu
+and confers nothing, and it is visible only to clients already following the
+group that made the claim.
+
+### 26.3 Membership
 
 One packet type carries every act of authority. The admin signs as the group:
 
@@ -3275,7 +3322,7 @@ There is no application packet. **Asking to join is an ordinary message to the
 group**, which needs no new type and leaves no permanent signed record that a
 person asked and was refused.
 
-### 26.3 Reading the log
+### 26.4 Reading the log
 
 Every act is signed and they accumulate; a client replays what it has heard.
 Three rules decide what the result is, and they exist so that two implementations
@@ -3308,7 +3355,7 @@ chosen by the narrowest window containing the moment, and membership is not.
 Narrowest-window-wins would demote a moderator the instant any narrower grant
 existed.
 
-### 26.4 Expiry, and what a quiet group does
+### 26.5 Expiry, and what a quiet group does
 
 `until:` on a grant is optional, exactly as it is on a mailbox declaration
 (section 13.12.1): a grant without one is open-ended and stays in force. A
@@ -3323,7 +3370,7 @@ and lets grants stand.
 offers, and it is enough. A moderator who stops operating falls off when their
 grant expires, with no vote, no timer and no act by anybody.
 
-### 26.5 When the admin is gone
+### 26.6 When the admin is gone
 
 **Succession is handing over the key.** The outgoing admin gives the group's
 private key to whoever takes it on; the callsign, the roster and every past
@@ -3352,7 +3399,7 @@ technical: found a new group and move to it. That is what a community does
 anyway when its administration fails, it needs no packet, and unlike an
 automatic succession it cannot silently fork a group in two.
 
-### 26.6 What a client shows
+### 26.7 What a client shows
 
 Membership decides display and nothing else. A closed group is not a private
 one, and three rules keep the difference honest.
@@ -3376,15 +3423,15 @@ everyone who belongs -- including members who never speak -- and a complete
 history of who suspended whom and when, gatewayed to the internet like anything
 else. That is **more** exposure than an open group, where only the people who
 talk are visible. A group that needs its membership kept secret cannot have it
-this way; use `x:` for the content, and see [circles.md](circles.md) for
-groups where membership itself is encrypted.
+this way. `x:` conceals what is said and nothing conceals who belongs, because
+the roster is what a stranger must read in order to honour it at all.
 
 None of this contradicts section 13.11.3. A group is still an address and not a
 boundary: anyone can still transmit to `X5A3F2` and everyone in range still
 hears it. Design rule 6 also stands -- every packet remains fully readable with
 no prior state, and the roster changes only what a client chooses to **show**.
 
-### 26.7 Bootstrap, and not becoming a weapon
+### 26.8 Bootstrap, and not becoming a weapon
 
 Any member may rebroadcast the grants it holds. They are signed by the group, so
 a newcomer verifies them against the group's key and needs to trust the
@@ -3536,7 +3583,7 @@ packet **250 bytes**, on every transport.
 | `remove` | `enum` | something this packet withdraws (section 6.5) |
 | `grant` | `path` | callsigns admitted to a group (section 26) |
 | `revoke` | `path` | callsigns removed or suspended (section 26) |
-| `role` | `enum` | what a grant confers: `mod`, or absent for a member |
+| `role` | `enum` | what a grant confers: `mod`, `sub`, or absent for a member |
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
@@ -3813,6 +3860,11 @@ t:moderate f:X32DVA d:X5A3F2 ts:... r:89a9c8 hide:message sig:...
 t:moderate f:X5A3F2 d:X5A3F2 ts:... revoke:X32DVA since:... sig:...
 ```
 
+A subgroup is an ordinary closed group with its own key, listed by another with
+`grant:<X5> role:sub` and delisted with `revoke:`. Listing confers no authority
+inside it and membership does not travel down. Five levels counting the root; a
+listing that makes a cycle is ignored.
+
 `f:` signs, `d:` names the group. `revoke:` with `until:` is a suspension;
 `revoke:` with `since:` voids that moderator's acts from then. Only the admin
 appoints; a moderator may revoke and hide. Authority is judged at the act's
@@ -3930,6 +3982,7 @@ document.
 | `t:service` | not implemented; no station advertises what it does |
 | `t:command` and `t:result` | not implemented; nothing acts on a received packet |
 | `X5` group callsigns and `t:moderate` | not implemented; groups are plain names with no member list anywhere |
+| Subgroups, `role:sub` nested five levels deep | not implemented; the chat wapp has a sub-room tree, but on NOSTR rooms and with authority inherited down the tree rather than stopping at each key |
 | Never filtering `sos`, `warning` and `info` by membership | not implemented; there is no membership filter to exempt them from |
 | The chat wapp's own moderation | **implemented, and by a different design**: NIP-72 rooms with a NOSTR kind-9078 op-log, authority from the room event's author rather than a group keypair, and no roster at all (`docs/chat-rooms.md`). Nothing in section 26 is built, and reconciling the two is not attempted here |
 | `cmd:interpret` | not implemented; no station interprets natural language |

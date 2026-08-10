@@ -124,7 +124,7 @@ Groups, observations, `?` control frames and receipts are never carried.
 
 That covers the closed groups of [XPRS.md](XPRS.md) section 26 as well. An `X5`
 group callsign is addressed like a station but is group traffic, and custody is
-not how a roster travels: section 26.7 propagates membership by members
+not how a roster travels: section 26.8 propagates membership by members
 rebroadcasting the signed grants they already hold, which needs no carrier
 because every grant verifies against the group's key on its own.
 

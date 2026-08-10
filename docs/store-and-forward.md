@@ -49,7 +49,7 @@ This is the wire as implemented. [XPRS.md](XPRS.md) specifies a different one,
 in which the same information is carried as `key:value` fields and a carrier
 appends itself to `via:` rather than the frame being rewritten. The behaviour
 described in this document is unaffected; only the encoding of the frame
-changes. XPRS.md section 35 tracks the gap.
+changes. XPRS.md section 36 tracks the gap.
 
 `FROM` and `TO` are always public. A carrier that cannot read the recipient
 cannot determine where to relay the frame, which is what allows custody to
@@ -120,7 +120,7 @@ Storage is bounded at 100 MB or 7 days, whichever is reached first, with
 that a busy location cannot fill the disk with mail the device may never
 deliver. Local mail is never refused.
 
-[XPRS.md](XPRS.md) section 30.3 cites this policy as the model of a decision the
+[XPRS.md](XPRS.md) section 31.3 cites this policy as the model of a decision the
 format deliberately leaves alone: it states no retention period, no minimum and
 no eviction order, because a dongle with a microSD card and a home server with a
 spare terabyte cannot share one number. The 100 MB, the 7 days and the

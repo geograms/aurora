@@ -73,7 +73,7 @@ t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack m:meet at the bridge at six
 
 Nothing in this document changes when that lands. The subtype, the rotation, the
 size router and every budget below are properties of the radio and the
-controller; the payload rides on top of them. XPRS.md section 35 lists what is
+controller; the payload rides on top of them. XPRS.md section 36 lists what is
 still outstanding.
 
 ## 3. Size routing

@@ -6,7 +6,7 @@ XPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 10. Section 35 states which parts are implemented.
+Status: DRAFT 10. Section 36 states which parts are implemented.
 
 ---
 
@@ -162,6 +162,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `mood` | `enum` | how the sender feels (section 27.1) |
 | `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
 | `opt` | `labels` | the choices in a poll, two to six (section 28) |
+| `root` | `hex6` | the packet a thread hangs from (section 6.4) |
+| `size` | `qty` | how large a file is (section 6.7.1) |
 | `vote` | `label` | the option chosen in a poll (section 28.3) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
@@ -210,7 +212,9 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
 | `poll` | a question put to everybody, with the choices (section 28) |
-| `place` | somewhere useful that is not the sender (section 29) |
+| `file` | what a file is, so it can be wanted (section 6.7.1) |
+| `report` | a claim that a packet is spam or abuse (section 29) |
+| `place` | somewhere useful that is not the sender (section 30) |
 | `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
@@ -606,6 +610,28 @@ t:message f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:399227 m:I'll be late, star
 replied to in turn. A receiver that has not seen the parent still displays the
 reply, marked as answering a message it does not hold.
 
+**Below the first level a reply also names the thread it belongs to**, with
+`root:`:
+
+```
+t:message f:X32DVA d:LISBOA ts:2026-08-08_14:40:00 root:399227 r:8536fb m:no rush, we start at nine
+```
+
+99 bytes. `r:` keeps exactly the meaning it had -- the packet being replied to --
+and `root:` names the packet the whole conversation hangs from.
+
+A first-level reply carries `r:` alone, because its parent *is* the root. Only
+deeper replies carry both, so the eleven bytes are spent only where they buy
+something.
+
+What they buy is the ordinary case on this network rather than an unusual one.
+**A lost middle packet orphans everything beneath it**: with `r:` alone, a
+receiver holding a reply whose parent it never heard cannot tell which
+conversation the reply belongs to, and a thread arriving out of order over three
+bearers reassembles into fragments. `root:` makes that reply filable anyway --
+shown under the right conversation, in the right place, with a gap where the
+missing packet was.
+
 ### 6.5 Reactions
 
 ```
@@ -665,9 +691,9 @@ differs is whether naming it means anything:
 
 | Packet type | Reply | React |
 |---|---|---|
-| `message`, `status`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `place`, `poll`, `warning`, `info` | yes | yes |
+| `message`, `status`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `place`, `poll`, `file`, `warning`, `info` | yes | yes |
 | `sos` | yes | **no** |
-| `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `command`, `result`, `moderate`, `ping`, `pong` | no | no |
+| `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `command`, `result`, `moderate`, `report`, `ping`, `pong` | no | no |
 
 A weather observation, a warning, a blog post, an offer and a channel
 announcement can all be replied to and reacted to. That is the point of deriving
@@ -697,6 +723,46 @@ two-party authentication exchange, valid for sixty seconds, and the only thing
 that should ever name a challenge is its own response. Anything else pointing at
 one is noise at best, and at worst an invitation to treat a security exchange as
 a conversation.
+
+### 6.5.2 Mentioning somebody
+
+A mention is `@` followed by a callsign, written in the text where a person would
+write it:
+
+```
+t:status f:X1QZ3N ts:2026-08-08_14:26:40 m:thanks @X1RD89 and @X32DVA for the relay last night
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:@CT1ABC-9 is the one to ask about the repeater
+```
+
+94 and 99 bytes. **There is no key for this**, and there should not be: a field
+would carry the same information twice, once for the parser and once for the
+reader, and cost bytes to do it. A receiver that has never heard of mentions
+still shows `@X1RD89` and a person still understands it, which is the property
+design rule 2 exists to protect. Other formats need a tag because their content
+is opaque to the protocol; `m:` is not opaque to anybody.
+
+**The parse rule is one line.** `@` followed by one or more `call` characters --
+uppercase letters, digits, `-` and `/` -- ending at the first character that is
+not one of those. A trailing `-` or `/` is punctuation and not part of the
+callsign.
+
+**Uppercase is what makes it safe.** Callsigns are always uppercase (section 3),
+so `write to me@example.com` contains no mention, and the rule needs no escape
+character, no delimiter and no exception.
+
+**There is no limit on how many.** The packet limit is already the limit, and it
+is a better one than any number this document could pick: mentions compete with
+the message for the same 250 bytes, so a station that tags thirty people has no
+room left to say anything to them.
+
+Two things follow. A station that finds its own callsign after an `@` **raises a
+notification**, which is the entire point of the convention. And **anyone may
+mention anyone**: there is no consent, no blocking and no way to prevent it, so a
+client must let its operator mute a callsign whose mentions it does not want.
+
+A mention is also the strongest signal a station has for deciding what to keep
+(section 31.3). Being named is what makes a packet worth more than the traffic
+around it, and until now nothing in this format said so.
 
 ### 6.6 Long messages
 
@@ -753,6 +819,34 @@ as an opaque download.
 How the bytes are transferred is outside this specification. A reference remains
 valid whether the file arrives over the same radio, over the internet, or on
 physical media.
+
+### 6.7.1 Saying what a file is
+
+A hash identifies a file perfectly and describes it not at all. `t:file` is the
+packet that says what the bytes are, so somebody who does not already know can
+decide whether to want them:
+
+```
+t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg size:240kB tag:radio m:the finished dipole, feed point centred
+```
+
+175 bytes. `m:` describes it, `tag:` files it under topics, and `size:` is a
+quantity with its unit like every other measurement in this format.
+
+**`size:` is the field that earns its bytes.** `cmd:file` (section 25.2) asks a
+station to send the content, and on a bearer that owes seconds of silence per
+packet the difference between a 240 kB photograph and a 40 MB video is the
+difference between a fetch and a mistake. Knowing the size first is how a station
+declines politely instead of starting something it cannot finish.
+
+A description packet is also the only thing that makes a file findable by
+**words**. `file:` alone can be looked up by somebody who already has the hash and
+by nobody else; a `t:file` gives a station something to index, so "that photo of
+the dipole" is a question with an answer.
+
+`t:file` describes and never delivers. The bytes travel however they travel
+(above), and a description whose content nobody holds is a description of
+something lost -- worth keeping anyway, because it says what was lost.
 
 ---
 
@@ -1002,7 +1096,7 @@ binding and the decoration together come to 255 bytes, which does not fit.
 The split turns out to be the right shape anyway. The key binding is small and
 must be repeated often, because a receiver that has never heard it can verify
 nothing (section 18.1). The decoration is larger and changes once a year, so it
-goes out rarely -- which is section 30 applied to this format's own traffic.
+goes out rarely -- which is section 31 applied to this format's own traffic.
 
 A packet without `k:` still verifies, against the key the receiver already holds
 for that callsign. One from a station whose key is unknown is ignored, exactly as
@@ -2808,6 +2902,23 @@ t:offer f:X1QZ3N pos:38.7223,-9.1393 kind:crew price:free ts:2026-08-08_14:26:40
 80 bytes. `price:free` says so explicitly, which is worth doing when the
 alternative is a receiver wondering whether the price was left out by accident.
 
+### 22.4 The format carries no money
+
+`price:` says what something costs and that is the end of this format's
+involvement. **There are no payment packets, no balances, no receipts for money
+and no tipping**, and the omission is deliberate rather than pending.
+
+A packet saying a payment happened is worth exactly what the recipient's
+willingness to believe it is worth, and it is the highest-value forgery in any
+format that has one. Settlement needs a ledger somebody agrees on, and a lossy
+broadcast medium where every station hears a different subset of the traffic is
+close to the worst place to keep one.
+
+Where value does move in this project it moves in the coin layer, which is a
+different system with different guarantees. A `t:offer` says the berth costs
+twenty-five euros a day; how the twenty-five euros travel is not a radio
+question.
+
 ---
 
 ## 23. Channels
@@ -3140,7 +3251,7 @@ the same however many minutes pass.
 | `403` | refused, not permitted |
 | `404` | unknown command, or nothing held to answer it |
 | `408` | too old, outside its freshness window |
-| `429` | over budget, ask later or ask elsewhere (section 30) |
+| `429` | over budget, ask later or ask elsewhere (section 31) |
 | `500` | tried and failed |
 
 ```
@@ -3200,7 +3311,7 @@ The answer is the ordinary sequence of section 25.1 -- accepted, then done:
 
 Between them the station re-airs the packets themselves. `code:404` says nothing
 was held for that window, `code:403` that the station will not serve this
-requester, and `code:429` that it is over budget -- with, by section 30, the
+requester, and `code:429` that it is over budget -- with, by section 31, the
 names of stations that might serve instead.
 
 **The replay is the original packets, unchanged.** `f:`, `ts:` and `sig:` are
@@ -3249,8 +3360,8 @@ another's begins, and no bug at the boundary between two windows. Asking two
 stations for overlapping windows costs airtime and nothing else.
 
 A station that keeps a spool says so with `serve:history` (section 24). What it
-keeps, for how long and for whom is its own to decide and to change: section 30.3
-says why this document sets no retention period, and section 30.2 what a station
+keeps, for how long and for whom is its own to decide and to change: section 31.3
+says why this document sets no retention period, and section 31.2 what a station
 owes a stranger regardless.
 
 ### 25.3 Keeping it out of the conversation
@@ -3774,7 +3885,7 @@ its packet, and the reason is that the alternative is worse. A poll with no
 closing time never resolves. It sits in every spool that keeps it, collects votes
 from stations coming back into range for as long as anybody replays it, and has a
 different answer every time it is counted -- for ever, with no moment at which
-anyone may say what the answer was. Section 30.3 makes that concrete: a station
+anyone may say what the answer was. Section 31.3 makes that concrete: a station
 may keep a followed callsign's traffic indefinitely, so "eventually it ages out"
 is not true here.
 
@@ -3878,7 +3989,60 @@ somebody something.
 
 ---
 
-## 29. Places
+## 29. Reporting
+
+`t:report` says that a packet is spam, abuse, or something worse. It is the one
+thing a station can do about bad traffic that is not inside a closed group,
+where section 26 gives a moderator `hide:` and everywhere else gives nobody
+anything.
+
+```
+133  t:report f:X32DVA d:X5A3F2 ts:2026-08-08_14:26:40 r:399227 kind:spam sig:<60 characters>
+164  t:report f:X32DVA ts:2026-08-08_14:26:40 r:399227 kind:abuse sig:<60 characters> m:same text to every group all morning
+```
+
+`r:` names the packet being reported and `kind:` says why. `d:` aims the report
+at a group, whose admin and moderators are the people most able to act; without
+it the report is made to whoever is listening.
+
+| `kind:` | The packet is |
+|---|---|
+| `spam` | repetitive, automated, or sent to be seen rather than read |
+| `abuse` | directed at somebody, and meant to harm them |
+| `illegal` | unlawful where the reporter is |
+| `false` | a claim the reporter believes is untrue and dangerous |
+| `other` | something else, described in `m:` |
+
+`kind:` needs no new key. It already means "what kind of thing this is" for a
+warning, a channel and a place, and this is the fourth vocabulary it carries.
+
+### 29.1 A report is a claim, never a verdict
+
+**Nothing happens automatically because a report exists.** A report is not
+moderation: `hide:` (section 26.3) is the only packet in this format that hides
+anything, it works only inside one closed group, and only a moderator of that
+group may send it. A report is one station's opinion, offered to whoever finds it
+useful.
+
+**A report must be signed.** An anonymous accusation is worth nothing to a
+receiver and costs the accused something, which is the worst possible ratio. An
+unsigned or unverifiable report is discarded.
+
+**Reports are themselves an attack.** Mass false reporting is the obvious one:
+twenty signed reports naming an innocent station cost an attacker nothing but
+airtime, and a client that counts reports without weighing who sent them has
+built a way to silence anybody. **A report counts for as much as its signer's
+standing with the receiver and no more** -- which is a local judgement, like
+every other judgement in this format, and cannot be delegated to the network.
+
+**Reporting is not blocking.** A station that wants to stop seeing somebody mutes
+them locally and needs no packet and nobody's permission. A report is for telling
+other people, and the two should not be confused in a user interface: one is a
+private decision, the other is a public statement about somebody else.
+
+---
+
+## 30. Places
 
 Every packet so far reports the sender: where I am, what I see, how I feel. A
 place reports **something that is not me and does not move** -- a tap on a
@@ -3915,7 +4079,7 @@ warning and for a channel, and this is the third vocabulary it carries.
 | `trailhead` | where a path starts |
 | `other` | something not in this list, described in `m:` |
 
-### 29.1 Naming, revising and withdrawing
+### 30.1 Naming, revising and withdrawing
 
 `title:` is a `label` and works exactly as it does on a post (section 19.1): a
 later place from the same station with the same title **replaces** the earlier
@@ -3933,7 +4097,7 @@ t:place f:X1BOA3 ts:2026-09-01_09:00:00 r:9f52f6 remove:place sig:<60 characters
 
 189 and 126 bytes.
 
-### 29.2 A place is a claim
+### 30.2 A place is a claim
 
 Nothing here is a survey and no station is an authority. Two people may publish
 different places with the same title, or the same place in different positions,
@@ -3951,7 +4115,7 @@ are the right packet when somebody could be hurt.
 
 ---
 
-## 30. Airtime
+## 31. Airtime
 
 Every other section says what a station **may** transmit. This one says how
 often, and what it owes the strangers who ask it for things. Sections 25.2 and
@@ -3959,7 +4123,7 @@ often, and what it owes the strangers who ask it for things. Sections 25.2 and
 to spend real airtime on demand, and a format that hands out that power without
 a budget has designed a way to flatten a solar node from across a bay.
 
-### 30.1 Cadence belongs to the bearer
+### 31.1 Cadence belongs to the bearer
 
 There is no single right interval, because the constraint is not the same on
 each bearer:
@@ -3981,7 +4145,7 @@ on a period measured in tens of minutes rather than seconds; and **a retry is
 not a new packet**, so re-airing something that went unanswered counts against
 the same budget as saying it the first time.
 
-### 30.2 What a station owes a stranger
+### 31.2 What a station owes a stranger
 
 `cmd:history` and `cmd:file` are requests to spend somebody else's battery. The
 answer is not that they must be refused, and not that they must be honoured.
@@ -4003,7 +4167,7 @@ t:result f:X3RLY7 d:X1BOA3 ts:2026-08-08_14:26:40 r:747ae8 code:429 sig:<60 char
 things, so a refusal that says nothing wastes the very airtime it was trying to
 save: the asker retries, reasonably, believing the packet was lost.
 
-### 30.3 Retention belongs to the station
+### 31.3 Retention belongs to the station
 
 **This document states no retention period, and will not.** There is no minimum
 depth, no maximum, no required eviction order, and no obligation to keep
@@ -4044,7 +4208,7 @@ retention still reassembles a week nobody was awake for.
 Durability here is social rather than technical: several stations keeping
 overlapping spools by their own choice, not one station promising to remember.
 
-### 30.4 Who this protects
+### 31.4 Who this protects
 
 The stations worth protecting are the ones that cannot argue back: a solar relay
 on a headland, a dongle in a hut, a phone at four percent in a tent. They are
@@ -4056,7 +4220,7 @@ nobody by morning.
 
 ---
 
-## 31. Adding a field, worked
+## 32. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -4082,7 +4246,7 @@ negotiation.
 
 ---
 
-## 32. Operating alongside APRS
+## 33. Operating alongside APRS
 
 A licensed amateur may bridge XPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -4093,19 +4257,19 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 33. Reserved
+## 34. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
 `response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `mailbox`,
-`service`, `command`, `result`, `moderate`, `status`, `place`, `poll`, `ping`,
-`pong`.
+`service`, `command`, `result`, `moderate`, `status`, `place`, `poll`, `file`,
+`report`, `ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
 `urg`, `scope`, `lang`, `nick`, `hold`, `serve`, `cmd`, `arg`, `code`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
-`remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `opt`, `vote`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
+`remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `opt`, `vote`, `root`, `size`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
@@ -4119,7 +4283,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 34. Cheat sheet
+## 35. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -4148,7 +4312,9 @@ packet **250 bytes**, on every transport.
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
 | `poll` | a question put to everybody, with the choices (section 28) |
-| `place` | somewhere useful that is not the sender (section 29) |
+| `file` | what a file is, so it can be wanted (section 6.7.1) |
+| `report` | a claim that a packet is spam or abuse (section 29) |
+| `place` | somewhere useful that is not the sender (section 30) |
 | `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
@@ -4200,6 +4366,8 @@ packet **250 bytes**, on every transport.
 | `mood` | `enum` | how the sender feels (section 27.1) |
 | `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
 | `opt` | `labels` | the choices in a poll, two to six (section 28) |
+| `root` | `hex6` | the packet a thread hangs from (section 6.4) |
+| `size` | `qty` | how large a file is (section 6.7.1) |
 | `vote` | `label` | the option chosen in a poll (section 28.3) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
@@ -4480,6 +4648,35 @@ Derived identifiers make the replay safe: a duplicate collapses on the identifie
 it already had, so there are no cursors and overlapping windows cost only
 airtime. Advertise a spool with `serve:history`, files with `serve:files`.
 
+### Mentions, threads and files
+
+A mention is `@CALLSIGN` **inside `m:`** -- no key. `@` then uppercase letters,
+digits, `-` and `/`, ending at the first character that is not one; uppercase is
+why `me@example.com` is not a mention. No limit but the packet limit. Being named
+raises a notification and is the strongest signal for what to keep. Anyone may
+mention anyone, so a client must offer to mute.
+
+`root:` names the packet a thread hangs from. A first-level reply carries `r:`
+alone; deeper replies carry both, so a lost middle packet no longer orphans
+everything beneath it.
+
+`t:file` says what a file is: `file:` the hash, `size:` with its unit, `tag:`
+topics, `m:` the description. `size:` is what lets a station decline before
+starting a fetch it cannot finish, and the description is the only thing that
+makes a file findable by words rather than by hash.
+
+### Reporting
+
+```
+t:report f:X32DVA d:X5A3F2 ts:... r:399227 kind:spam sig:...
+```
+
+`kind:` is `spam` `abuse` `illegal` `false` `other`. Must be signed. A report is
+a **claim, never a verdict** -- nothing acts on it automatically, and `hide:`
+(section 26.3) remains the only packet that hides anything. Mass false reporting
+is the obvious attack, so a report is worth its signer's standing and no more.
+Reporting is not blocking: muting is local, needs no packet and tells nobody.
+
 ### Polls, and passing things on
 
 ```
@@ -4656,7 +4853,7 @@ document.
 
 ---
 
-## 35. Implementation status
+## 36. Implementation status
 
 | Element | State |
 |---|---|
@@ -4700,13 +4897,17 @@ document.
 | `cmd:history`, backfill by replay | not implemented, and nothing equivalent exists: the APRS iGate mailbox holds only mail addressed to a callsign and is cleared on delivery (`docs/aprs.md`), so broadcast traffic missed while offline is gone |
 | `cmd:file`, fetching bytes by hash | not implemented as a command; the resolution ladder underneath it is built and works (Reticulum direct, DHT, LAN, I2P, BitTorrent -- `reticulum-dart/doc/file-sharing.md`), so this is an ask the format lacks rather than a transport it lacks |
 | `serve:history` | not implemented; no station keeps or advertises a spool |
-| Retention policy, and keeping by worth rather than by age | deliberately unspecified (section 30.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
+| Retention policy, and keeping by worth rather than by age | deliberately unspecified (section 31.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
 | Paged replies, `code:206` | not implemented; nothing serves a history request to page |
 | `t:poll` and `vote:` | not implemented; nothing puts a question or counts an answer |
+| `@CALLSIGN` mentions | not implemented; no wapp scans `m:` for them and nothing notifies on being named |
+| `root:` on a reply | not implemented; the chat wapp threads by parent pointer only (`docs/aprs-xt.md`), so a lost middle orphans the rest |
+| `t:file` and `size:` | not implemented as a packet; the equivalent exists as NOSTR kind-1063 metadata indexed in FTS5 (`reticulum-dart/doc/file-sharing.md`) |
+| `t:report` | not implemented; the chat wapp has moderation ops but no way for an ordinary station to flag anything |
 | `add:repost` | not implemented; the chat wapp has reactions (`add:like`) and no repost |
 | `t:place` | not implemented; nothing in the codebase reports a thing that is not the sender |
 | Avatar and description on `t:identity` | not implemented; the Social wapp renders NOSTR kind-0 profiles, which are a different mechanism |
-| Section 30, airtime | not implemented as stated here, though the Reticulum side has real cadences (30 s charging, 5 min on battery) and the NOSTR side has stranger-serving budgets |
+| Section 31, airtime | not implemented as stated here, though the Reticulum side has real cadences (30 s charging, 5 min on battery) and the NOSTR side has stranger-serving budgets |
 | `t:status` | not implemented; the Social wapp has a feed, but it is NOSTR kind-1 notes over the internet and Reticulum rather than XPRS packets (`docs/social.md`) |
 | `mood:` and client theming | not implemented; nothing reads a mood and no client changes appearance for one |
 | `X5` group callsigns and `t:moderate` | not implemented; groups are plain names with no member list anywhere |

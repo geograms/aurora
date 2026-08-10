@@ -30,6 +30,14 @@ class PreferencesService {
   /// completed (it returns the instance only after _prefs is ready).
   static PreferencesService? get instanceSync => _instance;
 
+  /// Drop the singleton so the next `instance()` reads a fresh
+  /// SharedPreferences. Tests only: a test that sets mock values after the
+  /// singleton exists would otherwise keep reading the previous store.
+  static void resetForTest() {
+    _instance = null;
+    _pending = null;
+  }
+
   // Terminal settings
   double get terminalFontSize => _prefs.getDouble('terminal.fontSize') ?? 16.0;
   set terminalFontSize(double v) => _prefs.setDouble('terminal.fontSize', v);
@@ -504,6 +512,29 @@ class PreferencesService {
 
   Future<void> setPinnedToDock(String wappId, bool pinned) =>
       _togglePin(_homeDockKey(), wappId, pinned);
+
+  // ── Wapps the launcher has already shown ────────────────────────────────
+  //
+  // `known` is every wapp id this profile has seen on the grid; `fresh` is the
+  // subset installed since the user last looked and not yet opened. A wapp that
+  // ships in an update lands in `fresh`, which is what puts it on the home
+  // screen instead of leaving it to be discovered by accident.
+
+  String _knownWappsKey() => 'launcher.known.$_activeProfileId';
+  String _freshWappsKey() => 'launcher.new.$_activeProfileId';
+
+  /// Null (not empty) when this profile has never been reconciled — the
+  /// difference between "no wapps yet" and "everything installed is new".
+  List<String>? get knownWapps => _prefs.getStringList(_knownWappsKey());
+
+  List<String> get freshWapps =>
+      _prefs.getStringList(_freshWappsKey()) ?? const [];
+
+  Future<void> setKnownWapps(List<String> ids) =>
+      _prefs.setStringList(_knownWappsKey(), ids);
+
+  Future<void> setFreshWapps(List<String> ids) =>
+      _prefs.setStringList(_freshWappsKey(), ids);
 
   Future<void> _togglePin(String key, String wappId, bool pinned) async {
     final list = List<String>.of(_prefs.getStringList(key) ?? const []);

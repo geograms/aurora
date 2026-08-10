@@ -40,6 +40,7 @@ import '../services/social/note_text.dart';
 import '../services/mesh/mesh_service.dart';
 import '../services/preferences_service.dart';
 import '../services/launch_count_store.dart';
+import '../services/new_wapp_tracker.dart';
 import '../services/hero/hero_brightness.dart';
 import '../services/hero/hero_feed_service.dart';
 import '../services/hero/hero_inbox.dart';

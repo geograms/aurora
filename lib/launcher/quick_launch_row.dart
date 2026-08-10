@@ -70,10 +70,14 @@ class _QuickLaunchRowState extends State<_QuickLaunchRow> {
   @override
   Widget build(BuildContext context) {
     // Rebuild on every unread change: a wapp that just gained a notification has
-    // to be able to float into the dock immediately, not at the next scan.
-    return ValueListenableBuilder<Map<String, int>>(
-      valueListenable: WappUnreadService.instance.counts,
-      builder: (context, unread, _) {
+    // to be able to float into the dock immediately, not at the next scan. Same
+    // for a wapp that just arrived — and for one the user just opened, which
+    // has to give its borrowed slot straight back.
+    return ValueListenableBuilder<Set<String>>(
+      valueListenable: NewWappTracker.instance.fresh,
+      builder: (context, _, _) => ValueListenableBuilder<Map<String, int>>(
+        valueListenable: WappUnreadService.instance.counts,
+        builder: (context, unread, _) {
         // The bars resolve themselves from the same inputs, so resolving them
         // again here gives exactly the set they are showing.
         final onBars = {
@@ -122,7 +126,8 @@ class _QuickLaunchRowState extends State<_QuickLaunchRow> {
             ],
           ),
         );
-      },
+        },
+      ),
     );
   }
 }

@@ -141,6 +141,14 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
       _svgIconBytes(svg);
     }
 
+    // Anything installed since the user last looked (a wapp added by an app
+    // update, or one they just installed) is marked fresh, which is what puts
+    // it on the home screen instead of leaving it buried in the grid.
+    await NewWappTracker.instance.reconcile([
+      for (final m in wapps)
+        if (m.kind == 'app') BackgroundWappManager.folderName(m.dirPath),
+    ]);
+
     if (mounted) setState(() => _wapps = wapps);
   }
 
@@ -217,6 +225,9 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
     // only after dependency gating has actually allowed navigation.
     final wappId = BackgroundWappManager.folderName(manifest.dirPath);
     WappUnreadService.instance.clearAll(wappId);
+    // Opening a newly arrived wapp is the whole acknowledgement: it stops
+    // being badged and stops being pulled into the dock.
+    await NewWappTracker.instance.markSeen(wappId);
     await LaunchCountStore.instance.increment(wappId);
     // Opening the feed IS looking at it: the status bar's "N new posts" counts
     // what followed accounts posted since this moment, so it drops to nothing
@@ -1064,6 +1075,46 @@ class _AppIcon extends StatelessWidget {
                         size: 11,
                         color: Colors.white,
                       ),
+                    ),
+                  ),
+                // "Arrived since you last looked" badge — a small dot in the
+                // bottom-right, so a wapp that shipped in an update is
+                // recognisable as the one that is new rather than being one
+                // more tile in a grid of twenty. Cleared by opening it.
+                if (wappId != null)
+                  Positioned(
+                    bottom: -2,
+                    right: -2,
+                    child: ValueListenableBuilder<Set<String>>(
+                      valueListenable: NewWappTracker.instance.fresh,
+                      builder: (context, fresh, _) {
+                        if (!fresh.contains(wappId)) {
+                          return const SizedBox.shrink();
+                        }
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 1,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2EA043),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: Theme.of(context).scaffoldBackgroundColor,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: const Text(
+                            'NEW',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 // Unread badge — a count chip (e.g. APRS messages) in the

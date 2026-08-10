@@ -75,9 +75,15 @@ List<_LauncherEntry> _resolveDockSlot(
   int unreadOf(_LauncherEntry e) =>
       e.wappId == null ? 0 : WappUnreadService.instance.totalFor(e.wappId!);
 
+  // A wapp that arrived since the user last looked bubbles up exactly like an
+  // unread one. It has no launch history, so the ranking below would never
+  // surface it, and a wapp shipped in an update that nobody can find is the
+  // same as one that was never shipped. Opening it clears the flag.
   final alerting = [
     for (final e in pool)
-      if (e.wappId != null && unreadOf(e) > 0) e,
+      if (e.wappId != null &&
+          (unreadOf(e) > 0 || NewWappTracker.instance.isNew(e.wappId!)))
+        e,
   ];
   if (alerting.isEmpty) return base;
 

@@ -155,6 +155,25 @@ The parts that are specified and not built:
 | `until:` as a carry deadline, capped at a year | not implemented; the 7-day quota is the only bound |
 | regional delivery, `dest:` with no recipient | not implemented |
 | `route:` copied into a signed receipt | not implemented |
+| `t:mailbox`, a recipient's preferred carriers | not implemented; nothing records who tends to see a given station |
+| `scope:local`, which must never be carried | not implemented; everything offered is a candidate |
+
+Two of those rows change what this document says about admission, so they are
+worth naming rather than leaving in a table.
+
+**`t:mailbox` is the half of routing this document does not have.** Section 4
+carries mail for anyone, which is right, and then has nothing to say about
+*which* carrier is likely to succeed. A mailbox declaration is the recipient
+saying so themselves: these stations tend to see me, try them first. It is
+signed, and a carrier that cannot verify one must ignore it, because a forged
+mailbox declaration collects somebody else's mail from every polite sender.
+
+**`scope:local` must be refused at admission, not at transmission.** A packet
+marked local is for the bearers in range now -- Bluetooth, WiFi Direct, a LAN --
+and carrying it to another town is precisely what it excludes. Parking one and
+airing it later would be a leak wearing the shape of a feature, and it is the
+one case where the "park anything for anyone" rule in section 4 must not
+apply.
 
 The carrier already reads `urg:` from a frame that carries one
 (`MeshCustodyDelegate._urgOf`). No frame does yet, so the default holds and the

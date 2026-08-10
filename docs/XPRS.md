@@ -134,6 +134,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
 | `urg` | `enum` | how much this is worth carrying (section 13.5) |
 | `scope` | `scope` | how far this may be relayed, default global (section 13.11) |
+| `lang` | `lang` | language of `m:`, default English (section 4.7) |
+| `hold` | `path` | preferred mailboxes, in order (section 13.12) |
 | `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
 | `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
@@ -189,6 +191,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `offer` | what a station has (section 22) |
 | `need` | what a station wants (section 22) |
 | `channel` | a frequency a station uses (section 23) |
+| `mailbox` | stations that hold mail for the sender (section 13.12) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -220,6 +223,7 @@ The type is fixed by this document and is never transmitted.
 | `ratio` | two digits `1` to `9` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
 | `scope` | `local`, `global`, or ISO 3166-1 alpha-2 codes separated by commas | `PT,ES` |
+| `lang` | an ISO 639-1 code, optionally `/` and a region | `PT/BR` |
 | `clock` | `HH:MM:SS`, a time of day in UTC | `20:00:00` |
 | `money` | an amount with an ISO 4217 code, optional leading `~` and `/` period, or one of `offers`, `swap`, `free` (section 22.2) | `~25EUR/day` |
 | `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
@@ -389,7 +393,42 @@ t:offer f:X1QZ3N pos:38.6902,-9.4012 kind:other cw:adult price:~40EUR/h ts:2026-
 
 120 bytes.
 
-### 4.7 Time
+### 4.7 Language
+
+`lang:` says what language the text is in. It is optional and **the default is
+English**, so a packet without it is read as English.
+
+```
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 lang:PT m:a rede comeca daqui a dez minutos
+```
+
+94 bytes, nine of them the field. An ISO 639-1 code in uppercase.
+
+A regional variant is added after a slash, which is worth the three bytes where
+it changes the words rather than the accent:
+
+```
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 lang:PT/BR m:a rede comeca daqui a dez minutos
+```
+
+97 bytes. `PT/BR` and `PT` are the same language and not the same
+vocabulary, and `EN/US` and `EN/GB` disagree about enough words to matter in a
+warning.
+
+Uppercase and the slash both follow conventions already in the format: values
+are uppercase where they are codes rather than words, and `/` already separates
+in `n:2/3` and in a callsign like `G0XYZ/P`.
+
+`lang:` describes `m:` and nothing else. A packet with no text does not need it,
+and the keys, the packet types and every enum value in this document are English
+regardless -- they are identifiers rather than prose, and translating them would
+break every receiver.
+
+A receiver that cannot read the language still relays it. Translation is a
+presentation matter, and a station that dropped what it could not read would
+make the network useless to anybody in a minority language.
+
+### 4.8 Time
 
 `ts:` is written the way a person reads it, in UTC:
 
@@ -420,7 +459,7 @@ A packet that may be relayed or carried **must** have a time field. A carried
 packet can be delivered days later, and an undated position is plotted as
 current. Two alternatives exist for stations without a clock (section 10.5).
 
-### 4.8 Extending the format
+### 4.9 Extending the format
 
 A new field takes an unused key, declares its type, and is placed anywhere.
 Receivers that do not know the key skip it and its value. No existing field
@@ -544,7 +583,7 @@ differs is whether naming it means anything:
 |---|---|---|
 | `message`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `warning`, `info` | yes | yes |
 | `sos` | yes | **no** |
-| `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `ping`, `pong` | no | no |
+| `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `ping`, `pong` | no | no |
 
 A weather observation, a warning, a blog post, an offer and a channel
 announcement can all be replied to and reacted to. That is the point of deriving
@@ -1682,6 +1721,53 @@ travel should not have restricted it.
 
 ---
 
+### 13.12 Where to leave mail for me
+
+`t:mailbox` names the stations a sender should hand mail to when the recipient
+cannot be reached directly.
+
+```
+t:mailbox f:X1QZ3N ts:2026-08-08_14:26:40 hold:X3RLY7,X32DVA sig:<60 characters>
+```
+
+125 bytes. `hold:` lists callsigns **in order of preference**, and a station
+that cannot reach `X1QZ3N` tries `X3RLY7` first.
+
+This is the missing half of section 13.4. Carrying toward a place works when the
+sender knows where the recipient is; a mailbox works when the sender knows who
+tends to see them. A boat that checks in at the same marina, a person whose
+neighbour runs a solar node, a group whose members all pass one repeater: those
+relationships exist and nothing in the format could infer them.
+
+`until:` bounds the declaration, which matters because the arrangement changes:
+
+```
+t:mailbox f:X1QZ3N ts:2026-08-08_14:26:40 hold:X3RLY7,X32DVA,CT1ABC-9 until:2026-09-08_00:00:00 sig:<60 characters>
+```
+
+160 bytes. A mailbox list with no expiry outlives the friendship, and a sender
+handing mail to a station that stopped carrying it a year ago gets silence.
+
+**A mailbox declaration must be signed, and a receiver that cannot verify one
+must not act on it.**
+
+This is the one packet in the format where forgery pays directly. Anyone who can
+publish `t:mailbox f:X1QZ3N hold:<attacker>` collects that station's incoming
+mail from every polite sender, and the sender believes it delivered. Signing is
+the default everywhere (section 9.1) and here it is the whole point: an unsigned
+mailbox declaration is a request to misroute somebody's mail, and it should be
+ignored rather than displayed.
+
+A station may publish more than one over time. The newest verifiable declaration
+from a callsign replaces the previous one, and `ts:` decides which is newest.
+
+Listing a station is not asking its permission. `hold:` records where the sender
+believes their mail will be seen, and a station named in one is free to carry
+nothing: it is under exactly the quota and priority rules of
+[store-and-forward.md](store-and-forward.md) as for any other traffic.
+
+---
+
 ## 14. Tracks
 
 A track is a named sequence of positions: a flight, a ride, a crossing. Any
@@ -2673,13 +2759,13 @@ because obscured meaning is not permitted on amateur bands.
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
-`response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `ping`,
-`pong`.
+`response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `mailbox`,
+`ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`urg`, `scope`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
+`urg`, `scope`, `lang`, `hold`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2727,6 +2813,7 @@ packet **250 bytes**, on every transport.
 | `offer` | what a station has (section 22) |
 | `need` | what a station wants (section 22) |
 | `channel` | a frequency a station uses (section 23) |
+| `mailbox` | stations that hold mail for the sender (section 13.12) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -2749,6 +2836,9 @@ packet **250 bytes**, on every transport.
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
 | `urg` | `enum` | how much this is worth carrying (section 13.5) |
+| `scope` | `scope` | how far this may be relayed, default global (section 13.11) |
+| `lang` | `lang` | language of `m:`, default English (section 4.7) |
+| `hold` | `path` | preferred mailboxes, in order (section 13.12) |
 | `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
 | `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
@@ -2977,6 +3067,12 @@ stop (required, never more than a year out), `urg:` `low` `normal` `high`
 `urgent`. A carrier takes a copy only if it expects to get closer. Not bound by
 the three-relay limit.
 
+`lang:` names the language of `m:`, default English: `PT`, or `PT/BR` for a
+regional variant.
+
+`t:mailbox` names the stations that hold mail for the sender, `hold:` in order
+of preference. It must be signed, and an unverifiable one must be ignored.
+
 `scope:` limits where a packet goes: absent or `global` anywhere, `local` only
 on BLE, WiFi Direct, WiFi Aware and a LAN, or ISO country codes. Not carried
 when `local`, and binding on gateways. Reception is never restricted, only
@@ -3063,6 +3159,8 @@ document.
 | Carrying toward a place (`dest:` on a message) | not implemented; custody currently carries only to a known callsign |
 | `urg:` | not implemented |
 | `scope:` | not implemented; every bearer currently forwards everything it can |
+| `lang:` | not implemented |
+| `t:mailbox` | not implemented; custody has no notion of a preferred carrier |
 | `near:`, regional delivery, `route:` in a receipt | not implemented |
 | `q:sign` and signed receipts | not implemented |
 | Recurring windows, `site:`, `supply:`, `range:` | not implemented |

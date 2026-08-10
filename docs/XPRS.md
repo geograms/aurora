@@ -166,7 +166,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
-| `g` | `sig` | signature |
+| `sig` | `base85` | signature |
 | `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
 
 ### 4.2 Packet types
@@ -224,7 +224,7 @@ The type is fixed by this document and is never transmitted.
 | `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
 | `b64` | base64url, no padding | `pQ4m9xT2vB8kR` |
 | `bech32` | a bech32 string | `npub1qz3n7...` |
-| `sig` | 60 characters, base85, no space | |
+| `base85` | 60 characters, base85, no space | |
 | `text` | any bytes, spaces included | `heading south on the N8` |
 
 A value that does not match its declared type is skipped, as an unknown key is.
@@ -369,10 +369,10 @@ and is never moved inside `x:`, because a receiver has to decide whether to
 render before it decrypts:
 
 ```
-t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 cw:adult x:<64 characters> g:<60 characters>
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 cw:adult x:<64 characters> sig:<60 characters>
 ```
 
-189 bytes. What the packet contains is disclosed; the content itself is not.
+191 bytes. What the packet contains is disclosed; the content itself is not.
 
 **A relay never strips it**, and **its absence is not a guarantee**. An unmarked
 packet is unmarked, not safe. A receiver that treats a missing `cw:` as a
@@ -660,15 +660,15 @@ key beginning with `z` is.
 
 ### 9.1 Signatures
 
-`g:` covers the whole packet with the `g:` field and its separating space
+`sig:` covers the whole packet with the `sig:` field and its separating space
 removed. Position in the packet is therefore not significant, and a verifier
 reconstructs the signed text by deletion.
 
 ```
-t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 g:<60 characters> m:net starts in ten minutes
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:<60 characters> m:net starts in ten minutes
 ```
 
-141 bytes. The identifier is `f6ff8d`, the same as the unsigned packet in
+143 bytes. The identifier is `f6ff8d`, the same as the unsigned packet in
 section 6.3, because signing changes neither `f:`, `ts:` nor the payload.
 
 | State | Condition |
@@ -678,11 +678,11 @@ section 6.3, because signing changes neither `f:`, `ts:` nor the payload.
 | unverified | signature present, signer key unknown |
 | unsigned | no signature |
 
-**`g:` may appear on any packet, and a station signs by default.**
+**`sig:` may appear on any packet, and a station signs by default.**
 
 A callsign is a label that anyone can write (section 3). Nothing else in this
 format stops a station putting `f:X1QZ3N` on a packet it did not send, and for
-most traffic a signature is the only thing that does. It is 63 bytes and it
+most traffic a signature is the only thing that does. It is 65 bytes and it
 should be spent unless there is a reason not to.
 
 Default means default and not mandatory. A sender may omit it, and a receiver
@@ -703,26 +703,26 @@ and the exchange is the authentication rather than something needing it
 Everything else is signed by default, including the smallest packets:
 
 ```
-t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like g:<60 characters>
+t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like sig:<60 characters>
 ```
 
-109 bytes for a signed reaction, against 46 unsigned. A forged reaction
+111 bytes for a signed reaction, against 46 unsigned. A forged reaction
 attributed to you is still an impersonation, and the extra bytes buy the same
 thing they buy anywhere else.
 
 ### 9.1.1 When the signature does not fit
 
-A signature is 63 bytes and the packet limit is 250, so a full observation can
+A signature is 65 bytes and the packet limit is 250, so a full observation can
 run out of room. The weather station in section 11.3 is 193 bytes and would be
-256 signed.
+258 signed.
 
 **Drop optional fields, never the signature.**
 
 ```
-t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa wind:3.4m/s wdir:210deg type:wx ts:2026-08-08_14:26:40 g:<60 characters>
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa wind:3.4m/s wdir:210deg type:wx ts:2026-08-08_14:26:40 sig:<60 characters>
 ```
 
-195 bytes: the same station with two readings fewer, signed. A receiver
+197 bytes: the same station with two readings fewer, signed. A receiver
 learns less and can trust what it learns, which is the better trade for a
 station whose whole value is being believed.
 
@@ -736,10 +736,10 @@ unsigned, and that is the case the "unsigned" state above exists to describe.
 `x:` carries the sealed body and replaces `m:`.
 
 ```
-t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 x:pQ4m9xT2vB8kR g:<60 characters>
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 x:pQ4m9xT2vB8kR sig:<60 characters>
 ```
 
-129 bytes. `t:`, `f:`, `d:` and `ts:` stay in cleartext, so an intermediate
+131 bytes. `t:`, `f:`, `d:` and `ts:` stay in cleartext, so an intermediate
 station can route the packet, identify the recipient and release a carried copy
 on the matching receipt, without reading the content.
 
@@ -1397,10 +1397,10 @@ A carried packet passes through strangers. The envelope is what they need and
 the body is not:
 
 ```
-t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:38,24 near:200km urg:high until:2026-09-08_00:00:00 x:<64 characters> g:<60 characters>
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:38,24 near:200km urg:high until:2026-09-08_00:00:00 x:<64 characters> sig:<60 characters>
 ```
 
-237 bytes. `dest:`, `near:`, `urg:` and `until:` stay in cleartext because a
+239 bytes. `dest:`, `near:`, `urg:` and `until:` stay in cleartext because a
 carrier cannot route without them. `m:` is replaced by `x:`, sealed to the
 recipient's key, so every carrier can decide whether to carry it and none can
 read it. This is the same rule as section 9.2 and needs no new mechanism.
@@ -1421,11 +1421,11 @@ an accuracy claim.
 that they read something, not a device reporting that bytes arrived:
 
 ```
-t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 g:<60 characters>
+t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 sig:<60 characters>
 ```
 
-182 bytes. `r:` names the original message -- `87e209`, computed from its sender,
-timestamp and text -- and `g:` signs the receipt, which covers `f:` and `r:`
+184 bytes. `r:` names the original message -- `87e209`, computed from its sender,
+timestamp and text -- and `sig:` signs the receipt, which covers `f:` and `r:`
 together (section 9.1). The result is evidence that the holder of `X1RD89`'s key
 acknowledged that exact message, and it is checkable by anyone holding the
 public key, not only by the sender.
@@ -1439,7 +1439,7 @@ home the same way the message came.
 | `read` | it was opened | no |
 | `sign` | a person acknowledged it | **required** |
 
-**An `s:sign` receipt without a valid `g:` is not a signed receipt.** A receiver
+**An `s:sign` receipt without a valid `sig:` is not a signed receipt.** A receiver
 discards it rather than showing it as one, because the whole point of the state
 is the signature, and a state that can be claimed without proof is worth less
 than no state at all.
@@ -1508,14 +1508,14 @@ everyone who moved it. A signed receipt copies that list into `route:` and signs
 it:
 
 ```
-t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign route:X32DVA,CT1ABC-9,SV1XYZ dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 g:<60 characters>
+t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign route:X32DVA,CT1ABC-9,SV1XYZ dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 sig:<60 characters>
 ```
 
-211 bytes. `via:` on this packet is the receipt's own journey home, which is a
+213 bytes. `via:` on this packet is the receipt's own journey home, which is a
 different list and is still being written. `route:` is the journey the message
 made, fixed at the moment it arrived.
 
-Because `g:` covers everything except itself (section 9.1), the signature binds
+Because `sig:` covers everything except itself (section 9.1), the signature binds
 the signer, the message identifier and the route together. The sender gets back
 a statement that this person read this message and that it came by these hands,
 which nobody along the way can alter without breaking the signature.
@@ -2040,7 +2040,7 @@ genuinely needs more room is a document, and a document is a file.
 A post should be signed. A message is usually one of many between two stations
 that know each other, but a post is read later, by strangers, after being
 relayed by stations the author never met, and authorship is the only thing a
-reader has to go on. A signature costs 63 bytes on the last part.
+reader has to go on. A signature costs 65 bytes on the last part.
 
 ---
 
@@ -2522,7 +2522,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`urg`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `g`, `k`, `add`,
+`urg`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2625,7 +2625,7 @@ packet **250 bytes**, on every transport.
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
 | `x` | `b64` | sealed body |
-| `g` | `sig` | signature |
+| `sig` | `base85` | signature |
 | `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
 
 ### Position and movement
@@ -2833,9 +2833,9 @@ Seal the body with `x:` and leave the routing keys in cleartext. Coarsen
 `dest:` -- it geolocates your correspondent.
 
 `q:sign` asks for a signed receipt; it copies the arrival `via:` into `route:`
-and signs it. `s:sign` without a valid `g:` is discarded.
+and signs it. `s:sign` without a valid `sig:` is discarded.
 
-`g:` goes on every packet by default, 63 bytes. Drop optional fields before
+`sig:` goes on every packet by default, 65 bytes. Drop optional fields before
 dropping the signature. Not signed: `identity`, `challenge`.
 
 ### Identifiers

@@ -26,6 +26,19 @@ answer. Both were measured against a device with both radios switched off:
 Delivery is the reliable signal. A station on the LAN, or reachable through a
 hub, acknowledges in well under one second.
 
+[XPRS.md](XPRS.md) section 10.6.2 adds the reading this table is missing.
+`hears:` is a station's list of the callsigns it hears **directly** — not
+through a relay, not from a replayed announce cache — which is the honest
+version of what `hal_rns_nodes` claims to be.
+
+It answers a different question from the one above, and the difference matters.
+Nothing a stranger publishes tells us whether *we* can reach a station, so
+delivery stays the only reliable test of our own path. What `hears:` tells us is
+**who else is one hop from the recipient**, which is the question this document
+actually has to answer when it picks a carrier — and the one the two tests above
+were being misused to answer. It is a claim rather than a measurement, so it
+informs the choice of carrier and never settles it.
+
 ```
 sendLxmf(dest, text)
   MeshCourier.armLxmf(dest, text)      unconditional

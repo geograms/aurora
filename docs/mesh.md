@@ -208,6 +208,19 @@ Load-adaptive backoff, same shape as the RNS transport's proven auto-passive:
   background → balanced/opportunistic scan (bigger miss window — SCF absorbs
   it). Reuse the existing foreground-service hold.
 
+**Each node measures this privately, and [XPRS.md](XPRS.md) section 10.6 lets it
+say so.** `busy:` is the proportion of the last hour the channel was occupied by
+anybody and `txtime:` the proportion this node was transmitting, both on an
+ordinary `t:observation`. The quiet/busy/saturated tiers above are exactly that
+measurement, computed from one vantage point and shared with nobody — so every
+node has to rediscover the congestion for itself, and a node in a quiet pocket
+next to a saturated one never learns it is about to make things worse.
+
+Publishing the number does not replace local backoff and should not: a node acts
+on what it hears, not on what it is told. What it adds is warning. And `txtime:`
+is the row that makes the table above auditable — a node claiming to back off
+last while contributing most of the traffic is visible for what it is.
+
 ## 8. Privacy
 
 Custody nodes hold messages for up to 7 days, so carried content must not be

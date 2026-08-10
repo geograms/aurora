@@ -23,16 +23,25 @@
  *        that owns the conversation renders it through the path it already
  *        uses; nothing about custody reaches it.
  *
- * Wire (the compact 0x41 frame every custodian already parks):
+ * Wire: XPRS (docs/XPRS.md).
  *
- *   FROM \x1F TO \x1F am:6hex [sd:32hex] [np:npub] body [~sig]
+ *   t:message f:FROM d:TO ts:2026-08-08_14:26:40 sig:<60> m:body
+ *   t:message f:FROM d:TO ts:2026-08-08_14:26:40 x:<sealed> sig:<60>
  *
  * The envelope is deliberately public — a carrier that cannot read who a
  * message is for cannot decide whom to hand it to — while the body is sealed to
- * the recipient's key whenever we hold one. `sd:` is the sender's LXMF delivery
- * address, so the receiving side can key the conversation by identity instead
- * of by callsign, and `np:` names the identity the copy is FOR, so a device
- * cannot be tricked into rendering someone else's mail as its own.
+ * the recipient's key whenever we hold one.
+ *
+ * Three fields of the old compact frame are gone. `am:` because the identifier
+ * is derived from the packet (section 5), so nothing announces its own id and a
+ * relayed copy keeps the one it was born with. `sd:` because the sender's LXMF
+ * address is a pure function of their public key, which is safer than trusting
+ * an address written on the wire by whoever sent it. `np:` because a sealed
+ * body already proves who the copy is for.
+ *
+ * We EMIT only XPRS. We still READ the compact frame (see mesh_frame.dart),
+ * because the chat wapp and the ESP32 dongle still speak it and custody sees
+ * every advert on the air. That half goes away when they are ported.
  */
 import 'dart:async';
 import 'dart:convert';
@@ -47,6 +56,9 @@ import '../../util/nostr_crypto.dart';
 import '../log_service.dart';
 import '../../profile/profile_service.dart';
 import '../reticulum/rns_service.dart';
+import '../xprs/xprs_packet.dart';
+import '../xprs/xprs_sig.dart';
+import 'mesh_frame.dart';
 import 'mesh_service.dart';
 
 /// One message waiting to find out whether it needs a carrier.
@@ -147,7 +159,7 @@ class MeshCourier {
 
     final body = _seal(npub, a.text);
     if (body == null) return;
-    final wire = _pack(self, call, body, npub);
+    final wire = _pack(self, call, body);
     if (wire == null) return;
     if (wire.length > maxWire) {
       MeshCourierCounters.refusedTooLong++;
@@ -196,44 +208,48 @@ class MeshCourier {
     }
   }
 
-  /// Build the frame. am: goes FIRST — both custody layers (the phones'
-  /// MeshCustodyDelegate and the dongle's blemesh_scf_offer) read the receipt id
-  /// at the very start, and a frame without one is carried but can never be
-  /// handed on inside a session.
-  List<int>? _pack(String self, String to, String body, String npub) {
-    final am = _amId();
-    final sd = RnsService.instance.lxmfDeliveryHex ?? '';
-    final sb = StringBuffer()..write('am:$am ');
-    if (sd.isNotEmpty) sb.write('sd:$sd ');
-    // No np: token. An npub costs 66 of the 240 bytes a carrier can hold, and
-    // buys nothing a sealed body does not already prove — only the holder of
-    // that key can open it. For a plaintext body the callsign on the envelope
-    // is the same claim the public 1:1 lane has always made.
-    sb.write(body);
-    final core = sb.toString();
-    final sig = _sign(self, core);
-    final text = sig.isEmpty ? core : '$core ~$sig';
-    return utf8.encode('$self\x1F$to\x1F$text');
-  }
+  /// Build the frame as an XPRS packet (docs/XPRS.md).
+  ///
+  /// Three fields the compact frame carried are gone, and none of them is
+  /// missed:
+  ///
+  /// `am:` — the receipt id is now derived from the packet (section 5), so
+  /// nothing announces its own identifier and a relayed copy keeps the one it
+  /// was born with. `ts:` is what makes that safe: without it every "OK" from
+  /// the same sender would hash alike.
+  ///
+  /// `sd:` — the sender's LXMF address is a pure function of their public key
+  /// (`RnsService._lxmfDestHexForPub`), and XPRS publishes public keys in
+  /// `t:identity`. Deriving it is also the safer half: an address written on
+  /// the wire by the sender is a claim, and an unsigned one lets anybody file
+  /// messages into somebody else's conversation.
+  ///
+  /// `np:` — was already dropped; a sealed body proves the recipient better
+  /// than a 66-byte token does.
+  /// [body] arrives already sealed by [_seal], or plaintext when we hold no key.
+  List<int>? _pack(String self, String to, String body) {
+    var p = XprsPacket.parse('t:message f:$self d:$to ts:${_nowIso()} m:x');
+    if (p == null) return null;
+    // A sealed body is `x:`; plaintext is `m:`. `m:` must stay last either way,
+    // so the sealed form drops it rather than putting `x:` after it.
+    p = body.startsWith('ENC1:')
+        ? XprsPacket(p.fields
+            .where((f) => f.key != 'm')
+            .followedBy([MapEntry('x', body.substring(5))]).toList())
+        : p.with_('m', body);
 
-  String _amId() {
-    final r = DateTime.now().microsecondsSinceEpoch;
-    final h = sha256.convert(utf8.encode('$r')).bytes;
-    return HEX.encode(h.sublist(0, 3));
-  }
-
-  /// Same canonical form the chat wapp and the host verifier already agree on:
-  /// `callsign|text`, short-Schnorr over its sha256, base85.
-  String _sign(String self, String core) {
     final d = _privScalar();
-    if (d == null) return '';
-    try {
-      final m = Uint8List.fromList(
-          sha256.convert(utf8.encode('$self|$core')).bytes);
-      return AprxSign.b85encode(AprxSign.sign(m, d));
-    } catch (_) {
-      return '';
-    }
+    if (d != null) p = xprsSign(p, d);
+    if (!p.fits) return null;
+    return utf8.encode(p.encode());
+  }
+
+  /// `YYYY-MM-DD_HH:MM:SS` in UTC (docs/XPRS.md section 4.8).
+  static String _nowIso() {
+    final t = DateTime.now().toUtc();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)}_'
+        '${two(t.hour)}:${two(t.minute)}:${two(t.second)}';
   }
 
   /// The signature covers `callsign|<everything before " ~">` — the same
@@ -269,16 +285,83 @@ class MeshCourier {
 
   // ── inbound ───────────────────────────────────────────────────────────────
 
+  /// Ingest an XPRS packet addressed to us.
+  ///
+  /// Shorter than the compact path it replaces, and not by accident: the
+  /// identifier is derived rather than carried, the source address is derived
+  /// from the sender's key rather than trusted off the wire, and the signature
+  /// covers the packet rather than a hand-built canonical string.
+  bool _ingestXprs(MeshFrame f, {required String via}) {
+    final p = f.packet!;
+    final senderNpub = _npubForCallsign(f.from);
+
+    // A carried packet passed through hands we do not control. When we hold the
+    // sender's key a bad signature is not a glitch, it is someone else's words
+    // under their callsign, and it stops here. Unsigned or unknown-key mail is
+    // still delivered: most stations have never announced a key.
+    if (p.has('sig') && senderNpub.isNotEmpty) {
+      final pubHex = NostrCrypto.decodeNpub(senderNpub);
+      final state = pubHex.isEmpty
+          ? XprsSigState.unverified
+          : xprsVerify(p, Uint8List.fromList(HEX.decode(pubHex)));
+      if (state == XprsSigState.forged) {
+        MeshCourierCounters.ingestDropped++;
+        LogService.instance.add(
+            'Courier: forged signature on a packet claiming to be from '
+            '${f.from} — dropped');
+        return false;
+      }
+    }
+
+    var body = p['m'] ?? '';
+    if (p.has('x')) {
+      final clear = _open(senderNpub, p['x']!);
+      if (clear == null) {
+        MeshCourierCounters.ingestDropped++;
+        LogService.instance
+            .add('Courier: sealed packet from ${f.from} we cannot open');
+        return false;
+      }
+      body = clear;
+    }
+    if (body.isEmpty) return false;
+
+    // The identifier is the packet's own (section 5), so the copy that reached
+    // us on air and the copy handed over in a session collapse onto one entry
+    // without either of them carrying an id.
+    if (!_ingested.add('id:${f.id}')) return false;
+    if (_ingested.length > 512) _ingested.remove(_ingested.first);
+
+    // No `sd:` to trust: the sender's delivery address is derived from the key
+    // they published, which cannot be forged without the private half.
+    final srcHex = RnsService.instance.lxmfDestForCallsign(f.from);
+    if (srcHex.isEmpty) {
+      MeshCourierCounters.ingestDropped++;
+      LogService.instance.add(
+          'Courier: packet from ${f.from} whose key we have never heard — '
+          'no address to answer, dropped');
+      return false;
+    }
+
+    RnsService.instance
+        .injectLxmf(sourceHex: srcHex, content: body, title: '', via: via);
+    MeshCourierCounters.ingested++;
+    LogService.instance
+        .add('Courier: delivered a carried packet from ${f.from} (via $via)');
+    return true;
+  }
+
   /// A frame addressed to us arrived — overheard on air, or handed over by a
   /// custodian in an MSP session. Verify it is ours, unwrap it, and give it to
   /// the wapp through the ordinary inbox. Returns true when it was ingested.
   bool ingest(Uint8List wire, {required String via}) {
-    final parts = _split(wire);
-    if (parts == null) return false;
-    final (from, to, text) = parts;
+    final f = MeshFrame.parse(wire);
+    if (f == null) return false;
     final self = MeshService.instance.tableCallsign.trim();
-    if (self.isEmpty || to.toUpperCase() != self.toUpperCase()) return false;
+    if (self.isEmpty || f.to.toUpperCase() != self.toUpperCase()) return false;
+    if (f.isXprs) return _ingestXprs(f, via: via);
 
+    final (from, to, text) = (f.from, f.to, f.body);
     var rest = text;
     final am = _take(rest, 'am:');
     if (am != null) rest = am.rest;
@@ -396,15 +479,6 @@ class MeshCourier {
   }
 
   static String _short(String h) => h.length >= 8 ? h.substring(0, 8) : h;
-
-  static (String, String, String)? _split(Uint8List wire) {
-    final s = utf8.decode(wire, allowMalformed: true);
-    final a = s.indexOf('\x1F');
-    if (a <= 0) return null;
-    final b = s.indexOf('\x1F', a + 1);
-    if (b < 0) return null;
-    return (s.substring(0, a), s.substring(a + 1, b), s.substring(b + 1));
-  }
 
   static _Token? _take(String s, String tag) {
     if (!s.startsWith(tag)) return null;

@@ -5022,6 +5022,7 @@ document.
 
 | Element | State |
 |---|---|
+| **On the air** | **implemented** on the Flutter side: `MeshCourier` emits XPRS for every carried message, and custody reads it. The chat wapp and the ESP32 still emit the older compact frame and are read through a fallback (`docs/store-and-forward.md` section 2), which goes away when they are ported |
 | **The packet format itself** | **implemented**; `lib/services/xprs/` parses, encodes, derives identifiers and signs. Every example packet in this document is a test fixture: `test/xprs_packet_test.dart` round-trips all 201 byte-exact, checks each stated byte count, and cross-checks every identifier against an independent Python implementation |
 | Section 5 identifiers | **implemented** |
 | Section 9.1 signatures, and surviving a relay | **implemented**; `test/xprs_sig_test.dart` signs, relays three hops and re-verifies |

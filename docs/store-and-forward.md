@@ -55,14 +55,35 @@ retry ladder.
 ## 2. Wire format
 
 ```
+t:message f:FROM d:TO ts:2026-08-08_14:26:40 sig:<60> m:body
+t:message f:FROM d:TO ts:2026-08-08_14:26:40 x:<sealed> sig:<60>
+```
+
+**Aurora emits XPRS** ([XPRS.md](XPRS.md)). It still *reads* the compact frame
+below, because the chat wapp and the ESP32 dongle both still emit one and
+custody sees every advert on the air:
+
+```
 FROM 0x1F TO 0x1F am:<6hex> [sd:<32hex>] <body> [~<sig>]
 ```
 
-This is the wire as implemented. [XPRS.md](XPRS.md) specifies a different one,
-in which the same information is carried as `key:value` fields and a carrier
-appends itself to `via:` rather than the frame being rewritten. The behaviour
-described in this document is unaffected; only the encoding of the frame
-changes. XPRS.md section 36 tracks the gap.
+`lib/services/mesh/mesh_frame.dart` is the seam. Everything above it asks for
+from/to/id/body and never learns which format arrived, so the legacy half can be
+deleted without touching custody, the store or the courier. The test is
+unambiguous and needs no version marker: a compact frame always holds two `0x1F`
+bytes, an XPRS packet holds none and starts with `t:`.
+
+Three fields did not survive the change, and none is missed. `am:` because the
+identifier is derived from the packet (XPRS section 5), so nothing announces its
+own id and a carried copy keeps the one it was born with -- the store column that
+held `am` now holds that identifier, unchanged, because both are six hex. `sd:`
+because the sender's LXMF address is a pure function of their public key, and
+deriving it is safer than trusting an address the sender wrote. `np:` because a
+sealed body already proves who the copy is for.
+
+**The dongle is not ported yet**, so while it speaks the compact frame it cannot
+read what a phone parks. Phone-to-phone custody is unaffected; the T-Dongle relay
+path is out until its firmware follows.
 
 `FROM` and `TO` are always public. A carrier that cannot read the recipient
 cannot determine where to relay the frame, which is what allows custody to

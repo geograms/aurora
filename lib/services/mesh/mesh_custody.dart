@@ -23,6 +23,7 @@ import '../xprs/xprs_packet.dart';
 import '../xprs/xprs_vocab.dart';
 import 'mesh_beacon.dart';
 import 'mesh_bulk_spool.dart';
+import 'mesh_frame.dart';
 import 'mesh_courier.dart';
 import 'mesh_service.dart';
 import 'mesh_session.dart';
@@ -375,29 +376,37 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
   static void onAirFrame(Uint8List wire, {required bool outbound}) {
     final store = MeshStore.instance;
     if (!store.ready) return;
-    final parts = _splitWire(wire);
-    if (parts == null) return;
-    final (from, to, text) = parts;
+    final f = MeshFrame.parse(wire);
+    if (f == null) return;
+    final (from, to, text) = (f.from, f.to, f.body);
     if (from.isEmpty) return;
 
-    // Overheard end-to-end receipt: `?ACK <am> d|r` — the target has it.
-    if (text.startsWith('?ACK ')) {
-      final am = text.length >= 11 ? text.substring(5, 11) : '';
-      if (am.length == 6) {
-        final n = store.purgeAm(am);
-        if (n > 0) {
-          MeshCustodyCounters.purged += n;
-          LogService.instance.add('Mesh: ?ACK $am purged parked copy');
+    if (f.isXprs) {
+      // Only a 1:1 message is custody material. Groups are not carried
+      // (store-and-forward.md §4), and neither is anything else — an
+      // observation, a status or a poll is aired, not couriered.
+      if (f.packet!.type != 'message' || !_isStation(to)) return;
+    } else {
+      // Overheard end-to-end receipt: `?ACK <am> d|r` — the target has it.
+      if (text.startsWith('?ACK ')) {
+        final am = text.length >= 11 ? text.substring(5, 11) : '';
+        if (am.length == 6) {
+          final n = store.purgeAm(am);
+          if (n > 0) {
+            MeshCustodyCounters.purged += n;
+            LogService.instance.add('Mesh: ?ACK $am purged parked copy');
+          }
         }
+        return;
       }
-      return;
+      // Only plain 1:1 traffic is custody material — no groups/control/queries.
+      if (to.isEmpty || '#!?'.contains(to[0]) || text.startsWith('?')) return;
     }
-    // Only plain 1:1 traffic is custody material — no groups/control/queries.
-    if (to.isEmpty || '#!?'.contains(to[0]) || text.startsWith('?')) return;
 
-    final am = (text.startsWith('am:') && text.length >= 9)
-        ? text.substring(3, 9)
-        : '';
+    // The handle this frame is tracked by: the derived identifier for XPRS
+    // (nothing transmits it), the `am:` token for a compact frame. Both six
+    // hex, so the store column is unchanged.
+    final am = f.id;
     final self = MeshService.instance.tableCallsign.toUpperCase();
     if (self.isEmpty) return;
 
@@ -488,6 +497,18 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
         }
       }
     } catch (_) {}
+  }
+
+  /// Whether `d:` names a station rather than a group.
+  ///
+  /// XPRS section 6.3 keeps the two apart by shape: an open group is an
+  /// uppercase name and may not look like a callsign, a closed group is an
+  /// `X5` callsign, and every station callsign carries a digit — `X1QZ3N`,
+  /// `X3RLY7`, `CT1ABC-9`. So "has a digit and is not X5" is the test, and it
+  /// is the format's own distinction rather than a guess about names.
+  static bool _isStation(String to) {
+    if (to.isEmpty || to.toUpperCase().startsWith('X5')) return false;
+    return to.contains(RegExp(r'[0-9]'));
   }
 
   /// The body of [wire] parsed as XPRS, or null when it is not an XPRS packet.

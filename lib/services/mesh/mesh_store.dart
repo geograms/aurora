@@ -32,7 +32,7 @@ import 'mesh_table.dart';
 
 /// How much a carried message is worth keeping when the store is full.
 ///
-/// The four levels are OPRS `urg:` (docs/OPRS.md §13.5), so a level stated on
+/// The four levels are XPRS `urg:` (docs/XPRS.md §13.5), so a level stated on
 /// the wire maps straight onto the eviction order with nothing to translate.
 /// This replaced a two-level `prio 0/1` that meant the same thing at half the
 /// resolution and could only ever be *inferred* by the carrier.
@@ -44,8 +44,8 @@ enum MeshUrgency {
   high,
   urgent;
 
-  /// Parse an OPRS `urg:` value. Anything unrecognised is [normal] — an
-  /// unknown word is skipped everywhere else in OPRS, and silently dropping a
+  /// Parse an XPRS `urg:` value. Anything unrecognised is [normal] — an
+  /// unknown word is skipped everywhere else in XPRS, and silently dropping a
   /// message because its urgency did not parse would be worse than carrying it.
   static MeshUrgency fromWire(String? v) => switch (v?.trim().toLowerCase()) {
         'low' => MeshUrgency.low,

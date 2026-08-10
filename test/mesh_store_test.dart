@@ -204,9 +204,9 @@ void main() {
         isTrue); // far below the cap: carried
   });
 
-  // The wire vocabulary is OPRS `urg:` (docs/OPRS.md §13.5), so a word that
+  // The wire vocabulary is XPRS `urg:` (docs/XPRS.md §13.5), so a word that
   // parses wrong must not cost the message: unknown falls back to normal.
-  test('urgency parses the OPRS words and never drops on a bad one', () {
+  test('urgency parses the XPRS words and never drops on a bad one', () {
     expect(MeshUrgency.fromWire('low'), MeshUrgency.low);
     expect(MeshUrgency.fromWire('normal'), MeshUrgency.normal);
     expect(MeshUrgency.fromWire('high'), MeshUrgency.high);

@@ -430,7 +430,7 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     // stranger's is capped below `urgent` so that marking everything urgent —
     // which stations will — cannot push our own traffic out of our own store.
     //
-    // The wire does not carry `urg:` yet (docs/OPRS.md §13.5 specifies it,
+    // The wire does not carry `urg:` yet (docs/XPRS.md §13.5 specifies it,
     // §28 lists it as unbuilt), so the default holds and this reproduces the
     // previous two-level behaviour exactly: ours `normal`, a stranger's `low`.
     final stated = MeshUrgency.fromWire(_urgOf(wire));
@@ -481,7 +481,7 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
 
   /// The sender-stated `urg:` value, or null when the frame carries none.
   ///
-  /// Today no frame does: the compact wire has no such field and OPRS §13.5
+  /// Today no frame does: the compact wire has no such field and XPRS §13.5
   /// is not built yet. Reading it here rather than later means the carrier
   /// honours it the moment senders start writing it, and costs one scan of a
   /// string already decoded.

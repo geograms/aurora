@@ -63,7 +63,7 @@ A station that cannot determine the intended recipient cannot decide where to
 relay the frame.
 
 **This is what the code transmits today, not the specification.**
-[OPRS.md](OPRS.md) defines the payload OPRS stations are to carry, and it is a
+[XPRS.md](XPRS.md) defines the payload XPRS stations are to carry, and it is a
 different shape: `key:value` fields separated by single spaces, a packet type in
 the first field, no unit separators, and no positional fields at all.
 
@@ -73,7 +73,7 @@ t:msg f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack m:meet at the bridge at six
 
 Nothing in this document changes when that lands. The subtype, the rotation, the
 size router and every budget below are properties of the radio and the
-controller; the payload rides on top of them. OPRS.md section 20 lists what is
+controller; the payload rides on top of them. XPRS.md section 20 lists what is
 still outstanding.
 
 ## 3. Size routing

@@ -3,7 +3,7 @@
 > Companion docs: [nostr-client.md](nostr-client.md) (the client, the relay hub
 > and the transports as they exist today), [dht.md in reticulum-dart](../../reticulum-dart/doc/dht.md)
 > (the who-has layer), [folders.md](folders.md), [mesh.md](mesh.md),
-> [OPRS.md](OPRS.md) (the same roles seen as an APRS replacement for unlicensed
+> [XPRS.md](XPRS.md) (the same roles seen as an APRS replacement for unlicensed
 > users).
 > This file is the **vision and the architecture**; it marks clearly what is
 > built, what is half-built, and what is not built at all.

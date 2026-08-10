@@ -45,11 +45,11 @@ retry ladder.
 FROM 0x1F TO 0x1F am:<6hex> [sd:<32hex>] <body> [~<sig>]
 ```
 
-This is the wire as implemented. [OPRS.md](OPRS.md) specifies a different one,
+This is the wire as implemented. [XPRS.md](XPRS.md) specifies a different one,
 in which the same information is carried as `key:value` fields and a carrier
 appends itself to `via:` rather than the frame being rewritten. The behaviour
 described in this document is unaffected; only the encoding of the frame
-changes. OPRS.md section 20 tracks the gap.
+changes. XPRS.md section 20 tracks the gap.
 
 `FROM` and `TO` are always public. A carrier that cannot read the recipient
 cannot determine where to relay the frame, which is what allows custody to
@@ -109,7 +109,7 @@ parked frame carries an urgency, and the quota sweep evicts in
 | `high` | the most a stranger's frame may claim |
 | `urgent` | ours only |
 
-The four levels are OPRS `urg:` ([OPRS.md](OPRS.md) section 13.5), so a level
+The four levels are XPRS `urg:` ([XPRS.md](XPRS.md) section 13.5), so a level
 stated on the wire needs no translation. **A sender states what it wants and the
 carrier decides what it may have**: a stranger's frame is capped below `urgent`,
 because stations will mark everything urgent and no device should be able to
@@ -133,7 +133,7 @@ meets the station it is addressed to. That works when the two are in the same
 region and never completes when they are not, because nothing tells a carrier
 which direction helps.
 
-[OPRS.md](OPRS.md) sections 13.4 to 13.10 specify the missing half. A packet
+[XPRS.md](XPRS.md) sections 13.4 to 13.10 specify the missing half. A packet
 carries `dest:` (where it is bound) and `near:` (how close counts as arrived),
 and a carrier accepts a copy **only if it expects to reduce the distance to
 `dest:`**. That single rule turns custody from "wait until I happen to meet you"
@@ -141,7 +141,7 @@ into a route across a continent, moved by people going that way anyway.
 
 The parts of it this document already provides, and which do not change:
 
-- the quota and eviction policy above, which is why OPRS specifies no copy limit
+- the quota and eviction policy above, which is why XPRS specifies no copy limit
 - `via:`, which prevents a carrier taking the same packet twice
 - release on receipt, section 6
 

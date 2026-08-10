@@ -1,6 +1,6 @@
-# OPRS spectrum
+# XPRS spectrum
 
-Where OPRS packets go on each bearer, and why the answer is not one number.
+Where XPRS packets go on each bearer, and why the answer is not one number.
 
 Status: PROPOSAL. Nothing in this document is blessed by a regulator or by any
 other project. Section 11 states what is implemented, which today is none of it.
@@ -14,19 +14,19 @@ uses is a licensed mobile band in the United States; the 915 MHz band an America
 station uses overlaps GSM-900 uplink in Europe. No frequency is licence-free
 everywhere, and no document can make one so.
 
-So this specification does not define *the* OPRS frequency. It defines, per
+So this specification does not define *the* XPRS frequency. It defines, per
 bearer and per region, the band a station operates in and one **calling
 frequency** within it, so that two strangers in the same country who have never
 met can find each other without configuration.
 
-What is worldwide is the packet. [OPRS.md](OPRS.md) defines 250 bytes of
+What is worldwide is the packet. [XPRS.md](XPRS.md) defines 250 bytes of
 `key:value` text that is identical on LoRa in Brazil, on WiFi in Japan and on a
 wire between two laptops. A station crossing a border changes its radio settings
 and changes nothing else, and a packet relayed across that border arrives
 unaltered.
 
 A station announces the channel it is actually using with `t:channel`
-([OPRS.md](OPRS.md) section 23), so the tables below are a starting point rather
+([XPRS.md](XPRS.md) section 23), so the tables below are a starting point rather
 than a dependency. Two stations that can hear each other at all can agree on
 anything else by saying so.
 
@@ -38,7 +38,7 @@ The regional bands are those of the LoRa Alliance regional parameters, which
 national regulators and every LoRa device already follow. The frequency and
 modulation are this document's proposal.
 
-| Region | Band | OPRS frequency | Typical limit |
+| Region | Band | XPRS frequency | Typical limit |
 |---|---|---|---|
 | Europe, UK, Africa, Middle East | 863-870 MHz | 869.525 MHz | 500 mW ERP, 10% duty in 869.4-869.65 |
 | United States, Canada, Mexico, Brazil | 902-928 MHz | 918.875 MHz | 1 W |
@@ -65,8 +65,8 @@ no second slot to move to. Meshtastic sits there because there is nowhere else,
 and so does everything else: regulators in Norway have measured heavy smart-meter
 activity across 869.525 MHz and above.
 
-So in Europe OPRS shares the channel deliberately, and separates itself by
-modulation instead. Meshtastic's default preset is SF11 at 250 kHz; OPRS is SF9.
+So in Europe XPRS shares the channel deliberately, and separates itself by
+modulation instead. Meshtastic's default preset is SF11 at 250 kHz; XPRS is SF9.
 
 Different spreading factors are quasi-orthogonal, so each network rejects much of
 the other's signal rather than being deafened by it. **That is a partial defence
@@ -81,12 +81,12 @@ The stronger argument for SF9 is not orthogonality but airtime:
 | SF9, 250 kHz | 615 ms | 5.5 s | 30% |
 | SF11, 250 kHz (Meshtastic) | 2050 ms | 18.5 s | 100% |
 
-OPRS occupies the channel for **less than a third** of the time Meshtastic needs
+XPRS occupies the channel for **less than a third** of the time Meshtastic needs
 for the same 250 bytes. Sharing a channel politely means being on it briefly, and
 that does more for the neighbours than any choice of spreading factor.
 
 The cost is sensitivity: SF9 is 5 dB below SF11, which is roughly two thirds of
-the range in typical suburban propagation. OPRS accepts that, because a 250-byte
+the range in typical suburban propagation. XPRS accepts that, because a 250-byte
 packet format designed around relaying and carrying is better served by many
 short transmissions than by few long ones.
 
@@ -141,7 +141,7 @@ of kilometres far beyond the horizon. Common in the Mediterranean and the
 tropics, entirely unschedulable, and it happens at exactly masthead height.
 
 Unlike 27 MHz there is no ionospheric path at 869 MHz, ever. LoRa reaches the
-horizon and stops, and everything beyond it is carried (OPRS.md section 13.4)
+horizon and stops, and everything beyond it is carried (XPRS.md section 13.4)
 rather than transmitted.
 
 ### 2.3 433 MHz, the other LoRa band
@@ -272,7 +272,7 @@ it is worth using despite being crowded.
 | 12, 13 | 2467, 2472 MHz | most of the world, not the United States |
 | 14 | 2484 MHz | Japan, 802.11b only |
 
-**Channel 6 is the proposed OPRS calling channel**, being available everywhere
+**Channel 6 is the proposed XPRS calling channel**, being available everywhere
 and clear of the 1 and 11 that consumer access points default to.
 
 Section 9 covers using this band connectionlessly.
@@ -320,12 +320,12 @@ not there at all.
 
 ---
 
-## 6. Marine VHF, which OPRS does not use
+## 6. Marine VHF, which XPRS does not use
 
 Listed to rule it out, as the United States is ruled out for CB.
 
 156-174 MHz is on every vessel, is internationally harmonised, and would be an
-obvious carrier for a maritime packet format. OPRS does not use it, and no
+obvious carrier for a maritime packet format. XPRS does not use it, and no
 station should be built that does.
 
 **These channels must never carry data under any circumstances:**
@@ -338,7 +338,7 @@ station should be built that does.
 | AIS 2 | 162.025 MHz | AIS position reporting |
 
 Channel 70 and the AIS channels are the dangerous ones precisely because they
-are already digital, so a transmitter that can generate an OPRS packet can
+are already digital, so a transmitter that can generate an XPRS packet can
 generate something that lands there. AIS is how ships avoid collisions and
 channel 16 is how people are found alive. Interference on either is a
 safety-of-life matter and not a spectrum-etiquette one.
@@ -356,7 +356,7 @@ transmission plan.
 
 ## 7. Licence-free voice bands
 
-These carry OPRS only as audio-frequency modulation over a voice channel, which
+These carry XPRS only as audio-frequency modulation over a voice channel, which
 is slow and which this document does not specify. They are listed because a
 station's `t:channel` announcements will name them and because operators ask.
 
@@ -365,11 +365,11 @@ allocation on this page: the same 40 channels are licence-free across CEPT
 Europe, the United States, and much of South America and Asia, though power and
 permitted modes differ. Typically 4 W for AM and FM, 12 W PEP for SSB.
 
-**Channel 24, 27.235 MHz, is the proposed OPRS calling channel, in Europe only.**
+**Channel 24, 27.235 MHz, is the proposed XPRS calling channel, in Europe only.**
 
 That is not an invention. Germany designates channels 24 and 25 as the digital
 CB channels, and channel 24 has carried 1200 baud AFSK packet radio for years.
-Aligning with an existing convention costs nothing and puts OPRS where operators
+Aligning with an existing convention costs nothing and puts XPRS where operators
 already expect to hear data.
 
 Channels to keep clear of: **9 (27.065 MHz) is the emergency channel** almost
@@ -381,7 +381,7 @@ Beware the channel table. Channels 23, 24 and 25 are out of numeric order --
 frequencies between were allocated to radio control. Any code that computes a
 frequency from a channel number by arithmetic is wrong for exactly these three.
 
-### 7.1 CB is Europe-only for OPRS
+### 7.1 CB is Europe-only for XPRS
 
 In the United States it is unlawful. 47 CFR 95.931 permits a CB station to
 transmit "two-way plain language voice communications" and nothing else, and
@@ -410,7 +410,7 @@ The band has two halves with very different populations:
 | 1 to 8 | 446.00625 - 446.09375 MHz | the original 1998 allocation; almost all of it |
 | 9 to 16 | 446.10625 - 446.19375 MHz | added by ECC Decision (15)05 in 2015; quiet, and many older handsets cannot reach it |
 
-**Channel 16, 446.19375 MHz, is the proposed OPRS calling channel.**
+**Channel 16, 446.19375 MHz, is the proposed XPRS calling channel.**
 
 Deliberately not channel 3. Channel 3 is the 3-3-3 convention -- channel 3, three
 minutes, every three hours -- and people *listen* on it for voice. Putting data
@@ -426,7 +426,7 @@ Unresolved, and stated as such rather than assumed.
 The ECC decisions describe PMR446 as carrying voice, tones, and limited data
 through digital modes such as DMR Tier 1 and dPMR Tier 1. They do not plainly
 address arbitrary packet data sent as audio through an analogue channel, which
-is how APRS works on amateur bands and how OPRS would most cheaply work here.
+is how APRS works on amateur bands and how XPRS would most cheaply work here.
 
 | Path | Standing |
 |---|---|
@@ -457,7 +457,7 @@ problem this document opens with:
 | Japan | Specified Low Power | 421-422 MHz |
 | Australia | UHF CB | 476.425-477.4125 MHz |
 
-None of those has an agreed OPRS channel. Proposing one for a service this
+None of those has an agreed XPRS channel. Proposing one for a service this
 document's authors cannot test would be guessing, and a wrong guess here puts
 somebody on a channel their regulator reserved for something else.
 
@@ -471,7 +471,7 @@ software fixes that.
 ### 8.1 VHF and UHF
 
 An `X1` or `X3` callsign is self-generated and must never be originated onto
-amateur spectrum ([OPRS.md](OPRS.md) section 25). Everything here applies to a
+amateur spectrum ([XPRS.md](XPRS.md) section 25). Everything here applies to a
 licensed operator using their own callsign, and encryption is not permitted
 (section 9.4 of that document).
 
@@ -489,26 +489,26 @@ licensed operator using their own callsign, and encryption is not permitted
 | Australia | 145.175 MHz |
 | Japan | 144.640 MHz |
 
-OPRS on VHF is an AX.25 UI frame at 1200 baud AFSK, which is what APRS has been
+XPRS on VHF is an AX.25 UI frame at 1200 baud AFSK, which is what APRS has been
 for thirty years. That is the whole argument: **an existing TNC, an existing
-radio and an existing digipeater network carry OPRS unmodified**, because at the
+radio and an existing digipeater network carry XPRS unmodified**, because at the
 link layer there is nothing to change. A station needs new software and no new
 hardware.
 
-Allocating a separate OPRS frequency would throw that away, split a working
+Allocating a separate XPRS frequency would throw that away, split a working
 network, and leave both halves worse.
 
 Two things follow from sharing a channel with APRS.
 
-An OPRS packet must be distinguishable from an APRS one, so that APRS software
+An XPRS packet must be distinguishable from an APRS one, so that APRS software
 ignores it rather than misparsing it. The AX.25 destination address is the field
-that does this, and **OPRS should register its own** with the tocall registry
+that does this, and **XPRS should register its own** with the tocall registry
 before anybody transmits. This document does not assign one, because inventing
 an unregistered destination address is how two projects end up colliding in a
 namespace built to prevent exactly that.
 
 And the channel is shared with a live network that was there first. 144.800 MHz
-in Europe carries real traffic; OPRS beaconing at APRS rates would degrade a
+in Europe carries real traffic; XPRS beaconing at APRS rates would degrade a
 service other people depend on. Same etiquette, same duty, and no assumption
 that the band is empty because your own software cannot hear anything on it.
 
@@ -523,7 +523,7 @@ Everything else in this document stops at the horizon. HF does not, because
 | Amateur HF | 3.5, 7, 14, 18, 21, 24, 28 MHz | amateur licence |
 
 There is no licence-exempt HF. Both routes require paperwork, and the amateur
-route additionally forbids encryption (section 9.4 of [OPRS.md](OPRS.md)) and
+route additionally forbids encryption (section 9.4 of [XPRS.md](XPRS.md)) and
 requires the operator's own callsign, never a self-generated `X1` or `X3` one.
 
 Which band depends on the hour and the distance. 14 MHz carries 2000 km and more
@@ -534,7 +534,7 @@ frequency all day will not find one.
 Data on HF is established rather than experimental: VARA HF, JS8Call, Winlink and
 FT8 all move traffic over thousands of kilometres at a few hundred bits per
 second, and Winlink in particular exists to carry email to vessels at sea. An
-OPRS packet is 250 bytes, which is a comfortable payload for any of them.
+XPRS packet is 250 bytes, which is a comfortable payload for any of them.
 
 On a boat the antenna is usually already there. An insulated backstay is the
 standard marine HF radiator, and a hull in salt water is the best RF ground
@@ -542,7 +542,7 @@ available, which is why HF from a vessel outperforms the same rig ashore.
 
 The honest position: HF is the only bearer here that reaches 2000 km on demand,
 and it is out of reach for an unlicensed station. For everyone else that distance
-is covered by carrying the packet (section 13.4 of [OPRS.md](OPRS.md)) rather
+is covered by carrying the packet (section 13.4 of [XPRS.md](XPRS.md)) rather
 than transmitting it, which trades days of latency for needing no licence, no
 antenna and no ionosphere.
 
@@ -568,7 +568,7 @@ A radio does none of that. It transmits and whoever is listening hears it. That
 is what BLE5 extended advertising already gives this project
 ([ble5.md](ble5.md)) and what makes it the off-grid plane. WiFi in monitor mode
 is the same idea with 20 MHz of bandwidth instead of 2 MHz, and it is the right
-shape for OPRS: a packet is 250 bytes addressed to a callsign, not a session.
+shape for XPRS: a packet is 250 bytes addressed to a callsign, not a session.
 
 So the honest framing is that this is a **bandwidth and topology** improvement
 over BLE5, not a range improvement over anything.
@@ -603,7 +603,7 @@ stations have found each other by another means. Do not replace it.
 **Step 3: monitor mode on the platforms that allow it.** Linux desktops with an
 mt76 or similar adapter, and the ESP32, which can transmit and receive raw
 802.11 frames without any of this difficulty and is already part of this project.
-A fixed vendor-specific element carrying an OPRS packet in a broadcast frame is
+A fixed vendor-specific element carrying an XPRS packet in a broadcast frame is
 straightforward on both. This makes desktops and dongles into the wide-band
 equivalent of the BLE5 plane and leaves phones on Aware.
 
@@ -627,7 +627,7 @@ Aligning national allocations is a decade of committee work and a specification
 does not move it. What a specification can do is remove every excuse that is not
 regulatory.
 
-If OPRS runs on LoRa, HaLow, WiFi, Bluetooth and the internet with one packet
+If XPRS runs on LoRa, HaLow, WiFi, Bluetooth and the internet with one packet
 format, then the only remaining difference between two countries is the number
 in the table, and that difference becomes visible and arguable. An operator can
 say precisely what they cannot do and why, and point at a working network next
@@ -647,10 +647,10 @@ work.
 | Marine VHF | deliberately not implemented and must not be |
 | 433 MHz LoRa | not implemented; documented as a secondary European option |
 | HF | not implemented; no HF hardware in this project |
-| PMR446 channel 16, CB channel 24 | not implemented; no bearer carries OPRS over an audio channel |
+| PMR446 channel 16, CB channel 24 | not implemented; no bearer carries XPRS over an audio channel |
 | Regional LoRa plans | not implemented; `lib/connections/lora/lora_connection.dart` sets no frequency, and the SX1262 and SX1276 drivers accept one from a caller that does not yet exist |
 | Calling frequencies | not implemented; proposed here for the first time |
-| `t:channel` announcements | not implemented ([OPRS.md](OPRS.md) section 28) |
+| `t:channel` announcements | not implemented ([XPRS.md](XPRS.md) section 28) |
 | WiFi Aware | not implemented |
 | WiFi Direct | implemented, as a session bearer |
 | Monitor mode on desktop or ESP32 | not implemented |

@@ -130,6 +130,6 @@ this transport, and [ble.md](ble.md) for the off‑grid transport that the iGate
 bridges to.
 
 **Why we also built something else:** APRS works well for licensed amateurs, and
-this document is how we speak it. [OPRS.md](OPRS.md) describes the parallel
+this document is how we speak it. [XPRS.md](XPRS.md) describes the parallel
 network for everyone who does not hold a licence — the same shapes (beacons,
 digipeaters, gateways, bulletins) on spectrum that needs no exam.

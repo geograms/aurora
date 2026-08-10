@@ -6,6 +6,8 @@
 /// packet is, how far it may be relayed, and where it may go.
 library;
 
+import 'dart:convert';
+
 import 'xprs_packet.dart';
 
 /// How much a carried packet is worth keeping when the store is full
@@ -128,6 +130,44 @@ const Set<String> kXprsBearers = {
   'satellite',
   'other',
 };
+
+/// Build the neighbour half of a discovery beacon (`docs/XPRS.md` section
+/// 10.6.4).
+///
+/// [candidates] must already be ordered most-relevant-first — the format leaves
+/// what "relevant" means to the sender, so the caller decides whether that is
+/// signal now, uptime, or being a powered relay on a hill.
+///
+/// Returns `hears:` truncated to whatever fits [budget] and `peers:` set to the
+/// **full** count, which is the point: without it a short list cannot be told
+/// from a small mesh, and a client would draw a map that is quietly wrong.
+({int peers, List<String> hears}) xprsNeighbourFit(
+  List<String> candidates,
+  XprsPacket envelope,
+  int budget,
+) {
+  final total = candidates.length;
+  var take = <String>[];
+  for (var i = 1; i <= candidates.length; i++) {
+    final trial = candidates.sublist(0, i);
+    final p = envelope
+        .with_('peers', '$total')
+        .with_('hears', trial.join(','));
+    if (utf8.encode(p.encode()).length > budget) break;
+    take = trial;
+  }
+  return (peers: total, hears: take);
+}
+
+/// How many stations the sender can reach directly, of which `hears:` lists the
+/// ones that fitted (section 10.6.4). Null when the packet states none.
+int? xprsPeers(XprsPacket p) => int.tryParse(p['peers'] ?? '');
+
+/// Messages this station holds for others and would hand over (section 10.6.5).
+///
+/// Deliberately not part of [xprsReadingIsScoped]: mail held is a fact about the
+/// station, not about one bearer, so it needs no `link:`.
+int? xprsMail(XprsPacket p) => int.tryParse(p['mail'] ?? '');
 
 /// Whether a channel reading on [p] is usable: it must name its bearer.
 ///

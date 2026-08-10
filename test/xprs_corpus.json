@@ -280,6 +280,16 @@
 "id": "4ab6be"
 },
 {
+"wire": "t:observation f:X1A67X link:ble peers:12 hears:X1RD89,X32DVA,CT1ABC-9",
+"bytes": 69,
+"id": "28893d"
+},
+{
+"wire": "t:observation f:X1A67X link:ble peers:12 mail:3 hears:X1RD89,X32DVA,CT1ABC-9",
+"bytes": 76,
+"id": "e09743"
+},
+{
 "wire": "t:observation f:X1BOA3 pos:38.6902,-9.4012 spd:6kt dir:275deg type:boat ts:2026-08-08_14:26:40",
 "bytes": 94,
 "id": "5ee342"

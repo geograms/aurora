@@ -58,6 +58,7 @@ import '../../profile/profile_service.dart';
 import '../reticulum/rns_service.dart';
 import '../xprs/xprs_packet.dart';
 import '../xprs/xprs_sig.dart';
+import 'mesh_custody.dart';
 import 'mesh_frame.dart';
 import 'mesh_service.dart';
 
@@ -168,26 +169,28 @@ class MeshCourier {
           '— not aired');
       return;
     }
-    // Straight down the same pipe a wapp broadcast uses, so the custody tap in
-    // BleService parks our own copy exactly as it parks anyone else's.
+    // PARKED, not aired.
     //
-    // Aired MORE THAN ONCE, deliberately. A receiver scans in bursts, so a
-    // single advert window is a lottery: a dongle two metres away parked six
-    // frames from one run and none from the next. The frame stays registered
-    // for five minutes and is refreshed twice inside that, which is what the
-    // old wapp path did by accident (its digipeater re-aired at +75s and
-    // +150s) and the only reason it looked reliable.
-    final bytes = Uint8List.fromList(wire);
-    void air() => ble.enqueueAdvert(this, bytes,
-        ttl: const Duration(seconds: 300));
-    air();
-    Timer(const Duration(seconds: 90), air);
-    Timer(const Duration(seconds: 180), air);
+    // This used to broadcast the message itself: registered on the advert bus
+    // for five minutes and refreshed twice inside that, so a passer-by might
+    // catch a copy. That spent the shared channel on a message almost every
+    // listener had no use for, and spent it again on every refresh, while the
+    // bus rotates through all registered frames — so each extra copy also stole
+    // airtime from the beacons that make the mesh work at all.
+    //
+    // The beacon now says `mail:N` instead (docs/XPRS.md §10.6.5). A neighbour
+    // that can actually reach the recipient opens a session and takes custody;
+    // everybody else spends nothing. Six bytes on a frame already on the air,
+    // in place of a repeating broadcast per message.
+    //
+    // Parking is explicit here because it used to be a side effect of
+    // `enqueueAdvert` — the custody tap parked our own outbound copy on its way
+    // to the radio. No advert, no tap, so the copy is offered directly.
+    MeshCustodyDelegate.onAirFrame(Uint8List.fromList(wire), outbound: true);
     MeshCourierCounters.aired++;
     LogService.instance.add(
-        'Courier: no path to $call — ${wire.length}B handed to the mesh'
-        '${npub.isEmpty ? "" : " (sealed)"} '
-        '[${utf8.decode(wire, allowMalformed: true).replaceAll('\x1F', '|').substring(0, wire.length < 48 ? wire.length : 48)}]');
+        'Courier: no path to $call — ${wire.length}B parked for custody'
+        '${npub.isEmpty ? "" : " (sealed)"}, beacon will advertise it');
   }
 
   /// ENC1 body when we hold their key, plaintext when we do not. Refusing to

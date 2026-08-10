@@ -25,6 +25,8 @@ import '../../profile/storage_paths.dart';
 import '../../util/media_archive.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
+import '../xprs/xprs_packet.dart';
+import '../xprs/xprs_vocab.dart';
 import 'mesh_beacon.dart';
 import 'mesh_custody.dart';
 import 'mesh_bulk_spool.dart';
@@ -155,6 +157,7 @@ class MeshService {
     }
 
     Ble5Bus.instance.onFrame(Ble5Subtype.mesh, _onFrame);
+    Ble5Bus.instance.onFrame(Ble5Subtype.xprs, _onXprsFrame);
     // Leaves listen too: extended SCANNING is a separate controller capability
     // from extended advertising, so a phone that can't beacon (e.g. C61) may
     // still hear the street. Idempotent; harmless where unsupported.
@@ -209,6 +212,42 @@ class MeshService {
     LogService.instance.add(
         'Mesh: started as $cs (${_canAdvertise ? "relay-capable" : "scan-only leaf"})');
   }
+
+  /// An XPRS frame on subtype `0x58` — a discovery beacon, or carried mail.
+  ///
+  /// Only the beacon is handled here. Mail addressed to us is already picked up
+  /// by [MeshCustodyDelegate.onAirFrame] on the transport's inbound path, which
+  /// is where custody decisions belong.
+  void _onXprsFrame(Ble5Frame f) {
+    final t = _table;
+    if (t == null) return;
+    final p = XprsPacket.parse(utf8.decode(f.data, allowMalformed: true));
+    if (p == null || p.type != 'observation') return;
+    final from = (p['f'] ?? '').trim().toUpperCase();
+    if (from.isEmpty || from == t.selfCallsign.toUpperCase()) return;
+
+    _xprsBeaconsHeard++;
+    // A reading without `link:` is unanswerable and discarded (section 10.6.1);
+    // one about another bearer is not evidence about this radio.
+    if (!xprsReadingIsScoped(p) || p['link'] != 'ble') return;
+
+    final peers = xprsPeers(p);
+    final heard = (p['hears'] ?? '')
+        .split(',')
+        .where((c) => c.isNotEmpty)
+        .toList();
+    LogService.instance.add(
+        'Mesh: XPRS beacon from $from (${f.rssi} dBm) — '
+        '${heard.length} of ${peers ?? heard.length} peers listed');
+    // The sender is by definition directly heard, so this is a sighting like
+    // any other: it registers the address for dialling.
+    onPeerSighting?.call(from, f.addr);
+  }
+
+  int _xprsBeaconsHeard = 0;
+
+  /// XPRS discovery beacons heard from other stations.
+  int get xprsBeaconsHeard => _xprsBeaconsHeard;
 
   void _onFrame(Ble5Frame f) {
     final t = _table;
@@ -331,7 +370,103 @@ class MeshService {
       _beaconsFailed++;
       LogService.instance.add('Mesh: beacon tx failed: $e');
     }
+    await _sendXprsBeacon();
   }
+
+  /// The discovery beacon, as XPRS (docs/XPRS.md section 10.6).
+  ///
+  /// ```
+  /// t:observation f:X1A67X link:ble peers:12 hears:X1RD89,X32DVA,CT1ABC-9
+  /// ```
+  ///
+  /// This is the half of discovery that is readable: who I am and who I can
+  /// reach. It rides its own subtype (`0x58`, ASCII 'X') so nothing has to sniff
+  /// a frame to know what it is, and so the chat wapp and the ESP32 — which
+  /// speak neither — ignore it instead of trying to parse it.
+  ///
+  /// The binary beacon above keeps the DV digest and the have-bloom, and that is
+  /// not a retreat: those two exist *because* they are compressed. A DV entry is
+  /// 4 bytes here and about 10 characters as text, and the bloom is a flat 128
+  /// bytes, so at this controller's ceiling text fits either the routing table
+  /// or the bloom and never both.
+  Future<void> _sendXprsBeacon() async {
+    final t = _table;
+    if (t == null || !_canAdvertise) return;
+    final self = t.selfCallsign.trim();
+    if (self.isEmpty) return;
+
+    var envelope =
+        XprsPacket.parse('t:observation f:$self link:ble peers:0 hears:x');
+    if (envelope == null) return;
+
+    // `mail:` is how this station says it is holding messages for other people
+    // (section 10.6.5), and it is why carried mail no longer needs a broadcast
+    // of its own: a neighbour that can reach a recipient opens a session, and
+    // everybody else spends nothing. Omitted at zero — a field that is almost
+    // always 0 is not worth transmitting.
+    final held = MeshStore.instance.ready ? MeshStore.instance.pendingCount() : 0;
+    if (held > 0) envelope = envelope.with_('mail', '$held');
+
+    // Most relevant first, and this station's idea of relevant (section
+    // 10.6.3): a powered, stationary relay outranks a passing phone that
+    // happens to be loud right now, then how reliably we hear it, then signal.
+    final now = DateTime.now();
+    final ranked = t.neighbors.values.toList()
+      ..sort((a, b) {
+        final ap = a.cond.powered ? 1 : 0, bp = b.cond.powered ? 1 : 0;
+        if (ap != bp) return bp - ap;
+        final c = b.contactRatio.compareTo(a.contactRatio);
+        if (c != 0) return c;
+        return b.lastRssi.compareTo(a.lastRssi);
+      });
+    final fresh = ranked
+        .where((n) => now.difference(n.lastHeard) < kNeighborTtl)
+        .map((n) => n.callsign.toUpperCase())
+        .toList();
+
+    // `peers:` is the true total even when `hears:` is cut to fit. Without it a
+    // short list cannot be told from a small mesh (section 10.6.4).
+    final fit = xprsNeighbourFit(fresh, envelope, Ble5Bus.instance.maxPayload);
+    var p = envelope.with_('peers', '${fit.peers}');
+    p = fit.hears.isEmpty
+        ? XprsPacket(p.fields.where((f) => f.key != 'hears').toList())
+        : p.with_('hears', fit.hears.join(','));
+
+    // No `busy:` or `txtime:` yet. Section 10.6 defines both over the last hour
+    // and this node measures neither — `channelLoad` is a short sliding window
+    // of adverts per second, which is a different quantity. Publishing it under
+    // those names would be a wrong number rather than a missing one.
+    try {
+      final bytes = Uint8List.fromList(utf8.encode(p.encode()));
+      final aired = await Ble5Bus.instance
+          .advertiseFrame('xprs', Ble5Subtype.xprs, bytes, ttl: _beaconTtl);
+      // HONOUR the answer. A refused frame is aired nowhere, and counting it
+      // as sent is how a device ends up reporting a healthy beacon while
+      // broadcasting into nothing — the same trap the binary beacon above
+      // documents.
+      if (aired) {
+        _xprsBeaconsSent++;
+      } else {
+        _xprsBeaconsFailed++;
+        if (_xprsBeaconsFailed == 1 || _xprsBeaconsFailed % 10 == 0) {
+          LogService.instance.add(
+              'Mesh: radio refused the XPRS beacon (${bytes.length}B, cap '
+              '${Ble5Bus.instance.maxPayload}B, $_xprsBeaconsFailed so far)');
+        }
+      }
+    } catch (e) {
+      LogService.instance.add('Mesh: XPRS beacon tx failed: $e');
+    }
+  }
+
+  int _xprsBeaconsSent = 0;
+  int _xprsBeaconsFailed = 0;
+
+  /// XPRS discovery beacons the radio accepted.
+  int get xprsBeaconsSent => _xprsBeaconsSent;
+
+  /// XPRS beacons the radio refused — aired nowhere.
+  int get xprsBeaconsFailed => _xprsBeaconsFailed;
 
   /// Devices snapshot as `people`-widget sections (consumed verbatim by the
   /// Bluetooth wapp via ui.people.set, same pattern as hal_rns_nodes → graph).
@@ -422,6 +557,9 @@ class MeshService {
       'routes': t?.routes.length ?? 0,
       'beaconsSent': _beaconsSent,
       'beaconsHeard': _beaconsHeard,
+      'xprsBeaconsSent': _xprsBeaconsSent,
+      'xprsBeaconsHeard': _xprsBeaconsHeard,
+      'xprsBeaconsFailed': _xprsBeaconsFailed,
       'channelLoad': double.parse(channelLoad().toStringAsFixed(2)),
       'politeness': ['quiet', 'busy', 'saturated'][politenessTier()],
       'beaconIntervalS': beaconIntervalNow().inSeconds,

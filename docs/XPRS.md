@@ -1369,7 +1369,9 @@ t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m seatemp:18.4C type:boat ts:
 | `link` | `enum` | which bearer a reading is about (section 10.6) | |
 | `busy` | `qty` | proportion of the last hour that bearer was occupied (section 10.6) | proportion |
 | `txtime` | `qty` | proportion of the last hour this station transmitted | proportion |
-| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.3) | |
+| `hears` | `path` | callsigns heard directly, most relevant first (section 10.6.3) | |
+| `peers` | `int` | how many stations are reachable in total (section 10.6.4) | |
+| `mail` | `int` | messages held for other stations (section 10.6.5) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
@@ -1401,7 +1403,9 @@ observation about a radio exactly as temperature is one about the air.
 | `link` | which bearer every reading in this packet is about |
 | `busy` | proportion of the last hour that bearer was occupied by anybody |
 | `txtime` | proportion of the last hour **this station** was transmitting |
-| `hears` | callsigns heard directly on that bearer in the last hour, strongest first |
+| `hears` | callsigns heard directly on that bearer, most relevant first |
+| `peers` | how many are reachable in total, so a truncated `hears:` is honest |
+| `mail` | messages held for others; omitted when none. A neighbour that can reach a recipient opens a session rather than everyone airing every message |
 
 **The window is one hour and is not stated on the wire**, because two stations
 reporting `busy:41%` have to mean the same thing for the number to be worth
@@ -1491,12 +1495,59 @@ Three limits, stated because a topology map invites over-reading:
 
 - **Directly heard only.** A callsign reached through a relay does not belong in
   `hears:`, or the list stops meaning anything.
-- **Strongest first**, so a truncated list still carries the useful half. Signal
-  per callsign is deliberately not carried: it would need a compound value this
-  format does not have, and the order says most of it.
+- **Most relevant first**, so a truncated list still carries the useful half.
+  What counts as relevant is the sender's judgement -- signal now, uptime,
+  whether the station is powered and stationary -- because a passing phone that
+  happens to be loud is not more useful than the solar relay on the hill, and no
+  single criterion suits every station. Signal per callsign is deliberately not
+  carried: it would need a compound value this format does not have.
 - **It is a claim like any other.** A station may list callsigns it cannot hear,
   and nothing here detects that. What it buys an attacker is being chosen as a
   carrier, which is why `hears:` informs a choice and never compels one.
+
+### 10.6.4 `peers:` says how many were left out
+
+```
+t:observation f:X1A67X link:ble peers:12 hears:X1RD89,X32DVA,CT1ABC-9
+```
+
+69 bytes. `peers:` is how many stations the sender can reach directly; `hears:`
+is the ones that fitted. **A busy street will not fit** -- about 29 six-character
+callsigns reach the 250-byte limit, and a shared bearer will offer less than
+that.
+
+Without the count, a truncated list is a lie by omission: a reader cannot tell
+"these three are all there is" from "these three of forty". With it, a station
+that is one of thirty knows to ask rather than assume, and a client can say
+"3 of 12 shown" instead of drawing a map that is quietly wrong.
+
+`peers:` counts what `hears:` would have listed in full, so the two always agree
+when nothing was dropped, and `peers:` is never smaller than the list.
+
+### 10.6.5 `mail:` says there is something to collect
+
+```
+t:observation f:X1A67X link:ble peers:12 mail:3 hears:X1RD89,X32DVA,CT1ABC-9
+```
+
+76 bytes. `mail:` is how many messages this station is holding **for other
+people** (section 13.4) and would hand over if asked. It is omitted when there
+is nothing, because a field that is almost always `0` is a field not worth
+transmitting.
+
+**This is what makes carrying mail cheap.** The alternative is what it replaces:
+airing every carried message as its own repeating broadcast, so that a passer-by
+might catch one. That spends the channel on messages most listeners have no use
+for, and spends it again every time the copy is refreshed. A beacon is on the
+air anyway. Saying "I have three" in six bytes lets a station that can actually
+reach one of the recipients ask for them directly, and lets everybody else
+ignore it.
+
+So the sequence is: a station beacons `mail:3`; a neighbour that recognises a
+recipient -- because it is one, or because its own `hears:` covers one -- opens a
+session and takes custody; everybody else spends nothing. The count is a hint
+for deciding whether a session is worth the battery, not a promise about what
+the session will contain.
 
 Hearing is also often **asymmetric** -- a handheld hears a hilltop repeater that
 cannot hear it back. Two stations listing each other can reach each other; one
@@ -4406,7 +4457,7 @@ Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `opt`, `vote`, `root`, `size`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
-`rssi`, `snr`, `link`, `busy`, `txtime`, `hears`, `age`, `epoch`.
+`rssi`, `snr`, `link`, `busy`, `txtime`, `hears`, `peers`, `mail`, `age`, `epoch`.
 
 Assigned `q:` and `s:` words: section 8.
 
@@ -4581,7 +4632,9 @@ packet **250 bytes**, on every transport.
 | `link` | `enum` | which bearer a reading is about (section 10.6) | |
 | `busy` | `qty` | proportion of the last hour that bearer was occupied (section 10.6) | proportion |
 | `txtime` | `qty` | proportion of the last hour this station transmitted | proportion |
-| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.3) | |
+| `hears` | `path` | callsigns heard directly, most relevant first (section 10.6.3) | |
+| `peers` | `int` | how many stations are reachable in total (section 10.6.4) | |
+| `mail` | `int` | messages held for other stations (section 10.6.5) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
@@ -4816,7 +4869,8 @@ is not a quantity. A reading without it is discarded; report once per bearer.
 
 `busy:` how much of the last hour that bearer was occupied by anybody, `txtime:`
 how much of it was **this** station, `hears:` callsigns heard **directly** on it,
-strongest first. Window is one hour and is never on the wire, so numbers compare.
+most relevant first (the sender decides what relevant means), `peers:` how many
+are reachable in total so a truncated list is honest. Window is one hour and is never on the wire, so numbers compare.
 Keys on `t:observation`, never a new type -- design rule 5.
 
 `busy:` is what section 31 was missing: a duty cycle limits one transmitter and
@@ -5022,7 +5076,7 @@ document.
 
 | Element | State |
 |---|---|
-| **On the air** | **implemented** on the Flutter side: `MeshCourier` emits XPRS for every carried message, and custody reads it. The chat wapp and the ESP32 still emit the older compact frame and are read through a fallback (`docs/store-and-forward.md` section 2), which goes away when they are ported |
+| **On the air** | **implemented** on the Flutter side: the discovery beacon is an XPRS `t:observation` on its own BLE5 subtype `0x58` (`docs/ble5.md`), carrying `peers:`, `hears:` and `mail:`; `MeshCourier` emits XPRS for every carried message, and custody reads it. The chat wapp and the ESP32 still emit the older compact frame and are read through a fallback (`docs/store-and-forward.md` section 2), which goes away when they are ported |
 | **The packet format itself** | **implemented**; `lib/services/xprs/` parses, encodes, derives identifiers and signs. Every example packet in this document is a test fixture: `test/xprs_packet_test.dart` round-trips all 201 byte-exact, checks each stated byte count, and cross-checks every identifier against an independent Python implementation |
 | Section 5 identifiers | **implemented** |
 | Section 9.1 signatures, and surviving a relay | **implemented**; `test/xprs_sig_test.dart` signs, relays three hops and re-verifies |

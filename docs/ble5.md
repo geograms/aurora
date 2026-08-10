@@ -44,10 +44,35 @@ All frames are carried in manufacturer data under company id `0xFFFF`, marker
 |---|---|---|
 | `0x55` | `rns` | one Reticulum packet |
 | `0x56` | `rnsChunk` | a fragment of a Reticulum packet exceeding one advertisement |
-| `0x41` | `aprs` | the compact direct or group text frame |
-| `0x47` | `presence` | GATT presence beacon: callsign and connectable indication |
-| `0x4D` | `mesh` | street mesh route beacon: gossip and distance-vector costs |
+| `0x41` | `aprs` | the compact direct or group text frame, and carried XPRS mail |
+| `0x47` | `presence` | **declared and never transmitted.** Nothing airs this subtype and nothing handles it; the real presence beacon is the legacy connectable advertisement below |
+| `0x4D` | `mesh` | street mesh route beacon: distance-vector costs and the have-bloom |
 | `0x57` | `wfd` | WiFi-Direct negotiation |
+| `0x58` | `xprs` | the XPRS discovery beacon (`docs/XPRS.md` section 10.6) |
+
+### The discovery beacon, subtype `0x58`
+
+```
+t:observation f:X1A67X link:ble peers:12 mail:3 hears:X1RD89,X32DVA,CT1ABC-9
+```
+
+76 bytes, readable without a decoder, aired on the same cadence as the binary
+beacon. `peers:` is how many stations are reachable in total and `hears:` the
+ones that fitted, so a truncated list is honest rather than silently short;
+`mail:` says how many messages this station holds for other people.
+
+`mail:` is why a carried message no longer needs a broadcast of its own. It used
+to be registered on the bus for five minutes and refreshed twice inside that, so
+a passer-by might catch a copy -- spending the channel on a message almost every
+listener had no use for, and stealing rotation slots from the beacons that make
+the mesh work. Now the beacon says there is mail, a neighbour that can reach the
+recipient opens a session, and everybody else spends nothing.
+
+**Two frames, because two things do not fit in one.** The DV digest is 4 bytes
+per destination and the have-bloom is a flat 128; as XPRS text a DV entry costs
+about 10 characters and the bloom base85s to 160, so at the ceilings below the
+text fits either the routing table or the bloom and never both. The binary
+beacon keeps them; everything a person would read moved to `0x58`.
 
 ### Compact frame, subtype `0x41`
 

@@ -212,7 +212,7 @@ The type is fixed by this document and is never transmitted.
 | `call` | uppercase letters, digits, `-` and `/` | `CT1ABC-9` |
 | `addr` | a `call` or a group name | `LISBOA` |
 | `path` | one or more `call`, separated by commas | `X32DVA,CT1ABC-9` |
-| `hex6` | exactly 6 lowercase hexadecimal characters | `f6ff8d` |
+| `hex6` | exactly 6 lowercase hexadecimal characters | `399227` |
 | `time` | `YYYY-MM-DD_HH:MM:SS`, UTC | `2026-08-08_14:26:40` |
 | `offset` | `+HH:MM` or `-HH:MM` | `+05:45` |
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
@@ -438,15 +438,12 @@ is otherwise unaffected.
 
 ## 5. Message identifiers
 
-A packet carrying a payload has an identifier that **is not transmitted**. Both
-ends compute it:
+**Every packet has an identifier, and it is never transmitted.** Both ends
+compute it from the packet itself:
 
 ```
-id = first 6 hex characters of sha256("<f>|<ts>|<payload>")
+id = first 6 hex characters of sha256(the packet, with sig: and via: removed)
 ```
-
-where `<payload>` is the value of `m:`, or of `x:` if there is no `m:`, or of
-`file:` if there is neither.
 
 Nothing announces its own identifier. A packet already carries who sent it and
 when, so the identifier is free.
@@ -456,18 +453,26 @@ The timestamp is what makes this work. Hashing content alone would give every
 network:
 
 ```
-X1QZ3N  2026-08-08_14:26:40  OK   ->  4ec9ed
-X1QZ3N  2026-08-08_14:27:22  OK   ->  2ff664
-X1RD89  2026-08-08_14:26:40  OK   ->  db8cdf
+X1QZ3N  2026-08-08_14:26:40  OK   ->  06900a
+X1QZ3N  2026-08-08_14:27:22  OK   ->  2c6755
+X1RD89  2026-08-08_14:26:40  OK   ->  03d7dc
 ```
 
 Sender, second and text together are unique in practice.
 
-`r:` carries an identifier when a packet refers to another: a reply, a
-reaction, a receipt, or a withdrawal of the sender's own earlier packet
-(section 17.2). Adding, removing or checking a
-signature does not change an identifier, and neither does relaying (section 13),
-because none of them changes `f:`, `ts:` or the payload.
+Two fields are excluded and both for the same reason: they change while a
+packet is in flight. Signing must not alter the identifier of what was signed,
+and a carrier appending itself to `via:` must not turn one message into a
+different one. Everything else is included, which is what makes the identifier
+exact.
+
+`f:` and `ts:` alone would not be enough. A station beaconing position and
+weather in the same second would give both packets one identifier, and a reply
+naming it would be ambiguous. Hashing the whole packet costs nothing, because
+none of it goes on the wire.
+
+`r:` carries an identifier when a packet refers to another: a reply, a reaction,
+a receipt, or a withdrawal of the sender's own earlier packet (section 17.2).
 
 ---
 
@@ -489,7 +494,7 @@ t:message f:X1QZ3N ts:2026-08-08_14:26:40 m:anyone near the north gate?
 t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 m:meet at the bridge at six
 ```
 
-78 bytes, identifier `101a23`.
+78 bytes, identifier `de9780`.
 
 ### 6.3 Group
 
@@ -501,14 +506,15 @@ characters that follow, so a group may not be named like an XPRS callsign.
 t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
 ```
 
-78 bytes, identifier `f6ff8d`.
+78 bytes, identifier `399227`.
 
 ### 6.4 Replies
 
-`r:` names the message being replied to.
+`r:` names the packet being replied to, which may be any packet carrying
+content (section 6.5).
 
 ```
-t:message f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:f6ff8d m:I'll be late, start without me
+t:message f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:399227 m:I'll be late, start without me
 ```
 
 92 bytes. The reply has its own identifier, computed the same way, so it can be
@@ -518,14 +524,43 @@ reply, marked as answering a message it does not hold.
 ### 6.5 Reactions
 
 ```
-t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like
-t:reaction f:X32DVA d:LISBOA r:f6ff8d remove:like
+t:reaction f:X32DVA d:LISBOA r:399227 add:like
+t:reaction f:X32DVA d:LISBOA r:399227 remove:like
 ```
 
 46 and 49 bytes. `add:` states what is being added and `remove:` withdraws that
 same thing, so neither has to be read as the negation of the other. A reaction
-carries no `m:`. It is counted once per callsign, is
-idempotent, is not displayed as a message and raises no notification.
+carries no `m:`. It is counted once per callsign, is idempotent, is not
+displayed as a message and raises no notification.
+
+**Every packet that carries content may be replied to and reacted to.**
+
+Every packet has an identifier (section 5), so `r:` can name any of them. There
+is nothing special about a message except that it is the common case:
+
+| Replied to and reacted to | Neither |
+|---|---|
+| `message`, `blog`, `observation`, `track` | `reaction` |
+| `passage`, `event`, `offer`, `need` | `receipt` |
+| `channel`, `sos`, `warning`, `info` | `challenge`, `response` |
+| | `request`, `identity`, `ping`, `pong` |
+
+A weather observation, a warning, a blog post, an offer and a channel
+announcement can all be replied to and reacted to. That is the point of deriving
+an identifier for every packet rather than only for messages.
+
+The right-hand column is protocol machinery rather than content, and a receiver
+**ignores** a reply or reaction naming any of it.
+
+A reaction is excluded because a reaction to a reaction is not a thing anyone
+means, and a reply to one is a reply to the wrong packet: the reaction already
+names what it was about, and that is what should be answered.
+
+A **challenge and its response** are excluded for a stronger reason. They are a
+two-party authentication exchange, valid for sixty seconds, and the only thing
+that should ever name a challenge is its own response. Anything else pointing at
+one is noise at best, and at worst an invitation to treat a security exchange as
+a conversation.
 
 ### 6.6 Long messages
 
@@ -604,13 +639,13 @@ Absence of `q:` means nothing is expected back, so silence is never ambiguous.
 t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack,read m:did you get the keys?
 ```
 
-85 bytes, identifier `8ab15f`.
+85 bytes, identifier `9821a4`.
 
 The answers, naming that identifier in `r:`:
 
 ```
-t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:ack
-t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:read
+t:receipt f:X1RD89 d:X1QZ3N r:9821a4 s:ack
+t:receipt f:X1RD89 d:X1QZ3N r:9821a4 s:read
 ```
 
 42 and 43 bytes. `s:ack` is sent when the message reaches the device, `s:read`
@@ -668,7 +703,7 @@ reconstructs the signed text by deletion.
 t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:<60 characters> m:net starts in ten minutes
 ```
 
-143 bytes. The identifier is `f6ff8d`, the same as the unsigned packet in
+143 bytes. The identifier is `399227`, the same as the unsigned packet in
 section 6.3, because signing changes neither `f:`, `ts:` nor the payload.
 
 | State | Condition |
@@ -703,7 +738,7 @@ and the exchange is the authentication rather than something needing it
 Everything else is signed by default, including the smallest packets:
 
 ```
-t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like sig:<60 characters>
+t:reaction f:X32DVA d:LISBOA r:399227 add:like sig:<60 characters>
 ```
 
 111 bytes for a signed reaction, against 46 unsigned. A forged reaction
@@ -1150,10 +1185,10 @@ A call for help is its own packet type, not an observation with a flag on it
 t:sos f:X1QZ3N pos:38.7223,-9.1393 acc:6m kind:medical ts:2026-08-08_14:26:40 m:broken leg, cannot walk
 ```
 
-103 bytes, identifier `2adab3`. Any station may answer:
+103 bytes, identifier `bfa3f1`. Any station may answer:
 
 ```
-t:receipt f:X32DVA d:X1QZ3N r:2adab3 s:ack
+t:receipt f:X32DVA d:X1QZ3N r:bfa3f1 s:ack
 ```
 
 42 bytes.
@@ -1199,20 +1234,20 @@ so nothing is expected back.
 
 ```
 1  t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
-2  t:message f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:f6ff8d m:I'll be late, start without me
-3  t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like
+2  t:message f:X1RD89 d:LISBOA ts:2026-08-08_14:36:00 r:399227 m:I'll be late, start without me
+3  t:reaction f:X32DVA d:LISBOA r:399227 add:like
 ```
 
 78, 92 and 46 bytes. Packet 1 transmits no identifier; every receiver computes
-`f6ff8d` from its sender, time and text. Packets 2 and 3 name that value.
+`399227` from its sender, time and text. Packets 2 and 3 name that value.
 Packet 2 has its own computed identifier and can be replied to in turn.
 
 ### 12.2 Direct message with both receipts
 
 ```
 1  t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack,read m:did you get the keys?
-2  t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:ack
-3  t:receipt f:X1RD89 d:X1QZ3N r:8ab15f s:read
+2  t:receipt f:X1RD89 d:X1QZ3N r:9821a4 s:ack
+3  t:receipt f:X1RD89 d:X1QZ3N r:9821a4 s:read
 ```
 
 85, 42 and 43 bytes. Packet 1 asks for two things by name and packets 2 and 3
@@ -1290,7 +1325,7 @@ The hop count is not transmitted. It is the number of callsigns in `via:`, which
 every station can count for itself, and a packet with no `via:` has taken no
 hops.
 
-The identifier is `101a23` in all four. `f:`, `ts:` and the payload never
+The identifier is `de9780` in all four. `f:`, `ts:` and the payload never
 change, so relaying alters neither the identifier nor a signature, and a station
 that already holds the message recognises the repeat and does not display it
 twice.
@@ -1421,10 +1456,10 @@ an accuracy claim.
 that they read something, not a device reporting that bytes arrived:
 
 ```
-t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 sig:<60 characters>
+t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:766d3e s:sign dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 sig:<60 characters>
 ```
 
-184 bytes. `r:` names the original message -- `87e209`, computed from its sender,
+184 bytes. `r:` names the original message -- `766d3e`, computed from its sender,
 timestamp and text -- and `sig:` signs the receipt, which covers `f:` and `r:`
 together (section 9.1). The result is evidence that the holder of `X1RD89`'s key
 acknowledged that exact message, and it is checkable by anyone holding the
@@ -1489,7 +1524,7 @@ t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 near:50km un
 t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 near:50km until:2026-09-08_00:00:00 q:sign via:X3RLY7,IT9ABC,SV2QRP m:are you still in Athens in September?
 ```
 
-177 and 175 bytes. Both are identifier `87e209`, because an identifier is computed
+177 and 175 bytes. Both are identifier `766d3e`, because an identifier is computed
 from `f:`, `ts:` and the payload (section 5) and `via:` is none of those.
 
 So the recipient recognises the second copy as one it already holds, shows it
@@ -1508,7 +1543,7 @@ everyone who moved it. A signed receipt copies that list into `route:` and signs
 it:
 
 ```
-t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:87e209 s:sign route:X32DVA,CT1ABC-9,SV1XYZ dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 sig:<60 characters>
+t:receipt f:X1RD89 d:X1QZ3N ts:2026-08-20_09:12:00 r:766d3e s:sign route:X32DVA,CT1ABC-9,SV1XYZ dest:38.72,-9.14 near:50km until:2026-10-01_00:00:00 sig:<60 characters>
 ```
 
 213 bytes. `via:` on this packet is the receipt's own journey home, which is a
@@ -1805,15 +1840,15 @@ reported it:
 ```
 t:warning f:X3RLY7 pos:39.4012,-8.2043 rad:5km kind:fire sev:danger ts:2026-08-08_02:10:00
 t:warning f:X3RLY7 pos:39.5511,-8.1002 rad:2km kind:fire sev:watch ts:2026-08-08_09:40:00
-t:warning f:X3RLY7 ts:2026-08-08_14:26:40 r:33a6de remove:warning
+t:warning f:X3RLY7 ts:2026-08-08_14:26:40 r:9fd8ea remove:warning
 ```
 
 90, 89 and 65 bytes. Two fires from one station, then the first one out.
 
 `r:` carries the identifier of the packet being withdrawn and `remove:` says
 what is being withdrawn. The identifier is computed, not transmitted
-(section 5), so both ends already have it: the first fire is `33a6de` and the
-second `35b600`, from the sender and the second they were reported.
+(section 5), so both ends already have it: the first fire is `9fd8ea` and the
+second `aad744`, from the sender and the second they were reported.
 
 This is why neither a warning nor a notice needs a name of its own. Naming the
 kind would not do: a station that has reported two fires and withdraws `fire`
@@ -1880,7 +1915,7 @@ Only the holder of the private key can recover the nonce. The answer is sealed
 to the challenger's key and names the challenge in `r:`:
 
 ```
-t:response f:CT1ABC-9 d:X32DVA ts:2026-08-08_14:26:40 r:7c31a9 x:<64 characters>
+t:response f:CT1ABC-9 d:X32DVA ts:2026-08-08_14:26:40 r:35a544 x:<64 characters>
 ```
 
 129 bytes. A challenger that gets back the value it expects has learned that

@@ -93,10 +93,13 @@ short transmissions than by few long ones.
 Every figure in the table above is **computed from the modulation**, and none of
 it says what is happening on a real channel on a real evening. `busy:` and
 `txtime:` ([XPRS.md](XPRS.md) section 10.6) are the measured version: how much of
-the last hour the channel was occupied by anybody, and how much of it was this
-station. A duty cycle constrains one transmitter; whether the band is usable
-depends on all of them, and that is the number worth having before choosing a
-spreading factor for a site rather than for a spreadsheet.
+the last hour a bearer was occupied by anybody, and how much of it was this
+station. Each reading names its bearer in `link:`, so a station on LoRa and a LAN
+at once reports each honestly instead of averaging them into nothing.
+
+A duty cycle constrains one transmitter; whether the band is usable depends on
+all of them, and that is the number worth having before choosing a spreading
+factor for a site rather than for a spreadsheet.
 
 A denser urban network may prefer SF8 -- more orthogonal still, 17% of the
 airtime, about half the range. A long rural link may prefer SF11 and accept the

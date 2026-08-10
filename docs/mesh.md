@@ -209,9 +209,10 @@ Load-adaptive backoff, same shape as the RNS transport's proven auto-passive:
   it). Reuse the existing foreground-service hold.
 
 **Each node measures this privately, and [XPRS.md](XPRS.md) section 10.6 lets it
-say so.** `busy:` is the proportion of the last hour the channel was occupied by
-anybody and `txtime:` the proportion this node was transmitting, both on an
-ordinary `t:observation`. The quiet/busy/saturated tiers above are exactly that
+say so.** `busy:` is the proportion of the last hour a named bearer was occupied by
+anybody and `txtime:` the proportion this node was transmitting on it, both on an
+ordinary `t:observation` carrying `link:ble` for this plane -- the bearer is
+required precisely because a node here is not one radio on one channel. The quiet/busy/saturated tiers above are exactly that
 measurement, computed from one vantage point and shared with nobody — so every
 node has to rediscover the congestion for itself, and a node in a quiet pocket
 next to a saturated one never learns it is about to make things worse.

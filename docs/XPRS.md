@@ -1359,14 +1359,15 @@ t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m seatemp:18.4C type:boat ts:
 |---|---|---|---|
 | `batt` | `qty` | battery charge | proportion |
 | `volt` | `qty` | supply voltage | voltage |
-| `busy` | `qty` | proportion of the last hour the channel was occupied (section 10.6) | proportion |
+| `link` | `enum` | which bearer a reading is about (section 10.6) | |
+| `busy` | `qty` | proportion of the last hour that bearer was occupied (section 10.6) | proportion |
 | `txtime` | `qty` | proportion of the last hour this station transmitted | proportion |
-| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.2) | |
+| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.3) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
 
-`rssi` and `snr` describe the link a packet arrived on and are reported by the
+`rssi` and `snr` describe the radio path a packet arrived on and are reported by the
 receiver, in a `pong` reply. A station does not transmit its own received signal
 strength.
 
@@ -1379,27 +1380,74 @@ A station can measure the air, its battery and where it is. It can also measure
 readings are what the rest of this format quietly assumes somebody has.
 
 ```
-t:observation f:X3RLY7 ts:2026-08-08_14:26:40 busy:41% txtime:6%
-t:observation f:X3RLY7 ts:2026-08-08_14:26:40 hears:X1QZ3N,X32DVA,CT1ABC-9
-t:observation f:X3RLY7 ts:2026-08-08_14:26:40 busy:41% txtime:6% hears:X1QZ3N,X32DVA,CT1ABC-9 batt:82%
+t:observation f:X3RLY7 ts:2026-08-08_14:26:40 link:lora busy:41% txtime:6%
+t:observation f:X3RLY7 ts:2026-08-08_14:26:40 link:lora hears:X1QZ3N,X32DVA,CT1ABC-9
+t:observation f:X3RLY7 ts:2026-08-08_14:26:40 link:ble hears:X1PZ4Q,X32DVA
 ```
 
-64, 74 and 102 bytes. No new packet type, because design rule 5 settles it: one
-type carries every kind of observation, and how busy a channel is is an
+74, 84 and 74 bytes. No new packet type, because design rule 5 settles it: one
+type carries every kind of observation, and how busy a bearer is is an
 observation about a radio exactly as temperature is one about the air.
 
 | Key | Reading |
 |---|---|
-| `busy` | proportion of the last hour the channel was occupied by anybody |
+| `link` | which bearer every reading in this packet is about |
+| `busy` | proportion of the last hour that bearer was occupied by anybody |
 | `txtime` | proportion of the last hour **this station** was transmitting |
-| `hears` | callsigns heard directly in the last hour, strongest first |
+| `hears` | callsigns heard directly on that bearer in the last hour, strongest first |
 
 **The window is one hour and is not stated on the wire**, because two stations
 reporting `busy:41%` have to mean the same thing for the number to be worth
 transmitting. A station that has been listening for less than an hour reports
 what it has and does not scale it up.
 
-### 10.6.1 Why `busy:` matters more than it looks
+### 10.6.1 A reading without a bearer is not a reading
+
+**`link:` is required whenever `busy:`, `txtime:` or `hears:` appears**, and a
+packet carrying any of them without it is discarded rather than guessed at.
+
+This is not pedantry. A station in this format is not one radio on one channel:
+the same phone may be on LoRa, Bluetooth, WiFi Direct, a LAN and the internet at
+once, and those bearers have nothing in common. On LoRa occupancy is a legal duty
+cycle measured in seconds of owed silence; on a LAN it is close to meaningless; on
+Bluetooth what binds is scan windows rather than airtime. A single number
+averaged across them is not a quantity at all, and `busy:41%` from a gateway
+would be a statement no receiver could act on and every receiver would graph.
+
+`hears:` has the same defect for a better reason. Hearing `X1PZ4Q` over
+Bluetooth means it is in the room; hearing it over LoRa means it is somewhere in
+ten kilometres of countryside. Recorded identically, those two facts are worse
+than either alone.
+
+So a station reports **once per bearer** and says nothing it cannot mean:
+
+| `link:` | The bearer |
+|---|---|
+| `lora` | LoRa on an ISM band |
+| `ble` | Bluetooth Low Energy |
+| `wifi` | 2.4 or 5 GHz WiFi, including WiFi Direct and WiFi Aware |
+| `halow` | 802.11ah, sub-GHz WiFi |
+| `lan` | a wired or local network the station is attached to |
+| `internet` | reached through a gateway, wherever that gateway is |
+| `vhf` | VHF packet |
+| `uhf` | UHF packet |
+| `hf` | HF |
+| `cb` | Citizens' Band |
+| `pmr` | PMR446 and its regional equivalents |
+| `satellite` | any satellite path |
+| `other` | something not in this list, named in `m:` |
+
+The list is the one section 31.1 and `spectrum.md` already work through; this key
+only gives it a name on the wire.
+
+**Section 31.1 becomes computable because of this.** It already says a station is
+bound by the strictest bearer it transmits on, and with one undifferentiated
+number nothing could tell which bearer that was. Per-bearer readings can. A phone
+bridging LoRa and the internet publishes `link:lora busy:41%` and, if it cares,
+`link:internet busy:2%` -- two true statements where a single average would have
+been one false one.
+
+### 10.6.2 Why `busy:` matters more than it looks
 
 Section 31 asks every station to be disciplined about airtime and gives it
 nothing to measure. `busy:` is that measurement, and it changes politeness from a
@@ -1420,7 +1468,7 @@ this is the reading that tells a station when to start making it.
 `busy:60%` while contributing `txtime:45%` of it has identified the problem, and
 it is itself.
 
-### 10.6.2 `hears:` is what makes a mesh diagnosable
+### 10.6.3 `hears:` is what makes a mesh diagnosable
 
 `hears:` is one station's answer to "who can you actually reach right now",
 directly, without a relay.
@@ -1444,8 +1492,8 @@ Three limits, stated because a topology map invites over-reading:
   carrier, which is why `hears:` informs a choice and never compels one.
 
 Hearing is also often **asymmetric** -- a handheld hears a hilltop repeater that
-cannot hear it back. Two stations listing each other is a link; one listing the
-other is not, and a client drawing a map should show the difference.
+cannot hear it back. Two stations listing each other can reach each other; one
+listing the other cannot, and a client drawing a map should show the difference.
 
 ### 10.7 Stations without a clock
 
@@ -4350,7 +4398,7 @@ Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `opt`, `vote`, `root`, `size`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
-`rssi`, `snr`, `busy`, `txtime`, `hears`, `age`, `epoch`.
+`rssi`, `snr`, `link`, `busy`, `txtime`, `hears`, `age`, `epoch`.
 
 Assigned `q:` and `s:` words: section 8.
 
@@ -4522,9 +4570,10 @@ packet **250 bytes**, on every transport.
 |---|---|---|---|
 | `batt` | `qty` | battery charge | proportion |
 | `volt` | `qty` | supply voltage | voltage |
-| `busy` | `qty` | proportion of the last hour the channel was occupied (section 10.6) | proportion |
+| `link` | `enum` | which bearer a reading is about (section 10.6) | |
+| `busy` | `qty` | proportion of the last hour that bearer was occupied (section 10.6) | proportion |
 | `txtime` | `qty` | proportion of the last hour this station transmitted | proportion |
-| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.2) | |
+| `hears` | `path` | callsigns heard directly, strongest first (section 10.6.3) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
@@ -4749,23 +4798,28 @@ makes a file findable by words rather than by hash.
 ### The radio itself
 
 ```
-t:observation f:X3RLY7 ts:... busy:41% txtime:6% hears:X1QZ3N,X32DVA,CT1ABC-9
+t:observation f:X3RLY7 ts:... link:lora busy:41% txtime:6% hears:X1QZ3N,X32DVA
 ```
 
-`busy:` how much of the last hour the channel was occupied by anybody, `txtime:`
-how much of it was **this** station, `hears:` callsigns heard **directly**, strongest
-first. Window is one hour and is never stated on the wire, so the numbers compare.
+**`link:` names the bearer and is required** -- `lora` `ble` `wifi` `halow` `lan`
+`internet` `vhf` `uhf` `hf` `cb` `pmr` `satellite` `other` -- because a station
+here is not one radio on one channel, and a figure averaged across LoRa and a LAN
+is not a quantity. A reading without it is discarded; report once per bearer.
+
+`busy:` how much of the last hour that bearer was occupied by anybody, `txtime:`
+how much of it was **this** station, `hears:` callsigns heard **directly** on it,
+strongest first. Window is one hour and is never on the wire, so numbers compare.
 Keys on `t:observation`, never a new type -- design rule 5.
 
 `busy:` is what section 31 was missing: a duty cycle limits one transmitter and
-says nothing about the forty others already on the channel. Rising `busy:` means
+says nothing about the forty others already on that bearer. Rising `busy:` means
 slow down what is discretionary -- beacons, statuses, history replays -- and let
 `urg:` decide what survives. A station reporting `busy:60%` with
 `txtime:45%` has found the problem and it is itself.
 
 `hears:` says why a mesh is broken, who to route through, and who is worth naming
-in `hold:`. Hearing is often asymmetric -- two stations listing each other is a
-link, one listing the other is not.
+in `hold:`. Hearing is often asymmetric -- two stations listing each other can
+reach each other; one listing the other cannot.
 
 ### Reporting
 
@@ -5005,7 +5059,7 @@ document.
 | `@CALLSIGN` mentions | not implemented; no wapp scans `m:` for them and nothing notifies on being named |
 | `root:` on a reply | not implemented; the chat wapp threads by parent pointer only (`docs/aprs-xt.md`), so a lost middle orphans the rest |
 | `t:file` and `size:` | not implemented as a packet; the equivalent exists as NOSTR kind-1063 metadata indexed in FTS5 (`reticulum-dart/doc/file-sharing.md`) |
-| `busy:` and `txtime:` | not implemented; the Reticulum side tracks announce cadence and the LoRa drivers know the duty cycle, but nothing measures or publishes channel occupancy |
+| `link:`, `busy:` and `txtime:` | not implemented; the Reticulum side tracks announce cadence and the LoRa drivers know the duty cycle, but nothing measures or publishes channel occupancy |
 | `hears:` | not implemented; `hal_rns_nodes` lists observed nodes but, per `docs/store-and-forward.md`, a hub replays its whole announce cache so the list is not "heard directly" |
 | `t:report` | not implemented; the chat wapp has moderation ops but no way for an ordinary station to flag anything |
 | `add:repost` | not implemented; the chat wapp has reactions (`add:like`) and no repost |

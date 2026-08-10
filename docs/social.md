@@ -47,6 +47,12 @@ The differences worth knowing before anyone tries to bridge the two:
 | Catching up | poll a relay, hours-deep (§4, §11) | `cmd:history` asks a station to re-air what it kept, paged with `code:206` |
 | Following | kind-3 follow lists, published | a list on the device, deliberately never a packet |
 | Profile picture | a URL in kind-0 | a sha256 in `file:`, fetched with `cmd:file` |
+| Mentions | a `p` tag beside the content | `@CALLSIGN` **inside** the text (section 6.5.2), because `m:` is not opaque to the protocol the way NOSTR content is |
+| Notifications | a dedicated `kinds:[1,6,7] #p:me` subscription | a station finds its own callsign after an `@` |
+| Threading | an `e` tag per NIP-10 | `r:` for the parent and `root:` for the thread, so a lost middle does not orphan the replies under it |
+| Describing a file | kind-1063 metadata, FTS5-indexed | `t:file` with `size:`, so a station can decline a fetch before starting it |
+| Flagging content | kind 1984 | `t:report`, signed, a claim and never a verdict |
+| Money | zaps | none at all, deliberately (section 22.4) |
 
 The one that would bite hardest is following: XPRS refuses to put "who reads
 whom" on the air, so a bridge that published this wapp's follow list onto a

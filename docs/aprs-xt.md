@@ -236,6 +236,23 @@ Receiver behaviour:
 Non‑APRS-XT clients simply show `+b9fb agreed, see you there` verbatim — still
 readable. Threads are **group‑only**.
 
+**A parent pointer alone loses a thread when a middle message is lost**, and on
+these bearers that is ordinary rather than rare: a receiver holding
+`+b9fb agreed` that never heard `b9fb` cannot tell which conversation the reply
+belongs to, so everything beneath the gap is orphaned. Nothing here changes
+today, but [XPRS.md](XPRS.md) section 6.4 solves it in the equivalent place by
+carrying **both** pointers — `r:` for the parent and `root:` for the packet the
+whole thread hangs from — with a first-level reply carrying only `r:`, so the
+extra bytes are spent only where they buy something. Widening the marker here
+would need a new marker character and a compatibility story; it is worth knowing
+the option exists before anyone extends §8.
+
+The same document also has a convention this one does not: a **mention** is
+`@CALLSIGN` written inside the message text (XPRS section 6.5.2), which needs no
+field, survives a client that has never heard of it, and is unambiguous only
+because callsigns are uppercase. It would ride an APRS-XT body unchanged if
+anyone wanted it, since it is text and nothing else.
+
 ---
 
 ## 9. Reactions ("likes")

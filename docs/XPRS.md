@@ -678,7 +678,58 @@ section 6.3, because signing changes neither `f:`, `ts:` nor the payload.
 | unverified | signature present, signer key unknown |
 | unsigned | no signature |
 
-Reactions and identity announcements are not signed.
+**`g:` may appear on any packet, and a station signs by default.**
+
+A callsign is a label that anyone can write (section 3). Nothing else in this
+format stops a station putting `f:X1QZ3N` on a packet it did not send, and for
+most traffic a signature is the only thing that does. It is 63 bytes and it
+should be spent unless there is a reason not to.
+
+Default means default and not mandatory. A sender may omit it, and a receiver
+must accept an unsigned packet rather than discarding it, because the network
+carries traffic from sensors with no key, from stations too small to sign, and
+from software written before this section. What a receiver must not do is
+present an unsigned packet as though its `f:` were established.
+
+Two exceptions remain, for reasons that are not economy.
+
+An **identity announcement** is not signed, because the signature would have to
+be verified with the key the packet is carrying (section 9.3).
+
+A **challenge and its response** carry their own proof: the response is signed,
+and the exchange is the authentication rather than something needing it
+(section 18).
+
+Everything else is signed by default, including the smallest packets:
+
+```
+t:reaction f:X32DVA d:LISBOA r:f6ff8d add:like g:<60 characters>
+```
+
+109 bytes for a signed reaction, against 46 unsigned. A forged reaction
+attributed to you is still an impersonation, and the extra bytes buy the same
+thing they buy anywhere else.
+
+### 9.1.1 When the signature does not fit
+
+A signature is 63 bytes and the packet limit is 250, so a full observation can
+run out of room. The weather station in section 11.3 is 193 bytes and would be
+256 signed.
+
+**Drop optional fields, never the signature.**
+
+```
+t:observation f:X3WX01 pos:38.7223,-9.1393 temp:14.2C hum:78% press:1013.2hPa wind:3.4m/s wdir:210deg type:wx ts:2026-08-08_14:26:40 g:<60 characters>
+```
+
+195 bytes: the same station with two readings fewer, signed. A receiver
+learns less and can trust what it learns, which is the better trade for a
+station whose whole value is being believed.
+
+Where the payload cannot be trimmed, split it (section 6.6) and sign the last
+part, which is what a long message already does. Where neither is possible --
+a single measurement that fills the packet by itself -- the sender may go
+unsigned, and that is the case the "unsigned" state above exists to describe.
 
 ### 9.2 Encryption
 
@@ -2784,6 +2835,9 @@ Seal the body with `x:` and leave the routing keys in cleartext. Coarsen
 `q:sign` asks for a signed receipt; it copies the arrival `via:` into `route:`
 and signs it. `s:sign` without a valid `g:` is discarded.
 
+`g:` goes on every packet by default, 63 bytes. Drop optional fields before
+dropping the signature. Not signed: `identity`, `challenge`.
+
 ### Identifiers
 
 Never transmitted. Both ends compute `sha256("<f>|<ts>|<payload>")` and take the
@@ -2818,6 +2872,7 @@ document.
 | Element | State |
 |---|---|
 | Callsigns, signatures, verification | implemented |
+| Signing by default on every packet type | not implemented; signing exists and is opt-in |
 | Direct, group and broadcast messages | implemented |
 | Replies and reactions | implemented |
 | Receipts and carrier release | implemented |

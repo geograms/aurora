@@ -637,13 +637,17 @@ t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, bu
 
 - Reassembly is keyed on `(f, ts)`. The parts of one message share a timestamp,
   so no identifier has to be transmitted to bind them.
-- Only `m:` is split. Every other field is carried whole on the part it belongs
-  to.
+- Only `m:` is split.
+- Every field except `m:` and `n:` is repeated on each part, so a receiver can
+  read the envelope of any one of them.
 - **A sender splits only at a space, and never inside a word.**
 - **A receiver joins the `m:` values in order with exactly one space between
   them.** No part begins or ends with a space, so there is never a doubled space
   and never a missing one.
-- The identifier of the whole message is computed from the joined text.
+- **The identifier is that of the packet the parts reassemble into**: every
+  field from the first part, `m:` replaced by the joined text, and `n:` removed,
+  hashed as section 5 says. A reply names that, never an individual part. Each
+  part has its own identifier and none of them is the message's.
 - Incomplete sets are held for 10 minutes and then discarded. A partial message
   is never displayed.
 - Parts may arrive in any order. A repeated part number is ignored.
@@ -2958,6 +2962,67 @@ t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 x:<64 characters> sig:<60 cha
 182 bytes, sealed and signed. `t:`, `f:`, `d:` and `ts:` stay in clear so the
 packet can be routed and its freshness checked without reading it.
 
+### 25.4 Commands too long for one packet
+
+A command splits across parts exactly as a message does (section 6.6), which
+matters for the case that motivates it: a spoken instruction, transcribed, and
+handed to a station that interprets it.
+
+`cmd:interpret` says the text in `m:` is the instruction and is to be read rather
+than matched:
+
+```
+t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:interpret n:1/3 m:open the north door for thirty seconds then switch the yard light on
+t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:interpret n:2/3 m:and leave it until sunrise, and if the water tank is below a quarter
+t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:interpret n:3/3 sig:<60 characters> m:start the pump for ten minutes and tell me what the level was
+```
+
+141, 141 and 199 bytes. Reassembled it is 266 bytes, which is why it split.
+
+This is the one command whose payload is `m:`, and it is an **explicit opt-in**
+rather than a hole in section 25.2. Everywhere else a bot reads `cmd:` and
+`arg:` and never takes instructions from free text. A station that does not
+interpret natural language answers `404`, and one that does has said so by
+accepting this command word.
+
+The reply names the **whole** command:
+
+```
+t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 r:863d7f code:202 sig:<60 characters>
+```
+
+132 bytes. `r:863d7f` is the identifier of the reassembled packet, not of any
+part. Each part has an identifier of its own and none of them is the command's.
+
+Three rules on top of section 6.6, all of them about not acting too early.
+
+**A station acts only on a complete, verified set.** The signature is on the last
+part and covers the reassembled packet, so a partial set proves nothing about who
+sent it. Half a command is not a smaller command.
+
+**Parts are held for the command's freshness window, not the ten minutes a
+message gets.** A set still incomplete at 300 seconds is discarded, because a
+command that has expired is not worth assembling.
+
+**The window runs from `ts:`, which every part shares.** A three-part command is
+one command that took a few seconds to arrive, not three events.
+
+### 25.5 Interpretation is not authorisation either
+
+`cmd:interpret` puts attacker-influenced text in front of a language model, and
+that is worth stating plainly rather than discovering later.
+
+A signature proves which callsign sent the text. It says nothing about whether
+the text is a good idea, and a model asked to interpret "open the north door"
+will do exactly as well with a sentence designed to talk it into something else.
+The allow-list of section 25.3 matters more here than anywhere in this document,
+because it is the only thing standing between a stranger and the interpreter.
+
+**A model's output should not be the last check before a physical action.** Map
+what it produces onto the same fixed set of commands a `cmd:` would have named,
+and apply the same permission test. An interpreter that can emit any action at
+all has made the allow-list decorative.
+
 ---
 
 ## 26. Adding a field, worked
@@ -3332,7 +3397,9 @@ signature verifies, newest `ts:` wins, and never usable as an address.
 ```
 
 Answer at once with 202 even when the work takes minutes; any number of results
-may name one command. Must be signed, expires after 300 s unless `until:` says
+may name one command. Splits across parts like a message; `cmd:interpret` puts a
+natural-language instruction in `m:` for a station that reads it, and a reply
+names the reassembled packet rather than any part. Must be signed, expires after 300 s unless `until:` says
 otherwise, never carried, never shown as a message. Authentication is not
 authorisation -- the allow-list is the bot's.
 
@@ -3434,6 +3501,7 @@ document.
 | `t:mailbox` | not implemented; custody has no notion of a preferred carrier |
 | `t:service` | not implemented; no station advertises what it does |
 | `t:command` and `t:result` | not implemented; nothing acts on a received packet |
+| `cmd:interpret` | not implemented; no station interprets natural language |
 | `near:`, regional delivery, `route:` in a receipt | not implemented |
 | `q:sign` and signed receipts | not implemented |
 | Recurring windows, `site:`, `supply:`, `range:` | not implemented |

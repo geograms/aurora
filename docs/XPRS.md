@@ -3092,6 +3092,7 @@ the same however many minutes pass.
 |---|---|
 | `200` | done |
 | `202` | accepted, working on it |
+| `206` | part of the answer, more on request (section 25.2.1) |
 | `400` | understood, arguments wrong |
 | `403` | refused, not permitted |
 | `404` | unknown command, or nothing held to answer it |
@@ -3163,6 +3164,37 @@ names of stations that might serve instead.
 exactly as first transmitted, so authorship survives having been held for days by
 a station nobody trusts. It cannot alter what it replays without breaking a
 signature, and it cannot invent traffic that was never sent.
+
+**A station answers with as much as it can afford, and says there is more.**
+A week of a busy group will not fit in one exchange on a bearer that owes several
+seconds of silence per packet, and a station must not have to choose between
+sending everything and sending nothing.
+
+```
+132  t:result f:X3RLY7 d:X1BOA3 ts:2026-08-08_14:31:02 r:747ae8 code:206 sig:<60 characters>
+```
+
+`code:206` closes a page rather than the request: what came before it is a
+complete, verifiable part of the answer, and more exists. `code:200` in the same
+place means that was all of it.
+
+**A page is continued by asking again for a narrower window**, not by a cursor:
+
+```
+179  t:command f:X1BOA3 d:X3RLY7 ts:2026-08-08_14:33:10 cmd:history since:2026-08-04_00:00:00 until:2026-08-06_11:02:44 sig:<60 characters>
+```
+
+**A replay runs newest first**, so the requester always knows where the page
+stopped: it moves `until:` to the `ts:` of the oldest packet it received and asks
+again. Newest first is also the right order for a person -- somebody back from
+four days at sea wants last night before last Tuesday, and a page that never
+arrives costs them the least.
+
+Nothing here is stateful. The station keeps no cursor, remembers no session and
+owes the requester nothing between exchanges, so a request that is never
+continued costs it nothing, and a station that reboots mid-backfill has broken
+no promise. Repeating a boundary packet is free for the same reason everything
+else here is: duplicates collapse on their identifiers.
 
 **Derived identifiers make backfill safe by construction**, and this is the part
 worth understanding before implementing any of it. A replayed packet has the same
@@ -3810,22 +3842,22 @@ spare terabyte. Any number this document picked would be an overstatement for
 the first and an insult to the third, and it would be wrong again the day
 somebody adds a disk.
 
-What a station owes instead is honesty, which is cheap:
+**A spool is not a time window, and this is why no station can usefully publish
+one number for it.** Keeping is a judgement about worth, not about age. A station
+holds the notes of the people its operator follows and never drops them; it keeps
+whatever recorded something that mattered -- a rescue, a storm, a passage that
+went wrong -- long after everything around it is gone; and it discards a
+stranger's chatter within hours of hearing it. Ask such a station "how far back
+do you go" and there is no honest answer: it goes back a year for one callsign
+and an afternoon for the next.
 
-- **Advertise only what you actually serve.** `serve:history` is a claim, and a
-  station that keeps four hours should not make it look like four months.
-- **Say how far back you go, when you know.** `since:` on a service announcement
-  means the spool reaches that far and no further:
+So a station advertises `serve:history` and nothing more. **The claim is "ask
+me", never "I hold everything since a date"**, and a station that keeps four
+hours of strangers should not dress that up as four months.
 
-```
-t:service f:X3RLY7 pos:38.7810,-9.2043 serve:relay,history since:2026-06-01_00:00:00 ts:2026-08-08_14:26:40 sig:<60 characters>
-```
-
-172 bytes. It saves the asker a request that was always going to be answered
-`code:404`, which is the cheapest airtime this format has to offer.
-
-- **Answer `code:404` plainly** for a window you no longer hold. Nothing was
-  promised, so nothing has failed.
+What it owes beyond that is plainness in the answer: **`code:404` for a window
+it does not hold**, without apology or explanation. Nothing was promised, so
+nothing has failed.
 
 The consequence for the asking side is the one that matters. **A client must
 never assume any depth exists.** It asks, takes what arrives, and asks somebody
@@ -4261,7 +4293,10 @@ t:command f:X1QZ3N d:X3RLY7 ts:... cmd:file file:9f2c4e1a...e13.jpg sig:...
 
 Standard commands carry parameters in named keys, never `arg:`. The station
 answers `code:202`, re-airs the **original packets unchanged**, then `code:200`.
-`404` nothing held, `403` refused, `429` over budget with alternatives in `m:`.
+`206` instead means that was one page and more exists: the replay runs **newest
+first**, so continue by moving `until:` to the oldest `ts:` you received and
+asking again. No cursor, no session. `404` nothing held, `403` refused, `429`
+over budget with alternatives in `m:`.
 Derived identifiers make the replay safe: a duplicate collapses on the identifier
 it already had, so there are no cursors and overlapping windows cost only
 airtime. Advertise a spool with `serve:history`, files with `serve:files`.
@@ -4291,10 +4326,11 @@ somebody else -- silence and refusal look identical to the asker and mean
 opposite things.
 
 **Retention is the station's own** -- this format sets no period, no minimum and
-no eviction order. Advertise only what you serve, put `since:` on a service
-announcement to say how far back the spool goes, answer `code:404` for a window
-you no longer hold. A client assumes no depth: ask, take what arrives, ask
-somebody else for the rest.
+no eviction order. A spool is not a time window: a station may keep a followed
+callsign for a year and a stranger for an afternoon, so it advertises
+`serve:history` and never a depth. Answer `code:404` for a window you no longer
+hold. A client assumes no depth: ask, take what arrives, ask somebody else for
+the rest.
 
 ### Status
 
@@ -4456,7 +4492,8 @@ document.
 | `cmd:history`, backfill by replay | not implemented, and nothing equivalent exists: the APRS iGate mailbox holds only mail addressed to a callsign and is cleared on delivery (`docs/aprs.md`), so broadcast traffic missed while offline is gone |
 | `cmd:file`, fetching bytes by hash | not implemented as a command; the resolution ladder underneath it is built and works (Reticulum direct, DHT, LAN, I2P, BitTorrent -- `reticulum-dart/doc/file-sharing.md`), so this is an ask the format lacks rather than a transport it lacks |
 | `serve:history` | not implemented; no station keeps or advertises a spool |
-| Retention policy | deliberately unspecified (section 29.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
+| Retention policy, and keeping by worth rather than by age | deliberately unspecified (section 29.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
+| Paged replies, `code:206` | not implemented; nothing serves a history request to page |
 | `t:place` | not implemented; nothing in the codebase reports a thing that is not the sender |
 | Avatar and description on `t:identity` | not implemented; the Social wapp renders NOSTR kind-0 profiles, which are a different mechanism |
 | Section 29, airtime | not implemented as stated here, though the Reticulum side has real cadences (30 s charging, 5 min on battery) and the NOSTR side has stranger-serving budgets |

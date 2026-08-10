@@ -24,7 +24,24 @@ The two differ on more than encoding, so anyone building Phase 3 should read it
 before choosing: rooms here have no roster at all, take their global admin from
 a compile-time `ROOM_MAIN_ADMIN`, and have no message-removal op; section 26 has
 a roster, a cryptographic root of trust that needs no pinned constant, and
-`hide:message`. Nothing here needs to change today, and nothing here should be
+`hide:message`.
+
+**The sub-room trees are the sharpest disagreement, and it is not cosmetic.**
+Both designs nest. Here, authority flows *down*: `room_has_authority` walks
+`parentRoomId` to the root (`wapps/chat/room.c:248-267`), so a global mod
+moderates every room beneath them, and a room's admin moderates its descendants.
+In section 26 a subgroup is an ordinary group with its own keypair, listed by
+its parent with `grant:<X5> role:sub`, and **listing confers nothing**: the
+parent cannot grant, revoke or hide inside the subgroup, because those acts are
+signed by the subgroup's own key and nothing else verifies. Membership does not
+travel down either.
+
+Neither is obviously right. A walked tree gives a community one place to deal
+with abuse anywhere beneath it; independent keys mean a compromised parent
+cannot touch its children, and a subgroup can be handed to somebody else by
+handing over one key. Choosing between them is choosing whether a parent
+administers its children or merely names them, and it should be decided
+deliberately rather than inherited from whichever code was written first. Nothing here needs to change today, and nothing here should be
 extended toward members-only rooms without deciding which of the two models the
 wapp is implementing.
 

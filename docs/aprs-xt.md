@@ -604,7 +604,7 @@ stays the transport's business, and the ladder in
 [file-sharing.md](../../reticulum-dart/doc/file-sharing.md) already does it.
 Nothing here changes; the paragraph above stands for APRS-XT.
 
-XPRS section 28 also fills the other gap this document has against plain APRS:
+XPRS section 29 also fills the other gap this document has against plain APRS:
 `t:place` reports something that is **not** the sender — an anchorage, a spring,
 a hut, a trailhead — which is what APRS Objects and Items are for and which
 neither this document nor the shipped code has any equivalent of.

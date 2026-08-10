@@ -6,7 +6,7 @@ XPRS carries position, movement, weather, telemetry and messages between
 stations over licence-free spectrum and the internet. It occupies the same role
 as APRS and requires no amateur licence.
 
-Status: DRAFT 10. Section 28 states which parts are implemented.
+Status: DRAFT 10. Section 35 states which parts are implemented.
 
 ---
 
@@ -161,6 +161,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
 | `mood` | `enum` | how the sender feels (section 27.1) |
 | `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
+| `opt` | `labels` | the choices in a poll, two to six (section 28) |
+| `vote` | `label` | the option chosen in a poll (section 28.1) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -207,7 +209,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
-| `place` | somewhere useful that is not the sender (section 28) |
+| `poll` | a question put to everybody, with the choices (section 28) |
+| `place` | somewhere useful that is not the sender (section 29) |
 | `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
@@ -615,6 +618,46 @@ same thing, so neither has to be read as the negation of the other. A reaction
 carries no `m:`. It is counted once per callsign, is idempotent, is not
 displayed as a message and raises no notification.
 
+### 6.5.1 Replying, quoting and passing on
+
+Three things a social network needs, and the format already had two of them.
+
+**A reply is `r:`** (section 6.4), and it works on any packet carrying content.
+
+**A quote is a reply that says something.** There is no separate mechanism and
+there does not need to be: `r:` names what is being quoted and `m:` is the
+comment on it.
+
+```
+t:status f:X32DVA ts:2026-08-08_14:40:00 r:399227 m:worth reading, he is right about the feed point
+```
+
+99 bytes. A client renders the parent above the comment; a client that never
+heard the parent shows the comment and says so, which section 6.4 already
+requires of every reply.
+
+**Passing something on unchanged is `add:repost`.**
+
+```
+t:reaction f:X32DVA d:LISBOA r:399227 add:repost
+t:reaction f:X32DVA d:LISBOA r:399227 remove:repost
+```
+
+48 and 51 bytes. It is a reaction because it has a reaction's shape exactly: one
+per callsign, idempotent, withdrawable, and no text of its own.
+
+**What travels is the original packet, not a copy of it.** A repost says "this
+belongs in front of the people who follow me", and the thing itself is re-aired
+with `f:`, `ts:` and `sig:` untouched -- the same act as a history replay
+(section 25.2.1), and safe for the same reason: duplicates collapse on the
+derived identifier, so a post reposted by nine stations is still one post.
+
+That is the difference from a quote worth understanding. **A repost adds nothing
+and changes nothing**, so it cannot misrepresent what it carries; the signature
+still proves who wrote it and the reposter's callsign appears only on the
+reaction. A quote is the sender's own packet with their own words, and they
+answer for those.
+
 **A reply and a reaction are different acts, and not every packet takes both.**
 
 Every packet has an identifier (section 5), so `r:` can name any of them. What
@@ -622,7 +665,7 @@ differs is whether naming it means anything:
 
 | Packet type | Reply | React |
 |---|---|---|
-| `message`, `status`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `place`, `warning`, `info` | yes | yes |
+| `message`, `status`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `place`, `poll`, `warning`, `info` | yes | yes |
 | `sos` | yes | **no** |
 | `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `command`, `result`, `moderate`, `ping`, `pong` | no | no |
 
@@ -783,7 +826,7 @@ later delivery discards its copy on hearing the matching `s:ack`.
 
 `q:` and `s:` words assigned by this document: `ack`, `read`, `sign`, `pos`,
 `batt`, `identity`, `pong`, `no`. Reactions assigned for `add:` and `remove:`:
-`like`. All other words are reserved. A word beginning with `z` is private, as a
+`like`, `repost`. All other words are reserved. A word beginning with `z` is private, as a
 key beginning with `z` is.
 
 ---
@@ -959,7 +1002,7 @@ binding and the decoration together come to 255 bytes, which does not fit.
 The split turns out to be the right shape anyway. The key binding is small and
 must be repeated often, because a receiver that has never heard it can verify
 nothing (section 18.1). The decoration is larger and changes once a year, so it
-goes out rarely -- which is section 29 applied to this format's own traffic.
+goes out rarely -- which is section 30 applied to this format's own traffic.
 
 A packet without `k:` still verifies, against the key the receiver already holds
 for that callsign. One from a station whose key is unknown is ignored, exactly as
@@ -2321,8 +2364,8 @@ has said nothing a receiver can act on. Naming the packet is exact, and the
 mechanism is the one replies, reactions and receipts already use.
 
 `remove:` takes the type being withdrawn: `warning`, `info`, `event`, `offer`,
-`need`, `channel`, `passage`, `blog`, `mailbox`, `service`, `place`, or `like`
-for a reaction. It is stated
+`need`, `channel`, `passage`, `blog`, `mailbox`, `service`, `place`, `vote`,
+`like` or `repost` for a reaction. It is stated
 even though `t:` repeats it, so that a receiver can filter withdrawals of any
 type on one key, and so that a later revision can withdraw part of a packet
 rather than all of it.
@@ -3097,7 +3140,7 @@ the same however many minutes pass.
 | `403` | refused, not permitted |
 | `404` | unknown command, or nothing held to answer it |
 | `408` | too old, outside its freshness window |
-| `429` | over budget, ask later or ask elsewhere (section 29) |
+| `429` | over budget, ask later or ask elsewhere (section 30) |
 | `500` | tried and failed |
 
 ```
@@ -3157,7 +3200,7 @@ The answer is the ordinary sequence of section 25.1 -- accepted, then done:
 
 Between them the station re-airs the packets themselves. `code:404` says nothing
 was held for that window, `code:403` that the station will not serve this
-requester, and `code:429` that it is over budget -- with, by section 29, the
+requester, and `code:429` that it is over budget -- with, by section 30, the
 names of stations that might serve instead.
 
 **The replay is the original packets, unchanged.** `f:`, `ts:` and `sig:` are
@@ -3206,8 +3249,8 @@ another's begins, and no bug at the boundary between two windows. Asking two
 stations for overlapping windows costs airtime and nothing else.
 
 A station that keeps a spool says so with `serve:history` (section 24). What it
-keeps, for how long and for whom is its own to decide and to change: section 29.3
-says why this document sets no retention period, and section 29.2 what a station
+keeps, for how long and for whom is its own to decide and to change: section 30.3
+says why this document sets no retention period, and section 30.2 what a station
 owes a stranger regardless.
 
 ### 25.3 Keeping it out of the conversation
@@ -3703,7 +3746,85 @@ give.
 
 ---
 
-## 28. Places
+## 28. Polls
+
+`t:poll` asks everybody the same question and counts the answers.
+
+```
+t:poll f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 opt:sagres,lagos,portimao until:2026-08-10_18:00:00 m:where shall we meet for the net?
+```
+
+134 bytes, identifier `7a9b50`. `opt:` carries the choices as comma-separated
+labels, `m:` asks the question, and `until:` says when voting closes. A poll to a
+group carries `d:` like anything else; without it, it is put to whoever is in
+range.
+
+`opt:` takes **two to six** options, each a `label` (lowercase letters, digits
+and `-`). Two because a poll with one option is not a question, and six because
+a person choosing on a phone in a cockpit is not reading a menu -- and because
+the options, the question and the envelope share 250 bytes.
+
+### 28.1 Voting is a reaction
+
+A vote needs no packet type of its own, because the format already has one that
+behaves exactly like a ballot:
+
+```
+t:reaction f:X32DVA d:LISBOA r:7a9b50 vote:sagres
+t:reaction f:X32DVA d:LISBOA r:7a9b50 remove:vote
+```
+
+49 bytes each. Section 6.5 already says a reaction is **counted once per callsign,
+is idempotent, is not displayed as a message and raises no notification**, which
+is the whole specification of a vote. `vote:` names the chosen option and `r:`
+names the poll.
+
+**Changing your mind is voting again.** The newest verifiable vote from a
+callsign stands, decided by `ts:`, exactly as a nickname is replaced (section
+9.3.1). `remove:vote` withdraws a vote without replacing it.
+
+A vote for an option the poll does not offer is discarded rather than counted as
+something else, and a vote arriving after `until:` is counted only if the
+counter chooses to -- both stations may reasonably disagree about when the
+deadline passed, and see below.
+
+### 28.2 The count is local, and provisional
+
+**There is no authoritative result and this format will not pretend otherwise.**
+Every station counts the votes it has actually heard, and no two stations on a
+radio network have heard the same set. A poll that closed an hour ago is still
+gaining votes on the far side of a relay that has just come back up.
+
+That is not a defect to be engineered away; it is what counting on a lossy
+broadcast medium means. What follows from it:
+
+- **Show the count as what it is** -- votes heard, not votes cast. A client that
+  displays "7 for sagres" where it means "7 that reached me" has lied by
+  rounding.
+- **The author's tally is not special.** The station that asked has no more
+  authority over the result than anyone else; it simply usually hears more. If a
+  final figure matters, the author publishes one as an ordinary `t:status` or a
+  reply, signed, and it is a claim like any other claim.
+- **`cmd:history` improves a count** (section 25.2) and never completes it.
+
+### 28.3 A poll is not a secret ballot
+
+Every vote is a signed packet naming a callsign and a choice, transmitted in
+clear to anybody in range and relayed onward. **Who voted for what is public,
+permanently, to everyone.**
+
+This cannot be fixed within the format. Sealing a vote with `x:` hides it from
+bystanders and not from the counter, and a vote nobody can read is a vote nobody
+can count. Anonymity on a broadcast medium needs cryptography this document does
+not have and a trusted counter this network does not want.
+
+So: use `t:poll` for what time the net should start and where to meet. Do not use
+it to elect anybody, and do not use it for a question whose answer could cost
+somebody something.
+
+---
+
+## 29. Places
 
 Every packet so far reports the sender: where I am, what I see, how I feel. A
 place reports **something that is not me and does not move** -- a tap on a
@@ -3740,7 +3861,7 @@ warning and for a channel, and this is the third vocabulary it carries.
 | `trailhead` | where a path starts |
 | `other` | something not in this list, described in `m:` |
 
-### 28.1 Naming, revising and withdrawing
+### 29.1 Naming, revising and withdrawing
 
 `title:` is a `label` and works exactly as it does on a post (section 19.1): a
 later place from the same station with the same title **replaces** the earlier
@@ -3758,7 +3879,7 @@ t:place f:X1BOA3 ts:2026-09-01_09:00:00 r:9f52f6 remove:place sig:<60 characters
 
 189 and 126 bytes.
 
-### 28.2 A place is a claim
+### 29.2 A place is a claim
 
 Nothing here is a survey and no station is an authority. Two people may publish
 different places with the same title, or the same place in different positions,
@@ -3776,7 +3897,7 @@ are the right packet when somebody could be hurt.
 
 ---
 
-## 29. Airtime
+## 30. Airtime
 
 Every other section says what a station **may** transmit. This one says how
 often, and what it owes the strangers who ask it for things. Sections 25.2 and
@@ -3784,7 +3905,7 @@ often, and what it owes the strangers who ask it for things. Sections 25.2 and
 to spend real airtime on demand, and a format that hands out that power without
 a budget has designed a way to flatten a solar node from across a bay.
 
-### 29.1 Cadence belongs to the bearer
+### 30.1 Cadence belongs to the bearer
 
 There is no single right interval, because the constraint is not the same on
 each bearer:
@@ -3806,7 +3927,7 @@ on a period measured in tens of minutes rather than seconds; and **a retry is
 not a new packet**, so re-airing something that went unanswered counts against
 the same budget as saying it the first time.
 
-### 29.2 What a station owes a stranger
+### 30.2 What a station owes a stranger
 
 `cmd:history` and `cmd:file` are requests to spend somebody else's battery. The
 answer is not that they must be refused, and not that they must be honoured.
@@ -3828,7 +3949,7 @@ t:result f:X3RLY7 d:X1BOA3 ts:2026-08-08_14:26:40 r:747ae8 code:429 sig:<60 char
 things, so a refusal that says nothing wastes the very airtime it was trying to
 save: the asker retries, reasonably, believing the packet was lost.
 
-### 29.3 Retention belongs to the station
+### 30.3 Retention belongs to the station
 
 **This document states no retention period, and will not.** There is no minimum
 depth, no maximum, no required eviction order, and no obligation to keep
@@ -3869,7 +3990,7 @@ retention still reassembles a week nobody was awake for.
 Durability here is social rather than technical: several stations keeping
 overlapping spools by their own choice, not one station promising to remember.
 
-### 29.4 Who this protects
+### 30.4 Who this protects
 
 The stations worth protecting are the ones that cannot argue back: a solar relay
 on a headland, a dongle in a hut, a phone at four percent in a tent. They are
@@ -3881,7 +4002,7 @@ nobody by morning.
 
 ---
 
-## 30. Adding a field, worked
+## 31. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -3907,7 +4028,7 @@ negotiation.
 
 ---
 
-## 31. Operating alongside APRS
+## 32. Operating alongside APRS
 
 A licensed amateur may bridge XPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -3918,18 +4039,19 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 32. Reserved
+## 33. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
 `response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `mailbox`,
-`service`, `command`, `result`, `moderate`, `status`, `place`, `ping`, `pong`.
+`service`, `command`, `result`, `moderate`, `status`, `place`, `poll`, `ping`,
+`pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
 `urg`, `scope`, `lang`, `nick`, `hold`, `serve`, `cmd`, `arg`, `code`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
-`remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
+`remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `opt`, `vote`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
@@ -3943,7 +4065,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 33. Cheat sheet
+## 34. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -3971,7 +4093,8 @@ packet **250 bytes**, on every transport.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
-| `place` | somewhere useful that is not the sender (section 28) |
+| `poll` | a question put to everybody, with the choices (section 28) |
+| `place` | somewhere useful that is not the sender (section 29) |
 | `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
@@ -4022,6 +4145,8 @@ packet **250 bytes**, on every transport.
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
 | `mood` | `enum` | how the sender feels (section 27.1) |
 | `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
+| `opt` | `labels` | the choices in a poll, two to six (section 28) |
+| `vote` | `label` | the option chosen in a poll (section 28.1) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -4301,6 +4426,28 @@ Derived identifiers make the replay safe: a duplicate collapses on the identifie
 it already had, so there are no cursors and overlapping windows cost only
 airtime. Advertise a spool with `serve:history`, files with `serve:files`.
 
+### Polls, and passing things on
+
+```
+t:poll f:X1QZ3N d:LISBOA ts:... opt:sagres,lagos,portimao until:... m:where shall we meet?
+t:reaction f:X32DVA d:LISBOA r:7a9b50 vote:sagres
+t:reaction f:X32DVA d:LISBOA r:7a9b50 remove:vote
+```
+
+`opt:` is two to six labels. A vote is a reaction, so it is one per callsign,
+idempotent and withdrawable; voting again replaces the earlier vote. The count is
+**local and provisional** -- every station counts what it heard, the author's
+tally is not authoritative, and a client that shows "7 votes" where it means "7
+that reached me" has lied by rounding. **Not a secret ballot**: who voted for
+what is public and permanent.
+
+Reply is `r:`. A **quote** is a reply that carries `m:` -- no separate mechanism.
+A **repost** is `add:repost` / `remove:repost` on a reaction, and what travels is
+the original packet with `f:`, `ts:` and `sig:` untouched, so duplicates collapse
+on the identifier and a post reposted by nine stations is still one post. A
+repost adds nothing and so cannot misrepresent; a quote is your own packet with
+your own words.
+
 ### Places
 
 `t:place` reports something that is not you and does not move. `kind:` from:
@@ -4448,7 +4595,7 @@ document.
 
 ---
 
-## 34. Implementation status
+## 35. Implementation status
 
 | Element | State |
 |---|---|
@@ -4492,11 +4639,13 @@ document.
 | `cmd:history`, backfill by replay | not implemented, and nothing equivalent exists: the APRS iGate mailbox holds only mail addressed to a callsign and is cleared on delivery (`docs/aprs.md`), so broadcast traffic missed while offline is gone |
 | `cmd:file`, fetching bytes by hash | not implemented as a command; the resolution ladder underneath it is built and works (Reticulum direct, DHT, LAN, I2P, BitTorrent -- `reticulum-dart/doc/file-sharing.md`), so this is an ask the format lacks rather than a transport it lacks |
 | `serve:history` | not implemented; no station keeps or advertises a spool |
-| Retention policy, and keeping by worth rather than by age | deliberately unspecified (section 29.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
+| Retention policy, and keeping by worth rather than by age | deliberately unspecified (section 30.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
 | Paged replies, `code:206` | not implemented; nothing serves a history request to page |
+| `t:poll` and `vote:` | not implemented; nothing puts a question or counts an answer |
+| `add:repost` | not implemented; the chat wapp has reactions (`add:like`) and no repost |
 | `t:place` | not implemented; nothing in the codebase reports a thing that is not the sender |
 | Avatar and description on `t:identity` | not implemented; the Social wapp renders NOSTR kind-0 profiles, which are a different mechanism |
-| Section 29, airtime | not implemented as stated here, though the Reticulum side has real cadences (30 s charging, 5 min on battery) and the NOSTR side has stranger-serving budgets |
+| Section 30, airtime | not implemented as stated here, though the Reticulum side has real cadences (30 s charging, 5 min on battery) and the NOSTR side has stranger-serving budgets |
 | `t:status` | not implemented; the Social wapp has a feed, but it is NOSTR kind-1 notes over the internet and Reticulum rather than XPRS packets (`docs/social.md`) |
 | `mood:` and client theming | not implemented; nothing reads a mood and no client changes appearance for one |
 | `X5` group callsigns and `t:moderate` | not implemented; groups are plain names with no member list anywhere |

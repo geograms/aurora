@@ -3173,9 +3173,10 @@ numbers to allocate, no agreement about where one station's history ends and
 another's begins, and no bug at the boundary between two windows. Asking two
 stations for overlapping windows costs airtime and nothing else.
 
-A station that keeps a spool says so with `serve:history` (section 24), and what
-it keeps, for how long, and for whom is its own business -- section 29 governs
-what it owes a stranger.
+A station that keeps a spool says so with `serve:history` (section 24). What it
+keeps, for how long and for whom is its own to decide and to change: section 29.3
+says why this document sets no retention period, and section 29.2 what a station
+owes a stranger regardless.
 
 ### 25.3 Keeping it out of the conversation
 
@@ -3795,7 +3796,48 @@ t:result f:X3RLY7 d:X1BOA3 ts:2026-08-08_14:26:40 r:747ae8 code:429 sig:<60 char
 things, so a refusal that says nothing wastes the very airtime it was trying to
 save: the asker retries, reasonably, believing the packet was lost.
 
-### 29.3 Who this protects
+### 29.3 Retention belongs to the station
+
+**This document states no retention period, and will not.** There is no minimum
+depth, no maximum, no required eviction order, and no obligation to keep
+anything at all. A hosting station and the software it runs decide what to keep,
+for how long, and for whom -- and change that decision whenever storage,
+battery, bandwidth or interest changes.
+
+That is not an omission. The stations on this network are a dongle with a
+microSD card, a phone that is someone's only computer, and a home server with a
+spare terabyte. Any number this document picked would be an overstatement for
+the first and an insult to the third, and it would be wrong again the day
+somebody adds a disk.
+
+What a station owes instead is honesty, which is cheap:
+
+- **Advertise only what you actually serve.** `serve:history` is a claim, and a
+  station that keeps four hours should not make it look like four months.
+- **Say how far back you go, when you know.** `since:` on a service announcement
+  means the spool reaches that far and no further:
+
+```
+t:service f:X3RLY7 pos:38.7810,-9.2043 serve:relay,history since:2026-06-01_00:00:00 ts:2026-08-08_14:26:40 sig:<60 characters>
+```
+
+172 bytes. It saves the asker a request that was always going to be answered
+`code:404`, which is the cheapest airtime this format has to offer.
+
+- **Answer `code:404` plainly** for a window you no longer hold. Nothing was
+  promised, so nothing has failed.
+
+The consequence for the asking side is the one that matters. **A client must
+never assume any depth exists.** It asks, takes what arrives, and asks somebody
+else for the rest. Because a replay is the original packets and duplicates
+collapse on their identifiers (section 25.2.1), asking three stations with
+overlapping spools is not waste -- it is how a network with no guaranteed
+retention still reassembles a week nobody was awake for.
+
+Durability here is social rather than technical: several stations keeping
+overlapping spools by their own choice, not one station promising to remember.
+
+### 29.4 Who this protects
 
 The stations worth protecting are the ones that cannot argue back: a solar relay
 on a headland, a dongle in a hut, a phone at four percent in a tent. They are
@@ -4248,6 +4290,12 @@ period (section 18.4's precedent). Refuse out loud with `code:429` and name
 somebody else -- silence and refusal look identical to the asker and mean
 opposite things.
 
+**Retention is the station's own** -- this format sets no period, no minimum and
+no eviction order. Advertise only what you serve, put `since:` on a service
+announcement to say how far back the spool goes, answer `code:404` for a window
+you no longer hold. A client assumes no depth: ask, take what arrives, ask
+somebody else for the rest.
+
 ### Status
 
 `t:status` is a short post about the sender, now -- the townhall packet. No
@@ -4408,6 +4456,7 @@ document.
 | `cmd:history`, backfill by replay | not implemented, and nothing equivalent exists: the APRS iGate mailbox holds only mail addressed to a callsign and is cleared on delivery (`docs/aprs.md`), so broadcast traffic missed while offline is gone |
 | `cmd:file`, fetching bytes by hash | not implemented as a command; the resolution ladder underneath it is built and works (Reticulum direct, DHT, LAN, I2P, BitTorrent -- `reticulum-dart/doc/file-sharing.md`), so this is an ask the format lacks rather than a transport it lacks |
 | `serve:history` | not implemented; no station keeps or advertises a spool |
+| Retention policy | deliberately unspecified (section 29.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
 | `t:place` | not implemented; nothing in the codebase reports a thing that is not the sender |
 | Avatar and description on `t:identity` | not implemented; the Social wapp renders NOSTR kind-0 profiles, which are a different mechanism |
 | Section 29, airtime | not implemented as stated here, though the Reticulum side has real cadences (30 s charging, 5 min on battery) and the NOSTR side has stranger-serving budgets |

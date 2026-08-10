@@ -133,6 +133,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `tag` | `labels` | topic labels chosen by the sender (section 4.5) |
 | `cw` | `words` | what the packet contains, warned before rendering (section 4.6) |
 | `urg` | `enum` | how much this is worth carrying (section 13.5) |
+| `scope` | `scope` | how far this may be relayed, default global (section 13.11) |
 | `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
 | `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
@@ -218,6 +219,7 @@ The type is fixed by this document and is never transmitted.
 | `coord` | two `dec` separated by a comma, latitude then longitude | `38.7223,-9.1393` |
 | `ratio` | two digits `1` to `9` separated by `/`, position then total | `2/3` |
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
+| `scope` | `local`, `global`, or ISO 3166-1 alpha-2 codes separated by commas | `PT,ES` |
 | `clock` | `HH:MM:SS`, a time of day in UTC | `20:00:00` |
 | `money` | an amount with an ISO 4217 code, optional leading `~` and `/` period, or one of `offers`, `swap`, `free` (section 22.2) | `~25EUR/day` |
 | `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
@@ -1571,6 +1573,83 @@ something, which is the only durable record any of this produces.
 
 ---
 
+### 13.11 How far a packet may go
+
+`scope:` limits where a packet may be transmitted and repeated. It is optional
+and **the default is global**: a packet without it may go anywhere, which is what
+every packet in this document does.
+
+| `scope:` | Meaning |
+|---|---|
+| absent, or `global` | anywhere, on any bearer |
+| `local` | short-range bearers only: Bluetooth LE, WiFi Direct, WiFi Aware, and a local network |
+| an ISO 3166-1 alpha-2 code, uppercase | not relayed out of that country |
+
+Lowercase words and uppercase codes cannot be confused, which is the same
+convention callsigns and enums already follow everywhere else.
+
+### 13.11.1 local
+
+```
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 scope:local m:anyone got a 10 mm spanner?
+```
+
+92 bytes, twelve of them the field.
+
+**`local` names bearers, not a distance.** A station must not put the packet on
+LoRa, on any radio band, on a satellite, or onto the internet. It may put it on
+Bluetooth, WiFi Direct, WiFi Aware or the network it is attached to.
+
+That is the difference between "the people in this building" and "everyone who
+can hear a 500 mW transmitter", and it is a privacy control as much as a noise
+one: a question asked in a marina should not arrive in the next county, and it
+certainly should not reach a relay that gates to the internet.
+
+**A `local` packet is not carried.** Section 13.4 exists to deliver somewhere
+else later, and somewhere else later is what `local` excludes. A carrier holding
+one drops it rather than taking it to another town.
+
+### 13.11.2 A country
+
+```
+t:warning f:X3RLY7 pos:39.4012,-8.2043 rad:5km kind:fire sev:danger scope:PT ts:2026-08-08_14:26:40
+```
+
+99 bytes. A station **does not relay it out of the named country**, which it
+decides from its own position -- the same position that already chose its
+frequency (section 1 of [spectrum.md](spectrum.md)).
+
+More than one country is a comma-separated list, which a border region needs:
+
+```
+t:warning f:X3RLY7 pos:41.8012,-6.7543 rad:9km kind:fire sev:danger scope:PT,ES ts:2026-08-08_14:26:40
+```
+
+102 bytes: a fire nine kilometres across on the Portuguese side of a border, to
+be relayed in both countries because the smoke does not stop either.
+
+**Radio does not respect borders, and `scope:` cannot pretend otherwise.** A
+transmission near a frontier is heard across it whatever this field says. What
+`scope:` governs is what a station chooses to *relay*, to carry, and to gate onto
+another network. Reception is not restricted and cannot be: a station that hears
+an out-of-scope packet may read it, and simply does not pass it on.
+
+A receiver that does not know where it is treats a country scope as global for
+reading and refuses to relay, which is the safe direction: it sees the packet
+and does not spread it.
+
+### 13.11.3 Against the other limits
+
+`scope:` is an additional constraint and replaces nothing. A packet still stops
+at the relay limit of section 13.1, still expires at `until:`, and still gets
+carried only toward `dest:`. Whichever binds first, binds.
+
+Where `scope:` and `dest:` disagree -- a country scope with a destination outside
+it -- **`scope:` wins and the packet is not carried.** A sender that meant it to
+travel should not have restricted it.
+
+---
+
 ## 14. Tracks
 
 A track is a named sequence of positions: a flight, a ride, a crossing. Any
@@ -2568,7 +2647,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`urg`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
+`urg`, `scope`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2866,6 +2945,10 @@ stop (required, never more than a year out), `urg:` `low` `normal` `high`
 `urgent`. A carrier takes a copy only if it expects to get closer. Not bound by
 the three-relay limit.
 
+`scope:` limits where a packet goes: absent or `global` anywhere, `local` only
+on BLE, WiFi Direct, WiFi Aware and a LAN, or ISO country codes. Not carried
+when `local`. Reception is never restricted, only relaying.
+
 `near:` is not `rad:`. `rad:` is the area a subject occupies; `near:` is how
 close to `dest:` is close enough. A warning carried to a town uses both.
 
@@ -2945,6 +3028,7 @@ document.
 | `t:channel` | not implemented |
 | Carrying toward a place (`dest:` on a message) | not implemented; custody currently carries only to a known callsign |
 | `urg:` | not implemented |
+| `scope:` | not implemented; every bearer currently forwards everything it can |
 | `near:`, regional delivery, `route:` in a receipt | not implemented |
 | `q:sign` and signed receipts | not implemented |
 | Recurring windows, `site:`, `supply:`, `range:` | not implemented |

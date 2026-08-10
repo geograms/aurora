@@ -49,7 +49,7 @@ This is the wire as implemented. [XPRS.md](XPRS.md) specifies a different one,
 in which the same information is carried as `key:value` fields and a carrier
 appends itself to `via:` rather than the frame being rewritten. The behaviour
 described in this document is unaffected; only the encoding of the frame
-changes. XPRS.md section 20 tracks the gap.
+changes. XPRS.md section 30 tracks the gap.
 
 `FROM` and `TO` are always public. A carrier that cannot read the recipient
 cannot determine where to relay the frame, which is what allows custody to
@@ -156,6 +156,7 @@ The parts that are specified and not built:
 | regional delivery, `dest:` with no recipient | not implemented |
 | `route:` copied into a signed receipt | not implemented |
 | `t:mailbox`, a recipient's preferred carriers | not implemented; nothing records who tends to see a given station |
+| several mailbox declarations, selected by `since:` and `until:` | not implemented; there is no store to select from |
 | `scope:local`, which must never be carried | not implemented; everything offered is a candidate |
 
 Two of those rows change what this document says about admission, so they are
@@ -167,6 +168,18 @@ carries mail for anyone, which is right, and then has nothing to say about
 saying so themselves: these stations tend to see me, try them first. It is
 signed, and a carrier that cannot verify one must ignore it, because a forged
 mailbox declaration collects somebody else's mail from every polite sender.
+
+A station may have several in force at once, so this is a query against time
+rather than a single stored value ([XPRS.md](XPRS.md) section 13.12.1). Each
+declaration may carry `since:` and `until:`; one without them is open-ended.
+Delivering to a recipient means picking the declaration whose window contains
+the moment, narrowest first, and falling back to the open-ended one. An
+implementation that keeps only the newest declaration per callsign gets this
+wrong the moment somebody announces a month away from home in advance, which is
+the case the field exists for.
+
+A declaration is withdrawn by a signed `remove:mailbox` naming it, not by being
+superseded, so a carrier holds them as a set and deletes by identifier.
 
 **`scope:local` must be refused at admission, not at transmission.** A packet
 marked local is for the bearers in range now -- Bluetooth, WiFi Direct, a LAN --

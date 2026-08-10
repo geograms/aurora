@@ -471,8 +471,8 @@ software fixes that.
 ### 8.1 VHF and UHF
 
 An `X1` or `X3` callsign is self-generated and must never be originated onto
-amateur spectrum ([XPRS.md](XPRS.md) section 25). Everything here applies to a
-licensed operator using their own callsign, and encryption is not permitted
+amateur spectrum ([XPRS.md](XPRS.md) section 9.4.1). Everything here applies to
+a licensed operator using their own callsign, and encryption is not permitted
 (section 9.4 of that document).
 
 | Band | Region 1 | Region 2 | Region 3 |
@@ -650,7 +650,7 @@ work.
 | PMR446 channel 16, CB channel 24 | not implemented; no bearer carries XPRS over an audio channel |
 | Regional LoRa plans | not implemented; `lib/connections/lora/lora_connection.dart` sets no frequency, and the SX1262 and SX1276 drivers accept one from a caller that does not yet exist |
 | Calling frequencies | not implemented; proposed here for the first time |
-| `t:channel` announcements | not implemented ([XPRS.md](XPRS.md) section 28) |
+| `t:channel` announcements | not implemented ([XPRS.md](XPRS.md) section 23) |
 | WiFi Aware | not implemented |
 | WiFi Direct | implemented, as a session bearer |
 | Monitor mode on desktop or ESP32 | not implemented |

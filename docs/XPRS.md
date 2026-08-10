@@ -915,6 +915,24 @@ only authorship, so signing is permitted on amateur bands.
 An implementation able to reach amateur infrastructure must refuse to transmit a
 sealed body onto it.
 
+### 9.4.1 Which callsign may be transmitted where
+
+An `X1` or `X3` callsign is derived by the station from its own key. No
+authority issued it, and section 3 says so plainly. That is sufficient on
+licence-free spectrum, where a callsign is a label and nothing more.
+
+It is not sufficient on amateur bands, where regulations require a transmission
+to be identified by the callsign the operator was licensed under. A
+self-generated callsign identifies nobody, so a packet whose `f:` is `X1` or
+`X3` **must never be originated onto amateur spectrum**. A licensed operator
+using XPRS there transmits under their own callsign, which the format already
+accepts at any length (section 3).
+
+This binds gateways more than it binds people. A station bridging licence-free
+traffic onto an amateur band must drop packets from self-generated callsigns
+rather than relay them, because relaying one puts an unidentified transmission
+on the air over the gateway operator's licence.
+
 ---
 
 ## 10. Observations
@@ -3524,7 +3542,8 @@ document.
 | Replies and reactions | implemented |
 | Receipts and carrier release | implemented |
 | Long messages in parts | implemented |
-| Encryption and the band rules | implemented |
+| Encryption and the sealed-body band rule | implemented |
+| Section 9.4.1, no self-generated callsign onto amateur spectrum | not implemented, and violated today: the ESP32 iGate computes an APRS-IS passcode for an `X3` callsign and states in `esp32/components/geogram_aprsis/aprsis.h` that no licence is needed for one |
 | File references by content hash | implemented |
 | Identity announcement | implemented |
 | `key:value` fields separated by spaces | not implemented; the current wire has three `0x1F`-separated fields and packs everything else into a trailing string |

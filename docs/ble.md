@@ -52,7 +52,7 @@ The `to` field encodes the routing, mirroring APRS semantics:
 Messages larger than one advert are chunked (`0x50` = data chunk, `0x51` =
 scan‑response chunk) and reassembled by the receiver. The same APRX payload
 markers (`+<mid>`, `<mid>:like`, `~<sig>`, `ENC1:`, `file:…`) ride inside `text`
-exactly as on APRS‑IS — see [aprx.md](aprx.md).
+exactly as on APRS‑IS — see [chat.md](chat.md).
 
 ## 3. Receiving, dedup, digipeating (`ble_handle`)
 
@@ -100,5 +100,5 @@ microSD message store queryable over HTTP/BLE.
 ---
 
 See also: [aprs.md](aprs.md) (the internet transport and the iGate that bridges
-to it), [aprx.md](aprx.md) (the message conventions carried over BLE), and
+to it), [chat.md](chat.md) (the message conventions carried over BLE), and
 [reticulum.md](../../reticulum-dart/doc/reticulum.md) (the link/resource layer used for files).

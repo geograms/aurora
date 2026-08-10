@@ -183,7 +183,7 @@ The parts that are specified and not built:
 | `route:` copied into a signed receipt | not implemented |
 | `t:mailbox`, a recipient's preferred carriers | not implemented; nothing records who tends to see a given station |
 | several mailbox declarations, selected by `since:` and `until:` | not implemented; there is no store to select from |
-| `scope:local`, which must never be carried | not implemented; everything offered is a candidate |
+| `scope:local`, which must never be carried | **implemented**; refused at admission in `MeshCustodyDelegate._mayCarry`, which is the right place -- a copy parked now and aired later leaks either way |
 
 Two of those rows change what this document says about admission, so they are
 worth naming rather than leaving in a table.

@@ -25,6 +25,7 @@ import 'package:sqlite3/sqlite3.dart';
 
 import '../../profile/profile_db.dart';
 
+import '../xprs/xprs_vocab.dart';
 import 'mesh_beacon.dart';
 import 'mesh_bloom.dart';
 import 'mesh_session.dart';
@@ -44,14 +45,17 @@ enum MeshUrgency {
   high,
   urgent;
 
-  /// Parse an XPRS `urg:` value. Anything unrecognised is [normal] — an
-  /// unknown word is skipped everywhere else in XPRS, and silently dropping a
-  /// message because its urgency did not parse would be worse than carrying it.
-  static MeshUrgency fromWire(String? v) => switch (v?.trim().toLowerCase()) {
-        'low' => MeshUrgency.low,
-        'high' => MeshUrgency.high,
-        'urgent' => MeshUrgency.urgent,
-        _ => MeshUrgency.normal,
+  /// Parse an XPRS `urg:` value.
+  ///
+  /// Delegates to [XprsUrgency] so the vocabulary is defined once. The store
+  /// keeps its own enum because the column it writes is a storage concern and
+  /// the eviction order is this file's business, but the *words* are the
+  /// format's and are read by the codec.
+  static MeshUrgency fromWire(String? v) => switch (XprsUrgency.fromWire(v)) {
+        XprsUrgency.low => MeshUrgency.low,
+        XprsUrgency.normal => MeshUrgency.normal,
+        XprsUrgency.high => MeshUrgency.high,
+        XprsUrgency.urgent => MeshUrgency.urgent,
       };
 
   /// The highest level this may be raised to. A sender states what it wants;

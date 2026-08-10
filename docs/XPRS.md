@@ -929,9 +929,16 @@ key beginning with `z` is.
 
 ### 9.1 Signatures
 
-`sig:` covers the whole packet with the `sig:` field and its separating space
-removed. Position in the packet is therefore not significant, and a verifier
-reconstructs the signed text by deletion.
+`sig:` covers the whole packet with the `sig:` and `via:` fields and their
+separating spaces removed. Position in the packet is therefore not significant,
+and a verifier reconstructs the signed text by deletion.
+
+**Both fields come out, and the reason for `via:` is not economy.** A relay
+appends itself to `via:` (section 13), so a signature covering it would break at
+the first hop and every relayed packet would read as forged -- on a network whose
+whole point is relaying, and where signing is the default. The signed text is
+therefore exactly the text the identifier is derived from (section 5), which
+leaves one canonical form to implement rather than two.
 
 ```
 t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:<60 characters> m:net starts in ten minutes
@@ -1845,10 +1852,10 @@ The hop count is not transmitted. It is the number of callsigns in `via:`, which
 every station can count for itself, and a packet with no `via:` has taken no
 hops.
 
-The identifier is `de9780` in all four. `f:`, `ts:` and the payload never
-change, so relaying alters neither the identifier nor a signature, and a station
-that already holds the message recognises the repeat and does not display it
-twice.
+The identifier is `de9780` in all four. Both the identifier and the signature are
+computed with `via:` removed (sections 5 and 9.1), so relaying alters neither,
+and a station that already holds the message recognises the repeat and does not
+display it twice.
 
 ### 13.1 How far a packet travels
 
@@ -1873,7 +1880,7 @@ whatever the count says. The limit bounds how far a packet travels; the path
 prevents it from travelling in a circle, and neither substitutes for the other.
 
 A relay also drops a packet it has already relayed within the last few minutes,
-identified by `f:`, `ts:` and the payload. Two digipeaters in range of each
+identified by the identifier of section 5. Two digipeaters in range of each
 other otherwise trade the same packet until the limit is reached, which is legal
 under the rules above and still a waste of the channel.
 
@@ -2045,7 +2052,8 @@ t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 near:50km un
 ```
 
 177 and 175 bytes. Both are identifier `766d3e`, because an identifier is computed
-from `f:`, `ts:` and the payload (section 5) and `via:` is none of those.
+with `via:` removed (section 5) and that is the only field the two copies differ
+in.
 
 So the recipient recognises the second copy as one it already holds, shows it
 once, and does not answer twice. This is not a rule that had to be added: it
@@ -4982,11 +4990,12 @@ dropping the signature. Not signed: `challenge`, `response`.
 
 ### Identifiers
 
-Never transmitted. Both ends compute `sha256("<f>|<ts>|<payload>")` and take the
-first 6 hexadecimal characters, where the payload is `m:`, or `x:` if there is
-no `m:`, or `file:` if there is neither. `r:` carries an identifier when referring to
-another packet, including the sender's own when withdrawing it. Signing and
-relaying do not change it.
+Never transmitted. Both ends compute
+`sha256(the packet, with sig: and via: removed)` and take the first 6
+hexadecimal characters. `r:` carries an identifier
+when referring to another packet, including the sender's own when withdrawing it.
+Signing and relaying do not change it, which is exactly why those two fields come
+out before hashing.
 
 ### Limits
 
@@ -5013,6 +5022,11 @@ document.
 
 | Element | State |
 |---|---|
+| **The packet format itself** | **implemented**; `lib/services/xprs/` parses, encodes, derives identifiers and signs. Every example packet in this document is a test fixture: `test/xprs_packet_test.dart` round-trips all 201 byte-exact, checks each stated byte count, and cross-checks every identifier against an independent Python implementation |
+| Section 5 identifiers | **implemented** |
+| Section 9.1 signatures, and surviving a relay | **implemented**; `test/xprs_sig_test.dart` signs, relays three hops and re-verifies |
+| Section 13.1 relay budget, 13.2 loop check | **implemented** in the codec (`xprsMayRelay`, `xprsWouldLoop`); nothing transmits `via:` yet, so nothing calls them on the air |
+| Section 13.11.3, `scope:local` is never carried | **implemented**; refused at custody admission in `MeshCustodyDelegate` |
 | Callsigns, signatures, verification | implemented |
 | Signing by default on every packet type | not implemented; signing exists and is opt-in |
 | Direct, group and broadcast messages | implemented |

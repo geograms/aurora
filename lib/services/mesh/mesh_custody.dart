@@ -19,6 +19,8 @@ import 'dart:typed_data';
 import '../../util/media_ref.dart';
 
 import '../log_service.dart';
+import '../xprs/xprs_packet.dart';
+import '../xprs/xprs_vocab.dart';
 import 'mesh_beacon.dart';
 import 'mesh_bulk_spool.dart';
 import 'mesh_courier.dart';
@@ -425,14 +427,23 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
         (t != null &&
             (t.neighbors.keys.any((n) => n.toUpperCase() == to.toUpperCase()) ||
                 t.routes.containsKey(meshHashHex(meshHash(to)))));
+    // A `scope:local` packet is never carried (docs/XPRS.md §13.11.3): it is
+    // for the bearers in range now, and parking it would air it somewhere it
+    // asked not to go. Refused at admission rather than at transmission,
+    // because a copy parked now and aired later is a leak either way.
+    if (!_mayCarry(wire)) {
+      LogService.instance
+          .add('Mesh: refused custody of a scope:local packet $from -> $to');
+      return;
+    }
     // The sender states what it wants and the carrier decides what it may have.
     // Mail we originated, or whose target we can reach, may claim any level; a
     // stranger's is capped below `urgent` so that marking everything urgent —
     // which stations will — cannot push our own traffic out of our own store.
     //
-    // The wire does not carry `urg:` yet (docs/XPRS.md §13.5 specifies it,
-    // §28 lists it as unbuilt), so the default holds and this reproduces the
-    // previous two-level behaviour exactly: ours `normal`, a stranger's `low`.
+    // The compact frame carries no `urg:`, so until it is replaced the default
+    // holds and this reproduces the previous two-level behaviour exactly: ours
+    // `normal`, a stranger's `low`.
     final stated = MeshUrgency.fromWire(_urgOf(wire));
     final urg = known
         ? stated.cappedAt(MeshUrgency.urgent)
@@ -479,19 +490,43 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     } catch (_) {}
   }
 
+  /// The body of [wire] parsed as XPRS, or null when it is not an XPRS packet.
+  ///
+  /// Two formats are in flight during the changeover. The compact frame carries
+  /// its text in the third `\x1F` field; a bare XPRS packet has no `\x1F` at all
+  /// and starts with `t:`. Trying both costs one string scan and means the
+  /// carrier reads whichever arrives.
+  static XprsPacket? _xprsOf(Uint8List wire) {
+    final s = utf8.decode(wire, allowMalformed: true);
+    return XprsPacket.parse(s) ?? XprsPacket.parse(_splitWire(wire)?.$3 ?? '');
+  }
+
   /// The sender-stated `urg:` value, or null when the frame carries none.
   ///
-  /// Today no frame does: the compact wire has no such field and XPRS §13.5
-  /// is not built yet. Reading it here rather than later means the carrier
-  /// honours it the moment senders start writing it, and costs one scan of a
-  /// string already decoded.
+  /// Reading it here rather than later means the carrier honours it the moment
+  /// senders start writing it (docs/XPRS.md §13.5).
   static String? _urgOf(Uint8List wire) {
+    final p = _xprsOf(wire);
+    if (p != null) return p['urg'];
+    // The compact frame is not XPRS, so scan it for the token directly. This
+    // branch goes away with the frame itself.
     final t = _splitWire(wire)?.$3;
     if (t == null) return null;
     for (final tok in t.split(' ')) {
       if (tok.startsWith('urg:') && tok.length > 4) return tok.substring(4);
     }
     return null;
+  }
+
+  /// Whether this frame may be parked at all.
+  ///
+  /// `scope:local` is for the bearers in range now, so carrying it to another
+  /// town is precisely what it excludes (docs/XPRS.md §13.11.3). The refusal
+  /// belongs at admission rather than at transmission: a copy parked now and
+  /// aired later is a leak wearing the shape of a feature.
+  static bool _mayCarry(Uint8List wire) {
+    final p = _xprsOf(wire);
+    return p == null || xprsMayCarry(p);
   }
 
   /// Split a compact frame `from\x1Fto\x1Ftext` (returns null when not one).

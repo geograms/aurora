@@ -137,6 +137,9 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `lang` | `lang` | language of `m:`, default English (section 4.7) |
 | `hold` | `path` | preferred mailboxes, in order (section 13.12) |
 | `serve` | `words` | what a station does for others (section 24) |
+| `cmd` | `label` | the action a command asks for (section 25) |
+| `arg` | `words` | its arguments |
+| `code` | `int` | what happened, on a `result` |
 | `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
 | `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
@@ -194,6 +197,8 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `channel` | a frequency a station uses (section 23) |
 | `mailbox` | stations that hold mail for the sender (section 13.12) |
 | `service` | what a station does for others (section 24) |
+| `command` | asks a station to do something (section 25) |
+| `result` | what happened to a command |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -586,7 +591,7 @@ differs is whether naming it means anything:
 |---|---|---|
 | `message`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `warning`, `info` | yes | yes |
 | `sos` | yes | **no** |
-| `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `ping`, `pong` | no | no |
+| `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `command`, `result`, `ping`, `pong` | no | no |
 
 A weather observation, a warning, a blog post, an offer and a channel
 announcement can all be replied to and reacted to. That is the point of deriving
@@ -2836,7 +2841,126 @@ about equipment that is switched on, and equipment gets switched off.
 
 ---
 
-## 25. Adding a field, worked
+## 25. Commands
+
+`t:command` asks another station to *do* something. `t:result` says what
+happened.
+
+```
+t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:door-open arg:north sig:<60 characters>
+```
+
+139 bytes. `cmd:` is a `label` naming the action and `arg:` carries its
+arguments, comma-separated. What the words mean is agreed between the two
+stations and is not this document's business.
+
+This is not `t:request`. That asks for state from a closed vocabulary -- send me
+your position, send me your battery -- and reports. A command acts, its
+vocabulary is whatever the operator defines, and reporting a battery level is not
+the same act as unlocking a door.
+
+### 25.1 The reply, immediately and again later
+
+**A station answers a command at once, even when it cannot finish it.**
+
+```
+t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 r:747ae8 code:202 sig:<60 characters>
+t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:29:12 r:747ae8 code:200 sig:<60 characters>
+```
+
+132 bytes each: accepted at 14:26:40, done at 14:29:12. `code:202` says the
+command arrived and is being worked on; `code:200` says it finished. A sender
+that hears nothing knows the command did not arrive, which is the whole point of
+answering before the work is done.
+
+**Any number of results may name one command**, and a late one needs no new
+mechanism: `r:747ae8` is the command's derived identifier (section 5), and it is
+the same however many minutes pass.
+
+| `code:` | Meaning |
+|---|---|
+| `200` | done |
+| `202` | accepted, working on it |
+| `400` | understood, arguments wrong |
+| `403` | refused, not permitted |
+| `404` | unknown command |
+| `408` | too old, outside its freshness window |
+| `500` | tried and failed |
+
+```
+t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 r:747ae8 code:403 sig:<60 characters> m:not on the allow list
+```
+
+156 bytes. `m:` is detail for a person reading a log.
+
+Numbers sit oddly beside `sev:danger` and `kind:fire`, and are still right here.
+The outcome space is open-ended in a way a word list is not, and these particular
+numbers are understood by everyone who has ever written a web client.
+
+### 25.2 Keeping it out of the conversation
+
+Four rules, each closing a specific confusion.
+
+`t:command` and `t:result` are **distinct packet types**, so a station filters
+them on the first field without parsing anything else.
+
+**Neither is ever rendered as a message.** A command is not chat, and it must not
+appear in a conversation view even when it carries `m:`.
+
+**Neither is replied to or reacted to** (section 6.5). They are protocol
+machinery like a receipt or a challenge.
+
+**`m:` is detail, never the command.** A bot reads `cmd:` and `arg:`; the free
+text is for the operator afterwards. A station that parsed instructions out of
+`m:` would have built a natural-language interface to its front door.
+
+### 25.3 Security
+
+A packet that opens a door is the highest-value forgery in this format, and the
+rules here are stricter than elsewhere because of it.
+
+**A command must be signed, and one that cannot be verified is discarded.**
+Signing is the default everywhere (section 9.1); here it is a requirement, and
+"unsigned" is not a state a command may be acted on in.
+
+**A command expires.** Without that, one signed packet opens a door for ever to
+anyone who recorded it. The default window is **300 seconds** from `ts:`, and
+`until:` extends it deliberately. Outside the window the answer is `code:408`.
+
+Five minutes rather than the sixty seconds section 18.4 gives a challenge,
+because a challenge is a direct exchange between two stations and a command
+crosses real bearers: LoRa at SF9 owes 5.5 seconds of silence for every packet
+under a 10 percent duty cycle, and a relay hop or two on top can honestly take
+longer than a minute. Five minutes is still far too short for a recording to be
+useful hours later.
+
+**Commands are never carried.** Section 13.4 exists to deliver somewhere else
+later, and later is precisely what a command must not be. A carrier drops one
+rather than parking it.
+
+**Repeating a command does not repeat the action.** The derived identifier of a
+retransmitted command is unchanged, so a station that has acted on
+`747ae8` recognises the second copy and answers again without opening the
+door twice. Idempotency falls out of section 5 rather than needing a rule.
+
+**Authentication is not authorisation, and this format only provides the first.**
+A signature proves which callsign sent a command. Whether that callsign may open
+that door is an allow-list held by the station acting on it, and nothing in XPRS
+expresses, distributes or checks one. A bot that acts on any correctly signed
+command has an open door with extra steps.
+
+Where bystanders should not learn what is being operated, seal it:
+
+```
+t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 x:<64 characters> sig:<60 characters>
+```
+
+182 bytes, sealed and signed. `t:`, `f:`, `d:` and `ts:` stay in clear so the
+packet can be routed and its freshness checked without reading it.
+
+---
+
+## 26. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -2862,7 +2986,7 @@ negotiation.
 
 ---
 
-## 26. Operating alongside APRS
+## 27. Operating alongside APRS
 
 A licensed amateur may bridge XPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -2873,17 +2997,17 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 27. Reserved
+## 28. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
 `response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `mailbox`,
-`service`, `ping`, `pong`.
+`service`, `command`, `result`, `ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`urg`, `scope`, `lang`, `nick`, `hold`, `serve`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
+`urg`, `scope`, `lang`, `nick`, `hold`, `serve`, `cmd`, `arg`, `code`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2898,7 +3022,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 28. Cheat sheet
+## 29. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -2933,6 +3057,8 @@ packet **250 bytes**, on every transport.
 | `channel` | a frequency a station uses (section 23) |
 | `mailbox` | stations that hold mail for the sender (section 13.12) |
 | `service` | what a station does for others (section 24) |
+| `command` | asks a station to do something (section 25) |
+| `result` | what happened to a command |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -2959,6 +3085,9 @@ packet **250 bytes**, on every transport.
 | `lang` | `lang` | language of `m:`, default English (section 4.7) |
 | `hold` | `path` | preferred mailboxes, in order (section 13.12) |
 | `serve` | `words` | what a station does for others (section 24) |
+| `cmd` | `label` | the action a command asks for (section 25) |
+| `arg` | `words` | its arguments |
+| `code` | `int` | what happened, on a `result` |
 | `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
 | `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
@@ -3193,6 +3322,20 @@ regional variant.
 `nick:` is a signed, human-readable name on `t:identity`. Shown only when the
 signature verifies, newest `ts:` wins, and never usable as an address.
 
+### Commands
+
+`t:command` with `cmd:` and `arg:`; `t:result` with `code:` naming it in `r:`.
+
+```
+200 done   202 accepted   400 bad args   403 refused
+404 unknown   408 too old   500 failed
+```
+
+Answer at once with 202 even when the work takes minutes; any number of results
+may name one command. Must be signed, expires after 300 s unless `until:` says
+otherwise, never carried, never shown as a message. Authentication is not
+authorisation -- the allow-list is the bot's.
+
 `t:service` advertises what a station does: `relay` `mailbox` `internet` `aprs`
 `nostr` `files` `time` `weather` `wifi` `other`. Physical goods are `t:offer`,
 not this. A claim about capability, never evidence of good faith.
@@ -3253,7 +3396,7 @@ document.
 
 ---
 
-## 29. Implementation status
+## 30. Implementation status
 
 | Element | State |
 |---|---|
@@ -3290,6 +3433,7 @@ document.
 | `nick:` and signed identity | not implemented; identity is announced unsigned today |
 | `t:mailbox` | not implemented; custody has no notion of a preferred carrier |
 | `t:service` | not implemented; no station advertises what it does |
+| `t:command` and `t:result` | not implemented; nothing acts on a received packet |
 | `near:`, regional delivery, `route:` in a receipt | not implemented |
 | `q:sign` and signed receipts | not implemented |
 | Recurring windows, `site:`, `supply:`, `range:` | not implemented |

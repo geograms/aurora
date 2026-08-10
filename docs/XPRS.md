@@ -1810,8 +1810,56 @@ the default everywhere (section 9.1) and here it is the whole point: an unsigned
 mailbox declaration is a request to misroute somebody's mail, and it should be
 ignored rather than displayed.
 
-A station may publish more than one over time. The newest verifiable declaration
-from a callsign replaces the previous one, and `ts:` decides which is newest.
+### 13.12.1 Several at once, each for a period
+
+**A station publishes as many mailboxes as it has, and they coexist.** An earlier
+draft said the newest declaration replaced the previous one, which made it
+impossible to say the true thing: that where you are found depends on when.
+
+`since:` and `until:` bound each one. A boat that knows its season says so months
+ahead:
+
+```
+t:mailbox f:X1BOA3 ts:2026-08-08_14:26:40 hold:X3RLY7,X32DVA sig:<60 characters>
+t:mailbox f:X1BOA3 ts:2026-08-08_14:26:40 hold:CT1MAR since:2026-09-01_00:00:00 until:2026-09-30_23:59:59 sig:<60 characters>
+t:mailbox f:X1BOA3 ts:2026-08-08_14:26:40 hold:EA7CAN,EA7GIB since:2026-11-01_00:00:00 until:2027-03-31_23:59:59 sig:<60 characters>
+```
+
+125, 170 and 177 bytes. Home stations all year, a marina through September,
+the Canaries from November to March. All three are true and none contradicts
+another.
+
+A declaration with no `since:` or `until:` is open-ended and always applies. One
+with a window applies only inside it.
+
+**Where windows overlap, the narrowest one that contains the moment wins.** In
+September a sender uses `CT1MAR` rather than the open-ended pair, because a
+declaration made about September is better information than one made about every
+month. Within a single declaration, `hold:` stays in order of preference.
+
+Outside every window a sender falls back to the open-ended declaration, and
+failing that to any station advertising `serve:mailbox` (section 24.2).
+
+### 13.12.2 Cancelling one
+
+Plans change earlier than they were meant to. A declaration is withdrawn by
+naming it, exactly as a warning is (section 17.2):
+
+```
+t:mailbox f:X1BOA3 ts:2026-08-20_09:00:00 r:46b4ba remove:mailbox sig:<60 characters>
+```
+
+130 bytes. `r:46b4ba` is the identifier of the marina declaration and
+`remove:mailbox` says what is being withdrawn. The other two are untouched, which
+is the point of cancelling one rather than replacing all of them.
+
+A cancellation must be signed like the declaration it cancels. An unsigned one is
+a request to stop delivering somebody's mail, which is an attack rather than an
+administrative act.
+
+Re-publishing a declaration after cancelling it is allowed and produces a new
+identifier, because `ts:` differs. There is no way to un-cancel, and none is
+needed.
 
 Listing a station is not asking its permission. `hold:` records where the sender
 believes their mail will be seen, and a station named in one is free to carry
@@ -2116,7 +2164,8 @@ has said nothing a receiver can act on. Naming the packet is exact, and the
 mechanism is the one replies, reactions and receipts already use.
 
 `remove:` takes the type being withdrawn: `warning`, `info`, `event`, `offer`,
-`need`, `channel`, `passage`, `blog`, or `like` for a reaction. It is stated
+`need`, `channel`, `passage`, `blog`, `mailbox`, `service`, or `like` for a
+reaction. It is stated
 even though `t:` repeats it, so that a receiver can filter withdrawals of any
 type on one key, and so that a later revision can withdraw part of a packet
 rather than all of it.
@@ -3408,7 +3457,9 @@ authorisation -- the allow-list is the bot's.
 not this. A claim about capability, never evidence of good faith.
 
 `t:mailbox` names the stations that hold mail for the sender, `hold:` in order
-of preference. It must be signed, and an unverifiable one must be ignored.
+of preference. Several coexist, each optionally bounded by `since:` and `until:`;
+the narrowest window containing the moment wins. Cancel one with `r:` and
+`remove:mailbox`. All of it must be signed, and an unverifiable one ignored.
 
 `scope:` limits where a packet goes: absent or `global` anywhere, `local` only
 on BLE, WiFi Direct, WiFi Aware and a LAN, or ISO country codes. Not carried
@@ -3499,6 +3550,7 @@ document.
 | `lang:` | not implemented |
 | `nick:` and signed identity | not implemented; identity is announced unsigned today |
 | `t:mailbox` | not implemented; custody has no notion of a preferred carrier |
+| Several mailboxes with windows, and cancellation | not implemented |
 | `t:service` | not implemented; no station advertises what it does |
 | `t:command` and `t:result` | not implemented; nothing acts on a received packet |
 | `cmd:interpret` | not implemented; no station interprets natural language |

@@ -224,6 +224,7 @@ The type is fixed by this document and is never transmitted.
 | `epoch` | two `int` separated by a dot, boot counter then seconds | `7.4210` |
 | `scope` | `local`, `global`, or ISO 3166-1 alpha-2 codes separated by commas | `PT,ES` |
 | `lang` | an ISO 639-1 code, optionally `/` and a region | `PT/BR` |
+| `nick` | 1 to 16 ASCII letters, digits, `-` and `_` | `joao-brito` |
 | `clock` | `HH:MM:SS`, a time of day in UTC | `20:00:00` |
 | `money` | an amount with an ISO 4217 code, optional leading `~` and `/` period, or one of `offers`, `swap`, `free` (section 22.2) | `~25EUR/day` |
 | `qty` | a number followed immediately by its unit (section 10.7) | `48km/h` |
@@ -778,10 +779,7 @@ carries traffic from sensors with no key, from stations too small to sign, and
 from software written before this section. What a receiver must not do is
 present an unsigned packet as though its `f:` were established.
 
-Two exceptions remain, for reasons that are not economy.
-
-An **identity announcement** is not signed, because the signature would have to
-be verified with the key the packet is carrying (section 9.3).
+One exception remains, and it is not economy.
 
 A **challenge and its response** carry their own proof: the response is signed,
 and the exchange is the authentication rather than something needing it
@@ -835,16 +833,59 @@ A later cipher suite takes a new key rather than changing this one.
 ### 9.3 Identity
 
 ```
-t:identity f:X1QZ3N ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f
+t:identity f:X1QZ3N ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f sig:<60 characters>
 ```
 
-106 bytes. A receiver stores the binding and uses it to verify signed packets
+171 bytes. A receiver stores the binding and uses it to verify signed packets
 from that callsign. Answers `q:identity`.
 
-An identity announcement is not signed, because the signature would have to be
-verified with the key the packet is carrying. Trust comes from repetition, from
-consistency with the callsign derivation in section 3, and from the signed
-packets that follow.
+**An identity announcement is signed like everything else.** An earlier draft of
+this document said it was not, on the grounds that the signature would have to be
+verified with the key the packet carries and was therefore circular. That
+reasoning was wrong, and the nickname below is what exposes it.
+
+A self-signature proves the sender **holds the private key**, which is not
+circular and is not nothing. Without one, anybody can rebroadcast
+`t:identity f:X1QZ3N k:<the real key of X1QZ3N>` with whatever else they like
+attached: the callsign still derives correctly from the key (section 3), every
+check passes, and the extra fields are the attacker's. With one, they cannot,
+because they do not have the private half.
+
+What the signature does not establish is entitlement to the callsign. For an
+`X1` or `X3` callsign the derivation in section 3 does that. For a callsign
+issued by an authority nothing in this format does, and section 18 exists for
+exactly that gap.
+
+### 9.3.1 Nicknames
+
+`nick:` gives a callsign a human-readable name.
+
+```
+t:identity f:X1QZ3N ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f nick:joao sig:<60 characters>
+```
+
+181 bytes. One to sixteen characters: ASCII letters, digits, `-` and `_`. No
+spaces, because no value except `m:` may contain one, and no accents, because the
+whole format is ASCII. A name that needs more than that belongs in a profile
+somewhere else, and this field is a label rather than a biography.
+
+Three rules, and the third is the one that matters.
+
+**It only counts when the signature verifies.** A receiver that cannot check the
+signature shows the callsign and not the nickname. An unsigned or unverifiable
+nickname is a claim by nobody.
+
+**The newest verifiable announcement wins**, decided by `ts:`. A station changes
+its nickname by announcing again.
+
+**A nickname is never an address.** `d:` takes a callsign and only a callsign.
+Nicknames are not unique, cannot be made unique without a registry this format
+deliberately does not have, and two stations calling themselves `joao` is
+expected rather than exceptional. A receiver that let a user address a nickname
+would have built the spoofing surface that signing the rest of this section was
+meant to close.
+
+Show it as decoration next to the callsign, never instead of it.
 
 ### 9.4 Permitted use by band
 
@@ -2765,7 +2806,7 @@ All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`urg`, `scope`, `lang`, `hold`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
+`urg`, `scope`, `lang`, `nick`, `hold`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -3070,6 +3111,9 @@ the three-relay limit.
 `lang:` names the language of `m:`, default English: `PT`, or `PT/BR` for a
 regional variant.
 
+`nick:` is a signed, human-readable name on `t:identity`. Shown only when the
+signature verifies, newest `ts:` wins, and never usable as an address.
+
 `t:mailbox` names the stations that hold mail for the sender, `hold:` in order
 of preference. It must be signed, and an unverifiable one must be ignored.
 
@@ -3095,7 +3139,7 @@ Seal the body with `x:` and leave the routing keys in cleartext. Coarsen
 and signs it. `s:sign` without a valid `sig:` is discarded.
 
 `sig:` goes on every packet by default, 65 bytes. Drop optional fields before
-dropping the signature. Not signed: `identity`, `challenge`.
+dropping the signature. Not signed: `challenge`, `response`.
 
 ### Identifiers
 
@@ -3160,6 +3204,7 @@ document.
 | `urg:` | not implemented |
 | `scope:` | not implemented; every bearer currently forwards everything it can |
 | `lang:` | not implemented |
+| `nick:` and signed identity | not implemented; identity is announced unsigned today |
 | `t:mailbox` | not implemented; custody has no notion of a preferred carrier |
 | `near:`, regional delivery, `route:` in a receipt | not implemented |
 | `q:sign` and signed receipts | not implemented |

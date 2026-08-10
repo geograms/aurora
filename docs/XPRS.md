@@ -136,6 +136,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `scope` | `scope` | how far this may be relayed, default global (section 13.11) |
 | `lang` | `lang` | language of `m:`, default English (section 4.7) |
 | `hold` | `path` | preferred mailboxes, in order (section 13.12) |
+| `serve` | `words` | what a station does for others (section 24) |
 | `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
 | `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
@@ -192,6 +193,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `need` | what a station wants (section 22) |
 | `channel` | a frequency a station uses (section 23) |
 | `mailbox` | stations that hold mail for the sender (section 13.12) |
+| `service` | what a station does for others (section 24) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -582,7 +584,7 @@ differs is whether naming it means anything:
 
 | Packet type | Reply | React |
 |---|---|---|
-| `message`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `warning`, `info` | yes | yes |
+| `message`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `warning`, `info` | yes | yes |
 | `sos` | yes | **no** |
 | `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `ping`, `pong` | no | no |
 
@@ -2759,7 +2761,82 @@ be transmitted where.
 
 ---
 
-## 24. Adding a field, worked
+## 24. Services
+
+`t:service` says what a station does for other stations.
+
+```
+t:service f:X3RLY7 pos:38.7810,-9.2043 serve:relay,mailbox ts:2026-08-08_14:26:40 sig:<60 characters>
+```
+
+146 bytes: a node that repeats packets and carries mail.
+
+`serve:` is a comma-separated list from a fixed set:
+
+| Word | The station |
+|---|---|
+| `relay` | repeats packets it hears |
+| `mailbox` | carries mail for stations it cannot reach |
+| `internet` | gateways to the internet |
+| `aprs` | gateways to APRS-IS |
+| `nostr` | runs a NOSTR relay |
+| `files` | hosts content-addressed files |
+| `time` | has a clock worth trusting, usually from GNSS |
+| `weather` | publishes observations |
+| `wifi` | offers network access to people nearby |
+| `other` | something not in this list, described in `m:` |
+
+A station with a position and a power source says so, because both decide
+whether it is worth routing through:
+
+```
+t:service f:X3RLY7 pos:38.7810,-9.2043 serve:relay,mailbox,internet,aprs supply:solar ts:2026-08-08_14:26:40 sig:<60 characters>
+```
+
+173 bytes. `supply:solar` from section 23.3 means it survives a power cut,
+which is when a gateway matters most.
+
+### 24.1 What this is not
+
+**Physical goods and help are `t:offer`, not this.** Water, fuel, shelter, a
+lift, a spare battery and a berth are already in section 22 with a price and an
+expiry, and they belong to a person rather than a station. `t:service` is what a
+radio does on the network, and the division is worth keeping: a station offering
+`internet` is advertising a route for packets, and one offering `wifi` is
+advertising a socket for humans.
+
+### 24.2 The other half of a mailbox
+
+`serve:mailbox` is a station volunteering. `t:mailbox` (section 13.12) is a
+recipient nominating. They are opposite directions of the same arrangement and
+neither implies the other.
+
+A sender with mail for an unreachable station looks for a `t:mailbox` from that
+station first, because the recipient knows best who sees them. Failing that, any
+station advertising `serve:mailbox` is a reasonable guess. **Neither is a
+promise.** A carrier is under the quota and eviction rules of
+[store-and-forward.md](store-and-forward.md) whatever it advertised, and a
+station that stops carrying does not owe anybody a withdrawal.
+
+### 24.3 Trust
+
+**Sign it.** Signing is the default (section 9.1) and an unsigned service
+advertisement is worth nothing: `serve:internet` is an invitation to route
+traffic through a station, and forging one is the cheapest way to collect other
+people's packets.
+
+Even signed, an advertisement is a **claim about capability, not a promise of
+behaviour, and never evidence of good faith**. A station that truthfully gateways
+to the internet may also log everything that passes. Encrypt what should not be
+read (section 9.2) and set `scope:` on what should not travel (section 13.11);
+neither depends on trusting the station that carries it.
+
+`until:` bounds the claim, and it should be short. A service list is a statement
+about equipment that is switched on, and equipment gets switched off.
+
+---
+
+## 25. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -2785,7 +2862,7 @@ negotiation.
 
 ---
 
-## 25. Operating alongside APRS
+## 26. Operating alongside APRS
 
 A licensed amateur may bridge XPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -2796,17 +2873,17 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 26. Reserved
+## 27. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
 `response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `mailbox`,
-`ping`, `pong`.
+`service`, `ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
-`urg`, `scope`, `lang`, `nick`, `hold`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
+`urg`, `scope`, `lang`, `nick`, `hold`, `serve`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
 `remove`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
@@ -2821,7 +2898,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 27. Cheat sheet
+## 28. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -2855,6 +2932,7 @@ packet **250 bytes**, on every transport.
 | `need` | what a station wants (section 22) |
 | `channel` | a frequency a station uses (section 23) |
 | `mailbox` | stations that hold mail for the sender (section 13.12) |
+| `service` | what a station does for others (section 24) |
 | `challenge` | a challenge to prove a callsign (section 18) |
 | `response` | the answer to a challenge |
 | `warning` | a warning about a hazard (section 16) |
@@ -2880,6 +2958,7 @@ packet **250 bytes**, on every transport.
 | `scope` | `scope` | how far this may be relayed, default global (section 13.11) |
 | `lang` | `lang` | language of `m:`, default English (section 4.7) |
 | `hold` | `path` | preferred mailboxes, in order (section 13.12) |
+| `serve` | `words` | what a station does for others (section 24) |
 | `near` | `qty` | how close to `dest` counts as arrived (section 13.4) |
 | `route` | `path` | the route a receipt is acknowledging (section 13.10) |
 | `add` | `enum` | something this packet adds (section 6.5) |
@@ -3114,6 +3193,10 @@ regional variant.
 `nick:` is a signed, human-readable name on `t:identity`. Shown only when the
 signature verifies, newest `ts:` wins, and never usable as an address.
 
+`t:service` advertises what a station does: `relay` `mailbox` `internet` `aprs`
+`nostr` `files` `time` `weather` `wifi` `other`. Physical goods are `t:offer`,
+not this. A claim about capability, never evidence of good faith.
+
 `t:mailbox` names the stations that hold mail for the sender, `hold:` in order
 of preference. It must be signed, and an unverifiable one must be ignored.
 
@@ -3170,7 +3253,7 @@ document.
 
 ---
 
-## 28. Implementation status
+## 29. Implementation status
 
 | Element | State |
 |---|---|
@@ -3206,6 +3289,7 @@ document.
 | `lang:` | not implemented |
 | `nick:` and signed identity | not implemented; identity is announced unsigned today |
 | `t:mailbox` | not implemented; custody has no notion of a preferred carrier |
+| `t:service` | not implemented; no station advertises what it does |
 | `near:`, regional delivery, `route:` in a receipt | not implemented |
 | `q:sign` and signed receipts | not implemented |
 | Recurring windows, `site:`, `supply:`, `range:` | not implemented |

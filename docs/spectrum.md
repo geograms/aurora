@@ -471,9 +471,10 @@ software fixes that.
 ### 8.1 VHF and UHF
 
 An `X1` or `X3` callsign is self-generated and must never be originated onto
-amateur spectrum ([XPRS.md](XPRS.md) section 9.4.1). Everything here applies to
-a licensed operator using their own callsign, and encryption is not permitted
-(section 9.4 of that document).
+licensed spectrum ([XPRS.md](XPRS.md) section 9.4.1): only a callsign issued by
+a competent authority to the operator transmitting may be used here. Everything
+in this section applies to such an operator, who binds that callsign to their
+signing key with `t:identity` (section 9.4.2) and may not encrypt (section 9.4).
 
 | Band | Region 1 | Region 2 | Region 3 |
 |---|---|---|---|

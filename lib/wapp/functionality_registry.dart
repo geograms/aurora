@@ -289,6 +289,26 @@ class FunctionalityRegistry {
         ParamDef('kv', 'string', 'key=value'),
       ], ReturnDef('int', '0 ok, -1 unknown key/bad value')),
     ]),
+    'hal.xprs': FunctionalityDef('hal.xprs',
+        'What this device has heard on the air: XPRS stations and packets. '
+        'READ-ONLY DIAGNOSTICS \u2014 it names what was heard and never steers '
+        'delivery. Internet traffic is not in it: the bearer is recorded where '
+        'a packet arrives and only radio/local bearers are collected, so there '
+        'is nothing to filter out later.', [
+      EndpointDef(
+          'hal_xprs_stations',
+          'Stations heard over the air, as people-widget sections '
+          '[{title,items:[{id,title,subtitle,tags}]}]',
+          [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+      EndpointDef(
+          'hal_xprs_traffic',
+          'Recent XPRS packets, oldest first '
+          '[{ts,bearer,rssi,from,to,type,id,mine,wire}] \u2014 includes packets '
+          'addressed to other stations',
+          [],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
+    ]),
     'hal.mesh': FunctionalityDef(
         'hal.mesh', 'BLE street-mesh registry (neighbors, routes, node status)', [
       EndpointDef('hal_mesh_status',

@@ -11,6 +11,7 @@ const _kDefaultSeedNames = {
   'mp4player',
   'reticulum',
   'social',
+  'xprs',
   'torrents',
 };
 

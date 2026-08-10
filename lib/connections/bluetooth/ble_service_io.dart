@@ -11,6 +11,7 @@
 // scan-only and [advertiseSupported] is false.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:bluetooth_low_energy/bluetooth_low_energy.dart';
@@ -24,6 +25,8 @@ import '../../profile/profile_service.dart';
 import '../../services/android_permissions_service.dart';
 import '../../services/log_service.dart';
 import '../../services/mesh/mesh_custody.dart';
+import '../../services/xprs/xprs_monitor.dart';
+import '../../services/xprs/xprs_packet.dart';
 import '../../services/mesh/mesh_transfer_scheduler.dart';
 import '../../services/mesh/mesh_service.dart';
 import '../../services/reticulum/rns_service.dart';
@@ -709,6 +712,16 @@ class BleService {
     // Mesh custody tap: overheard ?ACKs purge, our 1:1s feed the have-bloom,
     // others' 1:1s get parked for GATT delivery (docs/mesh.md §6).
     MeshCustodyDelegate.onAirFrame(f.data, outbound: false);
+    // And, when it is XPRS, show it to whoever is watching the air. Includes
+    // traffic addressed to other people — that is most of what a mesh carries,
+    // and seeing it is the point of the XPRS wapp.
+    final xp = XprsPacket.parse(utf8.decode(f.data, allowMalformed: true));
+    if (xp != null) {
+      XprsMonitor.instance.offer(xp,
+          bearer: 'ble',
+          selfCallsign: MeshService.instance.tableCallsign,
+          rssi: f.rssi);
+    }
     _inbound.add(BleInboundFrame(f.addr, f.rssi, f.data));
   }
 

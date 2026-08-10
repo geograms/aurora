@@ -25,6 +25,7 @@ import '../../profile/storage_paths.dart';
 import '../../util/media_archive.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
+import '../xprs/xprs_monitor.dart';
 import '../xprs/xprs_packet.dart';
 import '../xprs/xprs_vocab.dart';
 import 'mesh_beacon.dart';
@@ -222,10 +223,18 @@ class MeshService {
     final t = _table;
     if (t == null) return;
     final p = XprsPacket.parse(utf8.decode(f.data, allowMalformed: true));
-    if (p == null || p.type != 'observation') return;
+    if (p == null) return;
     final from = (p['f'] ?? '').trim().toUpperCase();
     if (from.isEmpty || from == t.selfCallsign.toUpperCase()) return;
 
+    // EVERY XPRS packet on this subtype goes to the monitor, whatever its type
+    // — an info broadcast, a warning and a beacon are all things a person
+    // watching the air should see (xprs_monitor.dart).
+    XprsMonitor.instance
+        .offer(p, bearer: 'ble', selfCallsign: t.selfCallsign, rssi: f.rssi);
+
+    // The rest of this is beacon handling, and only a beacon is a beacon.
+    if (p.type != 'observation') return;
     _xprsBeaconsHeard++;
     // A reading without `link:` is unanswerable and discarded (section 10.6.1);
     // one about another bearer is not evidence about this radio.

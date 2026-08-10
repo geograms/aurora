@@ -10,6 +10,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../connections/bluetooth/ble5_bus.dart';
+import 'xprs/xprs_packet.dart';
+
 import 'package:flutter/material.dart';
 
 import '../connections/bluetooth/ble_service.dart';
@@ -895,6 +898,39 @@ class RemoteApiService {
           'downloadedPath': u.downloadedPath,
           'canInstall': await UpdateNative.canInstall(),
           'error': u.error,
+        });
+      }
+      // Air one XPRS packet on BLE, for validating the radio path end to end
+      // from a laptop. {"type":"info","m":"..."} → t:info f:<self> ts:<now>
+      // m:<text>, signed, on subtype 0x58. Nothing in the app calls this; it
+      // exists so a two-device test can be driven over adb.
+      if (req.method == 'POST' && path == '/api/xprs/send') {
+        final data = await _body(req);
+        final type = (data['type'] ?? 'info').toString();
+        final text = (data['m'] ?? '').toString();
+        final self = MeshService.instance.tableCallsign.trim();
+        if (self.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'no callsign yet'},
+              status: HttpStatus.serviceUnavailable);
+        }
+        final now = DateTime.now().toUtc();
+        String two(int n) => n.toString().padLeft(2, '0');
+        final ts = '${now.year}-${two(now.month)}-${two(now.day)}_'
+            '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
+        var p = XprsPacket.parse('t:$type f:$self ts:$ts m:$text');
+        if (p == null || !p.fits) {
+          return _json(res, {'ok': false, 'error': 'malformed or too long'},
+              status: HttpStatus.badRequest);
+        }
+        final aired = await Ble5Bus.instance.advertiseFrame(
+            'xprs-send', Ble5Subtype.xprs,
+            Uint8List.fromList(utf8.encode(p.encode())),
+            ttl: const Duration(seconds: 60));
+        return _json(res, {
+          'ok': aired,
+          'bytes': p.byteLength,
+          'subtype': '0x58',
+          'wire': p.encode(),
         });
       }
       if (req.method == 'GET' && path == '/api/ble/status') {

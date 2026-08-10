@@ -56,6 +56,7 @@ import '../../util/nostr_crypto.dart';
 import '../log_service.dart';
 import '../../profile/profile_service.dart';
 import '../reticulum/rns_service.dart';
+import '../xprs/xprs_monitor.dart';
 import '../xprs/xprs_packet.dart';
 import '../xprs/xprs_sig.dart';
 import 'mesh_custody.dart';
@@ -296,6 +297,13 @@ class MeshCourier {
   /// covers the packet rather than a hand-built canonical string.
   bool _ingestXprs(MeshFrame f, {required String via}) {
     final p = f.packet!;
+    // Show it on the air view before deciding anything about it. `via` is the
+    // transport's own word for how it arrived ('mesh' overheard, or a session);
+    // anything the monitor does not recognise as a radio or local bearer is
+    // dropped there rather than mislabelled here.
+    XprsMonitor.instance.offer(p,
+        bearer: via == 'mesh' ? 'ble' : via,
+        selfCallsign: MeshService.instance.tableCallsign);
     final senderNpub = _npubForCallsign(f.from);
 
     // A carried packet passed through hands we do not control. When we hold the

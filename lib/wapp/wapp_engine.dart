@@ -28,6 +28,7 @@ import '../services/log_service.dart';
 import '../services/social/email_resolve_service.dart';
 import '../services/social/node_role_api.dart';
 import '../services/mesh/mesh_service.dart';
+import '../services/xprs/xprs_monitor.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -3416,6 +3417,24 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    final halXprsStations = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(XprsMonitor.instance.stationsJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
+    final halXprsTraffic = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(XprsMonitor.instance.trafficJson());
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     final halMeshDevices = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
@@ -3747,6 +3766,8 @@ class WappEngine {
       WasmImport('hal', 'archive_set_pref', halArchiveSetPref),
       WasmImport('hal', 'mesh_status', halMeshStatus),
       WasmImport('hal', 'mesh_devices', halMeshDevices),
+      WasmImport('hal', 'xprs_stations', halXprsStations),
+      WasmImport('hal', 'xprs_traffic', halXprsTraffic),
       WasmImport('hal', 'mesh_scf_status', halMeshScfStatus),
       WasmImport('hal', 'mesh_transfers', halMeshTransfers),
       WasmImport('hal', 'mesh_set_pref', halMeshSetPref),

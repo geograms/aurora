@@ -160,6 +160,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `role` | `enum` | what a grant confers: `mod`, `sub`, or absent for a member |
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
 | `mood` | `enum` | how the sender feels (section 27.1) |
+| `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -206,6 +207,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
+| `place` | somewhere useful that is not the sender (section 28) |
 | `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
@@ -620,7 +622,7 @@ differs is whether naming it means anything:
 
 | Packet type | Reply | React |
 |---|---|---|
-| `message`, `status`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `warning`, `info` | yes | yes |
+| `message`, `status`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `service`, `place`, `warning`, `info` | yes | yes |
 | `sos` | yes | **no** |
 | `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `command`, `result`, `moderate`, `ping`, `pong` | no | no |
 
@@ -930,6 +932,39 @@ meant to close.
 
 Show it as decoration next to the callsign, never instead of it.
 
+### 9.3.2 A face and a line about yourself
+
+A townhall of callsigns is a spreadsheet. `file:` gives an identity a picture and
+`m:` a line of description, both optional and both signed with the rest:
+
+```
+t:identity f:X1QZ3N ts:2026-08-08_14:26:40 nick:joao file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg sig:<60 characters> m:sailing the Algarve coast
+```
+
+219 bytes. The picture is a **reference and not bytes** -- a content hash like
+any other file in this format (section 6.7), fetched with `cmd:file` (section
+25.2) if the receiver wants it and ignored entirely if it does not. A station
+that never fetches an avatar has lost nothing but a picture.
+
+**An identity announcement carries any subset of these fields, and a receiver
+keeps, for each field, the value from the newest verifiable announcement that
+carried it.** That rule is forced by arithmetic rather than chosen: the key
+binding and the decoration together come to 255 bytes, which does not fit.
+
+```
+181  t:identity f:X1QZ3N ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f nick:joao sig:<60 characters>
+219  t:identity f:X1QZ3N ts:2026-08-08_14:26:40 nick:joao file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg sig:<60 characters> m:sailing the Algarve coast
+```
+
+The split turns out to be the right shape anyway. The key binding is small and
+must be repeated often, because a receiver that has never heard it can verify
+nothing (section 18.1). The decoration is larger and changes once a year, so it
+goes out rarely -- which is section 29 applied to this format's own traffic.
+
+A packet without `k:` still verifies, against the key the receiver already holds
+for that callsign. One from a station whose key is unknown is ignored, exactly as
+the nickname rule above requires.
+
 ### 9.4 Permitted use by band
 
 | Spectrum | Callsign in `f:` | Signing | Encryption |
@@ -1016,7 +1051,7 @@ signature does not obscure it. `sig:` is detached: the message stays in clear in
 authorship. Anyone monitoring reads the traffic exactly as they would unsigned.
 
 ```
-t:message f:CT1ABC d:G0XYZ ts:2026-08-08_14:26:40 m:net starts at eight on the repeater sig:<60 characters>
+t:message f:CT1ABC d:G0XYZ ts:2026-08-08_14:26:40 sig:<60 characters> m:net starts at eight on the repeater
 ```
 
 152 bytes, lawful on an amateur band, and verifiable.
@@ -2286,8 +2321,8 @@ has said nothing a receiver can act on. Naming the packet is exact, and the
 mechanism is the one replies, reactions and receipts already use.
 
 `remove:` takes the type being withdrawn: `warning`, `info`, `event`, `offer`,
-`need`, `channel`, `passage`, `blog`, `mailbox`, `service`, or `like` for a
-reaction. It is stated
+`need`, `channel`, `passage`, `blog`, `mailbox`, `service`, `place`, or `like`
+for a reaction. It is stated
 even though `t:` repeats it, so that a receiver can filter withdrawals of any
 type on one key, and so that a later revision can withdraw part of a packet
 rather than all of it.
@@ -2960,7 +2995,8 @@ t:service f:X3RLY7 pos:38.7810,-9.2043 serve:relay,mailbox ts:2026-08-08_14:26:4
 | `internet` | gateways to the internet |
 | `aprs` | gateways to APRS-IS |
 | `nostr` | runs a NOSTR relay |
-| `files` | hosts content-addressed files |
+| `files` | hosts content-addressed files, and answers `cmd:file` (section 25.2) |
+| `history` | keeps a spool of what it has heard, and re-airs it on `cmd:history` |
 | `time` | has a clock worth trusting, usually from GNSS |
 | `weather` | publishes observations |
 | `wifi` | offers network access to people nearby |
@@ -3058,8 +3094,9 @@ the same however many minutes pass.
 | `202` | accepted, working on it |
 | `400` | understood, arguments wrong |
 | `403` | refused, not permitted |
-| `404` | unknown command |
+| `404` | unknown command, or nothing held to answer it |
 | `408` | too old, outside its freshness window |
+| `429` | over budget, ask later or ask elsewhere (section 29) |
 | `500` | tried and failed |
 
 ```
@@ -3072,7 +3109,75 @@ Numbers sit oddly beside `sev:danger` and `kind:fire`, and are still right here.
 The outcome space is open-ended in a way a word list is not, and these particular
 numbers are understood by everyone who has ever written a web client.
 
-### 25.2 Keeping it out of the conversation
+### 25.2 The commands this document defines
+
+What a command word means is agreed between two stations and is mostly not this
+document's business. Two are the exception, because they cannot work between
+strangers if every station names them differently.
+
+**`cmd:history` asks a station to re-air what it kept.** It is how somebody back
+from four days at sea catches up on a townhall that was aired once while they
+were away.
+
+```
+153  t:command f:X1BOA3 d:X3RLY7 ts:2026-08-08_14:26:40 cmd:history since:2026-08-04_00:00:00 sig:<60 characters>
+165  t:command f:X1BOA3 d:X3RLY7 ts:2026-08-08_14:26:40 cmd:history since:2026-08-04_00:00:00 only:X5A3F2 sig:<60 characters>
+```
+
+`since:` and `until:` bound the window and already mean exactly this everywhere
+else. `only:` narrows the replay to one callsign or one group, which on a slow
+bearer is the difference between a useful answer and an unusable one.
+
+**A standard command carries its parameters in the keys the format already
+has**, not in `arg:`. `arg:` is positional, and design rule 1 says there are no
+positional fields; it stays for operator commands, where this document has no
+key to offer.
+
+**`cmd:file` asks for the bytes behind a `file:` reference.**
+
+```
+198  t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:file file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg sig:<60 characters>
+```
+
+Until now a `file:` reference could be shown and not resolved, which made every
+photograph in the format decoration. The command says **what** is wanted and
+never how it should travel; a station advertising `serve:files` (section 24)
+answers, and which bearer carries the bytes is the transport's business and not
+this document's.
+
+### 25.2.1 What comes back
+
+The answer is the ordinary sequence of section 25.1 -- accepted, then done:
+
+```
+132  t:result f:X3RLY7 d:X1BOA3 ts:2026-08-08_14:26:41 r:747ae8 code:202 sig:<60 characters>
+132  t:result f:X3RLY7 d:X1BOA3 ts:2026-08-08_14:31:02 r:747ae8 code:200 sig:<60 characters>
+```
+
+Between them the station re-airs the packets themselves. `code:404` says nothing
+was held for that window, `code:403` that the station will not serve this
+requester, and `code:429` that it is over budget -- with, by section 29, the
+names of stations that might serve instead.
+
+**The replay is the original packets, unchanged.** `f:`, `ts:` and `sig:` are
+exactly as first transmitted, so authorship survives having been held for days by
+a station nobody trusts. It cannot alter what it replays without breaking a
+signature, and it cannot invent traffic that was never sent.
+
+**Derived identifiers make backfill safe by construction**, and this is the part
+worth understanding before implementing any of it. A replayed packet has the same
+identifier it always had (section 5), so a client that already holds it
+recognises the duplicate and keeps one copy. That single property removes the
+machinery every comparable protocol needs: no cursors to persist, no sequence
+numbers to allocate, no agreement about where one station's history ends and
+another's begins, and no bug at the boundary between two windows. Asking two
+stations for overlapping windows costs airtime and nothing else.
+
+A station that keeps a spool says so with `serve:history` (section 24), and what
+it keeps, for how long, and for whom is its own business -- section 29 governs
+what it owes a stranger.
+
+### 25.3 Keeping it out of the conversation
 
 Four rules, each closing a specific confusion.
 
@@ -3089,7 +3194,7 @@ machinery like a receipt or a challenge.
 text is for the operator afterwards. A station that parsed instructions out of
 `m:` would have built a natural-language interface to its front door.
 
-### 25.3 Security
+### 25.4 Security
 
 A packet that opens a door is the highest-value forgery in this format, and the
 rules here are stricter than elsewhere because of it.
@@ -3133,7 +3238,7 @@ t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 x:<64 characters> sig:<60 cha
 182 bytes, sealed and signed. `t:`, `f:`, `d:` and `ts:` stay in clear so the
 packet can be routed and its freshness checked without reading it.
 
-### 25.4 Commands too long for one packet
+### 25.5 Commands too long for one packet
 
 A command splits across parts exactly as a message does (section 6.6), which
 matters for the case that motivates it: a spoken instruction, transcribed, and
@@ -3151,7 +3256,7 @@ t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:interpret n:3/3 sig:<60 c
 141, 141 and 199 bytes. Reassembled it is 266 bytes, which is why it split.
 
 This is the one command whose payload is `m:`, and it is an **explicit opt-in**
-rather than a hole in section 25.2. Everywhere else a bot reads `cmd:` and
+rather than a hole in section 25.3. Everywhere else a bot reads `cmd:` and
 `arg:` and never takes instructions from free text. A station that does not
 interpret natural language answers `404`, and one that does has said so by
 accepting this command word.
@@ -3178,7 +3283,7 @@ command that has expired is not worth assembling.
 **The window runs from `ts:`, which every part shares.** A three-part command is
 one command that took a few seconds to arrive, not three events.
 
-### 25.5 Interpretation is not authorisation either
+### 25.6 Interpretation is not authorisation either
 
 `cmd:interpret` puts attacker-influenced text in front of a language model, and
 that is worth stating plainly rather than discovering later.
@@ -3186,7 +3291,7 @@ that is worth stating plainly rather than discovering later.
 A signature proves which callsign sent the text. It says nothing about whether
 the text is a good idea, and a model asked to interpret "open the north door"
 will do exactly as well with a sentence designed to talk it into something else.
-The allow-list of section 25.3 matters more here than anywhere in this document,
+The allow-list of section 25.4 matters more here than anywhere in this document,
 because it is the only thing standing between a stranger and the interpreter.
 
 **A model's output should not be the last check before a physical action.** Map
@@ -3532,7 +3637,7 @@ family and refine later, rather than needing thirty palettes on the first day.
 
 ```
 t:status f:X1QZ3N ts:2026-08-08_14:26:40 mood:summited pos:42.6390,0.6560 m:top of Aneto, clear all the way to France
-t:status f:X1QZ3N d:X5A3F2 ts:2026-08-08_14:26:40 mood:stormbound m:staying put another day sig:<60 characters>
+t:status f:X1QZ3N d:X5A3F2 ts:2026-08-08_14:26:40 mood:stormbound sig:<60 characters> m:staying put another day
 ```
 
 117 and 156 bytes.
@@ -3565,7 +3670,144 @@ give.
 
 ---
 
-## 28. Adding a field, worked
+## 28. Places
+
+Every packet so far reports the sender: where I am, what I see, how I feel. A
+place reports **something that is not me and does not move** -- a tap on a
+harbour wall, a mooring buoy, a bothy, the one gap in a wall of gorse. APRS has
+had this for thirty years as Objects and Items, and a format aimed at people at
+sea and in mountains cannot do without it.
+
+```
+t:place f:X1BOA3 ts:2026-08-08_14:26:40 kind:anchorage pos:37.0194,-7.9304 title:baleeira m:good holding in sand, exposed to south
+```
+
+130 bytes. `kind:` says what it is, `pos:` where it is, and `title:` names it.
+
+`kind:` needs no new key: it already means "what kind of thing this is" for a
+warning and for a channel, and this is the third vocabulary it carries.
+
+| Word | The place |
+|---|---|
+| `anchorage` | somewhere to lie at anchor |
+| `mooring` | a buoy or pile to make fast to |
+| `ramp` | a slipway |
+| `jetty` | a pontoon or quay to come alongside |
+| `beach` | somewhere to land a small boat |
+| `fuel` | diesel, petrol or gas |
+| `water` | drinking water |
+| `repair` | a yard, a chandlery, somebody who mends things |
+| `shelter` | out of the weather, unstaffed |
+| `hut` | a refuge or bothy, walls and a roof |
+| `camp` | somewhere a tent goes |
+| `spring` | water out of the ground |
+| `ford` | a crossing |
+| `pass` | a way through a ridge |
+| `summit` | a top |
+| `trailhead` | where a path starts |
+| `other` | something not in this list, described in `m:` |
+
+### 28.1 Naming, revising and withdrawing
+
+`title:` is a `label` and works exactly as it does on a post (section 19.1): a
+later place from the same station with the same title **replaces** the earlier
+one. That is how a place is corrected when the tap is moved or the buoy is
+lifted, and it is why a place needs no separate revision mechanism.
+
+`until:` makes a place temporary -- a water point that runs dry in August, a
+winter-only shelter. `file:` attaches a photograph, which for a landing beach
+is worth more than any description. `remove:place` withdraws one:
+
+```
+t:place f:X1BOA3 ts:2026-08-08_14:26:40 kind:water pos:37.0194,-7.9304 title:sagres-tap sig:<60 characters> m:tap by the harbour office, potable
+t:place f:X1BOA3 ts:2026-09-01_09:00:00 r:9f52f6 remove:place sig:<60 characters>
+```
+
+189 and 126 bytes.
+
+### 28.2 A place is a claim
+
+Nothing here is a survey and no station is an authority. Two people may publish
+different places with the same title, or the same place in different positions,
+and both are true statements about what somebody believed.
+
+The rules are the ones this format uses everywhere else. **Newest wins per
+signer**, so a station corrects itself and never anybody else. **A client shows
+who said it**, because on a coast where a mistake grounds a boat, the callsign
+that reported the anchorage is part of the information. **An unsigned place is a
+claim by nobody**, and a client is right to rank it below one it can verify.
+
+A place that matters for safety is not a place. A hazard is `t:warning` and a
+call for help is `t:sos`; both carry a relay budget this type does not, and both
+are the right packet when somebody could be hurt.
+
+---
+
+## 29. Airtime
+
+Every other section says what a station **may** transmit. This one says how
+often, and what it owes the strangers who ask it for things. Sections 25.2 and
+13.12 make that urgent: `cmd:history` and `cmd:file` let one station ask another
+to spend real airtime on demand, and a format that hands out that power without
+a budget has designed a way to flatten a solar node from across a bay.
+
+### 29.1 Cadence belongs to the bearer
+
+There is no single right interval, because the constraint is not the same on
+each bearer:
+
+| Bearer | What binds |
+|---|---|
+| LoRa on ISM | a legal duty cycle, often 1 percent -- at SF9 a single packet owes several seconds of silence |
+| VHF and UHF packet | a shared channel and whoever else is on it |
+| Bluetooth and WiFi Direct | range, so traffic is naturally local and cheap |
+| the internet | nothing, which is the trap |
+
+**A station transmits unsolicited traffic no more often than the strictest
+bearer it is transmitting on allows.** A phone that gateways to both LoRa and the
+internet is bound by LoRa, not by the internet, for anything it sends to both.
+
+Two consequences worth stating, because both have been got wrong in practice:
+**a beacon is not free**, so position, identity and service announcements go out
+on a period measured in tens of minutes rather than seconds; and **a retry is
+not a new packet**, so re-airing something that went unanswered counts against
+the same budget as saying it the first time.
+
+### 29.2 What a station owes a stranger
+
+`cmd:history` and `cmd:file` are requests to spend somebody else's battery. The
+answer is not that they must be refused, and not that they must be honoured.
+
+- **Serving yourself is unmetered; serving a stranger is optional and metered.**
+  A station decides what it gives away, and a station that gives away nothing is
+  still a good citizen of this network.
+- **A bounded number of answers per period.** Section 18.4 already sets this
+  precedent for challenges, and the reasoning transfers unchanged: an unlimited
+  right to demand work from a battery-powered station is a way to flatten it.
+- **Refuse out loud.** Over budget, a station answers `code:429` rather than
+  going quiet, and names in `m:` any station it knows that serves the same thing:
+
+```
+t:result f:X3RLY7 d:X1BOA3 ts:2026-08-08_14:26:40 r:747ae8 code:429 sig:<60 characters> m:try X32DVA or CT1ABC-9
+```
+
+157 bytes. Silence and refusal look identical to the asker and mean opposite
+things, so a refusal that says nothing wastes the very airtime it was trying to
+save: the asker retries, reasonably, believing the packet was lost.
+
+### 29.3 Who this protects
+
+The stations worth protecting are the ones that cannot argue back: a solar relay
+on a headland, a dongle in a hut, a phone at four percent in a tent. They are
+also the stations that make the network reach anywhere interesting.
+
+A budget is therefore not a limitation on generosity but the thing that makes
+generosity survivable. A relay that serves until its battery dies has served
+nobody by morning.
+
+---
+
+## 30. Adding a field, worked
 
 A format is judged by what it costs to add something it did not foresee. Suppose
 a station gains an air-quality sensor.
@@ -3591,7 +3833,7 @@ negotiation.
 
 ---
 
-## 29. Operating alongside APRS
+## 31. Operating alongside APRS
 
 A licensed amateur may bridge XPRS and APRS under their own callsign and
 responsibility, subject to section 9.4. An `X1` or `X3` callsign is generated by
@@ -3602,18 +3844,18 @@ because obscured meaning is not permitted on amateur bands.
 
 ---
 
-## 30. Reserved
+## 32. Reserved
 
 Assigned packet types: `message`, `observation`, `receipt`, `reaction`,
 `request`, `identity`, `track`, `sos`, `warning`, `info`, `challenge`,
 `response`, `blog`, `passage`, `event`, `offer`, `need`, `channel`, `mailbox`,
-`service`, `command`, `result`, `moderate`, `status`, `ping`, `pong`.
+`service`, `command`, `result`, `moderate`, `status`, `place`, `ping`, `pong`.
 All other lowercase words are reserved.
 
 Assigned keys: `t`, `f`, `d`, `ts`, `tz`, `q`, `s`, `r`, `n`, `via`, `track`,
 `seq`, `title`, `dest`, `onboard`, `price`, `cw`, `freq`, `bw`, `shift`,
 `urg`, `scope`, `lang`, `nick`, `hold`, `serve`, `cmd`, `arg`, `code`, `near`, `route`, `tone`, `input`, `power`, `mode`, `ch`, `range`, `site`, `supply`, `every`, `for`, `at`, `kind`, `sev`, `rad`, `tag`, `type`, `m`, `file`, `x`, `sig`, `k`, `add`,
-`remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
+`remove`, `grant`, `revoke`, `role`, `hide`, `mood`, `only`, `since`, `until`, `pos`, `alt`, `acc`, `spd`, `dir`, `o`, `climb`,
 `temp`, `hum`,
 `intemp`, `inhum`, `wave`, `swell`, `seatemp`, `vis`, `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar`, `batt`, `volt`,
 `rssi`, `snr`, `age`, `epoch`.
@@ -3627,7 +3869,7 @@ purpose takes an unused type. Neither redefines an existing assignment.
 
 ---
 
-## 31. Cheat sheet
+## 33. Cheat sheet
 
 Everything the format defines, on one page. Each entry is stated in full in the
 section it belongs to; nothing here is new.
@@ -3655,6 +3897,7 @@ packet **250 bytes**, on every transport.
 | `sos` | a call for help (section 15) |
 | `info` | a notice about conditions (section 17) |
 | `blog` | a published post (section 19) |
+| `place` | somewhere useful that is not the sender (section 28) |
 | `status` | a short post about the sender, now (section 27) |
 | `passage` | where a vessel is going (section 20) |
 | `event` | something happening at a time and place (section 21) |
@@ -3704,6 +3947,7 @@ packet **250 bytes**, on every transport.
 | `role` | `enum` | what a grant confers: `mod`, `sub`, or absent for a member |
 | `hide` | `enum` | what a moderator withdraws from view: `message` |
 | `mood` | `enum` | how the sender feels (section 27.1) |
+| `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -3965,6 +4209,45 @@ when `local`, and binding on gateways. Reception is never restricted, only
 relaying. A group is an address, not a boundary -- only `x:` keeps content
 private.
 
+### Catching up, and fetching
+
+```
+t:command f:X1BOA3 d:X3RLY7 ts:... cmd:history since:... sig:...
+t:command f:X1BOA3 d:X3RLY7 ts:... cmd:history since:... until:... only:X5A3F2 sig:...
+t:command f:X1QZ3N d:X3RLY7 ts:... cmd:file file:9f2c4e1a...e13.jpg sig:...
+```
+
+Standard commands carry parameters in named keys, never `arg:`. The station
+answers `code:202`, re-airs the **original packets unchanged**, then `code:200`.
+`404` nothing held, `403` refused, `429` over budget with alternatives in `m:`.
+Derived identifiers make the replay safe: a duplicate collapses on the identifier
+it already had, so there are no cursors and overlapping windows cost only
+airtime. Advertise a spool with `serve:history`, files with `serve:files`.
+
+### Places
+
+`t:place` reports something that is not you and does not move. `kind:` from:
+
+```
+anchorage mooring ramp jetty beach fuel water repair
+shelter hut camp spring ford pass summit trailhead other
+```
+
+`pos:` where, `title:` names it and a later place with the same title from the
+same station replaces it, `until:` for temporary, `file:` for a photograph,
+`remove:place` to withdraw. Newest wins per signer; a client shows who said it.
+A hazard is `t:warning` and a call for help is `t:sos` -- both carry a relay
+budget a place does not.
+
+### Airtime
+
+Unsolicited traffic is bound by the **strictest bearer** a station transmits on,
+not the loosest. A beacon is not free; a retry is not a new packet. Serving
+yourself is unmetered, serving a stranger is optional, metered and bounded per
+period (section 18.4's precedent). Refuse out loud with `code:429` and name
+somebody else -- silence and refusal look identical to the asker and mean
+opposite things.
+
 ### Status
 
 `t:status` is a short post about the sender, now -- the townhall packet. No
@@ -4081,7 +4364,7 @@ document.
 
 ---
 
-## 32. Implementation status
+## 34. Implementation status
 
 | Element | State |
 |---|---|
@@ -4122,6 +4405,12 @@ document.
 | Several mailboxes with windows, and cancellation | not implemented |
 | `t:service` | not implemented; no station advertises what it does |
 | `t:command` and `t:result` | not implemented; nothing acts on a received packet |
+| `cmd:history`, backfill by replay | not implemented, and nothing equivalent exists: the APRS iGate mailbox holds only mail addressed to a callsign and is cleared on delivery (`docs/aprs.md`), so broadcast traffic missed while offline is gone |
+| `cmd:file`, fetching bytes by hash | not implemented as a command; the resolution ladder underneath it is built and works (Reticulum direct, DHT, LAN, I2P, BitTorrent -- `reticulum-dart/doc/file-sharing.md`), so this is an ask the format lacks rather than a transport it lacks |
+| `serve:history` | not implemented; no station keeps or advertises a spool |
+| `t:place` | not implemented; nothing in the codebase reports a thing that is not the sender |
+| Avatar and description on `t:identity` | not implemented; the Social wapp renders NOSTR kind-0 profiles, which are a different mechanism |
+| Section 29, airtime | not implemented as stated here, though the Reticulum side has real cadences (30 s charging, 5 min on battery) and the NOSTR side has stranger-serving budgets |
 | `t:status` | not implemented; the Social wapp has a feed, but it is NOSTR kind-1 notes over the internet and Reticulum rather than XPRS packets (`docs/social.md`) |
 | `mood:` and client theming | not implemented; nothing reads a mood and no client changes appearance for one |
 | `X5` group callsigns and `t:moderate` | not implemented; groups are plain names with no member list anywhere |

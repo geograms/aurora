@@ -49,7 +49,7 @@ This is the wire as implemented. [XPRS.md](XPRS.md) specifies a different one,
 in which the same information is carried as `key:value` fields and a carrier
 appends itself to `via:` rather than the frame being rewritten. The behaviour
 described in this document is unaffected; only the encoding of the frame
-changes. XPRS.md section 32 tracks the gap.
+changes. XPRS.md section 34 tracks the gap.
 
 `FROM` and `TO` are always public. A carrier that cannot read the recipient
 cannot determine where to relay the frame, which is what allows custody to

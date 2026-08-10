@@ -533,28 +533,39 @@ same thing, so neither has to be read as the negation of the other. A reaction
 carries no `m:`. It is counted once per callsign, is idempotent, is not
 displayed as a message and raises no notification.
 
-**Every packet that carries content may be replied to and reacted to.**
+**A reply and a reaction are different acts, and not every packet takes both.**
 
-Every packet has an identifier (section 5), so `r:` can name any of them. There
-is nothing special about a message except that it is the common case:
+Every packet has an identifier (section 5), so `r:` can name any of them. What
+differs is whether naming it means anything:
 
-| Replied to and reacted to | Neither |
-|---|---|
-| `message`, `blog`, `observation`, `track` | `reaction` |
-| `passage`, `event`, `offer`, `need` | `receipt` |
-| `channel`, `sos`, `warning`, `info` | `challenge`, `response` |
-| | `request`, `identity`, `ping`, `pong` |
+| Packet type | Reply | React |
+|---|---|---|
+| `message`, `blog`, `observation`, `track`, `passage`, `event`, `offer`, `need`, `channel`, `warning`, `info` | yes | yes |
+| `sos` | yes | **no** |
+| `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `ping`, `pong` | no | no |
 
 A weather observation, a warning, a blog post, an offer and a channel
 announcement can all be replied to and reacted to. That is the point of deriving
-an identifier for every packet rather than only for messages.
+an identifier for every packet rather than only for those carrying a message.
 
-The right-hand column is protocol machinery rather than content, and a receiver
+**A call for help takes replies and never reactions.** Answering an `sos` is
+`t:receipt` with `s:ack` (section 11.5), which says a station heard it and is a
+different thing from approving of it. A reaction adds nothing that mechanism
+does not already carry, spends airtime on a channel that must stay clear, and a
+counter of likes under somebody's call for help is grotesque. A receiver
+discards one.
+
+The bottom row is protocol machinery rather than content, and a receiver
 **ignores** a reply or reaction naming any of it.
 
 A reaction is excluded because a reaction to a reaction is not a thing anyone
 means, and a reply to one is a reply to the wrong packet: the reaction already
 names what it was about, and that is what should be answered.
+
+A **track point** is replied to and reacted to like anything else, but people
+mean the track rather than the point. A receiver attributes both to the track,
+which `f:` and `track:` identify (section 14), and shows them once against the
+line instead of against `seq:7`.
 
 A **challenge and its response** are excluded for a stronger reason. They are a
 two-party authentication exchange, valid for sixty seconds, and the only thing

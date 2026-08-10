@@ -32,6 +32,27 @@ The protocol is NOSTR (kinds 0/1/6/7, NIP-01 wire, NIP-19 mentions, Schnorr). Th
 wapp id/title are "social"; the protocol keeps the "nostr" name. A "publication" =
 a kind-1 text note.
 
+**A second design for the same feed exists on paper.** [XPRS.md](XPRS.md)
+section 27 specifies `t:status` — a short post about the sender, now — as the
+packet a townhall is made of, with an optional `mood:` from a closed list of
+thirty so a client can theme itself; section 9.3.2 gives an identity an avatar
+by content hash and a line of description, which is this wapp's kind-0 profile
+by another route. None of it is implemented, and nothing here needs to change.
+
+The differences worth knowing before anyone tries to bridge the two:
+
+| | Social (shipped) | XPRS section 27 (specified) |
+|---|---|---|
+| Reach | wss relays and Reticulum indexers | any bearer, including LoRa and packet radio |
+| Catching up | poll a relay, hours-deep (§4, §11) | `cmd:history` asks a station to re-air what it kept, paged with `code:206` |
+| Following | kind-3 follow lists, published | a list on the device, deliberately never a packet |
+| Profile picture | a URL in kind-0 | a sha256 in `file:`, fetched with `cmd:file` |
+
+The one that would bite hardest is following: XPRS refuses to put "who reads
+whom" on the air, so a bridge that published this wapp's follow list onto a
+radio bearer would be exporting exactly the record section 27.2 declines to
+create.
+
 ---
 
 ## 2. Where the code lives (and who owns what)

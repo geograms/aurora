@@ -120,6 +120,13 @@ Storage is bounded at 100 MB or 7 days, whichever is reached first, with
 that a busy location cannot fill the disk with mail the device may never
 deliver. Local mail is never refused.
 
+[XPRS.md](XPRS.md) section 29.3 cites this policy as the model of a decision the
+format deliberately leaves alone: it states no retention period, no minimum and
+no eviction order, because a dongle with a microSD card and a home server with a
+spare terabyte cannot share one number. The 100 MB, the 7 days and the
+`ORDER BY urg, ts` above are this implementation's answer and nobody else's, and
+changing them breaks no specification.
+
 Groups, observations, `?` control frames and receipts are never carried.
 
 That covers the closed groups of [XPRS.md](XPRS.md) section 26 as well. An `X5`

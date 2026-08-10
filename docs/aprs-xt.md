@@ -596,6 +596,19 @@ BLE parcel transfer, internet gateway, …) is a separate, future layer. A
 station that cannot resolve a hash simply shows the token as text — which is
 also exactly what a non‑APRS-XT client sees: retro‑compatible by construction.
 
+**[XPRS.md](XPRS.md) section 25.2 now answers the *asking* half of this**, for
+that format rather than for APRS-XT: `cmd:file` names a hash and requests the
+bytes, and the reply is `code:202`/`code:200`, or `code:404` when the station
+does not hold it. It deliberately does not say how the bytes travel either — that
+stays the transport's business, and the ladder in
+[file-sharing.md](../../reticulum-dart/doc/file-sharing.md) already does it.
+Nothing here changes; the paragraph above stands for APRS-XT.
+
+XPRS section 28 also fills the other gap this document has against plain APRS:
+`t:place` reports something that is **not** the sender — an anchorage, a spring,
+a hut, a trailhead — which is what APRS Objects and Items are for and which
+neither this document nor the shipped code has any equivalent of.
+
 ---
 
 *This spec documents the Geogram APRS wapp implementation (`wapps/aprs`). The

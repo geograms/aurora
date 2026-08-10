@@ -162,7 +162,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `mood` | `enum` | how the sender feels (section 27.1) |
 | `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
 | `opt` | `labels` | the choices in a poll, two to six (section 28) |
-| `vote` | `label` | the option chosen in a poll (section 28.1) |
+| `vote` | `label` | the option chosen in a poll (section 28.3) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -186,7 +186,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
-| `rad` | `qty` | radius of the area affected (sections 16, 17) |
+| `rad` | `qty` | radius of the area affected or asked about (sections 16, 17, 28) |
 | `since` | `time` | when the condition started, or will start |
 | `until` | `time` | when the sender expects the condition to end |
 | `m` | `text` | human-readable content, always last |
@@ -3755,16 +3755,70 @@ t:poll f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 opt:sagres,lagos,portimao until:
 ```
 
 134 bytes, identifier `7a9b50`. `opt:` carries the choices as comma-separated
-labels, `m:` asks the question, and `until:` says when voting closes. A poll to a
-group carries `d:` like anything else; without it, it is put to whoever is in
-range.
+labels and `m:` asks the question. A poll to a group carries `d:` like anything
+else; without it, it is put to whoever is in range.
 
 `opt:` takes **two to six** options, each a `label` (lowercase letters, digits
 and `-`). Two because a poll with one option is not a question, and six because
 a person choosing on a phone in a cockpit is not reading a menu -- and because
 the options, the question and the envelope share 250 bytes.
 
-### 28.1 Voting is a reaction
+### 28.1 `until:` is required
+
+**A poll states when voting closes, always.** `until:` is the one field a poll
+may not omit, and a poll without it is incomplete: a counter does not count votes
+for it, and a client shows it as a question rather than a ballot.
+
+This is the only field in the format that is required by its type rather than by
+its packet, and the reason is that the alternative is worse. A poll with no
+closing time never resolves. It sits in every spool that keeps it, collects votes
+from stations coming back into range for as long as anybody replays it, and has a
+different answer every time it is counted -- for ever, with no moment at which
+anyone may say what the answer was. Section 30.3 makes that concrete: a station
+may keep a followed callsign's traffic indefinitely, so "eventually it ages out"
+is not true here.
+
+Nothing about the requirement changes how a receiver **parses** a poll. Design
+rule 4 stands: an unknown or absent field is skipped and the packet still reads.
+What a missing `until:` costs is the count, not the parse.
+
+The same key already carries this weight elsewhere: a carried packet must state
+`until:` (section 13.4), for the same reason -- work with no deadline is work
+nobody can ever stop doing.
+
+### 28.2 Bounding who is being asked
+
+A poll may narrow its audience with fields the format already has, and needs no
+new ones:
+
+```
+133  t:poll f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 opt:yes,no scope:local until:2026-08-09_20:00:00 m:should we move the net to Sundays?
+137  t:poll f:X3RLY7 ts:2026-08-08_14:26:40 opt:yes,no pos:37.0194,-7.9304 rad:20km until:2026-08-09_20:00:00 m:is anyone still without power?
+131  t:poll f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 opt:sagres,lagos,portimao until:2026-08-10_18:00:00 lang:PT m:onde nos encontramos?
+```
+
+| Field | Narrows the poll to |
+|---|---|
+| `d:` | one group, open or closed (section 26) |
+| `scope:` | `local` for the bearers in range now, or ISO country codes (section 13.11) |
+| `pos:` with `rad:` | people within that radius of that point |
+| `lang:` | people who read that language (section 4.7) |
+| `cw:` | nobody -- it warns what the question contains before it renders |
+
+**These say who is being asked. They do not say who may answer**, and the
+difference is the same one section 26.7 draws about rosters. Anybody in range
+hears the poll, anybody may transmit a vote, and no field prevents it. What the
+fields do is tell a counter which votes belong in the answer and tell a client
+whether to put the question in front of its operator at all.
+
+A counter should therefore be honest about what it can actually check. `d:` and
+`lang:` it can read off the packets. `scope:` it can apply to its own bearers.
+**`rad:` it usually cannot check at all**, because a vote carries no position
+unless the voter chose to include one, and requiring a position to vote asks
+somebody to disclose where they are in order to answer a question. A poll bounded
+by radius is a poll asked politely of a region, not a constituency with a roll.
+
+### 28.3 Voting is a reaction
 
 A vote needs no packet type of its own, because the format already has one that
 behaves exactly like a ballot:
@@ -3788,7 +3842,7 @@ something else, and a vote arriving after `until:` is counted only if the
 counter chooses to -- both stations may reasonably disagree about when the
 deadline passed, and see below.
 
-### 28.2 The count is local, and provisional
+### 28.4 The count is local, and provisional
 
 **There is no authoritative result and this format will not pretend otherwise.**
 Every station counts the votes it has actually heard, and no two stations on a
@@ -3807,7 +3861,7 @@ broadcast medium means. What follows from it:
   reply, signed, and it is a claim like any other claim.
 - **`cmd:history` improves a count** (section 25.2) and never completes it.
 
-### 28.3 A poll is not a secret ballot
+### 28.5 A poll is not a secret ballot
 
 Every vote is a signed packet naming a callsign and a choice, transmitted in
 clear to anybody in range and relayed onward. **Who voted for what is public,
@@ -4146,7 +4200,7 @@ packet **250 bytes**, on every transport.
 | `mood` | `enum` | how the sender feels (section 27.1) |
 | `only` | `addr` | narrows a replay to one callsign or group (section 25.2) |
 | `opt` | `labels` | the choices in a poll, two to six (section 28) |
-| `vote` | `label` | the option chosen in a poll (section 28.1) |
+| `vote` | `label` | the option chosen in a poll (section 28.3) |
 | `via` | `path` | callsigns that relayed this packet, oldest first (section 13) |
 | `track` | `label` | name of a track this packet belongs to (section 14) |
 | `title` | `label` | name of a post or event, stable across revisions |
@@ -4170,7 +4224,7 @@ packet **250 bytes**, on every transport.
 | `seq` | `int` | position of this point within that track |
 | `kind` | `enum` | nature of an event, values per packet type (sections 15, 16) |
 | `sev` | `enum` | severity of a warning (section 16) |
-| `rad` | `qty` | radius of the area affected (sections 16, 17) |
+| `rad` | `qty` | radius of the area affected or asked about (sections 16, 17, 28) |
 | `since` | `time` | when the condition started, or will start |
 | `until` | `time` | when the sender expects the condition to end |
 | `m` | `text` | human-readable content, always last |
@@ -4434,7 +4488,14 @@ t:reaction f:X32DVA d:LISBOA r:7a9b50 vote:sagres
 t:reaction f:X32DVA d:LISBOA r:7a9b50 remove:vote
 ```
 
-`opt:` is two to six labels. A vote is a reaction, so it is one per callsign,
+`opt:` is two to six labels. **`until:` is required** -- a poll without it is not
+counted, because a poll that never closes has a different answer every time
+anybody replays it. Narrow the audience with `d:` (a group), `scope:` (`local` or
+country codes), `pos:` with `rad:`, or `lang:`; those say who is being **asked**,
+never who may answer, and a counter usually cannot check `rad:` at all because a
+vote carries no position.
+
+A vote is a reaction, so it is one per callsign,
 idempotent and withdrawable; voting again replaces the earlier vote. The count is
 **local and provisional** -- every station counts what it heard, the author's
 tally is not authoritative, and a client that shows "7 votes" where it means "7

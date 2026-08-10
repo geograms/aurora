@@ -1638,7 +1638,39 @@ A receiver that does not know where it is treats a country scope as global for
 reading and refuses to relay, which is the safe direction: it sees the packet
 and does not spread it.
 
-### 13.11.3 Against the other limits
+### 13.11.3 Gateways
+
+A gateway republishes a packet onto something that is not XPRS: an internet
+relay, a NOSTR relay, APRS-IS, a web page, a chat room. That is not relaying,
+the rules in section 13.1 do not reach it, and this is exactly why it has to be
+said separately.
+
+**A gateway treats `scope:` as binding.** It never publishes a `local` packet at
+all, and never publishes a country-scoped packet outside that country. A
+gateway that cannot determine where it is does not publish country-scoped
+traffic.
+
+This is the leak that matters, because a gateway is the one station whose whole
+purpose is to move traffic somewhere the sender cannot see.
+
+Three things follow that a community should know before relying on any of it.
+
+**The default publishes.** No `scope:` means global, and global includes the
+internet. A group that does not want its traffic leaving must say so on every
+packet; silence is not a restriction.
+
+**A group is an address, not a boundary.** `d:LISBOA` says where a packet is
+going, not who may read it. Anyone in range hears it, any station may relay it,
+and a gateway may publish it. Group membership is not enforced anywhere in this
+format and cannot be, because a broadcast medium has no door.
+
+**Only encryption keeps content private.** `scope:` asks well-behaved stations
+not to spread a packet. It is a request that a hostile or careless station
+ignores, and it leaves the text in clear for everyone in radio range regardless.
+A packet that must not be read by strangers uses `x:` (section 9.2), and one
+that must not travel uses both.
+
+### 13.11.4 Against the other limits
 
 `scope:` is an additional constraint and replaces nothing. A packet still stops
 at the relay limit of section 13.1, still expires at `until:`, and still gets
@@ -2947,7 +2979,9 @@ the three-relay limit.
 
 `scope:` limits where a packet goes: absent or `global` anywhere, `local` only
 on BLE, WiFi Direct, WiFi Aware and a LAN, or ISO country codes. Not carried
-when `local`. Reception is never restricted, only relaying.
+when `local`, and binding on gateways. Reception is never restricted, only
+relaying. A group is an address, not a boundary -- only `x:` keeps content
+private.
 
 `near:` is not `rad:`. `rad:` is the area a subject occupies; `near:` is how
 close to `dest:` is close enough. A warning carried to a town uses both.

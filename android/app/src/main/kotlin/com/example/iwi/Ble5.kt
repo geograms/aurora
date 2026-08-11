@@ -70,6 +70,24 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         // Long enough for a peer's duty-cycled scan to catch it, short enough to
         // cycle a few frames within a message's TTL.
         private const val ROTATE_MS = 1200L
+
+        // ── Transmit duty cycle ──────────────────────────────────────────────
+        //
+        // This radio is NOT full duplex. It time-shares one antenna, so every
+        // millisecond spent advertising is a millisecond not listening — and a
+        // device that advertises continuously is deaf for roughly half the time.
+        // That is the wrong trade for a mesh: a beacon says "I am here", which is
+        // worth a few seconds a minute, while everything that actually carries a
+        // message has to be HEARD.
+        //
+        // So the beacon airs in a short window and the rest of the minute is
+        // listening. Peers that want to move bytes upgrade to a GATT link, which
+        // is acknowledged and does not depend on catching an advert.
+        private const val ADV_WINDOW_MS = 5_000L
+        private const val ADV_PERIOD_MS = 60_000L
+
+        // enableAdvertising takes its duration in 10 ms units.
+        private const val ADV_WINDOW_UNITS = (ADV_WINDOW_MS / 10).toInt()
         // GATT parcel service (matches the ble_peripheral server + the old client).
         private val SVC_UUID  = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
         private val FFF1_UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
@@ -322,8 +340,13 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         val now = System.currentTimeMillis()
         frames[key] = Frame(mfg, now + ttlMs, prio)
         ensureRotating()
+        ensureAdvWindow()
         // Air immediately so a just-sent message doesn't wait a full rotation.
         rotateTick()
+        // A frame registered while the radio is listening opens the window now
+        // rather than waiting for the next minute: somebody just asked for this
+        // to go out. The window is still bounded, so the duty cycle holds.
+        if (!advWindowOpen) openAdvWindow()
         return true
     }
 
@@ -347,6 +370,45 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             rotateTick()
             if (frames.isEmpty()) { rotating = false; return }
             bg.postDelayed(this, ROTATE_MS)
+        }
+    }
+
+    // ── The transmit window ──────────────────────────────────────────────────
+    //
+    // The advertising SET is created once and kept, and only its enable state is
+    // cycled. Stopping and restarting the set is what made Android hand out a
+    // fresh random address every time, so a peer's address book filled with
+    // addresses for one device and the same address was attributed to two
+    // different callsigns seconds apart. One set, one address, a window that
+    // opens and closes.
+    private var advWindowOpen = false
+    private var advWindowScheduled = false
+
+    private fun ensureAdvWindow() {
+        if (disposed || advWindowScheduled) return
+        advWindowScheduled = true
+        bg.post(advWindowRunnable)
+    }
+
+    private val advWindowRunnable = object : Runnable {
+        override fun run() {
+            if (disposed) { advWindowScheduled = false; return }
+            if (frames.isEmpty()) { advWindowScheduled = false; return }
+            openAdvWindow()
+            bg.postDelayed(this, ADV_PERIOD_MS)
+        }
+    }
+
+    /** Air the beacon for [ADV_WINDOW_MS], then fall silent and listen. */
+    private fun openAdvWindow() {
+        val set = advertisingSet ?: return // not started yet; start airs it once
+        advWindowOpen = true
+        try {
+            // Duration is enforced by the controller: it stops on its own, so a
+            // missed callback cannot leave us transmitting for the whole minute.
+            set.enableAdvertising(true, ADV_WINDOW_UNITS, 0)
+        } catch (_: Exception) {
+            advWindowOpen = false
         }
     }
 
@@ -413,6 +475,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             .setSecondaryPhy(BluetoothDevice.PHY_LE_1M)
             .build()
         val cb = object : AdvertisingSetCallback() {
+            override fun onAdvertisingEnabled(set: AdvertisingSet?, enable: Boolean, status: Int) {
+                // The controller stops on its own when the window's duration
+                // expires — this is the radio going back to listening.
+                advWindowOpen = enable && status == ADVERTISE_SUCCESS
+            }
+
             override fun onAdvertisingSetStarted(set: AdvertisingSet?, txPower: Int, status: Int) {
                 starting = false
                 if (disposed) {
@@ -425,6 +493,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                     advertisingSet = set
                     advOnAir = true
                     advLastError = null
+                    // The set comes up advertising. Bound that first burst to the
+                    // window and start the once-a-minute cycle.
+                    try { set.enableAdvertising(true, ADV_WINDOW_UNITS, 0) } catch (_: Exception) {}
+                    advWindowOpen = true
+                    ensureAdvWindow()
                 } else {
                     lastHex = null
                     advOnAir = false
@@ -453,6 +526,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
     private fun stopAdvertise() {
         advOnAir = false
+        advWindowOpen = false
+        advWindowScheduled = false
         frames.clear()
         rotating = false
         rotateIdx = 0

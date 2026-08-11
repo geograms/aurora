@@ -12,18 +12,45 @@ boundaries).
 
 ---
 
-## 1. One radio, one advertising set
+## 1. One radio, one advertising set, and it cannot listen while it talks
 
-An Android device presents one advertising set. Every frame shares it in
-rotation, at `ROTATE_MS = 1200`
-(`android/app/src/main/kotlin/com/example/iwi/Ble5.kt`). Consequences:
+**The radio is half duplex.** One antenna, time-shared: every millisecond spent
+advertising is a millisecond not receiving. A device that advertises
+continuously is deaf for roughly half of every second, and on a mesh that is the
+wrong trade — a beacon only has to say "I am here", while everything that
+carries a message has to be HEARD.
 
-- With N frames registered, each is on air approximately 1/N of the time.
-- A receiver scanning in bursts observes a frame only when a burst overlaps one
-  of that frame's slots.
+So transmission is a WINDOW, not a state:
+
+| | |
+|---|---|
+| `ADV_WINDOW_MS` | 5 000 — the beacon is on air |
+| `ADV_PERIOD_MS` | 60 000 — how often that window opens |
+| Rest of the minute | receiving |
+
+(`android/app/src/main/kotlin/com/example/iwi/Ble5.kt`.) The window is enforced
+by the controller itself — `AdvertisingSet.enableAdvertising(true, duration, 0)`
+— so a missed callback cannot leave the device transmitting for a whole minute.
+Registering a frame while the radio is listening opens the window immediately
+rather than waiting for the next minute: somebody just asked for that to go out.
+
+**The advertising set is created once and kept.** Only its enable state cycles.
+Stopping and restarting a set is what makes Android hand out a fresh random
+address, and that address churn is what filled peers' address books with several
+addresses for one device — and got the same address attributed to two different
+callsigns seconds apart. One set, one address, a window that opens and closes.
+
+Within the window, frames still share the set in rotation at `ROTATE_MS = 1200`.
+Consequences:
+
+- With N frames registered, each is on air approximately 1/N of the window — so
+  N matters far more than it used to. Section 2 explains why only one beacon is
+  aired.
+- A receiver observes a frame only when its scan overlaps that frame's slot
+  inside somebody else's window.
 - A frame transmitted once may not be observed at all. This is the most common
   cause of behaviour that differs between a desk test and a field test. See
-  section 5.
+  section 5. **Anything that must arrive takes a link, not the air.**
 
 Frames are keyed and carry a TTL:
 
@@ -46,7 +73,7 @@ All frames are carried in manufacturer data under company id `0xFFFF`, marker
 | `0x56` | `rnsChunk` | a fragment of a Reticulum packet exceeding one advertisement |
 | `0x41` | `aprs` | the compact direct or group text frame, and carried XPRS mail |
 | `0x47` | `presence` | **declared and never transmitted.** Nothing airs this subtype and nothing handles it; the real presence beacon is the legacy connectable advertisement below |
-| `0x4D` | `mesh` | street mesh route beacon: distance-vector costs and the have-bloom |
+| `0x4D` | `mesh` | **no longer aired.** The route beacon's distance-vector costs and have-bloom are exchanged in full over an MSP session instead, where they are acknowledged. Still read, so an un-updated peer is understood |
 | `0x57` | `wfd` | WiFi-Direct negotiation |
 | `0x58` | `xprs` | the XPRS discovery beacon (`docs/XPRS.md` section 10.6) |
 

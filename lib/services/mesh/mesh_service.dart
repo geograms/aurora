@@ -312,73 +312,25 @@ class MeshService {
   /// actually went out.
   int get beaconsFailed => _beaconsFailed;
 
+  /// Say we are here. ONE beacon goes out, and it is the XPRS one.
+  ///
+  /// The binary mesh beacon used to be aired alongside it, carrying a
+  /// distance-vector digest and a have-bloom. It is gone from the air for two
+  /// reasons.
+  ///
+  /// The radio is the first. It is not full duplex — one antenna, time-shared —
+  /// so every millisecond spent advertising is a millisecond deaf, and a device
+  /// that advertises continuously misses roughly half of what is said to it.
+  /// The transmit window is now a few seconds a minute (Ble5.kt), and two
+  /// beacons competing for that window halve the chance either is heard.
+  ///
+  /// The second is that an advert is the wrong carrier for that content anyway:
+  /// the DV digest and the bloom are exchanged IN FULL over an MSP session,
+  /// acknowledged, whenever two stations have something to move. A beacon's job
+  /// is to say "I am here, this is my callsign, this is what I am holding" —
+  /// enough for a peer to decide to open a link. That is exactly what the XPRS
+  /// beacon says (docs/XPRS.md section 10.6).
   Future<void> _sendBeacon() async {
-    final t = _table;
-    if (t == null || !_canAdvertise) return;
-    final store = MeshStore.instance;
-    final saturated = politenessTier() == 2;
-    final have = saturated ? Uint8List(0) : store.buildHaveBloom();
-    final pendingMsgs = store.pendingCount().clamp(0, 255);
-    final pendingBulk = MeshBulkSpool.instance.pendingCount().clamp(0, 255);
-    final beacon = MeshBeacon(
-      callsign: t.selfCallsign,
-      deviceClass: _deviceClass(),
-      cond: MeshConditions(
-        powered: _powered,
-        uptimeBucket:
-            MeshConditions.bucketForUptime(DateTime.now().difference(_startedAt)),
-        mobility: MeshMobility.unknown,
-        storageBucket: 3,
-      ),
-      dv: saturated ? const [] : t.exportDv(),
-      have: have,
-      pendingMsgs: pendingMsgs,
-      pendingBulk: pendingBulk,
-    );
-    // Fit THIS controller's advert ceiling (often ~247 B, not the 450 B spec
-    // default) — an over-cap frame is rejected outright, so trim the DV digest
-    // (freshest neighbors were exported first), then the have-bloom, until
-    // the beacon fits.
-    var bytes = beacon.encode();
-    final cap = Ble5Bus.instance.maxPayload;
-    var dv = beacon.dv;
-    var haveOut = have;
-    while (bytes.length > cap && (dv.isNotEmpty || haveOut.isNotEmpty)) {
-      if (dv.isNotEmpty) {
-        dv = dv.sublist(0, dv.length - 1);
-      } else {
-        haveOut = Uint8List(0); // DV exhausted: the bloom is the next to go
-      }
-      bytes = MeshBeacon(
-              callsign: beacon.callsign,
-              deviceClass: beacon.deviceClass,
-              cond: beacon.cond,
-              dv: dv,
-              have: haveOut,
-              pendingMsgs: pendingMsgs,
-              pendingBulk: pendingBulk)
-          .encode();
-    }
-    try {
-      // Count it only if the radio TOOK it. This used to increment regardless,
-      // so a device whose controller refused every advert still reported
-      // "advertising: true, beaconsSent: 40" while airing nothing at all.
-      final aired = await Ble5Bus.instance
-          .advertiseFrame('mesh', Ble5Subtype.mesh, bytes, ttl: _beaconTtl);
-      if (aired) {
-        _beaconsSent++;
-      } else {
-        _beaconsFailed++;
-        if (_beaconsFailed == 1 || _beaconsFailed % 10 == 0) {
-          LogService.instance.add(
-              'Mesh: radio refused the beacon ($_beaconsFailed so far) — '
-              'nobody can see this device');
-        }
-      }
-    } catch (e) {
-      _beaconsFailed++;
-      LogService.instance.add('Mesh: beacon tx failed: $e');
-    }
     await _sendXprsBeacon();
   }
 

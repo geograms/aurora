@@ -132,7 +132,10 @@ class MeshService {
       return;
     }
     if (_running && _table?.selfCallsign == cs) {
-      _canAdvertise = canAdvertise || _canAdvertise;
+      // Only ever RAISE this on a repeat start: a later caller that knows less
+      // (the BLE5 probe had not answered when it ran) must not mute a node that
+      // is already transmitting.
+      if (canAdvertise && !_canAdvertise) setCanAdvertise(true);
       return;
     }
     _table = MeshTable(cs);

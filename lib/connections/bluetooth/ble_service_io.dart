@@ -547,7 +547,19 @@ class BleService {
     // Street-mesh node (docs/mesh.md): rides the same BLE5 bus on its own
     // subtype. Non-BLE5 devices still start it as a scan-only leaf so the
     // Bluetooth wapp has a live (if empty) registry + self status.
-    unawaited(MeshService.instance.start(canAdvertise: _ble5));
+    //
+    // WAIT FOR THE PROBE FIRST. `_ble5` is answered asynchronously by
+    // `_initBle5`, and starting before it lands passes `canAdvertise: false` —
+    // which made the mesh a scan-only leaf for the WHOLE session, on a device
+    // whose radio was perfectly able to transmit. Seen on C61 after a boot:
+    // `advertising False, xprsSent 1`, no beacon for anyone to hear, while the
+    // native layer was creating advertising sets and RNS traffic flowed over
+    // the same bus. Nothing raised it afterwards, so the device stayed mute
+    // until it was restarted and won the race by luck.
+    unawaited(_ble5Probe.future
+        .timeout(const Duration(seconds: 10), onTimeout: () {})
+        .whenComplete(
+            () => MeshService.instance.start(canAdvertise: _ble5)));
     // WiFi-Direct coordinator: negotiates a fast P2P data plane over this same
     // BLE bus (subtype 0x57) when a bulk transfer wants a BLE-adjacent peer.
     // Android-only + self-gating (no-op where WiFi Direct is unsupported).

@@ -340,13 +340,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         val now = System.currentTimeMillis()
         frames[key] = Frame(mfg, now + ttlMs, prio)
         ensureRotating()
-        ensureAdvWindow()
         // Air immediately so a just-sent message doesn't wait a full rotation.
         rotateTick()
-        // A frame registered while the radio is listening opens the window now
-        // rather than waiting for the next minute: somebody just asked for this
-        // to go out. The window is still bounded, so the duty cycle holds.
-        if (!advWindowOpen) openAdvWindow()
         return true
     }
 
@@ -493,11 +488,18 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                     advertisingSet = set
                     advOnAir = true
                     advLastError = null
-                    // The set comes up advertising. Bound that first burst to the
-                    // window and start the once-a-minute cycle.
-                    try { set.enableAdvertising(true, ADV_WINDOW_UNITS, 0) } catch (_: Exception) {}
+                    // The set comes up advertising and STAYS on air.
+                    //
+                    // A 5s-per-minute transmit window was tried here and is the
+                    // right idea — this radio is half duplex and cannot hear
+                    // while it talks. It is reverted for now because it stopped
+                    // the beacon being heard at all: the peer counted zero XPRS
+                    // beacons in two minutes, where it had been counting them
+                    // steadily. Duty cycling has to be introduced together with
+                    // the scan side (the peer must be listening across the whole
+                    // window, and the window has to be long enough to survive a
+                    // duty-cycled scanner), not on the transmit side alone.
                     advWindowOpen = true
-                    ensureAdvWindow()
                 } else {
                     lastHex = null
                     advOnAir = false

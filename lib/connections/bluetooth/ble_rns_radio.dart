@@ -11,6 +11,7 @@
 // lib/services/reticulum/rns_ble_interface.dart.
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:reticulum/reticulum.dart'
     show Ble5Bus, Ble5Subtype, RnsTransport;
 
@@ -165,8 +166,54 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
   final List<int> _pathReqAt = [];
   int _pathReqDropped = 0;
 
+  /// Destinations somebody is actually trying to reach RIGHT NOW, and when
+  /// they were asked for. A request for one of these is never throttled.
+  ///
+  /// The trickle above is the right budget for the background sweep — a node
+  /// that has been on the internet holds hundreds of destinations and asks
+  /// about all of them — but it was applied to every request equally, so the
+  /// ONE request that a person is waiting on queued behind the sweep and was
+  /// dropped with it. Measured after a cold start with Bluetooth as the only
+  /// interface: 9,600 requests held back in ten minutes, among them the peer in
+  /// the same room, so a message could not be addressed at all.
+  ///
+  /// Wanting to deliver to somebody is the difference between "resolve the
+  /// directory" and "reach this person", and that is what earns the air.
+  final Map<String, int> _wanted = {};
+  static const int _wantedTtlMs = 5 * 60 * 1000;
+  static const int _wantedMax = 32;
+
+  /// Mark [destHash] as needed now (a queued message, a failed route being
+  /// re-asked). Called by RnsService on the delivery paths.
+  void wantPathTo(Uint8List destHash) {
+    if (destHash.length != 16) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _wanted.removeWhere((_, t) => now - t > _wantedTtlMs);
+    _wanted[_hexOf(destHash)] = now;
+    if (_wanted.length > _wantedMax) _wanted.remove(_wanted.keys.first);
+  }
+
+  static String _hexOf(List<int> b) =>
+      b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+  /// The destination a path request is asking about: `dest(16) | ours(16) | tag`.
+  static String? _requestedDest(Uint8List frame) {
+    // header(2) + pathRequestDest(16) + payload
+    if (frame.length < 18 + 16) return null;
+    return _hexOf(frame.sublist(18, 34));
+  }
+
   bool _allowPathRequest(Uint8List frame) {
     if (!RnsTransport.isPathRequest(frame)) return true;
+    // Somebody is waiting on this one: it goes, budget or no budget.
+    final wantedHex = _requestedDest(frame);
+    if (wantedHex != null) {
+      final at = _wanted[wantedHex];
+      if (at != null &&
+          DateTime.now().millisecondsSinceEpoch - at <= _wantedTtlMs) {
+        return true;
+      }
+    }
     final now = DateTime.now().millisecondsSinceEpoch;
     _pathReqAt.removeWhere((t) => now - t > 60000);
     if (_pathReqAt.length >= _pathReqPerMinute) {
@@ -181,6 +228,10 @@ class Ble5ChunkedRnsRadio implements RnsBleRadio {
     _pathReqAt.add(now);
     return true;
   }
+
+  /// The throttle decision, for tests: does this frame get the air?
+  @visibleForTesting
+  bool debugAllowPathRequest(Uint8List frame) => _allowPathRequest(frame);
 
   /// Path requests held back so the channel stays usable (diagnostics).
   int get pathRequestsDropped => _pathReqDropped;

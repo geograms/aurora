@@ -612,6 +612,20 @@ class RnsService {
   // end-to-end itself — this channel is a dumb pipe).
   final Map<String, List<Map<String, dynamic>>> _wappInbox = {};
 
+  /// The BLE radios in use, so a delivery can tell them which destination it
+  /// is actually waiting on. Their path-request budget is deliberately tiny
+  /// (the advert channel is for the room, not for resolving a 600-entry
+  /// directory), and without this the one request somebody is waiting on
+  /// queued behind the sweep and was dropped with it.
+  final List<Ble5ChunkedRnsRadio> _bleRadios = [];
+
+  /// Ask every BLE radio to let a path request for [destHash] through.
+  void _wantPathOverBle(Uint8List destHash) {
+    for (final r in _bleRadios) {
+      r.wantPathTo(destHash);
+    }
+  }
+
   /// Last announced app_data and a periodic re-announce so the node stays
   /// visible to the mesh (and so repeaters keep an "in range" view of it). The
   /// CONTENT is supplied by the caller (e.g. the device callsign) — kept generic.
@@ -1201,6 +1215,7 @@ class RnsService {
       final radio = Ble5ChunkedRnsRadio();
       if (!await radio.supported()) return; // no BLE5 here — remain a leaf
       await radio.startScan();
+      _bleRadios.add(radio);
       final iface = RnsBleInterface(
         radio: radio,
         edge: true,
@@ -2643,11 +2658,12 @@ class RnsService {
           send: (raw) => _transport?.sendLinkAware(raw),
           nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
           identityForDest: (h) => _transport?.pathFor(h)?.identity,
-          requestPath: (h) => _transport?.requestPath(h),
-          // A delivery that never lands is evidence about the ROUTE, not just
-          // about this message: the peer that was on Wi-Fi when we learned it
-          // may be on Bluetooth only now. Forget the entry and ask again, so
-          // the retry is not posted into the same dead hub path.
+          // A message is waiting on this one, so it jumps the BLE radio's
+          // path-request trickle — see [_wantPathOverBle].
+          requestPath: (h) {
+            _wantPathOverBle(h);
+            _transport?.requestPath(h);
+          },
           onMessage: (m) {
             // Wapp datagrams ride LXMF too — route them to the wapp inbox instead
             // of surfacing them as chat messages.
@@ -2718,8 +2734,10 @@ class RnsService {
           // may be on Bluetooth only now, and nothing else in the path table
           // ever learns from failure. Forget the entry and ask again, so the
           // retry is not posted into the same dead hub route.
-          ..pathFailed =
-              ((h) => _transport?.pathFailed(h, reason: 'lxmf delivery'))
+          ..pathFailed = ((h) {
+            _wantPathOverBle(h); // the re-ask must not queue behind the sweep
+            _transport?.pathFailed(h, reason: 'lxmf delivery');
+          })
           ..nextHopForDest = ((h) => _transport?.pathFor(h)?.nextHop)
           ..pathIsLocal = ((h) =>
               rnsIfaceIsLocal(rnsIfaceKind(_transport?.pathFor(h)?.via ?? '')))
@@ -3246,6 +3264,7 @@ class RnsService {
             throw StateError('BLE5 extended advertising unsupported');
           }
           await radio.startScan();
+          _bleRadios.add(radio);
           final b5 = RnsBleInterface(
             radio: radio,
             label: 'ble5', // must match the inbound `via` tag — see above

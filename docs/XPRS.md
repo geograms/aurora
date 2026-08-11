@@ -5076,7 +5076,7 @@ document.
 
 | Element | State |
 |---|---|
-| **On the air** | **implemented** on the Flutter side: the discovery beacon is an XPRS `t:observation` on its own BLE5 subtype `0x58` (`docs/ble5.md`), carrying `peers:`, `hears:` and `mail:`; `MeshCourier` emits XPRS for every carried message, and custody reads it. The chat wapp and the ESP32 still emit the older compact frame and are read through a fallback (`docs/store-and-forward.md` section 2), which goes away when they are ported |
+| **On the air** | **implemented** on the Flutter side: the discovery beacon is an XPRS `t:observation` on its own BLE5 subtype `0x58` (`docs/ble5.md`), carrying `peers:`, `hears:` and `mail:`; `MeshCourier` emits XPRS for every carried message, and custody reads it. The **chat wapp emits XPRS too** since 0.4.38 — 1:1, group, broadcast and position (`wapps/chat/xprs.c`, `docs/aprs-xt.md` section 2.2) — keeping the compact frame only for its own control frames (`?MAIL`, `?IGATE`, `?PING`) and for a body over 250 bytes. Every receiver still reads both, so an un-ported peer keeps working; the ESP32 is that peer today |
 | **The packet format itself** | **implemented**; `lib/services/xprs/` parses, encodes, derives identifiers and signs. Every example packet in this document is a test fixture: `test/xprs_packet_test.dart` round-trips all 201 byte-exact, checks each stated byte count, and cross-checks every identifier against an independent Python implementation |
 | Section 5 identifiers | **implemented** |
 | Section 9.1 signatures, and surviving a relay | **implemented**; `test/xprs_sig_test.dart` signs, relays three hops and re-verifies |
@@ -5093,10 +5093,10 @@ document.
 | Section 9.4.2, an issued callsign bound to a key by `t:identity` | not implemented; identity announcements are not built, and no user interface offers to enter a licensed callsign |
 | File references by content hash | implemented |
 | Identity announcement | implemented |
-| `key:value` fields separated by spaces | not implemented; the current wire has three `0x1F`-separated fields and packs everything else into a trailing string |
-| `t:` packet type as the first field | not implemented; the current wire infers the purpose from the destination field |
+| `key:value` fields separated by spaces | **implemented** everywhere the device transmits: the beacon, carried mail, and the chat wapp since 0.4.38. The three-`0x1F`-field frame remains only as a fallback that is still read, and that chat still sends for its control frames |
+| `t:` packet type as the first field | **implemented**; chat's own routing (a callsign, a `#group`, `!` for a position, empty for in-range) is now expressed as `t:` plus `d:`, not inferred from one overloaded field |
 | Derived identifiers | not implemented; the current wire hashes message content without a timestamp, so every `OK` collides, and carries a separate receipt identifier |
-| `ts:` on messages | not implemented; messages carry no time, although they are the packets most often carried for days |
+| `ts:` on messages | **implemented** on the chat wire since 0.4.38: a message now states when it was written, so one that waited in a mailbox no longer shows the minute it arrived. A packet with no `ts:` is still read (section 10.7) |
 | `q:` and `s:` | not implemented; receipts exist, requests do not |
 | `via:` instead of rewriting `f:` | not implemented; a carrier currently retransmits under its own callsign, which breaks both authorship and the identifier |
 | Relay limit by packet type | not implemented; custody re-airs a fixed three times with no path recorded |

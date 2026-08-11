@@ -41,9 +41,9 @@ the payload conventions for APRS/TNC2 packets and APRS‑over‑BLE; the
 
 ### Limits
 
-| | APRS/TNC2 | BLE compact advert |
+| | APRS/TNC2 | XPRS advert |
 |---|---|---|
-| Message body | **67** chars (`APRS_MAX_MSG_LEN`) | keep whole frame ≤ ~27 bytes |
+| Message body | **67** chars (`APRS_MAX_MSG_LEN`) | whole packet ≤ 250 bytes (XPRS section 4); ≤ ~27 on legacy advertising |
 | Bulletin body | 67 chars/line, up to **10 lines** (BLN0–BLN9) | as above |
 | Position comment | 107 chars | as above |
 
@@ -68,24 +68,46 @@ examples for brevity.
   - bulletins carry **no `{seq`** and are never acked.
 - **Position:** `FROM>APRS,<path>:!<DDMM.mmN><symtable><DDDMM.mmW><symcode><comment>`
 
-### 2.2 APRS‑over‑BLE (compact)
+### 2.2 On the air: XPRS
 
-Connectionless broadcast in manufacturer data (company id `0xFFFF`). Fields are
-separated by the unit‑separator byte `0x1F`:
+Connectionless broadcast in manufacturer data (company id `0xFFFF`). Since chat
+0.4.38 the payload is **XPRS** (`XPRS.md`) — the format the whole device
+speaks — rather than a frame invented here:
+
+```
+t:message     f:X16JK8 d:CT1ABC ts:2026-08-08_14:26:40 m:hello
+t:message     f:X16JK8 d:WX     ts:2026-08-08_14:26:40 m:Net at 8pm
+t:message     f:X16JK8          ts:2026-08-08_14:26:40 m:>>anyone around?
+t:observation f:X16JK8          ts:2026-08-08_14:26:40 pos:38.7223,-9.1393 m:at the ferry
+```
+
+- a `d:` that looks like a station (`X1`/`X3`/`X5` + four, an SSID, a digit in
+  the first three characters) is a 1:1; anything else is a group, and XPRS
+  group names carry **no `#`** — that marker is chat's own, added back on
+  receipt (XPRS section 6.3)
+- no `d:` → area / geo‑chat broadcast text (may begin `>>`)
+- a position is a `t:observation` with `pos:`; the comment rides in `m:`
+- `ts:` is the sender's clock, which the old frame never carried
+
+The **payload semantics below (threads, likes, pubkey, geo‑chat) apply
+identically to the `m:` field**, which is greedy and last, so an `ENC1:`
+ciphertext, a `~` signature and a `+<id> ` reply marker ride in it unchanged.
+
+#### 2.2.1 The compact frame (still read)
+
+The older three‑field form is what chat sent before 0.4.38 and what the ESP32
+still sends:
 
 ```
 <from> 0x1F <to> 0x1F <text>
 ```
 
-- `to` routing target:
-  - a callsign → 1:1 message
-  - `#GRP` → group/bulletin message (group name only, **no scope marker**)
-  - `!` → position; `text` = `lat,lon[,comment]` (decimal degrees)
-  - empty → area / geo‑chat broadcast text (may begin `>>`)
+Every receiver reads both, so an un‑updated peer keeps working. Chat still
+**sends** it for the control frames XPRS has no words for yet (`?MAIL`,
+`?IGATE`, `?HELLO`, `?PING`, `?PONG`) and for a body over 250 bytes, until
+XPRS section 6.6 parts are wired.
 
-The **payload semantics below (threads, likes, pubkey, geo‑chat) apply
-identically to the BLE `text` field.** See `BLE_PROTOCOL.md` for the byte‑level
-advert format and dedup.
+See `BLE_PROTOCOL.md` for the byte‑level advert format and dedup.
 
 ---
 
@@ -183,7 +205,10 @@ anyone whose filter selects them receives them.
 X10EGL>APRS::BLN0NEWS :repeater PI3UTR back on air
 ```
 
-Over BLE the same message is `from 0x1F #NEWS 0x1F repeater PI3UTR back on air`.
+Over the air the same message is
+`t:message f:X10EGL d:NEWS ts:2026-08-08_14:26:40 m:repeater PI3UTR back on air`
+(and, from a station older than chat 0.4.38,
+`from 0x1F #NEWS 0x1F repeater PI3UTR back on air`).
 
 ### Reserved group names
 
@@ -334,8 +359,9 @@ X10EGL>APRS:!3843.34N/00908.36W>>>net starting now
 ```
 
 (`>` is the symbol code; `>>` then begins the comment.) Long geo‑chat is sent as
-several position reports, each comment chunk prefixed `>>`. Over BLE it's the
-empty‑`to` form: `from 0x1F  0x1F >>net starting now`.
+several position reports, each comment chunk prefixed `>>`. Over the air it is
+the form with no `d:`:
+`t:message f:X10EGL ts:2026-08-08_14:26:40 m:>>net starting now`.
 
 Receivers show these on a location‑scoped "live" view rather than as a
 1:1/group conversation.

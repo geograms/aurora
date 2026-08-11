@@ -2644,6 +2644,10 @@ class RnsService {
           nextHopFor: (peer) => _transport?.nextHopForIdentity(peer),
           identityForDest: (h) => _transport?.pathFor(h)?.identity,
           requestPath: (h) => _transport?.requestPath(h),
+          // A delivery that never lands is evidence about the ROUTE, not just
+          // about this message: the peer that was on Wi-Fi when we learned it
+          // may be on Bluetooth only now. Forget the entry and ask again, so
+          // the retry is not posted into the same dead hub path.
           onMessage: (m) {
             // Wapp datagrams ride LXMF too — route them to the wapp inbox instead
             // of surfacing them as chat messages.
@@ -2709,6 +2713,13 @@ class RnsService {
         // live LAN path sat unused. And tell the router when that path is
         // local, so the post-handshake body grace drops 500ms -> 150ms.
         _lxmf!
+          // A delivery that never lands is evidence about the ROUTE, not just
+          // about this message: the peer that was on Wi-Fi when we learned it
+          // may be on Bluetooth only now, and nothing else in the path table
+          // ever learns from failure. Forget the entry and ask again, so the
+          // retry is not posted into the same dead hub route.
+          ..pathFailed =
+              ((h) => _transport?.pathFailed(h, reason: 'lxmf delivery'))
           ..nextHopForDest = ((h) => _transport?.pathFor(h)?.nextHop)
           ..pathIsLocal = ((h) =>
               rnsIfaceIsLocal(rnsIfaceKind(_transport?.pathFor(h)?.via ?? '')))

@@ -232,10 +232,15 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     final store = MeshStore.instance;
     final key = m.am.isNotEmpty ? m.am : MeshStore.contentKey(m.wire);
 
-    // Parse the compact 0x41 frame: from \x1F to \x1F text.
-    final parts = _splitWire(m.wire);
-    if (parts == null) return MspMsgRej.malformed;
-    final (from, to, _) = parts;
+    // Read the addressing, in whichever of the two formats arrived. This used
+    // to parse the compact frame ONLY, so an XPRS packet — which is what the
+    // courier and the chat wapp now hand to a carrier — was answered
+    // "malformed" and the delivery it was carrying died at the last hop. The
+    // parking side (onAirFrame, below) already reads both; this is the other
+    // half of the same seam.
+    final f = MeshFrame.parse(m.wire);
+    if (f == null || f.from.isEmpty) return MspMsgRej.malformed;
+    final (from, to) = (f.from, f.to);
 
     final self = MeshService.instance.tableCallsign;
     if (to.toUpperCase() == self.toUpperCase()) {

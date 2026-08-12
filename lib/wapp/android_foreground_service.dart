@@ -81,7 +81,7 @@ class AndroidForegroundService {
 
   String _composeLabel() {
     final parts = <String>[];
-    if (_holders.contains('reticulum')) parts.add('Reticulum node');
+    if (_holders.contains('mesh')) parts.add('Mesh node');
     if (_wappLabel != null && _wappLabel!.isNotEmpty) parts.add(_wappLabel!);
     return parts.isEmpty
         ? 'Running in background'

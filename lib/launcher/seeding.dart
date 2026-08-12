@@ -9,7 +9,7 @@ const _kDefaultSeedNames = {
   'mail',
   'chat',
   'mp4player',
-  'reticulum',
+  'mesh',
   'social',
   'xprs',
   'torrents',
@@ -121,6 +121,10 @@ Future<void> migrateNostrToSocial() => _migrateWappFolder('nostr', 'social');
 /// Rename messages -> mail: the one kind-4 inbox keeps its conversation
 /// history, its dedup ring and its autostart setting across the rename.
 Future<void> migrateMessagesToMail() => _migrateWappFolder('messages', 'mail');
+
+/// Rename reticulum -> mesh: the graph wapp now covers Reticulum AND XPRS,
+/// and its data dir carries the node's observed.sqlite3 (rns_autostart).
+Future<void> migrateReticulumToMesh() => _migrateWappFolder('reticulum', 'mesh');
 
 /// First-run bootstrap, run as a boot task BEFORE the UI so the launcher
 /// never renders an empty grid mid-seed. Installs the curated default
@@ -307,7 +311,7 @@ Future<int> _seedDefaultsFromFilesystem() async {
 /// the upgrade pass only touches already-installed wapps. So backfill each of
 /// these exactly ONCE per profile, recorded in `.seeded.json['offered']` so a
 /// wapp the user later uninstalls is never resurrected.
-const _kBackfillDefaults = {'mp4player', 'reticulum'};
+const _kBackfillDefaults = {'mp4player', 'mesh'};
 
 /// Install any [_kBackfillDefaults] not yet offered to this profile. Runs every
 /// launch (cheap: a marker read + a set check). Returns the count installed.

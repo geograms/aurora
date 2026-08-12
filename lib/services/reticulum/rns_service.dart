@@ -28,6 +28,7 @@ import '../../connections/bluetooth/ble5_radio.dart';
 import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
 import '../mesh/mesh_courier.dart';
+import '../xprs/xprs_monitor.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
 import '../files/dht/dht_node.dart';
 import '../files/dht/holder_hint.dart';
@@ -2166,12 +2167,17 @@ class RnsService {
   /// than the internet, geogram or not, newest first, capped at [limit]. The
   /// Chat wapp's nearby list is built from exactly this, so the list and the
   /// graph can never disagree about who is local.
+  /// [includeXprs] merges the XPRS stations this device has heard over the
+  /// air (XprsMonitor) into the same picture, as `kind:"xprs"` nodes edged to
+  /// self — the Mesh wapp's view of the whole street. Off by default so the
+  /// `localOnly` consumers (the Chat wapp's nearby list) are unchanged.
   Map<String, dynamic> graphSnapshot({
     String? service,
     bool geogramOnly = false,
     String? search,
     bool localOnly = false,
     int limit = 0,
+    bool includeXprs = false,
   }) {
     sweepObserved();
     final q = (search ?? '').trim().toLowerCase();
@@ -2324,6 +2330,59 @@ class RnsService {
           'to': n.identityHex,
           'kind': 'direct',
         });
+      }
+    }
+
+    // XPRS stations heard over the air (docs/XPRS.md §10.6), as nodes edged
+    // directly to self — they were heard HERE, that IS the topology. Skipped
+    // when a station's callsign already labels an RNS node (one device, two
+    // protocols); the dongle may still appear twice when its RNS announce
+    // label ("tdongle-s3") differs from its XPRS callsign ("X3JS7Y") — two
+    // identities on the wire, honestly shown. A `service:` filter hides them
+    // (a beacon announces no services); `geogramOnly` keeps them (an XPRS
+    // station is geogram-speaking by definition).
+    if (includeXprs && !localOnly) {
+      final mon = XprsMonitor.instance..sweep();
+      final knownCalls = <String>{
+        for (final node in nodes)
+          (((node['meta'] as Map?)?['callsign'] as String?) ?? '')
+              .toUpperCase(),
+      }..remove('');
+      for (final s in mon.stations.values) {
+        if (service != null && service.isNotEmpty) break;
+        final call = s.callsign.toUpperCase();
+        if (knownCalls.contains(call)) continue;
+        if (q.isNotEmpty && !call.toLowerCase().contains(q)) continue;
+        final id = 'xprs:$call';
+        nodes.add({
+          'id': id,
+          'label': call,
+          'kind': 'xprs',
+          'services': const <String>[],
+          'geogram': true,
+          'hops': 1,
+          // The bearer doubles as the via tag, so the scene colours the orb
+          // by the network it was actually heard on (ble/lan/lora).
+          'via': s.bearer,
+          'relayer': '',
+          'meta': {
+            'callsign': call,
+            'pubkey': '',
+            'role': '',
+            'caps': const <String>[],
+            'capacity': 0,
+            'firstSeen': s.firstMs,
+            'lastSeen': s.lastMs,
+            'bearer': s.bearer,
+            'rssi': s.rssi,
+            'packets': s.packets,
+            if (s.peers != null) 'peers': s.peers,
+            if (s.mail != null) 'mail': s.mail,
+            if (s.uptime != null) 'uptime': s.uptime,
+            if (s.lifetime != null) 'lifetime': s.lifetime,
+          },
+        });
+        edges.add({'from': identityHex ?? 'self', 'to': id, 'kind': 'xprs'});
       }
     }
 

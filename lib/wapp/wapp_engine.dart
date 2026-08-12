@@ -3335,7 +3335,11 @@ class WappEngine {
             geogramOnly: geogramOnly,
             search: search,
             localOnly: localOnly,
-            limit: limit);
+            limit: limit,
+            // The Mesh wapp's graph shows the whole street: RNS nodes AND the
+            // XPRS stations heard over the air. localOnly consumers (the Chat
+            // nearby list) never get them — the merge is skipped there.
+            includeXprs: true);
         final bytes = utf8.encode(jsonEncode(snap));
         if (bytes.length > outCap) return -bytes.length;
         return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));

@@ -81,9 +81,16 @@ because the sender's LXMF address is a pure function of their public key, and
 deriving it is safer than trusting an address the sender wrote. `np:` because a
 sealed body already proves who the copy is for.
 
-**The dongle is not ported yet**, so while it speaks the compact frame it cannot
-read what a phone parks. Phone-to-phone custody is unaffected; the T-Dongle relay
-path is out until its firmware follows.
+**The dongle is ported** (`esp32/rns_ble5`, via `components/geogram_xprs` — a C
+mirror of `lib/services/xprs/` verified against the same 205-example corpus):
+it reads XPRS on both subtypes, parks 1:1 `t:message` mail keyed by the derived
+identifier at the stated (capped) urgency, refuses `scope:local` at admission,
+releases on `?ACK <id>` and on `t:receipt … r:<id> s:ack`, re-airs with itself
+appended to `via:`, answers `t:ping` with a rate-limited `t:pong rssi:`, and
+airs its own `t:observation … link:ble mail:N` beacon on `0x58`. It transmits
+unsigned (`sig:` is APRX short-Schnorr over secp256k1, which TweetNaCl/mbedtls
+do not provide) and dates packets `epoch:<boots>.<uptime>` per XPRS.md §10.7,
+holding no wall clock.
 
 `FROM` and `TO` are always public. A carrier that cannot read the recipient
 cannot determine where to relay the frame, which is what allows custody to

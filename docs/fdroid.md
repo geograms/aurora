@@ -93,7 +93,7 @@ APRS-IS are proprietary services, although nothing depends on them.
 | `relay.damus.io`, `nos.lol`, `relay.nostr.band`, `relay.primal.net`, `purplepag.es` | Default NOSTR relays, open protocol, all replaceable in Settings. |
 | `blossom.primal.net`, `nostr.download` | Blossom blob servers (open protocol). |
 | `reseed.i2p-projekt.de`, `reseed.stormycloud.org`, `reseed.diva.exchange`, `banana.incognet.io`, `i2pseed.creativecowpat.net`, `reseed-fr.i2pd.xyz`, `reseed.onion.im` | Standard I2P reseeds. |
-| `rns.beleth.net:4242` (in `reticulum.wapp`) | Default Reticulum hub. |
+| `rns.beleth.net:4242` (in `mesh.wapp`) | Default Reticulum hub. |
 | `njump.me` | Renders `nostr:` links (open source). |
 
 **Strings that are not network calls**

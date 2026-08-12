@@ -1377,11 +1377,36 @@ t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m seatemp:18.4C type:boat ts:
 | `mail` | `int` | messages held for other stations (section 10.6.5) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
+| `uptime` | `qty` | how long the station has run without interruption | duration |
+| `lifetime` | `qty` | how long the station has run in total, across every restart | duration |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
 
 `rssi` and `snr` describe the radio path a packet arrived on and are reported by the
 receiver, in a `pong` reply. A station does not transmit its own received signal
 strength.
+
+`uptime` and `lifetime` are the station's account of its own stability, for
+whoever is deciding whether to route through it or nominate it a mailbox.
+
+```
+t:observation f:X3RLY7 link:ble peers:4 mail:3 uptime:26h lifetime:38day
+```
+
+72 bytes. `uptime` resets to zero at every restart, which is the point: a
+station that reboots hourly cannot claim otherwise for long. `lifetime` is
+**accumulated service time** — the sum of every period the station has been
+running since it first kept records — so it survives restarts and needs no
+wall clock, which a station reporting `epoch:` (section 10.7) does not have.
+It is not the calendar age of the hardware: a dongle powered one hour a day
+for a year reports `lifetime:15day`, and that is the honest figure for a
+station whose value is being on the air.
+
+Both are claims, not measurements a receiver can check. Like `serve:`
+(section 24.3), they say what the sender believes about itself; a receiver
+weighs them against what it has observed. Coarse figures are the expected
+form — `uptime:26h` rather than `uptime:94340s` — because the reading changes
+by the second while its meaning changes by the hour, and the bytes are better
+spent elsewhere.
 
 An observation carries a note in `m:`, the same key a message uses.
 
@@ -5190,7 +5215,7 @@ document.
 
 | Element | State |
 |---|---|
-| **On the air** | **implemented** on the Flutter side: the discovery beacon is an XPRS `t:observation` on its own BLE5 subtype `0x58` (`docs/ble5.md`), carrying `peers:`, `hears:` and `mail:`; `MeshCourier` emits XPRS for every carried message, and custody reads it. The **chat wapp emits XPRS too** since 0.4.38 — 1:1, group, broadcast and position (`wapps/chat/xprs.c`, `docs/aprs-xt.md` section 2.2) — keeping the compact frame only for its own control frames (`?MAIL`, `?IGATE`, `?PING`) and for a body over 250 bytes. Every receiver still reads both, so an un-ported peer keeps working; the ESP32 is that peer today |
+| **On the air** | **implemented** on the Flutter side: the discovery beacon is an XPRS `t:observation` on its own BLE5 subtype `0x58` (`docs/ble5.md`), carrying `peers:`, `hears:` and `mail:`; `MeshCourier` emits XPRS for every carried message, and custody reads it. The **chat wapp emits XPRS too** since 0.4.38 — 1:1, group, broadcast and position (`wapps/chat/xprs.c`, `docs/aprs-xt.md` section 2.2) — keeping the compact frame only for its own control frames (`?MAIL`, `?IGATE`, `?PING`) and for a body over 250 bytes. Every receiver still reads both, so an un-ported peer keeps working. The ESP32 T-Dongle (`esp32/rns_ble5`) speaks XPRS too via `esp32/components/geogram_xprs`, a C mirror of `lib/services/xprs/` replaying the same 205-example corpus: it reads both subtypes, parks `t:message` mail by derived identifier, relays with `via:`, answers `t:ping` with `t:pong rssi:` (rate-limited per section 31.2), refuses `scope:local` at custody admission, dates its packets `epoch:` (section 10.7, NVS boot counter) and transmits unsigned |
 | **The packet format itself** | **implemented**; `lib/services/xprs/` parses, encodes, derives identifiers and signs. Every example packet in this document is a test fixture: `test/xprs_packet_test.dart` round-trips all 201 byte-exact, checks each stated byte count, and cross-checks every identifier against an independent Python implementation |
 | Section 5 identifiers | **implemented** |
 | Section 9.1 signatures, and surviving a relay | **implemented**; `test/xprs_sig_test.dart` signs, relays three hops and re-verifies |
@@ -5274,3 +5299,4 @@ document.
 | `press`, `wind`, `wdir`, `gust`, `rain1`, `rain24`, `solar` weather | no source |
 | `batt`, `volt` telemetry | not implemented; charging state is tracked, charge level is not |
 | `rssi`, `snr` telemetry | implemented on the receive paths |
+| `uptime`, `lifetime` telemetry | implemented on the ESP32 T-Dongle beacon (`esp32/rns_ble5`, lifetime accumulated in NVS); the phone beacon does not carry them yet |

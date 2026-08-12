@@ -334,7 +334,7 @@ class _LauncherPageState extends State<LauncherPage> with RouteAware {
   /// it is showing. A no-op if the user uninstalled it — the bar is still worth
   /// reading on its own.
   Future<void> _openStatusWapp() async {
-    final manifest = _wappForSource('reticulum');
+    final manifest = _wappForSource('mesh');
     if (manifest == null) return;
     await _openWapp(manifest);
   }

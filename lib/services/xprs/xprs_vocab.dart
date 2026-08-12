@@ -163,6 +163,17 @@ const Set<String> kXprsBearers = {
 /// ones that fitted (section 10.6.4). Null when the packet states none.
 int? xprsPeers(XprsPacket p) => int.tryParse(p['peers'] ?? '');
 
+/// A duration as an XPRS `qty` (section 10.9: `s`, `min`, `h`, `day`) — coarse
+/// on purpose. `uptime:` and `lifetime:` (section 10.5) change by the second
+/// while their meaning changes by the hour, so the spec asks for `uptime:26h`,
+/// not `uptime:94340s`.
+String xprsFmtDuration(int seconds) {
+  if (seconds < 120) return '${seconds}s';
+  if (seconds < 120 * 60) return '${seconds ~/ 60}min';
+  if (seconds < 48 * 3600) return '${seconds ~/ 3600}h';
+  return '${seconds ~/ 86400}day';
+}
+
 /// Messages this station holds for others and would hand over (section 10.6.5).
 ///
 /// Deliberately not part of [xprsReadingIsScoped]: mail held is a fact about the

@@ -90,11 +90,12 @@ Future<void> ensureRnsAutostart() async {
     rns.emailResolver = (email) => EmailResolveService.instance.resolve(email);
     rns.diskIndexPath = ws.getAbsolutePath('disk_index.sqlite3');
 
-    // Persistent observed-node cache lives in the reticulum wapp's per-profile
-    // data folder (user-specific data the reticulum wapp surfaces). The store
-    // creates the directory if the wapp hasn't written there yet.
+    // Persistent observed-node cache lives in the mesh wapp's per-profile
+    // data folder (user-specific data the mesh wapp surfaces; the
+    // reticulum->mesh boot migration moves it). The store creates the
+    // directory if the wapp hasn't written there yet.
     rns.observedStorePath =
-        wappDataStorageFor(prefs, 'reticulum').getAbsolutePath('observed.sqlite3');
+        wappDataStorageFor(prefs, 'mesh').getAbsolutePath('observed.sqlite3');
 
     // Announce our callsign so peers/repeaters can show a human name (plaintext
     // presence beacon, same as the manual start path).
@@ -116,7 +117,7 @@ Future<void> ensureRnsAutostart() async {
         // Keep the process alive while the node is up so it goes on sharing /
         // routing with the screen off or backgrounded (ref-counted holder, so
         // it coexists with the background-wapp service).
-        await AndroidForegroundService.instance.hold('reticulum');
+        await AndroidForegroundService.instance.hold('mesh');
         break;
       }
     }
@@ -132,7 +133,7 @@ Future<void> ensureRnsAutostart() async {
         if (ok || rns.isUp) {
           LogService.instance.add(
               'RNS autostart: no bootstrap reachable — up on Bluetooth only');
-          await AndroidForegroundService.instance.hold('reticulum');
+          await AndroidForegroundService.instance.hold('mesh');
           return;
         }
       } catch (e) {

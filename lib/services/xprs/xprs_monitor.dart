@@ -87,6 +87,11 @@ class XprsStation {
   /// one. Null means it has not said, which is different from zero.
   int? peers;
   int? mail;
+
+  /// The sender's stability account (section 10.5), verbatim `qty` text like
+  /// `26h` / `38day`. A claim, not a measurement — shown as said.
+  String? uptime;
+  String? lifetime;
 }
 
 class XprsMonitor {
@@ -157,6 +162,8 @@ class XprsMonitor {
     final peers = xprsPeers(p);
     if (peers != null) st.peers = peers;
     if (p.has('mail')) st.mail = xprsMail(p);
+    if (p.has('uptime')) st.uptime = p['uptime'];
+    if (p.has('lifetime')) st.lifetime = p['lifetime'];
 
     revision++;
   }
@@ -189,6 +196,8 @@ class XprsMonitor {
         s.bearer.toUpperCase(),
         if (s.peers != null) 'peers ${s.peers}',
         if (s.mail != null && s.mail! > 0) 'mail ${s.mail}',
+        if (s.uptime != null) 'up ${s.uptime}',
+        if (s.lifetime != null) 'life ${s.lifetime}',
       ];
       final sub = StringBuffer(s.bearer.toUpperCase());
       if (s.rssi != 0) sub.write(' - ${s.rssi} dBm');

@@ -286,6 +286,19 @@ Future<void> _boot() async {
     init: migrateMessagesToMail,
   );
   BootOrchestrator.instance.register(
+    id: 'migrate-reticulum-to-mesh',
+    name: 'Migrate reticulum wapp to mesh',
+    description:
+        'One-time rename of the network wapp folder reticulum->mesh (data '
+        'dir — which carries the node\'s observed.sqlite3 — autostart '
+        'preference and offered-set markers included) so existing profiles '
+        'transition to the renamed "Mesh" wapp, which now covers Reticulum '
+        'and XPRS. Idempotent; runs before seeding + bundled-wapp upgrade '
+        'and before reticulum-autostart, which reads the data dir.',
+    mode: BootStart.sequential,
+    init: migrateReticulumToMesh,
+  );
+  BootOrchestrator.instance.register(
     id: 'seed-default-wapps',
     name: 'Seed default wapps',
     description:
@@ -324,7 +337,7 @@ Future<void> _boot() async {
 
   BootOrchestrator.instance.register(
     id: 'reticulum-autostart',
-    name: 'Reticulum node (always-on)',
+    name: 'Mesh node (always-on)',
     description:
         'Starts the Reticulum node automatically and keeps it running so '
         'folder sharing, discovery-by-key, and file transfer work with no '

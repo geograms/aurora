@@ -867,7 +867,10 @@ q:pong       reply to this reachability test
 Several are separated by commas. An unknown word is ignored, so `q:pos,bat,co2`
 still returns position and battery from a station that has never heard of CO2.
 
-Absence of `q:` means nothing is expected back, so silence is never ambiguous.
+Absence of `q:` means nothing is expected back, so silence is never ambiguous —
+with one exception, and it is the common case: a direct message between two
+stations that have exchanged one before is acknowledged without being asked
+(section 13.7.1). Everything else still answers only what `q:` requested.
 
 ```
 t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 q:ack,read m:did you get the keys?
@@ -2061,6 +2064,56 @@ A signed receipt can be replayed by anyone who heard it, and that is harmless: i
 names one message and says one thing, so a second copy asserts exactly what the
 first did.
 
+### 13.7.1 Receipts without asking
+
+A direct message between two stations that have exchanged one before is
+acknowledged automatically. Neither operator turns anything on, and the sender
+does not have to remember `q:ack`:
+
+```
+t:message f:X1RD89 d:X1A67X ts:2026-08-12_17:28:52 m:on my way
+t:receipt f:X1A67X d:X1RD89 r:40f357 s:ack
+```
+
+62 and 42 bytes. `r:40f357` is the message's identifier (section 5), so the
+receipt costs two thirds of what it confirms and names it exactly.
+
+This exists because the alternative is a message that fails in silence. A
+station that hands a packet to a radio and hears nothing back cannot tell
+delivery from loss, so it cannot retry, and a lost message is simply gone while
+both operators believe it arrived. Measured between two phones with no internet:
+a reply left as a single unacknowledged transmission was recorded as delivered
+and retried **zero** times.
+
+**When it applies.** One condition: a direct message has already passed between
+the two callsigns, in **either** direction. From then on each acknowledges the
+other's direct messages. A relayed message is acknowledged the same way — the
+receipt travels home as section 13.7 describes, and a carried message is
+precisely the case where the sender has least other evidence.
+
+**When it does not.** Each of these would put an acknowledgement on a shared
+channel for every station that hears it, so none of them is automatic:
+
+| Not acknowledged | Why |
+|---|---|
+| a broadcast (no `d:`) | one packet, every hearer answering |
+| a regional message (`dest:`, no `d:`) | same, bounded only by the region |
+| a group message | every member answering every message |
+| a receipt | an acknowledgement of an acknowledgement never terminates |
+| a station never exchanged with | see below |
+
+`q:ack` still works, and still asks a station outside these rules for a receipt.
+
+**Why a known station rather than everybody.** An acknowledgement is airtime
+paid on a channel everyone shares, and answering a stranger also confirms to
+anyone listening that this callsign is here and awake. Two stations that have
+already exchanged a direct message have both of those costs priced in; a
+stranger has not agreed to either.
+
+An automatic receipt is never signed and carries no `q:`. It is a device
+reporting bytes, not a person agreeing to anything — that remains `s:sign`
+(section 13.7), which is still asked for explicitly.
+
 ### 13.8 Delivering to a region
 
 A message with `dest:` and **no `d:`** is addressed to whoever is in that region
@@ -2106,9 +2159,18 @@ t:message f:X1QZ3N d:X1RD89 ts:2026-08-08_14:26:40 dest:37.98,23.73 near:50km un
 with `via:` removed (section 5) and that is the only field the two copies differ
 in.
 
-So the recipient recognises the second copy as one it already holds, shows it
-once, and does not answer twice. This is not a rule that had to be added: it
-falls out of deriving identifiers from the message rather than the journey.
+So the recipient recognises the second copy as one it already holds and shows it
+once. This is not a rule that had to be added: it falls out of deriving
+identifiers from the message rather than the journey.
+
+It does **answer** each copy, with the same receipt. The two cases are
+indistinguishable on the air — a resend after a lost acknowledgement carries the
+same identifier as the original, because the identifier describes the message
+and not the attempt — so a recipient that answered only the first copy would
+leave a sender whose receipt was lost retrying against a silence it can never
+break. A receipt is idempotent (section 13.7): re-airing it asserts exactly what
+the first one did. Bound it at one receipt per message per sender per 20
+seconds, so a burst of copies is answered once rather than once each.
 
 The difference between the copies is worth keeping rather than discarding. Each
 `via:` is a route that actually worked, which is knowledge no single copy
@@ -4692,6 +4754,10 @@ Assigned: `ack`, `read`, `sign`, `pos`, `batt`, `identity`, `pong`, `no`.
 `s:no` means the request will not be served at all. A partial answer names only
 what it satisfied.
 
+A direct message between two stations that have exchanged one before is answered
+with `t:receipt … s:ack` **without** `q:ack` (section 13.7.1). Broadcasts, group
+and regional messages, receipts, and strangers are never answered automatically.
+
 ### What a station is, or is riding on
 
 `type:`
@@ -5086,7 +5152,8 @@ document.
 | Signing by default on every packet type | not implemented; signing exists and is opt-in |
 | Direct, group and broadcast messages | implemented |
 | Replies and reactions | implemented |
-| Receipts and carrier release | implemented |
+| Receipts and carrier release | implemented, for receipts that were asked for with `q:` |
+| Section 13.7.1, receipts without asking | **specified, not yet on the air.** The rule and its exclusions are settled and the two example packets are test fixtures; no station sends an unasked `s:ack` yet. What made it necessary is fixed already on the Reticulum side: an unacknowledged single-packet delivery no longer reports itself as delivered, and the sender retries at 20s/60s/5min before leaving the copy held (`lxmf_router.dart`) |
 | Long messages in parts | implemented |
 | Encryption and the sealed-body band rule | implemented |
 | Section 9.4.1, no self-generated callsign onto licensed spectrum | not implemented, and violated today: the ESP32 iGate computes an APRS-IS passcode for an `X3` callsign and states in `esp32/components/geogram_aprsis/aprsis.h` that no licence is needed for one |

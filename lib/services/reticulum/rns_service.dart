@@ -1073,6 +1073,34 @@ class RnsService {
       });
     }
 
+    // ── Stations known only from an XPRS beacon ──
+    // A row above needs an lxmf ANNOUNCE. A neighbour met over Bluetooth may
+    // have beaconed for minutes without one reaching us, and then it has no row
+    // at all — which is why filling in a missing callsign was not enough on its
+    // own, and the peer stayed listed as raw hex. The beacon already gave both
+    // halves of what a row needs: who it is, and where to write to it.
+    final seen = {for (final e in out) e['dest'] as String? ?? ''};
+    for (final entry in _lxmfCallsign.entries) {
+      if (seen.contains(entry.key)) continue;
+      final at = _lxmfCallsignAt[entry.key] ?? 0;
+      if (q.isNotEmpty) {
+        final hay = '${entry.value} ${entry.key}'.toLowerCase();
+        if (!hay.contains(q)) continue;
+      }
+      out.add({
+        'kind': 'lxmf',
+        'dest': entry.key,
+        'name': '',
+        'callsign': entry.value,
+        'identity': '',
+        'geogram': true, // it speaks XPRS, so it is one of ours
+        'hops': 1, // heard directly on the radio
+        'via': 'ble5',
+        'lastSeen': at,
+        'live': now - at < 90000,
+      });
+    }
+
     // ── Geogram people (their 1:1 is NOSTR kind-4, handled by Messages) ──
     for (final p in searchPeople(q)) {
       out.add({
@@ -1966,15 +1994,19 @@ class RnsService {
   /// listed by the first bytes of its hash while the very frames that named it
   /// went by. Bounded: a street's worth of stations, oldest evicted.
   final Map<String, String> _lxmfCallsign = {};
+  final Map<String, int> _lxmfCallsignAt = {};
   static const int _maxLxmfCallsigns = 256;
 
   void noteLxmfCallsign(String destHex, String callsign) {
     final d = destHex.trim().toLowerCase();
     final c = callsign.trim().toUpperCase();
     if (d.length != 32 || c.isEmpty) return;
+    _lxmfCallsignAt[d] = DateTime.now().millisecondsSinceEpoch;
     if (_lxmfCallsign[d] == c) return;
     if (_lxmfCallsign.length >= _maxLxmfCallsigns) {
-      _lxmfCallsign.remove(_lxmfCallsign.keys.first);
+      final oldest = _lxmfCallsign.keys.first;
+      _lxmfCallsign.remove(oldest);
+      _lxmfCallsignAt.remove(oldest);
     }
     _lxmfCallsign[d] = c;
   }
@@ -4869,7 +4901,10 @@ class RnsService {
         _lxmfRetries.remove(e);
         continue;
       }
-      final ok = await r.send_(msg, timeout: const Duration(seconds: 12));
+      final outcome = await r.deliver(msg, timeout: const Duration(seconds: 12));
+      // Only a CONFIRMED delivery retires a retry. An unacknowledged single
+      // packet keeps its place in the ladder, which is the whole point.
+      final ok = outcome == LxmfDelivery.confirmed;
       final who = destHex.length >= 8 ? destHex.substring(0, 8) : destHex;
       final n = (e['try'] as int) + 1;
       if (ok) {
@@ -4939,13 +4974,22 @@ class RnsService {
     // well under a second, and the fast retry ladder (first rung 2s) plus the
     // router's own broadcast failover recover the rest. Waiting 30s only
     // delayed the retry that would actually deliver.
-    final ok = await r.send_(msg, timeout: const Duration(seconds: 10));
+    final outcome = await r.deliver(msg, timeout: const Duration(seconds: 10));
+    final ok = outcome == LxmfDelivery.confirmed;
     final who = destHex.length >= 8 ? destHex.substring(0, 8) : destHex;
-    LogService.instance.add(
-      ok
-          ? 'RNS/lxmf: delivered to $who over a direct link'
-          : 'RNS/lxmf: no direct link to $who — held for relay pickup',
-    );
+    LogService.instance.add(switch (outcome) {
+      LxmfDelivery.confirmed => 'RNS/lxmf: delivered to $who over a direct link',
+      // Handed to the radio with nothing acknowledging it. Saying "delivered"
+      // here is what let a reply vanish: no retry was queued, and both ends
+      // believed it had arrived.
+      LxmfDelivery.sentUnconfirmed =>
+        'RNS/lxmf: one packet to $who, unacknowledged — retrying until it is',
+      LxmfDelivery.failed =>
+        'RNS/lxmf: no direct link to $who — held for relay pickup',
+    });
+    // Anything not confirmed gets the ladder. An unacknowledged datagram is
+    // exactly the case that needs it; the recipient drops the duplicate if the
+    // first copy did land (LxmfRouter dedups on the envelope hash).
     if (!ok) _queueLxmfRetry(destHex, msg.packed, title, content, fields);
     // Whether this needed a carrier is not knowable yet — MeshCourier asks the
     // retry queue twenty seconds from now, when "did it arrive" has an answer.

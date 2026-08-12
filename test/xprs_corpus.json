@@ -435,6 +435,16 @@
 "id": "d27713"
 },
 {
+"wire": "t:message f:X1RD89 d:X1A67X ts:2026-08-12_17:28:52 m:on my way",
+"bytes": 62,
+"id": "40f357"
+},
+{
+"wire": "t:receipt f:X1A67X d:X1RD89 r:40f357 s:ack",
+"bytes": 42,
+"id": "d1718d"
+},
+{
 "wire": "t:message f:X3RLY7 ts:2026-08-08_14:26:40 dest:38.72,-9.14 near:30km urg:high until:2026-08-15_00:00:00 m:water is off in the old town until Friday",
 "bytes": 147,
 "id": "fd1224"

@@ -71,6 +71,7 @@ import '../services/notification_service.dart';
 import '../services/location_service.dart';
 import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
+import '../services/xprs/xprs_monitor.dart';
 import '../util/time_ago.dart';
 import '../services/wapp_unread_service.dart';
 import '../services/hero/hero_inbox.dart';

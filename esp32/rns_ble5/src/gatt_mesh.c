@@ -34,6 +34,7 @@
 
 #include "blemesh.h"
 #include "blemesh_session.h"
+#include "xprs.h"
 
 static const char *TAG = "gatt_mesh";
 
@@ -428,17 +429,40 @@ static int op_msg_rx(void *ctx, const char *peer, const char *am, uint32_t ts,
                      const uint8_t *wire, int len)
 {
     (void)ctx; (void)ts;
-    /* The dongle is a carrier: park whatever a session hands us. Target is
-     * inside the compact frame (from \x1F to \x1F text). */
+    /* The dongle is a carrier: park whatever a session hands us. Two wire
+     * formats are in flight (aurora mesh_frame.dart): XPRS text — `t:` and no
+     * 0x1F — where the target is d:, and the compact frame, where it sits
+     * between the two 0x1F separators. */
     char to[BLEMESH_CALLSIGN_MAX + 1] = "";
-    int a = -1, b = -1;
-    for (int i = 0; i < len; i++) {
-        if (wire[i] == 0x1F) { if (a < 0) a = i; else { b = i; break; } }
+    char id[XPRS_ID_LEN] = "";
+    uint8_t urg = BLEMESH_URG_NORMAL;
+    if (xprs_looks_like(wire, len)) {
+        xprs_t p;
+        if (len > XPRS_MAX_WIRE || !xprs_parse((const char *)wire, len, &p))
+            return MSP_REJ_MALFORMED;
+        if (!xprs_get_str(&p, "d", to, sizeof to) ||
+            !xprs_is_station(to, (int)strlen(to)))
+            return MSP_REJ_MALFORMED;         /* carried mail is 1:1 only */
+        if (xprs_scope_local(&p))
+            return MSP_REJ_QUOTA;             /* never carried (§13.11.3) */
+        /* Under XPRS the custody handle IS the derived identifier; recompute
+         * when the session carried none. The offering phone already applied
+         * the stranger cap; parking at the stated level keeps both stores
+         * evicting in the same order. */
+        if (!am[0]) { xprs_id(&p, id); am = id; }
+        urg = (uint8_t)xprs_urg(&p);
+    } else {
+        int a = -1, b = -1;
+        for (int i = 0; i < len; i++) {
+            if (wire[i] == 0x1F) { if (a < 0) a = i; else { b = i; break; } }
+        }
+        if (a < 0 || b < 0 || b - a - 1 > BLEMESH_CALLSIGN_MAX)
+            return MSP_REJ_MALFORMED;
+        memcpy(to, wire + a + 1, b - a - 1);
+        to[b - a - 1] = 0;
     }
-    if (a < 0 || b < 0 || b - a - 1 > BLEMESH_CALLSIGN_MAX) return 3; /* malformed */
-    memcpy(to, wire + a + 1, b - a - 1);
-    to[b - a - 1] = 0;
-    if (!blemesh_scf_offer(to, am, wire, len, now_s())) return 1; /* duplicate */
+    if (!blemesh_scf_offer(to, am, wire, len, now_s(), urg))
+        return MSP_REJ_DUP;
     ESP_LOGI(TAG, "took custody of %s for %s (via %s)", am[0] ? am : "msg", to, peer);
     return 0;
 }

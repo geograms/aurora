@@ -14,6 +14,7 @@
  * its own crypto), so no pairing is needed.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -53,9 +54,15 @@
 
 /* BLE street mesh (aurora docs/mesh.md): route beacon + DV table + SCF. */
 #include <sys/stat.h>
+#include <time.h>
 #include "blemesh.h"
 #include "gatt_mesh.h"
 #include "sdcard.h"
+
+/* XPRS (aurora docs/XPRS.md): the text wire format the whole device fleet
+ * speaks now. This station reads it, answers pings, parks 1:1 mail and
+ * relays with a via: path. */
+#include "xprs.h"
 
 /* Provisioning defaults (WiFi creds + callsign). The real file is gitignored;
  * values are written to NVS on first boot and NVS is the source of truth after.
@@ -82,6 +89,7 @@ static uint8_t s_own_addr_type;
 #define SUBTYPE      0x55   /* Reticulum packet */
 #define SUBTYPE_APRS 0x41   /* APRS broadcast parcel ('A') — plaintext */
 #define SUBTYPE_MESH BLEMESH_SUBTYPE /* 0x4D street-mesh route beacon ('M') */
+#define SUBTYPE_XPRS 0x58   /* XPRS text packet ('X') — docs/ble5.md §2 */
 
 #define RNS_PKT_ANNOUNCE 0x01
 #define DST_HASH_LEN     16
@@ -125,6 +133,16 @@ static void mesh_deliver_pending(const char *target);
 static volatile bool s_mesh_dirty;      /* topology changed -> beacon early */
 static bool s_mesh_up;
 static char s_aprs_call[10];            /* tentative; defined with iGate below */
+/* XPRS station: ingest (both 0x58 and text-form 0x41), pong, presence beacon. */
+static void handle_xprs(const uint8_t *payload, int len, int rssi, uint8_t subtype);
+static void xprs_beacon_air(void);
+static uint32_t s_boot_epoch;           /* NVS boot counter (XPRS.md §10.7) */
+/* lifetime: (XPRS.md §10.5) — cumulative service seconds across every restart,
+ * accumulated in NVS. s_life_base is the total saved by PREVIOUS runs; the
+ * current figure is s_life_base + now_sec(). Saved every 15 min from
+ * relay_task, so a power pull costs at most that much history. */
+static uint32_t s_life_base;
+#define LIFE_SAVE_SEC 900
 
 /* TweetNaCl entropy hook. */
 void randombytes(unsigned char *p, unsigned long long n)
@@ -233,6 +251,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                     handle_aprs(&m[4], mlen - 4, d->rssi);       /* show + relay */
                 } else if (m[3] == SUBTYPE_MESH) { /* street-mesh route beacon */
                     handle_mesh(&m[4], mlen - 4, d->rssi);
+                } else if (m[3] == SUBTYPE_XPRS) { /* XPRS text (beacons, pings) */
+                    handle_xprs(&m[4], mlen - 4, d->rssi, SUBTYPE_XPRS);
                 }
             }
         }
@@ -520,8 +540,9 @@ static bool split_aprs_fields(const uint8_t *p, int len,
     return sep;
 }
 
-/* Frame a raw APRS payload as a BLE AD: [len][FF FF][3E][41][payload]. */
-static int build_aprs_ad(const uint8_t *payload, int len, uint8_t *out)
+/* Frame a raw payload as a BLE AD: [len][FF FF][3E][subtype][payload]. */
+static int build_ad(uint8_t subtype, const uint8_t *payload, int len,
+                    uint8_t *out)
 {
     int n = 0;
     out[n++] = 0;            /* AD length placeholder */
@@ -529,11 +550,16 @@ static int build_aprs_ad(const uint8_t *payload, int len, uint8_t *out)
     out[n++] = COMPANY_LO;
     out[n++] = COMPANY_HI;
     out[n++] = MARKER;
-    out[n++] = SUBTYPE_APRS;
+    out[n++] = subtype;
     if (n + len > 254) return 0;             /* one AD max 254 bytes */
     memcpy(out + n, payload, len); n += len;
     out[0] = n - 1;
     return n;
+}
+
+static int build_aprs_ad(const uint8_t *payload, int len, uint8_t *out)
+{
+    return build_ad(SUBTYPE_APRS, payload, len, out);
 }
 
 /* An APRS group message heard over BLE5. Unlike Reticulum, APRS is PLAINTEXT
@@ -542,6 +568,14 @@ static int build_aprs_ad(const uint8_t *payload, int len, uint8_t *out)
 static void handle_aprs(const uint8_t *payload, int len, int rssi)
 {
     if (len <= 0) return;
+    /* The format seam (aurora mesh_frame.dart): an XPRS packet starts `t:`
+     * and holds no 0x1F byte; a compact Aurora parcel holds two. Chat and
+     * carried mail both ride this subtype as XPRS now — the compact path
+     * below stays for the leftovers (?ACK, ?MAIL, ?IGATE) only. */
+    if (xprs_looks_like(payload, len)) {
+        handle_xprs(payload, len, rssi, SUBTYPE_APRS);
+        return;
+    }
     uint32_t ch = fnv1a(payload, len);
     if (relay_seen(ch)) return;              /* already handled (dedup) */
     relay_remember(ch);
@@ -595,7 +629,8 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
     if (aurora && s_mesh_up) {
         bool one2one = to[0] && to[0] != '#' && to[0] != '?' && to[0] != '!' &&
                        text[0] != '?' && strcmp(to, s_aprs_call) != 0;
-        if (one2one && blemesh_scf_offer(to, am, payload, len, now_sec()))
+        if (one2one && blemesh_scf_offer(to, am, payload, len, now_sec(),
+                                         BLEMESH_URG_NORMAL))
             ESP_LOGI(TAG, "SCF: parked %dB for %s (am=%s, %d held)",
                      len, to, am[0] ? am : "-", blemesh_scf_count());
         mesh_deliver_pending(from);
@@ -612,18 +647,283 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
     }
 }
 
+/* ---- XPRS station (aurora docs/XPRS.md) ----------------------------------- */
+
+/* ts: when the clock is plausibly synced, epoch:<boot>.<uptime> otherwise
+ * (§10.7 — a clockless station with NVS keeps a boot counter, and a receiver
+ * holding a clock anchors the epoch when it first hears it). This firmware
+ * has no SNTP, so epoch: is the everyday form. */
+static void xprs_time_field(char *out, int cap)
+{
+    time_t t = time(NULL);
+    if (t > 1750000000) {                       /* mid-2025: a real wall clock */
+        struct tm tm;
+        gmtime_r(&t, &tm);
+        snprintf(out, cap, "ts:%04d-%02d-%02d_%02d:%02d:%02d",
+                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min, tm.tm_sec);
+    } else {
+        snprintf(out, cap, "epoch:%u.%u", (unsigned)s_boot_epoch,
+                 (unsigned)now_sec());
+    }
+}
+
+/* A duration as an XPRS qty (§10.9: s, min, h, day) — coarse on purpose. The
+ * reading changes by the second while its meaning changes by the hour, so the
+ * spec asks for `uptime:26h`, not `uptime:94340s`. */
+static void xprs_fmt_duration(uint32_t sec, char *out, int cap)
+{
+    if (sec < 120)              snprintf(out, cap, "%us", (unsigned)sec);
+    else if (sec < 120 * 60)    snprintf(out, cap, "%umin", (unsigned)(sec / 60));
+    else if (sec < 48 * 3600)   snprintf(out, cap, "%uh", (unsigned)(sec / 3600));
+    else                        snprintf(out, cap, "%uday", (unsigned)(sec / 86400));
+}
+
+/* Is [word] one of the comma-separated words in [list]? (`s:ack,read`) */
+static bool xprs_words_has(const char *list, const char *word)
+{
+    int wl = (int)strlen(word);
+    const char *p = list;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        int n = e ? (int)(e - p) : (int)strlen(p);
+        if (n == wl && strncasecmp(p, word, wl) == 0) return true;
+        p = e ? e + 1 : p + n;
+    }
+    return false;
+}
+
+/* Air one XPRS wire on [subtype], remembering its identifier first so the
+ * echo (and any phone's relay of it) reads as already-handled. */
+static void xprs_air(const char *wire, int len, uint8_t subtype)
+{
+    char id[XPRS_ID_LEN];
+    if (xprs_id_of(wire, len, id))
+        relay_remember((uint32_t)strtoul(id, NULL, 16));
+    uint8_t ad[256];
+    int n = build_ad(subtype, (const uint8_t *)wire, len, ad);
+    if (n > 0) relay_enqueue(ad, n);
+}
+
+/* Answer a ping (§11.6): the reply reports the signal the test ARRIVED with —
+ * the receiver's measurement, not the sender's. Bounded per §31.2: serving a
+ * stranger is metered, so at most one pong per caller per minute and one
+ * globally per 5 s; over budget is silence, not code:429 — a pong is a
+ * measurement, not a command answer. */
+#define XPRS_PONG_SLOTS      8
+#define XPRS_PONG_PER_CALL   60
+#define XPRS_PONG_GLOBAL     5
+static struct { char call[10]; uint32_t last; } s_pong[XPRS_PONG_SLOTS];
+static uint32_t s_pong_last;
+
+static void xprs_pong(const char *to, int rssi)
+{
+    uint32_t t = now_sec();
+    if (s_pong_last && t - s_pong_last < XPRS_PONG_GLOBAL) return;
+    int slot = -1;
+    for (int i = 0; i < XPRS_PONG_SLOTS; i++)
+        if (strcasecmp(s_pong[i].call, to) == 0) { slot = i; break; }
+    if (slot >= 0 && s_pong[slot].last &&
+        t - s_pong[slot].last < XPRS_PONG_PER_CALL) return;
+    if (slot < 0) {
+        slot = 0;
+        for (int i = 1; i < XPRS_PONG_SLOTS; i++)
+            if (s_pong[i].last < s_pong[slot].last) slot = i;
+    }
+    snprintf(s_pong[slot].call, sizeof s_pong[slot].call, "%s", to);
+    s_pong[slot].last = t ? t : 1;
+    s_pong_last = t ? t : 1;
+
+    char tf[32];
+    xprs_time_field(tf, sizeof tf);
+    char wire[XPRS_MAX_WIRE + 1];
+    int n = snprintf(wire, sizeof wire, "t:pong f:%s d:%s %s rssi:%ddBm",
+                     s_aprs_call[0] ? s_aprs_call : "TDONGLE", to, tf, rssi);
+    if (n <= 0 || n >= (int)sizeof wire) return;
+    xprs_air(wire, n, SUBTYPE_XPRS);
+    ESP_LOGI(TAG, "TX pong -> %s (their signal here: %ddBm)", to, rssi);
+}
+
+/* One XPRS packet heard on the air — from its own subtype 0x58 or as the
+ * text form of 0x41 (the handle_aprs seam). This is the station's front
+ * door: dedup, sighting, ping/pong, receipt release, custody, relay. */
+static void handle_xprs(const uint8_t *payload, int len, int rssi,
+                        uint8_t subtype)
+{
+    /* Static: this only ever runs on the NimBLE host task. */
+    static char buf[XPRS_MAX_WIRE + 1];
+    static char rewired[XPRS_MAX_WIRE + 1];
+    static xprs_t p;
+
+    if (len <= 0 || len > XPRS_MAX_WIRE) return;
+    memcpy(buf, payload, len);
+    buf[len] = 0;
+    if (!xprs_parse(buf, len, &p)) return;
+
+    /* Dedup by the DERIVED identifier (§5), not by content: via: grows at
+     * every hop, so the same packet has a different content hash at each —
+     * and the same identifier at all of them. This is also what makes our
+     * own relayed copy (and its echo off a phone) inert. */
+    char id[XPRS_ID_LEN];
+    xprs_id(&p, id);
+    uint32_t idh = (uint32_t)strtoul(id, NULL, 16);
+    if (relay_seen(idh)) return;
+    relay_remember(idh);
+
+    char type[16] = "", from[10] = "", to[12] = "";
+    xprs_type(&p, type, sizeof type);
+    xprs_get_str(&p, "f", from, sizeof from);
+    xprs_get_str(&p, "d", to, sizeof to);
+    if (!from[0]) return;                                  /* unattributable */
+    if (strcasecmp(from, s_aprs_call) == 0) return;        /* our own echo */
+
+    ESP_LOGI(TAG, "RX XPRS %s %s>%s id=%s rssi=%d %dB",
+             type, from, to[0] ? to : "*", id, rssi, len);
+
+    /* The sender was just heard: deliver anything parked for it, and feed
+     * the APRS-IS filter the same way the compact path does. */
+    igate_heard_add(from);
+    if (s_mesh_up) mesh_deliver_pending(from);
+
+    /* ping: answer when it is for us or for anyone (§11.6). Protocol
+     * machinery — never parked, never relayed (§6.5.1 bottom row). */
+    if (strcmp(type, "ping") == 0) {
+        if (!to[0] || strcasecmp(to, s_aprs_call) == 0) xprs_pong(from, rssi);
+        return;
+    }
+    if (strcmp(type, "pong") == 0) return;   /* logged above; a measurement */
+
+    /* receipt: r: names the delivered packet, s:ack|read means the target
+     * has it — release every parked copy (§13.3). The receipt itself then
+     * relays below: "a receipt is worth repeating even after the sender has
+     * seen it", because it releases OTHER carriers too. */
+    if (strcmp(type, "receipt") == 0) {
+        char r[8] = "", s[24] = "";
+        if (xprs_get_str(&p, "r", r, sizeof r) && strlen(r) == 6 &&
+            xprs_get_str(&p, "s", s, sizeof s) &&
+            (xprs_words_has(s, "ack") || xprs_words_has(s, "read"))) {
+            int purged = blemesh_scf_ack(r);
+            if (purged) ESP_LOGI(TAG, "SCF: receipt %s purged %d", r, purged);
+        }
+    }
+
+    bool relay = true;
+
+    /* observation: a beacon — the sighting above was its whole value. Its
+     * readings (link:, rssi measured here) are local to the SENDER's spot;
+     * relaying would assert reach the relayer has, not the sender. */
+    if (strcmp(type, "observation") == 0) relay = false;
+
+    if (strcmp(type, "message") == 0 && to[0]) {
+        if (strcasecmp(to, s_aprs_call) == 0) {
+            relay = false;                    /* delivered; nothing to extend */
+        } else if (s_mesh_up && xprs_is_station(to, (int)strlen(to))) {
+            /* Store-and-forward custody. scope:local is refused AT ADMISSION
+             * (§13.11.3): parking now and airing later is carrying, which is
+             * exactly what local excludes. (Relaying stays allowed — a re-air
+             * on the same short-range bearer never leaves it.)
+             * Urgency (§13.5): the sender states what it wants, the carrier
+             * decides what it may have — a reachable target's mail may claim
+             * any level, a stranger's is capped below urgent and defaults to
+             * low when it states nothing (docs/store-and-forward.md §4). */
+            if (!xprs_scope_local(&p)) {
+                bool known = blemesh_reachable(to);
+                int vl = 0;
+                bool stated = xprs_get(&p, "urg", &vl) != NULL;
+                int urg = xprs_urg(&p);
+                if (!known)
+                    urg = stated
+                        ? (urg > XPRS_URG_HIGH ? XPRS_URG_HIGH : urg)
+                        : XPRS_URG_LOW;
+                if (blemesh_scf_offer(to, id, payload, len, now_sec(),
+                                      (uint8_t)urg))
+                    ESP_LOGI(TAG, "SCF: parked XPRS %dB for %s (id=%s urg=%d, %d held)",
+                             len, to, id, urg, blemesh_scf_count());
+            } else {
+                ESP_LOGI(TAG, "SCF: refused scope:local %s -> %s", from, to);
+            }
+        }
+    }
+
+    /* Relay with the §13 discipline: append ourselves to via:. The codec
+     * refuses when we are already in the path (§13.2), when the type's relay
+     * budget is spent (§13.1: sos/warning 9, everything else 3), or when the
+     * result would not fit one AD — all three mean "do not re-air". The
+     * identifier and any sig: survive unchanged (§5, §9.1). */
+    if (relay) {
+        int rl = xprs_append_via(buf, len, s_aprs_call, rewired, 249);
+        if (rl > 0) {
+            uint8_t ad[256];
+            int an = build_ad(subtype, (const uint8_t *)rewired, rl, ad);
+            if (an > 0) {
+                relay_enqueue(ad, an);
+                s_relayed_count++;
+                ESP_LOGI(TAG, "relayed XPRS %s id=%s +via:%s (#%u)",
+                         type, id, s_aprs_call, (unsigned)s_relayed_count);
+            }
+        }
+    }
+}
+
+/* Our XPRS presence beacon (§10.6, same fields and order as the phone's
+ * mesh_service.dart): who we are, on which bearer, how many neighbours, and
+ * how much mail we hold — mail:N is what invites a neighbour that can reach
+ * the recipient to dial a custody session. Zero-valued fields are omitted. */
+static void xprs_beacon_air(void)
+{
+    char wire[160];
+    int n = snprintf(wire, sizeof wire, "t:observation f:%s link:ble",
+                     s_aprs_call[0] ? s_aprs_call : "TDONGLE");
+    int peers = blemesh_neighbor_count();
+    if (peers > 0 && n < (int)sizeof wire)
+        n += snprintf(wire + n, sizeof wire - n, " peers:%d", peers);
+    int mail = blemesh_scf_count();
+    if (mail > 0 && n < (int)sizeof wire)
+        n += snprintf(wire + n, sizeof wire - n, " mail:%d", mail);
+    /* Stability account (§10.5): how long this run, how long in total. */
+    char up[16], life[16];
+    xprs_fmt_duration(now_sec(), up, sizeof up);
+    xprs_fmt_duration(s_life_base + now_sec(), life, sizeof life);
+    if (n < (int)sizeof wire)
+        n += snprintf(wire + n, sizeof wire - n, " uptime:%s lifetime:%s",
+                      up, life);
+    if (n <= 0 || n >= (int)sizeof wire) return;
+    uint8_t ad[256];
+    int an = build_ad(SUBTYPE_XPRS, (const uint8_t *)wire, n, ad);
+    if (an > 0) air_raw_ad(ad, an);
+}
+
 /* ---- street mesh (aurora docs/mesh.md): beacon + DV + SCF ----------------- */
 
 /* Re-air every parked frame for [target] (it was just seen). Each goes back on
- * the normal relay rotation as a plain 0x41 broadcast; the receiver dedups. */
+ * the normal relay rotation as a plain 0x41 broadcast; the receiver dedups.
+ * An XPRS frame goes out with our callsign appended to via: (§13.3 — a
+ * carrier appends itself when it finally transmits); when the append is
+ * refused (we are already in the path, the budget is spent, or it would not
+ * fit) the frame airs UNMODIFIED — delivery to a sighted target outranks the
+ * relay budget, which governs relays, not the final handover. */
 static void mesh_deliver_pending(const char *target)
 {
     static uint8_t frames[4][BLEMESH_SCF_FRAME_MAX];
     static int lens[4];
     int n = blemesh_scf_pop_for(target, now_sec(), frames, lens, 4);
     for (int i = 0; i < n; i++) {
+        const uint8_t *out = frames[i];
+        int olen = lens[i];
+        static char rewired[XPRS_MAX_WIRE + 1];
+        if (xprs_looks_like(frames[i], lens[i])) {
+            int rl = xprs_append_via((const char *)frames[i], lens[i],
+                                     s_aprs_call, rewired, 249);
+            if (rl > 0) { out = (const uint8_t *)rewired; olen = rl; }
+            /* Re-remember the identifier: the original sighting may be past
+             * the dedup window, and the echo of this re-air must not read as
+             * a fresh packet. */
+            char id[XPRS_ID_LEN];
+            if (xprs_id_of((const char *)out, olen, id))
+                relay_remember((uint32_t)strtoul(id, NULL, 16));
+        }
         uint8_t ad[256];
-        int an = build_aprs_ad(frames[i], lens[i], ad);
+        int an = build_aprs_ad(out, olen, ad);
         if (an > 0) { relay_enqueue(ad, an); s_relayed_count++; }
     }
     if (n > 0)
@@ -696,7 +996,7 @@ static void relay_task(void *arg)
     uint32_t last_sweep = now_sec();
     uint32_t last_beacon = 0;
     int tick = 0;
-    bool flip = false;
+    int own_rot = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1500));
         uint32_t t = now_sec();
@@ -707,6 +1007,19 @@ static void relay_task(void *arg)
             last_sweep = t;
             blemesh_table_sweep(t);
             blemesh_scf_sweep(t);
+        }
+        /* lifetime: accumulate service time into NVS every 15 min (§10.5).
+         * A power pull loses at most that tail; ~96 writes/day is nothing to
+         * a wear-leveled NVS partition. */
+        static uint32_t last_life_save;
+        if (t - last_life_save >= LIFE_SAVE_SEC) {
+            last_life_save = t;
+            nvs_handle_t h;
+            if (nvs_open("rns", NVS_READWRITE, &h) == ESP_OK) {
+                nvs_set_u32(h, "lifesec", s_life_base + t);
+                nvs_commit(h);
+                nvs_close(h);
+            }
         }
         /* Scan watchdog (same lesson as the phones): a controller that has
          * delivered nothing for 60 s gets its discovery torn down and
@@ -733,13 +1046,17 @@ static void relay_task(void *arg)
         /* Our own frames get a GUARANTEED slot every 8 s — a busy street keeps
          * the relay queue non-empty for minutes at a time, and a beacon that
          * only airs when idle is never heard (the phones then never learn we
-         * exist, so no routes ever point through us). Alternate the mesh route
-         * beacon and the signed RNS announce; relays fill every other slot. */
+         * exist, so no routes ever point through us). Rotate the mesh route
+         * beacon, the XPRS presence beacon (the readable half of discovery:
+         * phones' XprsMonitor + peer sighting) and the signed RNS announce —
+         * each airs every ~24 s; relays fill every other slot. */
         if (t - last_own >= 8) {
-            flip = !flip;
-            if (flip && s_mesh_up) {
+            own_rot = (own_rot + 1) % 3;
+            if (own_rot == 0 && s_mesh_up) {
                 mesh_beacon_air();
                 last_beacon = t;
+            } else if (own_rot == 1) {
+                xprs_beacon_air();
             } else {
                 char msg[48];
                 int l = snprintf(msg, sizeof(msg), "tdongle-s3 #%d", ++tick);
@@ -1062,8 +1379,11 @@ static bool igate_relay(const char *from, const char *to, const char *text)
     return true;
 }
 
-/* Derive a stable X3-prefixed station callsign from the RNS identity hash. */
-static void derive_x3_callsign(char *out, int cap)
+/* The base36 derivation earlier builds used — kept ONLY so provisioning can
+ * recognise (and replace) a stored callsign that was auto-derived by it. Its
+ * alphabet is wrong per XPRS.md §3: an XPRS callsign's four characters come
+ * from the bech32 charset, where b, i, o and 1 never appear. */
+static void derive_x3_base36(char *out, int cap)
 {
     static const char B36[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     uint32_t v = 0;
@@ -1071,6 +1391,25 @@ static void derive_x3_callsign(char *out, int cap)
     if (cap < 7) { out[0] = 0; return; }
     out[0] = 'X'; out[1] = '3';
     for (int i = 0; i < 4; i++) { out[2 + i] = B36[v % 36]; v /= 36; }
+    out[6] = 0;
+}
+
+/* Derive the station's X3 callsign (XPRS.md §3): X3 + the first 20 bits of
+ * the signing public key through the bech32 charset, uppercased — the same
+ * arithmetic as the phone's X1 (nostr_key_generator.dart: the first four data
+ * characters of the key's bech32 form). */
+static void derive_x3_callsign(char *out, int cap)
+{
+    static const char CS[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    if (cap < 7) { if (cap > 0) out[0] = 0; return; }
+    uint32_t bits = ((uint32_t)s_ed_pk[0] << 12) |
+                    ((uint32_t)s_ed_pk[1] << 4) |
+                    ((uint32_t)s_ed_pk[2] >> 4);         /* 20 bits */
+    out[0] = 'X'; out[1] = '3';
+    for (int i = 0; i < 4; i++) {
+        char c = CS[(bits >> (15 - 5 * i)) & 31];
+        out[2 + i] = (char)(c >= 'a' ? c - 32 : c);      /* uppercase letters */
+    }
     out[6] = 0;
 }
 
@@ -1102,6 +1441,20 @@ static void igate_provision(void)
                 derive_x3_callsign(s_aprs_call, sizeof s_aprs_call);
             nvs_set_str(h, "aprs_call", s_aprs_call);
             nvs_commit(h);
+        } else {
+            /* Migration: a stored callsign equal to the old base36 derivation
+             * was auto-derived, not operator-chosen — replace it with the
+             * bech32 form XPRS.md §3 requires. Provisioned callsigns differ
+             * from the derivation and are left alone. */
+            char old[10];
+            derive_x3_base36(old, sizeof old);
+            if (strcmp(s_aprs_call, old) == 0) {
+                derive_x3_callsign(s_aprs_call, sizeof s_aprs_call);
+                nvs_set_str(h, "aprs_call", s_aprs_call);
+                nvs_commit(h);
+                ESP_LOGI(TAG, "callsign migrated %s -> %s (XPRS bech32 alphabet)",
+                         old, s_aprs_call);
+            }
         }
         nvs_close(h);
     }
@@ -1152,7 +1505,10 @@ static void igate_start(void)
  * Debug/control without the app: type into `pio device monitor` / serial.sh.
  *   status                   dump identity, neighbors, routes, parked mail
  *   msg <to> <text...>       air a compact APRS 1:1/group frame from our call
- *   beacon                   air the mesh route beacon now
+ *   xmsg <to> <text...>      air an XPRS t:message from our call (0x41)
+ *   xping <call>             air an XPRS t:ping (0x58)
+ *   xid <wire>               print a packet's derived identifier (XPRS.md §5)
+ *   beacon | xbeacon         air the mesh route / XPRS presence beacon now
  *   ack <6hex>               simulate an overheard ?ACK (purges parked mail)
  */
 static void console_recv_begin(const char *path);
@@ -1161,12 +1517,18 @@ static void console_handle(char *line)
 {
     if (strcmp(line, "status") == 0) {
         printf("callsign=%s mesh=%d neigh=%d routes=%d scf=%d sd=%d "
-               "disc=%lu last_rx=%lus ago\n",
+               "disc=%lu last_rx=%lus ago epoch=%u.%u\n",
                s_aprs_call[0] ? s_aprs_call : "TDONGLE", (int)s_mesh_up,
                blemesh_neighbor_count(), blemesh_route_count(),
                blemesh_scf_count(), (int)sdcard_is_mounted(),
                (unsigned long)s_disc_count,
-               (unsigned long)(now_sec() - s_last_disc));
+               (unsigned long)(now_sec() - s_last_disc),
+               (unsigned)s_boot_epoch, (unsigned)now_sec());
+        char up[16], life[16];
+        xprs_fmt_duration(now_sec(), up, sizeof up);
+        xprs_fmt_duration(s_life_base + now_sec(), life, sizeof life);
+        printf("uptime=%s lifetime=%s (life base %us, saved every %ds)\n",
+               up, life, (unsigned)s_life_base, LIFE_SAVE_SEC);
         if (s_rssi_n) {
             printf("rx rssi: min=%d max=%d avg=-%lu n=%lu\n", s_rssi_min,
                    s_rssi_max, (unsigned long)(s_rssi_sum / s_rssi_n),
@@ -1208,10 +1570,10 @@ static void console_handle(char *line)
         printf("scf %d/%d\n", n, BLEMESH_SCF_MAX);
         for (int i = 0; i < n; i++) {
             const char *tg = "", *am = "";
-            int ln = 0; uint32_t age = 0;
-            if (blemesh_scf_at(i, &tg, &am, &ln, &age, now_sec()))
-                printf("  [%d] for=%-9s am=%-6s %dB age=%us\n", i, tg,
-                       am[0] ? am : "-", ln, (unsigned)age);
+            int ln = 0; uint32_t age = 0; uint8_t urg = 0;
+            if (blemesh_scf_at(i, &tg, &am, &ln, &age, now_sec(), &urg))
+                printf("  [%d] for=%-9s id=%-6s %dB age=%us urg=%d\n", i, tg,
+                       am[0] ? am : "-", ln, (unsigned)age, urg);
         }
         return;
     }
@@ -1221,6 +1583,39 @@ static void console_handle(char *line)
         return;
     }
     if (strcmp(line, "beacon") == 0) { mesh_beacon_air(); printf("beacon aired\n"); return; }
+    if (strcmp(line, "xbeacon") == 0) { xprs_beacon_air(); printf("xprs beacon aired\n"); return; }
+    if (strncmp(line, "xping ", 6) == 0) {
+        char tf[32], wire[XPRS_MAX_WIRE + 1];
+        xprs_time_field(tf, sizeof tf);
+        int n = snprintf(wire, sizeof wire, "t:ping f:%s d:%s %s",
+                         s_aprs_call[0] ? s_aprs_call : "TDONGLE", line + 6, tf);
+        if (n <= 0 || n >= (int)sizeof wire) { printf("too long\n"); return; }
+        xprs_air(wire, n, SUBTYPE_XPRS);        /* remembers own id (echo guard) */
+        printf("queued: %s\n", wire);
+        return;
+    }
+    if (strncmp(line, "xmsg ", 5) == 0) {
+        char *to = line + 5;
+        char *sp = strchr(to, ' ');
+        if (!sp) { printf("usage: xmsg <to> <text>\n"); return; }
+        *sp = 0;
+        char tf[32], wire[XPRS_MAX_WIRE + 1];
+        xprs_time_field(tf, sizeof tf);
+        int n = snprintf(wire, sizeof wire, "t:message f:%s d:%s %s m:%s",
+                         s_aprs_call[0] ? s_aprs_call : "TDONGLE", to, tf, sp + 1);
+        if (n <= 0 || n >= (int)sizeof wire) { printf("too long\n"); return; }
+        xprs_air(wire, n, SUBTYPE_APRS);        /* messages ride 0x41 */
+        printf("queued %dB to %s\n", n, to);
+        return;
+    }
+    if (strncmp(line, "xid ", 4) == 0) {
+        char id[XPRS_ID_LEN];
+        if (xprs_id_of(line + 4, (int)strlen(line + 4), id))
+            printf("id=%s\n", id);
+        else
+            printf("not an XPRS packet\n");
+        return;
+    }
     if (strncmp(line, "ack ", 4) == 0) {
         printf("purged %d\n", blemesh_scf_ack(line + 4));
         return;
@@ -1255,7 +1650,8 @@ static void console_handle(char *line)
         console_recv_begin(line + 5);
         return;
     }
-    printf("commands: status | msg <to> <text> | beacon | ack <am> | "
+    printf("commands: status | msg <to> <text> | xmsg <to> <text> | "
+           "xping <call> | xid <wire> | beacon | xbeacon | ack <am> | "
            "sendfile <to> <path> | transfers\n");
 }
 
@@ -1333,6 +1729,23 @@ void app_main(void)
         return;
     }
     identity_init();
+
+    /* Boot epoch counter (XPRS.md §10.7): a clockless station dates its
+     * packets epoch:<boots>.<uptime-seconds>; a receiver holding a clock
+     * anchors the epoch when it first hears it. */
+    {
+        nvs_handle_t h;
+        if (nvs_open("rns", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_get_u32(h, "bootcnt", &s_boot_epoch);   /* absent -> stays 0 */
+            s_boot_epoch++;
+            nvs_set_u32(h, "bootcnt", s_boot_epoch);
+            nvs_get_u32(h, "lifesec", &s_life_base);    /* absent -> stays 0 */
+            nvs_commit(h);
+            nvs_close(h);
+        } else {
+            s_boot_epoch = 1;
+        }
+    }
 
     /* Start the dashboard UI task (owns all LVGL calls). */
     s_ui_q = xQueueCreate(12, sizeof(ui_msg_t));

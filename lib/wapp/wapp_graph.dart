@@ -1090,9 +1090,11 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     final m = n.meta;
     final kindName = n.effectiveKind == 'self'
         ? 'This node'
-        : n.effectiveKind == 'hub'
-            ? 'Hub / transport node'
-            : 'Peer';
+        : n.kind == 'xprs'
+            ? 'XPRS station · heard over the air'
+            : n.effectiveKind == 'hub'
+                ? 'Hub / transport node'
+                : 'Peer';
     final pubkey = (m['pubkey'] ?? '').toString();
     final canMessage = n.kind != 'self' && n.dm.isNotEmpty && pubkey.isNotEmpty;
     // Mail is keyed by the person, not the device: their npub when the announce
@@ -1243,6 +1245,23 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         _kv('Capabilities', (m['caps'] as List).join(', ')),
       if (n.kind != 'self') _kv('Hops', '${n.hops}'),
       if (n.via.isNotEmpty) _kv('Via', n.via),
+      // The XPRS beacon's own account of the station (docs/XPRS.md §10.5-10.6):
+      // where it was heard, how loud, how long it has run and what it carries.
+      if (n.kind == 'xprs') ...[
+        if ((m['bearer'] ?? '').toString().isNotEmpty)
+          _kv('Heard over', m['bearer'].toString().toUpperCase()),
+        if ((m['rssi'] as num?)?.toInt() != null &&
+            (m['rssi'] as num).toInt() != 0)
+          _kv('Signal', '${(m['rssi'] as num).toInt()} dBm'),
+        if ((m['uptime'] ?? '').toString().isNotEmpty)
+          _kv('Uptime', m['uptime'].toString()),
+        if ((m['lifetime'] ?? '').toString().isNotEmpty)
+          _kv('Lifetime', m['lifetime'].toString()),
+        if ((m['mail'] as num?) != null && (m['mail'] as num).toInt() > 0)
+          _kv('Mail held', '${(m['mail'] as num).toInt()}'),
+        if ((m['packets'] as num?) != null)
+          _kv('Packets heard', '${(m['packets'] as num).toInt()}'),
+      ],
       if (n.effectiveKind == 'hub' && n.members > 0)
         _kv('Peers heard', '≈ ${n.members} (sample)'),
       if (m['firstSeen'] != null) _kv('First seen', _ago(m['firstSeen'])),

@@ -6,9 +6,10 @@
  * so an SD card mounted on VFS works) and reloads on boot — a powered dongle
  * survives reboots without losing parked mail.
  *
- * File format: [u8 ver=1] then per entry
- *   [u8 target_len][target][u8 am_len][am][u32 ts][u16 frame_len][frame]
- * Rewritten whole on every mutation (small: <= 24 entries * ~260 B).
+ * File format: [u8 ver=2] then per entry
+ *   [u8 target_len][target][u8 am_len][am][u32 ts][u8 urg][u16 frame_len][frame]
+ * (ver 1 lacked the urg byte; the loader reads both.) Rewritten whole on
+ * every mutation (small: <= 24 entries * ~260 B).
  */
 #include "blemesh.h"
 
@@ -25,6 +26,7 @@ typedef struct {
     uint32_t last_reair;    /* 0 = never re-aired */
     uint32_t last_custody;  /* 0 = never handed over MSP (rate limit) */
     uint32_t chash;         /* content dedup when no am id */
+    uint8_t  urg;           /* BLEMESH_URG_* — eviction order under pressure */
 } scf_t;
 
 static scf_t s_scf[BLEMESH_SCF_MAX];
@@ -43,7 +45,7 @@ static void persist(void)
     if (!s_path[0]) return;
     FILE *f = fopen(s_path, "wb");
     if (!f) return;
-    uint8_t ver = 1;
+    uint8_t ver = 2;
     fwrite(&ver, 1, 1, f);
     for (int i = 0; i < s_scf_n; i++) {
         scf_t *e = &s_scf[i];
@@ -51,6 +53,7 @@ static void persist(void)
         fwrite(&tl, 1, 1, f); fwrite(e->target, 1, tl, f);
         fwrite(&al, 1, 1, f); fwrite(e->am, 1, al, f);
         fwrite(&e->ts, 4, 1, f);
+        fwrite(&e->urg, 1, 1, f);
         uint16_t ln = e->len;
         fwrite(&ln, 2, 1, f);
         fwrite(e->frame, 1, ln, f);
@@ -64,16 +67,19 @@ static void load(void)
     FILE *f = fopen(s_path, "rb");
     if (!f) return;
     uint8_t ver = 0;
-    if (fread(&ver, 1, 1, f) != 1 || ver != 1) { fclose(f); return; }
+    if (fread(&ver, 1, 1, f) != 1 || (ver != 1 && ver != 2)) { fclose(f); return; }
     while (s_scf_n < BLEMESH_SCF_MAX) {
         scf_t *e = &s_scf[s_scf_n];
         memset(e, 0, sizeof(*e));
+        e->urg = BLEMESH_URG_NORMAL;
         uint8_t tl, al; uint16_t ln;
         if (fread(&tl, 1, 1, f) != 1 || tl > BLEMESH_CALLSIGN_MAX) break;
         if (fread(e->target, 1, tl, f) != tl) break;
         if (fread(&al, 1, 1, f) != 1 || al > 7) break;
         if (fread(e->am, 1, al, f) != al) break;
         if (fread(&e->ts, 4, 1, f) != 1) break;
+        if (ver >= 2 && fread(&e->urg, 1, 1, f) != 1) break;
+        if (e->urg > BLEMESH_URG_URGENT) e->urg = BLEMESH_URG_NORMAL;
         if (fread(&ln, 2, 1, f) != 1 || ln > BLEMESH_SCF_FRAME_MAX) break;
         if (fread(e->frame, 1, ln, f) != ln) break;
         e->len = ln;
@@ -97,10 +103,12 @@ void blemesh_scf_init(const char *persist_path)
 }
 
 bool blemesh_scf_offer(const char *target, const char *am,
-                       const uint8_t *frame, int len, uint32_t now)
+                       const uint8_t *frame, int len, uint32_t now,
+                       uint8_t urg)
 {
     if (!target || !target[0] || len <= 0 || len > BLEMESH_SCF_FRAME_MAX)
         return false;
+    if (urg > BLEMESH_URG_URGENT) urg = BLEMESH_URG_NORMAL;
     uint32_t ch = fnv1a(frame, len);
     for (int i = 0; i < s_scf_n; i++) {
         if (am && am[0] && strcmp(s_scf[i].am, am) == 0) return false;
@@ -109,9 +117,14 @@ bool blemesh_scf_offer(const char *target, const char *am,
     int slot;
     if (s_scf_n < BLEMESH_SCF_MAX) slot = s_scf_n++;
     else {
-        slot = 0;                     /* evict oldest */
+        /* Evict lowest urgency first, oldest within a level — the phone's
+         * `ORDER BY urg, ts` (docs/store-and-forward.md §4), so a street
+         * marking everything urgent cannot push higher-valued mail out. */
+        slot = 0;
         for (int i = 1; i < s_scf_n; i++)
-            if (s_scf[i].ts < s_scf[slot].ts) slot = i;
+            if (s_scf[i].urg < s_scf[slot].urg ||
+                (s_scf[i].urg == s_scf[slot].urg &&
+                 s_scf[i].ts < s_scf[slot].ts)) slot = i;
     }
     scf_t *e = &s_scf[slot];
     memset(e, 0, sizeof(*e));
@@ -121,12 +134,13 @@ bool blemesh_scf_offer(const char *target, const char *am,
     e->len = (uint16_t)len;
     e->ts = now;
     e->chash = ch;
+    e->urg = urg;
     persist();
     return true;
 }
 
 bool blemesh_scf_at(int i, const char **target, const char **am,
-                    int *len, uint32_t *age_sec, uint32_t now)
+                    int *len, uint32_t *age_sec, uint32_t now, uint8_t *urg)
 {
     if (i < 0 || i >= s_scf_n) return false;
     scf_t *e = &s_scf[i];
@@ -134,6 +148,7 @@ bool blemesh_scf_at(int i, const char **target, const char **am,
     if (am) *am = e->am;
     if (len) *len = e->len;
     if (age_sec) *age_sec = (now >= e->ts) ? now - e->ts : 0;
+    if (urg) *urg = e->urg;
     return true;
 }
 

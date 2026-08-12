@@ -128,16 +128,31 @@ bool blemesh_route_via(const char *target, char via[BLEMESH_CALLSIGN_MAX + 1]);
 #define BLEMESH_SCF_FRAME_MAX  252   /* one extended-advert AD payload */
 #define BLEMESH_SCF_TTL_SEC    (7 * 24 * 3600)  /* 7 days (docs/mesh.md §6) */
 
+/* Urgency of a parked frame (XPRS urg:, docs/XPRS.md §13.5) — the eviction
+ * order when the store is full: lowest level first, oldest within a level
+ * (the phone's `ORDER BY urg, ts`). Values match XPRS_URG_* in geogram_xprs. */
+enum {
+    BLEMESH_URG_LOW    = 0,
+    BLEMESH_URG_NORMAL = 1,
+    BLEMESH_URG_HIGH   = 2,
+    BLEMESH_URG_URGENT = 3,
+};
+
 /* Initialize; [persist_path] (e.g. "/sdcard/mesh/pending.bin") may be NULL for
  * RAM-only. Loads any persisted entries. */
 void blemesh_scf_init(const char *persist_path);
 
 /* Offer a heard 1:1 frame for custody. [target] the addressee callsign, [am]
- * the 6-hex receipt id ("" = none, keyed by content hash instead), [frame] the
- * RAW subtype-0x41 payload (from\x1Fto\x1Ftext) to re-air verbatim.
+ * the 6-hex id ("" = none, keyed by content hash instead) — the legacy am:
+ * receipt token for a compact frame, the DERIVED identifier (XPRS.md §5) for
+ * an XPRS one; both are six hex, which is why the store never changed. [frame]
+ * is the RAW subtype-0x41 payload to re-air verbatim (from\x1Fto\x1Ftext, or
+ * XPRS `t:message ...` text). [urg] is BLEMESH_URG_* — the caller applies the
+ * admission cap (a stranger's mail never above HIGH) before offering.
  * Dedups by am/content. Returns true if newly parked. */
 bool blemesh_scf_offer(const char *target, const char *am,
-                       const uint8_t *frame, int len, uint32_t now);
+                       const uint8_t *frame, int len, uint32_t now,
+                       uint8_t urg);
 
 /* An "?ACK <am> ..." receipt was overheard — the target has the message;
  * drop every parked copy carrying that am. Returns entries purged. */
@@ -161,7 +176,7 @@ int blemesh_scf_count(void);
  * show custody once the store runs at capacity (it evicts the oldest and the
  * number stops moving). [i] < blemesh_scf_count(). */
 bool blemesh_scf_at(int i, const char **target, const char **am,
-                    int *len, uint32_t *age_sec, uint32_t now);
+                    int *len, uint32_t *age_sec, uint32_t now, uint8_t *urg);
 /* Drop everything held. For starting a test from a known-empty store. */
 void blemesh_scf_clear(void);
 

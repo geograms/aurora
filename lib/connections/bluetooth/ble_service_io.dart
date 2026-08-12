@@ -304,8 +304,13 @@ class BleService {
     // we hold none, so the NEXT message goes direct instead of being parked for
     // store-and-carry. The transport's per-destination backoff makes this one
     // question, not a storm (RnsTransport.requestPath).
-    MeshService.instance.onPeerAddress = (destHex) {
+    MeshService.instance.onPeerAddress = (destHex, callsign) {
       RnsService.instance.requestPathIfUnknown(destHex);
+      // The beacon named its own sender, so this destination has a callsign
+      // whether or not its announce ever carried one. Record it, else the
+      // messaging directory serves a nameless row and the chat rail shows the
+      // first bytes of the hash instead of the station.
+      RnsService.instance.noteLxmfCallsign(destHex, callsign);
     };
     // …and what we publish in our own beacon, so a neighbour can address us.
     MeshService.instance.ourLxmfDest = () => RnsService.instance.lxmfDeliveryHex;

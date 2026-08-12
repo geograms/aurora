@@ -1050,7 +1050,11 @@ class RnsService {
       if (dest.isEmpty) continue;
       destOk++;
       final name = n.lxmfName ?? '';
-      final call = n.callsign ?? '';
+      // An announce carries no callsign; a beacon does. Prefer what the peer
+      // announced, fall back to what it beaconed, so a station met only over
+      // Bluetooth still shows as a callsign rather than hex.
+      var call = n.callsign ?? '';
+      if (call.isEmpty) call = _lxmfCallsign[dest] ?? '';
       if (q.isNotEmpty) {
         final hay = '$name $call ${n.identityHex} $dest'.toLowerCase();
         if (!hay.contains(q)) continue;
@@ -1953,6 +1957,31 @@ class RnsService {
   /// graph snapshot calls this per node per render.
   final Map<String, String> _lxmfDestCache = {};
   String _lastDirectoryTally = '';
+
+  /// Callsign for an LXMF delivery destination, learned from an XPRS beacon.
+  ///
+  /// A beacon states its sender's callsign AND its `lx:` destination in the
+  /// same frame, so the pairing costs nothing and cannot be wrong. An announce
+  /// carries no callsign of its own, which is why a peer met over Bluetooth was
+  /// listed by the first bytes of its hash while the very frames that named it
+  /// went by. Bounded: a street's worth of stations, oldest evicted.
+  final Map<String, String> _lxmfCallsign = {};
+  static const int _maxLxmfCallsigns = 256;
+
+  void noteLxmfCallsign(String destHex, String callsign) {
+    final d = destHex.trim().toLowerCase();
+    final c = callsign.trim().toUpperCase();
+    if (d.length != 32 || c.isEmpty) return;
+    if (_lxmfCallsign[d] == c) return;
+    if (_lxmfCallsign.length >= _maxLxmfCallsigns) {
+      _lxmfCallsign.remove(_lxmfCallsign.keys.first);
+    }
+    _lxmfCallsign[d] = c;
+  }
+
+  /// The callsign known for an LXMF delivery destination, or '' if none.
+  String callsignForLxmfDest(String destHex) =>
+      _lxmfCallsign[destHex.trim().toLowerCase()] ?? '';
   String _lxmfDestHexForPub(String pubkeyHex) {
     final hit = _lxmfDestCache[pubkeyHex];
     if (hit != null) return hit;

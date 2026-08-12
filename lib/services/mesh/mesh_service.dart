@@ -262,13 +262,19 @@ class MeshService {
     // backoff, which turns this into a single question rather than a storm. The
     // peer answers with its announce and the next message goes direct instead of
     // being parked for store-and-carry.
+    // The beacon states BOTH who is speaking and where to write to them, so it
+    // is the one place that pairing is free and authoritative. Pass the callsign
+    // along with the address: without it the host knows an LXMF destination it
+    // cannot name, and every UI built on the directory falls back to showing
+    // raw hex where a callsign belongs.
     final lx = p['lx'];
-    if (lx != null && lx.length == 32) onPeerAddress?.call(lx);
+    if (lx != null && lx.length == 32) onPeerAddress?.call(lx, from);
   }
 
   /// A neighbour published its LXMF delivery address in a beacon and we hold no
-  /// path to it. The owner turns this into a (throttled) path request.
-  void Function(String destHex)? onPeerAddress;
+  /// path to it. The owner turns this into a (throttled) path request, and
+  /// records [callsign] as the name for [destHex].
+  void Function(String destHex, String callsign)? onPeerAddress;
 
   /// This station's own LXMF delivery destination, for the beacon's `lx:`.
   /// Supplied by the owner — the mesh does not reach into Reticulum itself

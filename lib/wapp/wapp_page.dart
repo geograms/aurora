@@ -3436,17 +3436,13 @@ class _WappPageState extends State<WappPage>
         _sendCommand('conversations_block');
       },
     );
-    // "Held for relay" used to be invisible: a message parked in the outbound
-    // mailbox looked exactly like a delivered one. Say it, above the thread it
-    // belongs to, and say that we keep trying.
-    final openDest = (openId != null && openId.startsWith('lxmf:'))
-        ? openId.substring(5)
-        : '';
-    if (openDest.isEmpty) return roomsField;
-    return Column(children: [
-      _LxmfPendingStrip(destHex: openDest),
-      Expanded(child: roomsField),
-    ]);
+    // A message still on its way says so where it happened — on its own bubble,
+    // by having no tick yet (chat_view_field's _statusBadge: nothing while
+    // pending, one tick delivered, two read). A banner across the top of the
+    // thread said the same thing in a worse place: it covered the conversation,
+    // it spoke for the whole thread rather than for the message just sent, and
+    // it stayed up while the user read older messages that had long arrived.
+    return roomsField;
   }
 
   Widget _buildConversationsScreen(GeoUiBlock screen, GeoUiBlock group) {
@@ -11293,52 +11289,3 @@ class _ForwardPanelState extends State<_ForwardPanel> {
 /// A one-line "waiting to deliver" banner for an open LXMF thread. Rebuilds
 /// itself off RnsService's LXMF listener, so it disappears the moment a retry
 /// gets through.
-class _LxmfPendingStrip extends StatefulWidget {
-  final String destHex;
-  const _LxmfPendingStrip({required this.destHex});
-
-  @override
-  State<_LxmfPendingStrip> createState() => _LxmfPendingStripState();
-}
-
-class _LxmfPendingStripState extends State<_LxmfPendingStrip> {
-  @override
-  void initState() {
-    super.initState();
-    RnsService.instance.addLxmfListener(_refresh);
-  }
-
-  @override
-  void dispose() {
-    RnsService.instance.removeLxmfListener(_refresh);
-    super.dispose();
-  }
-
-  void _refresh() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final n = RnsService.instance.lxmfPendingFor(widget.destHex);
-    if (n == 0) return const SizedBox.shrink();
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      color: cs.tertiaryContainer.withValues(alpha: 0.45),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-      child: Row(children: [
-        const Icon(Icons.schedule, size: 15),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            n == 1
-                ? 'Waiting to deliver — still trying'
-                : 'Waiting to deliver $n messages — still trying',
-            style: const TextStyle(fontSize: 12.5),
-          ),
-        ),
-      ]),
-    );
-  }
-}

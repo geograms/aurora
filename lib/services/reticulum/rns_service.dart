@@ -772,6 +772,22 @@ class RnsService {
     return true;
   }
 
+  /// Ask for a path to [destHex] only when we hold none.
+  ///
+  /// Fed by the XPRS beacon's `lx:` field: a neighbour we can hear but cannot
+  /// address. Already-known destinations cost nothing here, and the transport's
+  /// per-destination backoff bounds the rest.
+  bool requestPathIfUnknown(String destHex) {
+    final t = _transport;
+    final bytes = _hexToBytes(destHex);
+    if (t == null || bytes == null || bytes.length != kRnsDestHashBytes) {
+      return false;
+    }
+    if (t.hasPath(bytes)) return false;
+    t.requestPath(bytes);
+    return true;
+  }
+
   /// Whether we currently hold a path to [destHex] (32-hex destination hash).
   bool hasPathTo(String destHex) {
     final t = _transport;

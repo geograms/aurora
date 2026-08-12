@@ -196,6 +196,11 @@ class MeshCustodyCounters {
   static int sessionsClean = 0;
   static int sessionsAbrupt = 0;
 
+  /// Sessions that died before the peer said who it was — a dial that cost a
+  /// link and returned nothing. Watch this against `sessionsClean`: churn shows
+  /// up as this number climbing while custody counters stay flat.
+  static int sessionsPreHello = 0;
+
   static Map<String, dynamic> toJson() => {
         'custodyIn': custodyIn,
         'custodyOut': custodyOut,
@@ -205,6 +210,7 @@ class MeshCustodyCounters {
         'courier': MeshCourierCounters.json(),
         'sessionsClean': sessionsClean,
         'sessionsAbrupt': sessionsAbrupt,
+        'sessionsPreHello': sessionsPreHello,
       };
 }
 
@@ -367,6 +373,12 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
       MeshCustodyCounters.sessionsClean++;
     } else {
       MeshCustodyCounters.sessionsAbrupt++;
+      // A close BEFORE hello is a dial that bought nothing: the link came up,
+      // the peer never identified, and the radio was held for the attempt. It
+      // is counted apart from an abrupt close mid-session because the two have
+      // different causes and only this one is pure waste. Measure before
+      // changing the dial policy — docs/performance.md section 4.
+      if (peer.isEmpty) MeshCustodyCounters.sessionsPreHello++;
     }
     _log('session with ${peer.isEmpty ? "(pre-hello)" : peer} closed '
         '${clean ? "cleanly" : "abruptly"}');

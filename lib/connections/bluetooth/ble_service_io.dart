@@ -300,6 +300,15 @@ class BleService {
     hooks.dialable = meshDialable;
     // Beacon sightings feed the dial registry too (the extended beacon lands
     // at fringe RSSI where the legacy presence advert is missed).
+    // A beacon that published where to write to its sender: ask for a path when
+    // we hold none, so the NEXT message goes direct instead of being parked for
+    // store-and-carry. The transport's per-destination backoff makes this one
+    // question, not a storm (RnsTransport.requestPath).
+    MeshService.instance.onPeerAddress = (destHex) {
+      RnsService.instance.requestPathIfUnknown(destHex);
+    };
+    // …and what we publish in our own beacon, so a neighbour can address us.
+    MeshService.instance.ourLxmfDest = () => RnsService.instance.lxmfDeliveryHex;
     MeshService.instance.onPeerSighting = (callsign, addr) {
       final cs = callsign.toUpperCase();
       final my = (ProfileService.instance.activeProfile?.callsign ?? '')

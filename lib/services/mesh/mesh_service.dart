@@ -254,7 +254,26 @@ class MeshService {
     // The sender is by definition directly heard, so this is a sighting like
     // any other: it registers the address for dialling.
     onPeerSighting?.call(from, f.addr);
+
+    // `lx:` says where to write to this station (section 10.6). Hearing it is
+    // not the same as being able to address it: that needs a Reticulum path,
+    // which carries the peer's key and comes from an announce. So when we hold
+    // no path, ask for one — ONCE, through the transport's per-destination
+    // backoff, which turns this into a single question rather than a storm. The
+    // peer answers with its announce and the next message goes direct instead of
+    // being parked for store-and-carry.
+    final lx = p['lx'];
+    if (lx != null && lx.length == 32) onPeerAddress?.call(lx);
   }
+
+  /// A neighbour published its LXMF delivery address in a beacon and we hold no
+  /// path to it. The owner turns this into a (throttled) path request.
+  void Function(String destHex)? onPeerAddress;
+
+  /// This station's own LXMF delivery destination, for the beacon's `lx:`.
+  /// Supplied by the owner — the mesh does not reach into Reticulum itself
+  /// (docs/architecture.md: the transports own their own layer).
+  String? Function()? ourLxmfDest;
 
   int _xprsBeaconsHeard = 0;
 
@@ -370,6 +389,22 @@ class MeshService {
     // always 0 is not worth transmitting.
     final held = MeshStore.instance.ready ? MeshStore.instance.pendingCount() : 0;
     if (held > 0) envelope = envelope.with_('mail', '$held');
+
+    // `lx:` — WHERE TO WRITE TO US: this station's LXMF delivery destination.
+    //
+    // Knowing a callsign is on the air is not enough to address it. That needs a
+    // Reticulum path, which is learned from an ANNOUNCE, and announces were
+    // losing the advert channel to traffic: measured between two phones with no
+    // internet, one heard its neighbour's beacon every few seconds and its
+    // announce once in five minutes, so `/api/rns/route` for that peer stayed
+    // null and every message fell back to store-and-carry.
+    //
+    // The beacon already says who is here; this says where to write. A hearer
+    // that holds no path asks for one (a single throttled path request), and the
+    // peer answers with the announce that carries its key. 36 bytes on a
+    // 76-byte beacon, well inside the smallest measured advert ceiling (184).
+    final lx = ourLxmfDest?.call();
+    if (lx != null && lx.length == 32) envelope = envelope.with_('lx', lx);
 
     // Most relevant first, and this station's idea of relevant (section
     // 10.6.3): a powered, stationary relay outranks a passing phone that

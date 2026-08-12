@@ -71,6 +71,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         // cycle a few frames within a message's TTL.
         private const val ROTATE_MS = 1200L
 
+        // One presence frame (beacon / announce) for every this-many traffic
+        // slots. 4 keeps a handshake brisk while guaranteeing presence roughly
+        // every 5 seconds even when traffic never stops.
+        private const val PRESENCE_EVERY = 4
+
         // ── Transmit duty cycle ──────────────────────────────────────────────
         //
         // This radio is NOT full duplex. It time-shares one antenna, so every
@@ -83,8 +88,8 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         // So the beacon airs in a short window and the rest of the minute is
         // listening. Peers that want to move bytes upgrade to a GATT link, which
         // is acknowledged and does not depend on catching an advert.
-        private const val ADV_WINDOW_MS = 5_000L
-        private const val ADV_PERIOD_MS = 60_000L
+        private const val ADV_WINDOW_MS = 10_000L
+        private const val ADV_PERIOD_MS = 30_000L
 
         // enableAdvertising takes its duration in 10 ms units.
         private const val ADV_WINDOW_UNITS = (ADV_WINDOW_MS / 10).toInt()
@@ -161,6 +166,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // point that touches this map is dispatched there.
     private val frames = LinkedHashMap<String, Frame>()
     private var rotateIdx = 0
+    private var rotateN = 0
     private var rotating = false
     private var lastHex: String? = null // last data put on air (skip redundant sets)
 
@@ -340,8 +346,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         val now = System.currentTimeMillis()
         frames[key] = Frame(mfg, now + ttlMs, prio)
         ensureRotating()
+        ensureAdvWindow()
         // Air immediately so a just-sent message doesn't wait a full rotation.
         rotateTick()
+        // Somebody just asked for this to go out: open the window now rather
+        // than at the top of the next period. Still bounded, so the duty holds.
+        if (!advWindowOpen) openAdvWindow()
         return true
     }
 
@@ -419,12 +429,25 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             stopAdvertise()
             return
         }
-        // Traffic first, in its own round-robin; presence only when no traffic
-        // is waiting. With every frame in one queue a three-packet handshake
-        // was aired a rotation apart with announces in between, and the link
-        // timed out before it completed.
+        // Traffic first — but never to the exclusion of presence.
+        //
+        // Traffic used to take the channel outright whenever any prio frame was
+        // registered, so on a node with a link handshake in flight (8s TTL each,
+        // and there is nearly always one) presence NEVER aired. Measured between
+        // two phones with no internet: the peer heard 19 announces from the
+        // ESP32 and ONE from the phone next to it, so no Reticulum path to that
+        // phone ever formed and every chat message fell back to store-and-carry.
+        // A handshake that completes to a peer nobody can address is not a win.
+        //
+        // So presence gets a guaranteed share: one presence frame every
+        // PRESENCE_EVERY traffic frames. Traffic still dominates — a three-packet
+        // handshake still completes inside a couple of rotations — but "I am
+        // here, and here is where to write to me" keeps reaching the air.
         val prioKeys = frames.filterValues { it.prio }.keys.toList()
-        val keys = if (prioKeys.isNotEmpty()) prioKeys else frames.keys.toList()
+        val presenceKeys = frames.filterValues { !it.prio }.keys.toList()
+        val usePresence = prioKeys.isEmpty() ||
+            (presenceKeys.isNotEmpty() && (++rotateN % PRESENCE_EVERY == 0))
+        val keys = if (usePresence) presenceKeys else prioKeys
         if (keys.isEmpty()) return
         if (rotateIdx >= keys.size) rotateIdx = 0
         val frame = frames[keys[rotateIdx]] ?: return
@@ -488,18 +511,23 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
                     advertisingSet = set
                     advOnAir = true
                     advLastError = null
-                    // The set comes up advertising and STAYS on air.
+                    // The set comes up advertising, and the window governs it.
                     //
-                    // A 5s-per-minute transmit window was tried here and is the
-                    // right idea — this radio is half duplex and cannot hear
-                    // while it talks. It is reverted for now because it stopped
-                    // the beacon being heard at all: the peer counted zero XPRS
-                    // beacons in two minutes, where it had been counting them
-                    // steadily. Duty cycling has to be introduced together with
-                    // the scan side (the peer must be listening across the whole
-                    // window, and the window has to be long enough to survive a
-                    // duty-cycled scanner), not on the transmit side alone.
+                    // The radio is half duplex: time spent talking is time deaf.
+                    // A first attempt at 5s-per-minute silenced this device
+                    // entirely — the peer counted ZERO beacons in two minutes —
+                    // because presence was also losing the rotation to traffic,
+                    // so the few slots inside the window carried handshakes and
+                    // never a beacon. With presence now guaranteed a share
+                    // (PRESENCE_EVERY), the window has something to carry.
+                    //
+                    // It is deliberately gentler than 5s/60s to start: a third of
+                    // the time on air, which still hands two thirds of the radio
+                    // back to listening. Tighten it once the peer's beacon-arrival
+                    // rate is measured across a change (docs/ble5.md section 6).
+                    try { set.enableAdvertising(true, ADV_WINDOW_UNITS, 0) } catch (_: Exception) {}
                     advWindowOpen = true
+                    ensureAdvWindow()
                 } else {
                     lastHex = null
                     advOnAir = false

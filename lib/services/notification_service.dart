@@ -118,6 +118,13 @@ class SystemTrayNotificationBackend implements NotificationBackend {
 
   @override
   Future<void> show(GeogramNotification n) async {
+    // Not while the user is looking at the app. A system heads-up drops a bar
+    // over the top of whatever they are reading — including the very chat the
+    // notification is about — and the in-app card (bottom of the screen, and
+    // tappable) already tells them. The tray is for when they are elsewhere.
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      return;
+    }
     // Native OS routing (notify-send / osascript) lives in the
     // platform abstraction so this file stays dart:io-free and the
     // web build can compile it. On web the call is a no-op; the

@@ -385,28 +385,36 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
-  /// Delivery/read ticks on our own 1:1 messages (WhatsApp-style): sent (✓),
-  /// delivered (✓✓ grey), read (✓✓ blue). The wapp only sets `status` on
-  /// outgoing 1:1 messages, so groups/geochat/Activity never show it.
+  /// Delivery ticks on our own 1:1 messages, the way a phone messenger does it:
+  /// **nothing** while it is still on its way, ✓ once it reached the other
+  /// device, ✓✓ once it was read.
+  ///
+  /// Nothing-means-pending is the important half. There is no server here to
+  /// take custody, so a message can genuinely sit undelivered for a long time
+  /// (the peer is out of range, and section 13.7.2 of docs/XPRS.md deliberately
+  /// stops re-airing at it) — and an optimistic tick on a message nobody has
+  /// received would be a lie the user acts on.
+  ///
+  /// The wapp only sets `status` on outgoing 1:1 messages, so groups, geochat
+  /// and Activity never show a tick.
   Widget _statusBadge(Map<String, dynamic> m) {
     final s = (m['status'] ?? '').toString();
-    if (s.isEmpty) return const SizedBox.shrink();
     final IconData icon;
     final Color color;
     switch (s) {
       case 'read':
+        // The bubble under it is already the accent blue, so read is the solid
+        // white double-tick and delivered is the dimmed single one.
         icon = Icons.done_all;
-        // The bubble under it is already the accent blue, so read is a solid
-        // white double-tick and delivered/sent are the dimmed one.
         color = Colors.white;
         break;
       case 'delivered':
-        icon = Icons.done_all;
-        color = Colors.white.withAlpha(190); // dimmed = delivered
-        break;
-      default: // sent
         icon = Icons.done;
         color = Colors.white.withAlpha(190);
+        break;
+      default:
+        // Pending, or a state we do not render: show nothing at all.
+        return const SizedBox.shrink();
     }
     return Padding(
       padding: const EdgeInsets.only(left: 6),

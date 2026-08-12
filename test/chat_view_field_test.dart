@@ -202,4 +202,40 @@ void main() {
     // And the field is empty and ready, so the next message needs no click.
     expect(tester.widget<TextField>(field).controller!.text, '');
   });
+
+  // A phone messenger shows nothing until the message is somewhere. There is no
+  // server here to take custody, so "pending" is a real and sometimes long
+  // state — a tick on a message nobody has received is a lie the user acts on.
+  group('delivery ticks', () {
+    testWidgets('an unacknowledged message shows no tick at all',
+        (tester) async {
+      await pump(tester, [msg('on my way', dir: 'out', mid: 'aa11')]);
+      expect(find.byIcon(Icons.done), findsNothing);
+      expect(find.byIcon(Icons.done_all), findsNothing);
+    });
+
+    testWidgets('reaching the other device is a single tick', (tester) async {
+      await pump(tester, [
+        {...msg('on my way', dir: 'out', mid: 'aa11'), 'status': 'delivered'}
+      ]);
+      expect(find.byIcon(Icons.done), findsOneWidget);
+      expect(find.byIcon(Icons.done_all), findsNothing);
+    });
+
+    testWidgets('being read is a double tick', (tester) async {
+      await pump(tester, [
+        {...msg('on my way', dir: 'out', mid: 'aa11'), 'status': 'read'}
+      ]);
+      expect(find.byIcon(Icons.done_all), findsOneWidget);
+      expect(find.byIcon(Icons.done), findsNothing);
+    });
+
+    testWidgets('their messages never carry our ticks', (tester) async {
+      await pump(tester, [
+        {...msg('hello', mid: 'bb22'), 'status': 'read'}
+      ]);
+      expect(find.byIcon(Icons.done), findsNothing);
+      expect(find.byIcon(Icons.done_all), findsNothing);
+    });
+  });
 }

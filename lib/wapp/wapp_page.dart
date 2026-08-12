@@ -5683,6 +5683,18 @@ class _WappPageState extends State<WappPage>
               (c.name ?? '').isNotEmpty,
         )
         .toList();
+    // Same reasoning as the stats strip above, for a SETTING that belongs to
+    // the list under it — "carry mail for other stations" over the list of
+    // what is being carried. Without this the people body swallows it and the
+    // screen offers no way to change the thing it is describing.
+    final switchFields = screen.children
+        .where(
+          (c) =>
+              c.keyword == 'field' &&
+              c.type == 'bool' &&
+              (c.name ?? '').isNotEmpty,
+        )
+        .toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -5703,6 +5715,25 @@ class _WappPageState extends State<WappPage>
                 },
               ),
             ),
+        for (final f in switchFields)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
+            child: SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              value: _fieldValues[f.name!] == true,
+              title: Text(f.getString('label') ?? f.name!),
+              subtitle: (f.getString('tip') ?? '').isEmpty
+                  ? null
+                  : Text(f.getString('tip')!,
+                      style: Theme.of(context).textTheme.bodySmall),
+              onChanged: (v) {
+                setState(() => _fieldValues[f.name!] = v);
+                final apply = f.getString('apply');
+                if (apply != null && apply.isNotEmpty) _sendCommand(apply);
+              },
+            ),
+          ),
         if (toolbarActions.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),

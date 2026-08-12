@@ -3464,6 +3464,18 @@ class WappEngine {
       },
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
+    // What this device is holding for other people. Read-only and generic: the
+    // rows as stored, so a viewer can show WHAT is being carried and not only
+    // how much (hal_mesh_scf_status already gives the counts).
+    final halMeshHeld = WasmFunction(
+      (int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final bytes = utf8.encode(jsonEncode(MeshService.instance.held()));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
+    );
     final halMeshTransfers = WasmFunction(
       (int outPtr, int outCap) {
         if (outCap <= 0) return 0;
@@ -3780,6 +3792,7 @@ class WappEngine {
       WasmImport('hal', 'xprs_traffic', halXprsTraffic),
       WasmImport('hal', 'mesh_scf_status', halMeshScfStatus),
       WasmImport('hal', 'mesh_transfers', halMeshTransfers),
+      WasmImport('hal', 'mesh_held', halMeshHeld),
       WasmImport('hal', 'mesh_set_pref', halMeshSetPref),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),

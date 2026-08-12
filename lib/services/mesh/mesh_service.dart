@@ -48,6 +48,12 @@ class MeshService {
   final DateTime _startedAt = DateTime.now();
   final Battery _battery = Battery();
 
+  // `lifetime:` (docs/XPRS.md section 10.5): cumulative service seconds saved
+  // by every PREVIOUS run; the current figure is this plus the uptime. Loaded
+  // once (a re-entrant start() must not fold the running uptime back into the
+  // base, or the total double-counts), saved from the sweep timer.
+  int _lifeBaseSec = -1;
+
   MeshTable? _table;
   bool _canAdvertise = false;
   bool _running = false;
@@ -145,6 +151,11 @@ class MeshService {
     // The custody store lives beside the other cross-wapp state
     // (…/data/mesh.sqlite3) and re-opens when the profile changes.
     final prefs = PreferencesService.instanceSync;
+    // The owner's standing answer on carrying for other people (default yes).
+    if (prefs != null) {
+      MeshStore.instance.carryForOthers = prefs.meshCarryForOthers;
+    }
+    if (prefs != null && _lifeBaseSec < 0) _lifeBaseSec = prefs.meshLifetimeSec;
     if (prefs != null) {
       try {
         MeshStore.instance
@@ -192,6 +203,12 @@ class MeshService {
       if (++sweepTick % 10 == 0) {
         MeshStore.instance.sweep(); // TTL + quota
         MeshBulkSpool.instance.sweep();
+      }
+      // lifetime: accumulate service time every 15 min (section 10.5). A kill
+      // loses at most that tail, same trade the dongle makes with its NVS.
+      if (sweepTick % 15 == 0 && _lifeBaseSec >= 0) {
+        PreferencesService.instanceSync?.meshLifetimeSec =
+            _lifeBaseSec + DateTime.now().difference(_startedAt).inSeconds;
       }
     });
 
@@ -412,6 +429,16 @@ class MeshService {
     final lx = ourLxmfDest?.call();
     if (lx != null && lx.length == 32) envelope = envelope.with_('lx', lx);
 
+    // `uptime:`/`lifetime:` — this station's stability account (section 10.5),
+    // for whoever is choosing a relay or a mailbox. Added BEFORE the
+    // neighbour fit below so their bytes count against the advert budget.
+    final upSec = DateTime.now().difference(_startedAt).inSeconds;
+    envelope = envelope.with_('uptime', xprsFmtDuration(upSec));
+    if (_lifeBaseSec >= 0) {
+      envelope =
+          envelope.with_('lifetime', xprsFmtDuration(_lifeBaseSec + upSec));
+    }
+
     // Most relevant first, and this station's idea of relevant (section
     // 10.6.3): a powered, stationary relay outranks a passing phone that
     // happens to be loud right now, then how reliably we hear it, then signal.
@@ -594,8 +621,15 @@ class MeshService {
       'quotaBytes': MeshStore.instance.quotaBytes,
       'spoolPending': MeshBulkSpool.instance.pendingCount(),
       'spoolQuotaBytes': MeshBulkSpool.instance.quotaBytes,
+      // Whether this device carries other people's mail (see setQuotaPref's
+      // 'scfEnabled'). 1 by default.
+      'enabled': MeshStore.instance.carryForOthers ? 1 : 0,
     };
   }
+
+  /// What this device is holding for other people, newest first.
+  List<Map<String, dynamic>> held({int limit = 200}) =>
+      MeshStore.instance.heldJson(limit: limit);
 
   /// Bulk-lane transfers in flight.
   List<Map<String, dynamic>> transfers() =>
@@ -610,6 +644,13 @@ class MeshService {
         MeshStore.instance.quotaBytes = mb * 1024 * 1024;
       case 'bulkQuotaMb':
         MeshBulkSpool.instance.quotaBytes = mb * 1024 * 1024;
+      case 'scfEnabled':
+        // Not a quota — a yes/no — but it rides the same one-int channel, so
+        // the wapp needs no second HAL to ask for it. 0 = carry nothing for
+        // anyone else; anything else = carry (the default).
+        MeshStore.instance.carryForOthers = mb != 0;
+        unawaited(PreferencesService.instanceSync
+            ?.setMeshCarryForOthers(mb != 0) ?? Future<void>.value());
       default:
         return false;
     }

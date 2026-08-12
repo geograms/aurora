@@ -252,6 +252,21 @@ class PreferencesService {
   int get observedBytesPerSec => _prefs.getInt('node.bps') ?? 0;
   set observedBytesPerSec(int v) => _prefs.setInt('node.bps', v);
 
+  // Cumulative seconds this station has been running, across every restart —
+  // the XPRS `lifetime:` reading (docs/XPRS.md section 10.5). Device-level,
+  // not profile-scoped: it describes the station, not an identity.
+  int get meshLifetimeSec => _prefs.getInt('mesh.lifesec') ?? 0;
+  set meshLifetimeSec(int v) => _prefs.setInt('mesh.lifesec', v);
+
+  // Does this device carry other people's mail? ON by default: a mesh where
+  // nobody carries only works when both parties are awake and in range at the
+  // same moment, which is the thing store-and-forward exists to fix. Kept at
+  // device level, like the lifetime above — it describes the station.
+  bool get meshCarryForOthers => _prefs.getBool('mesh.carry') ?? true;
+  Future<void> setMeshCarryForOthers(bool v) async {
+    await _prefs.setBool('mesh.carry', v);
+  }
+
   // Stated by the user (-1 = not stated; we then use what we can see, and we
   // never guess "solar" for anybody).
   int get nodePower => _prefs.getInt('node.power') ?? -1;

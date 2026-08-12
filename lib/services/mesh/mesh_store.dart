@@ -18,6 +18,7 @@
  * sweep drops expired rows, then archives oldest-first, then in-transit
  * lowest-urgency-oldest-first ([MeshUrgency]).
  */
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -77,6 +78,16 @@ class MeshStore {
 
   Database? _db;
   int quotaBytes = 100 * 1024 * 1024;
+
+  /// Whether this device carries other people's mail at all.
+  ///
+  /// On by default: a mesh where nobody carries is a mesh that only works
+  /// when both parties are awake and in range at the same moment, which is
+  /// the situation store-and-forward exists to fix. The owner can still say
+  /// no — it is their disk, their battery and their airtime — and then we
+  /// keep our OWN outbound copies (that is not carrying, it is sending) but
+  /// accept nothing on behalf of anyone else.
+  bool carryForOthers = true;
   static const int retentionS = 7 * 24 * 3600;
   // received_ams window feeding the bloom (~24 h keeps the filter sparse).
   static const int receivedWindowS = 24 * 3600;
@@ -163,9 +174,12 @@ class MeshStore {
     String am = '',
     MeshUrgency urg = MeshUrgency.normal,
     bool inTransit = true,
+    bool ours = false,
   }) {
     final db = _db;
     if (db == null || wire.length > maxWire) return false;
+    // Somebody else's mail, and the owner has switched carrying off.
+    if (!carryForOthers && !ours) return false;
     final key = am.isNotEmpty ? am : contentKey(wire);
     // A frame whose am we've already seen delivered is not worth carrying.
     if (am.isNotEmpty && wasReceived(am)) return false;
@@ -420,6 +434,49 @@ class MeshStore {
         total -= r.first['size'] as int;
       }
     }
+  }
+
+  /// The messages this device is holding for other people, newest first.
+  ///
+  /// Read-only and generic: the row as stored, with the wire decoded to text
+  /// when it is text (XPRS is), so a viewer can show what is being carried
+  /// rather than only how much. [limit] bounds a screenful.
+  List<Map<String, dynamic>> heldJson({int limit = 200}) {
+    final db = _db;
+    if (db == null) return const [];
+    final rows = db.select(
+        'SELECT am, target, sender, wire, ts, size, urg, state '
+        'FROM mesh_store ORDER BY ts DESC LIMIT ?', [limit]);
+    final out = <Map<String, dynamic>>[];
+    for (final r in rows) {
+      final blob = r['wire'];
+      var text = '';
+      if (blob is Uint8List) {
+        // Printable-ASCII only: a binary frame is summarised by its size
+        // rather than rendered as mojibake. 0x1F counts as text — it is the
+        // field separator of the compact frame, so a frame full of them is
+        // structured text, and it reads as a space.
+        final printable = blob.every((b) =>
+            b == 9 || b == 10 || b == 13 || b == 31 || (b >= 32 && b < 127));
+        if (printable) {
+          text = utf8.decode(
+              Uint8List.fromList(blob.map((b) => b == 31 ? 32 : b).toList()),
+              allowMalformed: true);
+        }
+      }
+      out.add({
+        'am': r['am'] as String? ?? '',
+        'target': r['target'] as String? ?? '',
+        'sender': r['sender'] as String? ?? '',
+        'ts': r['ts'] as int? ?? 0,
+        'size': r['size'] as int? ?? 0,
+        'urg': r['urg'] as int? ?? 1,
+        // 0 = still to hand on, 1 = delivered and kept for the archive window.
+        'state': r['state'] as int? ?? 0,
+        'wire': text,
+      });
+    }
+    return out;
   }
 
   MeshStoreCounts counts() {

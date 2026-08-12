@@ -100,6 +100,8 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
     final sel = _section == idx;
     final title = (s['title'] ?? '').toString();
     final count = ((s['items'] as List?) ?? const []).length;
+    final iconName = (s['icon'] ?? '').toString();
+    final icon = iconName.isEmpty ? null : geoUiResolveIcon(iconName);
     return InkWell(
       onTap: () => setState(() => _section = idx),
       child: Container(
@@ -113,18 +115,48 @@ class _PeopleViewFieldState extends State<PeopleViewField> {
           ),
         ),
         alignment: Alignment.center,
-        child: Text(
-          // "Downloaded (3)". A bare trailing number read as part of the title
-          // ("Downloaded 3"), and a wapp that wrote its own count into the title
-          // ended up saying it twice. The count belongs to the tab, so the tab
-          // formats it — and it says (0) rather than hiding, because "none yet"
-          // is information the user wants, not a state to conceal.
-          '$title ($count)',
-          style: TextStyle(
-            fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
-            color: sel ? cs.onSurface : cs.onSurfaceVariant,
-          ),
-        ),
+        // A section may name an ICON, and then the tab is that icon and the
+        // count — no label. Six worded tabs across a phone wrap to three lines
+        // each ("Messa/ges", "Beaco/ns") and the strip stops being scannable,
+        // which is the one thing a filter row has to be. The title survives as
+        // the tooltip, so nothing is lost for anyone who wants the word.
+        child: icon != null
+            ? Tooltip(
+                message: '$title ($count)',
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(icon,
+                        size: 20,
+                        color: sel ? cs.primary : cs.onSurfaceVariant),
+                    if (count > 0) ...[
+                      const SizedBox(width: 5),
+                      Text(
+                        '$count',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+                          color: sel ? cs.onSurface : cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              )
+            : Text(
+                // "Downloaded (3)". A bare trailing number read as part of the
+                // title ("Downloaded 3"), and a wapp that wrote its own count
+                // into the title ended up saying it twice. The count belongs to
+                // the tab, so the tab formats it — and it says (0) rather than
+                // hiding, because "none yet" is information the user wants, not
+                // a state to conceal.
+                '$title ($count)',
+                style: TextStyle(
+                  fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+                  color: sel ? cs.onSurface : cs.onSurfaceVariant,
+                ),
+              ),
       ),
     );
   }

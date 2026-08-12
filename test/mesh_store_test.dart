@@ -294,6 +294,70 @@ void main() {
     store.recordBulkHandover('sha1', 'BBB', 'CCC');
     expect(store.bulkHandedOver('sha1', 'BBB'), true);
   });
-}
 
-// M3 additions exercised on the same store fixture set.
+  // What the device is holding, so a viewer can show WHAT is carried and not
+  // only how much. The counts already existed; the rows did not.
+  group('what we are holding, listed', () {
+    test('a parked frame appears with its addressing, size and text', () {
+      store.offer(
+          target: 'X1RD89', sender: 'X1A67X', wire: _wire('X1A67X', 'X1RD89', 'on my way'), am: 'aa11');
+
+      final held = store.heldJson();
+      expect(held, hasLength(1));
+      expect(held.single['target'], 'X1RD89');
+      expect(held.single['sender'], 'X1A67X');
+      expect(held.single['am'], 'aa11');
+      expect(held.single['size'], greaterThan(0));
+      expect(held.single['state'], 0, reason: 'still to hand on');
+      expect(held.single['wire'], contains('on my way'),
+          reason: 'a text frame is shown as text');
+    });
+
+    test('newest first, and bounded by the limit asked for', () {
+      for (var i = 0; i < 5; i++) {
+        store.offer(
+            target: 'X1RD89', sender: 'X1A67X',
+            wire: _wire('X1A67X', 'X1RD89', 'note $i'), am: 'am$i');
+      }
+      expect(store.heldJson(limit: 2), hasLength(2));
+      expect(store.heldJson(), hasLength(5));
+    });
+
+    test('nothing held is an empty list, not an error', () {
+      expect(store.heldJson(), isEmpty);
+    });
+  });
+
+  // The owner's disk, battery and airtime. On by default, because a mesh where
+  // nobody carries only works when both people are awake and in range at once.
+  group('carrying for other people', () {
+    test('is on by default', () {
+      expect(store.carryForOthers, isTrue);
+    });
+
+    test('switched off, somebody else\'s mail is refused', () {
+      store.carryForOthers = false;
+      addTearDown(() => store.carryForOthers = true);
+
+      final took = store.offer(
+          target: 'X1RD89', sender: 'X1A67X', wire: _wire('X1A67X', 'X1RD89', 'carry me'), am: 'bb22');
+
+      expect(took, isFalse);
+      expect(store.heldJson(), isEmpty);
+    });
+
+    test('switched off, our OWN outgoing copy is still kept', () {
+      store.carryForOthers = false;
+      addTearDown(() => store.carryForOthers = true);
+
+      // Declining to carry for strangers is not the same as refusing to send:
+      // our own mail still needs somewhere to wait for its recipient.
+      final took = store.offer(
+          target: 'X1RD89', sender: 'X1A67X', wire: _wire('X1A67X', 'X1RD89', 'mine'),
+          am: 'cc33', ours: true);
+
+      expect(took, isTrue);
+      expect(store.heldJson(), hasLength(1));
+    });
+  });
+}

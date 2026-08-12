@@ -17,6 +17,7 @@ import 'widgets/log_view_field.dart';
 import 'widgets/stats_grid_field.dart';
 import 'widgets/popularity_chart_field.dart';
 import 'widgets/chat_view_field.dart';
+import 'widgets/details_field.dart';
 
 /// Bindings interface for reading/writing field values.
 abstract class GeoUiBindings {
@@ -360,6 +361,7 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
       'icon' => _renderIconField(fieldName, label, tip, field),
       'qr' => _renderQrField(fieldName, label, tip, field),
       'stats' => _renderStatsField(fieldName),
+      'details' => _renderDetailsField(fieldName, field),
       'popularity' => _renderPopularityField(fieldName),
       'image' => _renderImageField(fieldName, label, tip, field),
       'gallery' => _renderGalleryField(fieldName, label, tip, field),
@@ -394,6 +396,23 @@ class _GeoUiScreenRendererState extends State<GeoUiScreenRenderer> {
   /// `$type:"stats"` — the native dashboard grid (stats_grid_field.dart). Tiles
   /// arrive from the wapp via `ui.stats.set`; a tile with `tap:true` fires
   /// `<field>_tap` with `<field>_id`, the people-row contract.
+  /// `$type:"details"` — one thing explained field by field (details_field.dart).
+  /// The wapp sets the field value (ui.field.set) to
+  /// `[{title, items:[{label, value, key, mono}]}]`.
+  Widget _renderDetailsField(String name, GeoUiBlock field) {
+    final stored = widget.bindings.getValue(name);
+    final sections = stored is List
+        ? stored
+            .whereType<Map>()
+            .map((m) => m.map((k, v) => MapEntry(k.toString(), v)))
+            .toList()
+        : const <Map<String, dynamic>>[];
+    return DetailsField(
+      sections: sections,
+      emptyText: field.getString('empty'),
+    );
+  }
+
   Widget _renderStatsField(String name) {
     final raw = widget.bindings.getValue(name);
     final tiles = raw is List

@@ -604,9 +604,14 @@ NodeSprite spriteOfRnsNode(
       );
     default:
       final direct = n.effectiveRelayer.isEmpty;
+      // kind 'xprs' = a station heard over the air (an XPRS beacon), not an
+      // RNS announce. Same leaf orb in its bearer's colour, with a soft ring
+      // so the eye can tell "heard" from "routable".
+      final xprs = n.kind == 'xprs';
       return NodeSprite(
         radius: direct ? 22 : 17,
         coreColor: n.iface.color,
+        ringColor: xprs ? Colors.white38 : null,
         secondaryColor: n.geogram ? geogramGreen : null,
         label: n.label,
         labelMinPx: direct ? kRnsLabelFloorPx : null,

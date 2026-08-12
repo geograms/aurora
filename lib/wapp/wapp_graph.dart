@@ -274,7 +274,8 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     // +interval, so opening this page used to show zeros for ~5 seconds while
     // the data it needed was already sitting in memory, one synchronous call
     // away. Reading it here means the graph is populated on the first frame.
-    final d = widget.data.value ?? RnsService.instance.graphSnapshot();
+    final d =
+        widget.data.value ?? RnsService.instance.graphSnapshot(includeXprs: true);
     final nodes = (d['nodes'] as List?) ?? const [];
     final parsed = [
       for (final m in nodes) RnsGraphNode((m as Map).cast<String, dynamic>())
@@ -866,6 +867,10 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     final geo = reach.geogram;
     final online = reach.others;
     final hubs = reach.hubs;
+    // XPRS stations heard over the air right now (XprsMonitor's own staleness
+    // window). A count, not a tap target: the stations are already on the
+    // canvas as nodes — this line says how many of the orbs are that kind.
+    final xprs = (XprsMonitor.instance..sweep()).stations.length;
     return Positioned(
       top: 54,
       right: 10,
@@ -932,6 +937,25 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
                     ]),
                   ),
                 ),
+                if (xprs > 0) ...[
+                  Container(width: 1, height: 20, color: _gBorder),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 7, 10, 7),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.podcasts_outlined,
+                          size: 14, color: _gSelf),
+                      const SizedBox(width: 5),
+                      Text('$xprs',
+                          style: const TextStyle(
+                              color: _gFg,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700)),
+                      const SizedBox(width: 4),
+                      const Text('xprs',
+                          style: TextStyle(color: _gMuted, fontSize: 12)),
+                    ]),
+                  ),
+                ],
               ]),
               const Divider(height: 1, thickness: 1, color: _gBorder),
               // Line 2 — geogram-reachable devices → list + 1:1 messaging.

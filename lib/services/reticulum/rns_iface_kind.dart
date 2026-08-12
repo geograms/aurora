@@ -22,7 +22,9 @@ String rnsIfaceKind(String via) {
     return 'lan';
   }
   if (v.startsWith('lora')) return 'lora';
-  if (v.startsWith('radio') || v.startsWith('aprs') || v.startsWith('kiss')) {
+  if (v.startsWith('radio') || v.startsWith('aprs') || v.startsWith('kiss') ||
+      v.startsWith('vhf') || v.startsWith('uhf') || v.startsWith('hf') ||
+      v.startsWith('cb') || v.startsWith('pmr')) {
     return 'radio';
   }
   // A TCP link is usually a bootstrap hub out on the internet — but two devices

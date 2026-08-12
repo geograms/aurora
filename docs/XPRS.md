@@ -2114,6 +2114,48 @@ An automatic receipt is never signed and carries no `q:`. It is a device
 reporting bytes, not a person agreeing to anything — that remains `s:sign`
 (section 13.7), which is still asked for explicitly.
 
+### 13.7.2 When to stop trying
+
+A receipt that never comes is an instruction to stop, not to try harder.
+
+The failure this guards against is the expensive one. A station holding an
+unacknowledged message for a peer that walked out of range will re-air it on
+whatever schedule it was given, and every one of those transmissions is spent on
+a peer that is not there. On a duty-cycled band that is not merely wasteful:
+section 31.1 counts a retry against the same budget as saying it the first time,
+so a handful of stations each nursing a few undelivered messages can hold a
+frequency down between them while delivering nothing.
+
+**A retry is spent only against evidence that the peer can be reached.** Two
+kinds count, and either will do:
+
+| Evidence | Where it comes from |
+|---|---|
+| the peer's beacon, heard recently | section 10.6 — it already names the station and where to write to it |
+| a live route to it | the bearer, on the paths that have one |
+
+With neither, a station **parks** the message. Parking is not failure and not
+delivery: nothing is transmitted, the copy stays held, and the attempt is not
+counted. The station keeps listening, and when the peer's beacon returns the
+ladder resumes where it left off rather than having been spent into an empty
+room. A peer that comes back in an hour is then still owed its message, which is
+what store-and-forward was for (section 13.3).
+
+This costs nothing to implement, because the evidence is already arriving: a
+station hears its neighbours' beacons whether or not it has anything to send.
+
+**Three more rules keep the acknowledgement itself cheap.**
+
+- **A receipt rides with traffic when it can.** A station that owes an
+  acknowledgement and is about to send that peer something anyway names the
+  message in `r:` on the packet it was already sending, rather than paying for a
+  transmission of its own.
+- **One cycle per peer, not one per message.** Several messages waiting for the
+  same station are retried together.
+- **The bearer sets the cadence, and the strictest one binds** (section 31.1).
+  The fast first attempts that make a conversation in one room feel immediate
+  belong to Bluetooth; on LoRa the same ladder is fewer rungs, further apart.
+
 ### 13.8 Delivering to a region
 
 A message with `dest:` and **no `d:`** is addressed to whoever is in that region
@@ -4392,6 +4434,12 @@ on a period measured in tens of minutes rather than seconds; and **a retry is
 not a new packet**, so re-airing something that went unanswered counts against
 the same budget as saying it the first time.
 
+Section 13.7.2 says when to stop re-airing altogether: a retry is spent only
+against evidence that the peer can still be reached, because a station that
+cannot hear its peer learns nothing by transmitting at it again — and a few
+stations each nursing undelivered messages for peers that left can hold a
+frequency down between them while delivering nothing at all.
+
 ### 31.2 What a station owes a stranger
 
 `cmd:history` and `cmd:file` are requests to spend somebody else's battery. The
@@ -5153,6 +5201,7 @@ document.
 | Direct, group and broadcast messages | implemented |
 | Replies and reactions | implemented |
 | Receipts and carrier release | implemented, for receipts that were asked for with `q:` |
+| Section 13.7.2, parking a retry with no evidence | **implemented** on the Reticulum side: a retry is spent only against a live path or a beacon heard in the last three minutes (`RnsService._peerReachable`), otherwise the entry parks without burning a rung and the copy stays held |
 | Section 13.7.1, receipts without asking | **specified, not yet on the air.** The rule and its exclusions are settled and the two example packets are test fixtures; no station sends an unasked `s:ack` yet. What made it necessary is fixed already on the Reticulum side: an unacknowledged single-packet delivery no longer reports itself as delivered, and the sender retries at 20s/60s/5min before leaving the copy held (`lxmf_router.dart`) |
 | Long messages in parts | implemented |
 | Encryption and the sealed-body band rule | implemented |

@@ -22,6 +22,7 @@ import 'dart:math' show Random;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../connections/bluetooth/ble5_radio.dart';
 import '../../connections/bluetooth/ble_rns_radio.dart';
@@ -4838,6 +4839,38 @@ class RnsService {
   Timer? _lxmfRetryTimer;
   static const List<int> _lxmfBackoffSec = [2, 5, 10, 20, 60, 300, 1800];
 
+  /// How long a retry waits when there is no evidence the peer can be reached.
+  /// Re-checking is free (no transmission); only the check repeats.
+  static const int _lxmfParkMs = 60 * 1000;
+
+  /// A beacon older than this is not evidence that the peer is still in range.
+  /// Three times the beacon period, so one missed beacon does not park a peer
+  /// that is simply having a bad minute.
+  static const int _lxmfAudibleMs = 3 * 60 * 1000;
+
+  /// Is there any reason to believe a transmission would reach [destHex]?
+  ///
+  /// Two kinds of evidence, and either will do: a path the transport holds
+  /// (which covers the internet, LAN and WiFi Direct, where no beacon exists
+  /// and airtime is not rationed), or the peer's XPRS beacon heard recently —
+  /// the same beacon that already tells us its callsign and where to write to
+  /// it (section 10.6).
+  /// Test hook for the rule above: is a retry to [destHex] worth airtime?
+  /// Beacon evidence only — the path half needs a live transport.
+  @visibleForTesting
+  bool debugRetryWorthwhile(String destHex) {
+    final heard = _lxmfCallsignAt[destHex.trim().toLowerCase()];
+    if (heard == null) return false;
+    return DateTime.now().millisecondsSinceEpoch - heard < _lxmfAudibleMs;
+  }
+
+  bool _peerReachable(String destHex, Uint8List dh) {
+    if (_transport?.hasPath(dh) ?? false) return true;
+    final heard = _lxmfCallsignAt[destHex.trim().toLowerCase()];
+    if (heard == null) return false;
+    return DateTime.now().millisecondsSinceEpoch - heard < _lxmfAudibleMs;
+  }
+
   void _queueLxmfRetry(String destHex, Uint8List packed, String title,
       String content, Map<int, Object?>? fields) {
     // Wapp datagrams have their own delivery story; only user messages retry.
@@ -4894,6 +4927,23 @@ class RnsService {
         continue;
       }
       final t = _transport;
+      // A retry is only worth airtime if something changed since the last
+      // attempt, and on a radio the thing that changes is whether the peer is
+      // still there. Re-airing into a room the peer walked out of tells us
+      // nothing and costs a duty cycle everyone else shares — on LoRa at SF9 a
+      // single packet owes seconds of silence (docs/XPRS.md section 31.1: a
+      // retry is not a new packet).
+      //
+      // So a rung is spent only against evidence of reachability: a live path,
+      // or the peer's own beacon heard recently. With neither, the entry is
+      // PARKED — not dropped, not counted as a try — and the message stays
+      // held for pickup. A peer that returns in an hour resumes its ladder
+      // instead of having spent it into an empty room.
+      if (!_peerReachable(destHex, dh)) {
+        if (t != null) t.requestPath(dh); // cheap, throttled, and it is the ask
+        e['at'] = now + _lxmfParkMs;
+        continue;
+      }
       if (t != null && !t.hasPath(dh)) t.requestPath(dh);
       // Same bytes as the original attempt — same hash end to end.
       final msg = LxmfMessage.unpack(e['packed'] as Uint8List);

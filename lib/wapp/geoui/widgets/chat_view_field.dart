@@ -426,9 +426,14 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final count = (m['likes'] as num?)?.toInt() ?? 0;
     // Hide entirely on our own messages with no likes yet (nothing to show).
     if (outgoing && count == 0) return const SizedBox.shrink();
-    final color = liked ? _likeColor : _onBubbleFg(outgoing, 140);
+    // On OUR message the heart cannot mean "I liked this" — we do not like our
+    // own — so it means "this HAS been liked". Showing the hollow outline next
+    // to a count of 1 read as nobody had, which is the opposite of what
+    // happened. On someone else's message it still reports OUR vote.
+    final filled = outgoing ? count > 0 : liked;
+    final color = filled ? _likeColor : _onBubbleFg(outgoing, 140);
     final child = Row(mainAxisSize: MainAxisSize.min, children: [
-      Icon(liked ? Icons.favorite : Icons.favorite_border,
+      Icon(filled ? Icons.favorite : Icons.favorite_border,
           size: big ? 16 : 13, color: color),
       if (count > 0) ...[
         const SizedBox(width: 3),

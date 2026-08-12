@@ -139,10 +139,15 @@ void main() {
         msg('mine', dir: 'out', mid: 'aa11'),
         msg('mine liked', dir: 'out', mid: 'bb22', likes: 2),
       ]);
-      // Nothing at all on the un-liked one, a tally on the other.
-      expect(find.byIcon(Icons.favorite_border), findsOneWidget);
+      // Nothing at all on the un-liked one, a tally on the other. The heart is
+      // FILLED: on our own message it cannot mean "I liked this" (we do not
+      // like our own), so it means "this has been liked". It used to draw the
+      // hollow outline beside a count of 2, which read as nobody had.
+      expect(find.byIcon(Icons.favorite_border), findsNothing);
+      expect(find.byIcon(Icons.favorite), findsOneWidget);
       expect(find.text('2'), findsOneWidget);
-      await tester.tap(find.byIcon(Icons.favorite_border));
+      // Still read-only: tapping our own tally must not cast a vote.
+      await tester.tap(find.byIcon(Icons.favorite));
       await tester.pump();
       expect(sent, isEmpty);
     });

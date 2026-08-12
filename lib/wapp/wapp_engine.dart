@@ -1599,6 +1599,15 @@ class WappEngine {
       () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
       params: [], results: [ValueTy.i64],
     );
+    // Minutes EAST of UTC for this device, right now (so DST is included:
+    // +120 in CEST, +60 in CET). A wapp stamps and ships UTC epochs — that is
+    // the only sane thing to put on a wire between two phones in different
+    // zones — but it has no way to render one as a wall clock without this.
+    // Without it every message read two hours early on a CEST phone.
+    final halTimeUtcOffset = WasmFunction(
+      () => DateTime.now().timeZoneOffset.inMinutes,
+      params: [], results: [ValueTy.i32],
+    );
     final halLog = WasmFunction.voidReturn(
       (int level, int ptr, int len) {
         logs.add(WappLogEntry(level, _readStr(ptr, len)));
@@ -3588,6 +3597,7 @@ class WappEngine {
       WasmImport('hal', 'heap_free', halHeapFree),
       WasmImport('hal', 'time_ms', halTimeMs),
       WasmImport('hal', 'time_epoch', halTimeEpoch),
+      WasmImport('hal', 'time_utc_offset', halTimeUtcOffset),
       WasmImport('hal', 'log', halLog),
       WasmImport('hal', 'yield', halYield),
       // KV

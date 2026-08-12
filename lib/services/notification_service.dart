@@ -26,6 +26,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../platform/platform.dart' as platform;
+import '../launcher/launcher.dart' show rootNavigatorKey;
+import '../wapp/wapp_open.dart';
 import 'announced_tags_store.dart';
 import 'event_bus.dart';
 
@@ -314,14 +316,23 @@ class _NotificationLayerState extends State<NotificationLayer> {
 
   @override
   Widget build(BuildContext context) {
+    // Phones get the banner at the BOTTOM, full width; desktop keeps the
+    // stacked cards top-right. A 340px card pinned top-right is a desktop
+    // shape: on a 720px phone it lands under the status bar, away from the
+    // thumb, and a like on your own message went unnoticed entirely.
+    final w = MediaQuery.of(context).size.width;
+    final phone = w < 600;
+    final inset = MediaQuery.of(context).padding;
     return Stack(
       children: [
         widget.child,
         if (_visible.isNotEmpty)
           Positioned(
-            top: 16,
-            right: 16,
-            width: 340,
+            top: phone ? null : 16,
+            bottom: phone ? inset.bottom + 12 : null,
+            right: phone ? 12 : 16,
+            left: phone ? 12 : null,
+            width: phone ? null : 340,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               // stretch so each card gets the full 340px width from
@@ -376,11 +387,29 @@ class _NotificationCard extends StatelessWidget {
       NotificationLevel.warning => Icons.warning_amber_outlined,
       NotificationLevel.error => Icons.error_outline,
     };
+    // A notification about something ("X liked your message") is only useful if
+    // it takes you to that something. The Android tray tap already routes
+    // through geogram://open -> openWappByFolder; the in-app card was a dead
+    // rectangle, so a like told you it happened and then left you to find it.
+    final wapp = n.source.startsWith('wapp:') ? n.source.substring(5) : '';
+    final canOpen = wapp.isNotEmpty;
     return Material(
       color: color,
       elevation: 6,
       borderRadius: BorderRadius.circular(10),
-      child: Padding(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: canOpen
+            ? () {
+                onDismiss();
+                unawaited(openWappByFolder(
+                  wapp,
+                  convo: n.convo,
+                  navigator: rootNavigatorKey.currentState,
+                ));
+              }
+            : null,
+        child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 4, 12),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -427,6 +456,7 @@ class _NotificationCard extends StatelessWidget {
               ),
             ),
           ],
+        ),
         ),
       ),
     );

@@ -30,6 +30,18 @@ class AuroraApplication : Application() {
          */
         @Volatile
         var bgChannel: MethodChannel? = null
+
+        /**
+         * Set when Dart reports (over bg_service `dartReady`) that it reached its
+         * first `runApp`, i.e. the engine owns a root widget and a view attached
+         * to it will actually draw.
+         *
+         * An engine that never reports this is not reusable: `main()` died on the
+         * way up, and handing it to the Activity paints a black screen that no
+         * amount of reopening fixes. See [MainActivity.provideFlutterEngine].
+         */
+        @Volatile
+        var dartReady: Boolean = false
     }
 
     override fun onCreate() {
@@ -50,6 +62,7 @@ class AuroraApplication : Application() {
             return
         }
         Log.d(TAG, "Creating headless FlutterEngine")
+        dartReady = false
         try {
             // Default constructor auto-registers the generated plugins, which
             // main() needs immediately (path_provider, shared_preferences, …).
@@ -63,6 +76,29 @@ class AuroraApplication : Application() {
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to create headless FlutterEngine: ${t.message}", t)
         }
+    }
+
+    /**
+     * Throw away a cached engine whose Dart side never came up, so the caller
+     * can build a fresh one. Returns true if anything was discarded.
+     */
+    @Synchronized
+    fun discardDeadEngine(): Boolean {
+        val cache = FlutterEngineCache.getInstance()
+        val cached = cache.get(ENGINE_ID) ?: return false
+        if (dartReady) return false
+        Log.w(TAG, "Cached engine never reported dartReady — discarding it")
+        cache.remove(ENGINE_ID)
+        bgChannel = null
+        try {
+            // Unbind BLE/WiFi-Direct first: their teardown talks to the engine's
+            // messenger, which stops existing the moment it is destroyed.
+            NativeBridgeRegistry.dispose(cached)
+            cached.destroy()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Discarding dead engine failed: ${t.message}", t)
+        }
+        return true
     }
 
     /**

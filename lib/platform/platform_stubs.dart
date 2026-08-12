@@ -18,6 +18,14 @@ String currentLocale() => 'en';
 /// paths with a `kIsWeb` check or use [homeDir] == null to branch.
 String? homeDir() => null;
 
+/// Tell the host that Dart owns a root widget. Android-only concern
+/// (the engine started by the boot receiver); no-op on web.
+Future<void> signalDartReady() async {}
+
+/// Whether this engine has a view to draw into. Always true on web —
+/// there is no headless engine there.
+bool get hasImplicitView => true;
+
 /// Fire a desktop system notification. No-op on web: the browser
 /// has its own Notification API but gating it behind permission
 /// prompts is out of scope for this abstraction.

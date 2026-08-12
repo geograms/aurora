@@ -103,8 +103,15 @@ class MainActivity : FlutterFragmentActivity() {
      * Reuse the headless engine created at boot (if any) so opening the UI does
      * not spawn a second isolate that would run BLE/APRS twice. Returns null on a
      * normal cold start, letting the framework create a fresh engine.
+     *
+     * A cached engine is only reused once Dart has reported `dartReady` — that
+     * it owns a root widget. An engine whose `main()` died before its first
+     * runApp has nothing to draw, and attaching the UI to it shows a black
+     * screen that survives every reopen (only force-stop cleared it). Discard
+     * that one and let the framework build a fresh engine instead.
      */
     override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        (application as? AuroraApplication)?.discardDeadEngine()
         return FlutterEngineCache.getInstance().get(AuroraApplication.ENGINE_ID)
     }
 

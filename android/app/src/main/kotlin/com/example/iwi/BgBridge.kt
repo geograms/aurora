@@ -40,6 +40,12 @@ object BgBridge {
         val ch = MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL_NAME)
         ch.setMethodCallHandler { call, result ->
             when (call.method) {
+                // Dart reached its first runApp on this engine, so a view may be
+                // attached to it. Sent by every engine, headless or not.
+                "dartReady" -> {
+                    AuroraApplication.dartReady = true
+                    result.success(true)
+                }
                 "start" -> {
                     val text = call.argument<String>("text") ?: "Running in background"
                     val i = Intent(appCtx, BgService::class.java).putExtra("text", text)

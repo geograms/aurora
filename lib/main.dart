@@ -27,25 +27,57 @@ import 'services/remote_api_service.dart';
 import 'services/deep_link_service.dart';
 import 'profile/profile_encryption.dart';
 import 'profile/profile_service.dart';
+import 'platform/platform.dart' show hasImplicitView, signalDartReady;
 import 'profile/storage_paths.dart';
 import 'services/task_monitor_service.dart';
 
 import 'launcher/boot_splash.dart';
 import 'launcher/launcher.dart';
 
-/// Entry point. Boots the host services through the [BootOrchestrator]
-/// and runs the launcher ([IwiApp]). All launcher UI lives in
-/// lib/launcher/.
+/// Entry point.
+///
+/// Everything runs inside a guarded zone, and the binding is created inside it
+/// too (Flutter requires the binding and `runApp` to share a zone). The point is
+/// the boot engine: it has no Activity and no screen, so a throw on the way to
+/// the first `runApp` used to leave nothing behind at all — no widget, no log,
+/// no clue. Now it is written to the log ring the API serves.
 Future<void> main() async {
+  runZonedGuarded(_boot, (error, stack) {
+    // The zone outlives boot, so it catches every uncaught async error for the
+    // life of the process. Only the ones that land before the first runApp are
+    // boot failures — calling a later one "BOOT FAILED" sends the next reader
+    // hunting through main() for a fault that lives in a service.
+    LogService.instance
+      ..add('${_bootFinished ? "uncaught" : "BOOT FAILED"}: $error')
+      ..add('$stack');
+  });
+}
+
+/// Set once the launcher is on screen; see the error handler above.
+bool _bootFinished = false;
+
+/// Boots the host services through the [BootOrchestrator] and runs the
+/// launcher ([IwiApp]). All launcher UI lives in lib/launcher/.
+Future<void> _boot() async {
   // Required before any async work that touches platform channels.
   WidgetsFlutterBinding.ensureInitialized();
 
   // Lock to portrait — the UI is designed portrait-first and auto-rotation is
-  // disorienting on phones (the manifest also pins screenOrientation=portrait).
-  await SystemChrome.setPreferredOrientations(const [
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
-  ]);
+  // disorienting on phones (the manifest also pins screenOrientation=portrait,
+  // which is what makes skipping this safe when there is no view).
+  //
+  // ONLY with a view. `flutter/platform` is served by PlatformPlugin, and
+  // PlatformPlugin is built by the Activity delegate — never by a bare
+  // FlutterEngine. On the engine the boot receiver starts there is no Activity,
+  // so this call threw MissingPluginException here, uncaught, BEFORE the first
+  // runApp: no splash, no log line, no services, and MainActivity then attached
+  // the UI to that rootless engine and showed a black screen until force-stop.
+  if (hasImplicitView) {
+    await SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+  }
 
   // Mirror everything the app prints into the in-memory log buffer so the
   // remote-control API can serve it over /api/log.
@@ -103,6 +135,12 @@ Future<void> main() async {
   // the splash has been visible for a beat (see the hold below runAll).
   final splashShownAt = DateTime.now();
   runApp(const BootSplashApp());
+
+  // From here the engine has a root widget, so attaching a view to it renders
+  // something. The Android host refuses to reuse an engine that never got
+  // this far — see MainActivity.provideFlutterEngine.
+  unawaited(signalDartReady());
+  _bootFinished = true;
 
   // The shared-package Blossom server logs through this injectable sink
   // (it no longer knows aurora's LogService directly).

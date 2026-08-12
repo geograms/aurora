@@ -9,6 +9,7 @@
  */
 
 import 'dart:io';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/services.dart' show MethodChannel;
 
@@ -32,6 +33,27 @@ String? homeDir() {
     return null;
   }
 }
+
+/// Tell the Android host that Dart got far enough to own a root widget, so a
+/// view may safely be attached to this engine.
+///
+/// The engine created at boot has no Activity, so anything that throws before
+/// the first `runApp` leaves it rootless — and [MainActivity] would hand that
+/// rootless engine to the UI, which renders black forever. The host keeps this
+/// flag and refuses to reuse an engine that never sent it. No-op off Android.
+Future<void> signalDartReady() async {
+  try {
+    if (!Platform.isAndroid) return;
+    await _bgChannel.invokeMethod('dartReady');
+  } catch (_) {
+    // Nothing to report to: a missing host handler only means the engine is
+    // not reusable, which is exactly the safe default.
+  }
+}
+
+/// Whether this engine has a view to draw into. False on the headless engine
+/// the boot receiver starts, where UI-only platform channels have no handler.
+bool get hasImplicitView => PlatformDispatcher.instance.implicitView != null;
 
 Future<void> showSystemNotification({
   required String title,

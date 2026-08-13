@@ -439,7 +439,11 @@ class _ChatViewFieldState extends State<ChatViewField> {
     // to a count of 1 read as nobody had, which is the opposite of what
     // happened. On someone else's message it still reports OUR vote.
     final filled = outgoing ? count > 0 : liked;
-    final color = filled ? _likeColor : _onBubbleFg(outgoing, 140);
+    // The pink heart vanishes against the solid blue outgoing bubble, so the
+    // filled state goes white there, like the ticks and thread accent do.
+    final color = filled
+        ? (outgoing ? Colors.white : _likeColor)
+        : _onBubbleFg(outgoing, 140);
     final child = Row(mainAxisSize: MainAxisSize.min, children: [
       Icon(filled ? Icons.favorite : Icons.favorite_border,
           size: big ? 16 : 13, color: color),

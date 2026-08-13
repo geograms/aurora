@@ -91,6 +91,7 @@ import 'wapp_social_store.dart';
 import '../launcher/launcher.dart' show WappManifest;
 import 'functionality_broker.dart';
 import 'functionality_registry.dart';
+import 'wapp_open.dart';
 import 'wapp_graph_scene.dart';
 import 'wapp_icons.dart';
 import 'wapp_engine.dart';
@@ -4505,6 +4506,9 @@ class _WappPageState extends State<WappPage>
           ? RnsService.instance.nostrNotificationsUnread()
           : declared;
 
+      // A screen may be a doorway rather than a panel: `"open_wapp": "<folder>"`
+      // makes its icon open that installed wapp instead of a panel of this one.
+      final openWapp = _menuScreens[i].getString('open_wapp') ?? '';
       Widget button = IconButton(
         icon: Icon(_panelIcon(i)),
         tooltip: _i18n.resolve(name),
@@ -4512,6 +4516,10 @@ class _WappPageState extends State<WappPage>
         constraints: _kAppBarIconConstraints,
         visualDensity: VisualDensity.compact,
         onPressed: () {
+          if (openWapp.isNotEmpty) {
+            openWappByFolder(openWapp, navigator: Navigator.of(context));
+            return;
+          }
           // (marking read happens in _buildNotificationsScreen, so every route
           // into the panel clears the badge — not just this one)
           setState(() {
@@ -4752,6 +4760,13 @@ class _WappPageState extends State<WappPage>
         } else if (value.startsWith('panel:')) {
           final i = int.tryParse(value.substring(6)) ?? -1;
           if (i >= 0 && i < _menuScreens.length) {
+            // Doorway screens (`"open_wapp"`) route to the other wapp from the
+            // options menu too, so both ways in behave identically.
+            final target = _menuScreens[i].getString('open_wapp') ?? '';
+            if (target.isNotEmpty) {
+              openWappByFolder(target, navigator: Navigator.of(context));
+              return;
+            }
             // A menu screen whose whole body is ONE action is a button wearing
             // a screen's clothes: pushing a full page to show a single link
             // ("Start a chat" → "New chat") is a step that exists only because

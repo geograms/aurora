@@ -5525,17 +5525,25 @@ station that did not pick it.
 
 ### 36.1 What a publication is
 
-A publication is a packet that is **durable, addressable and publicly offered**:
+An indexer holds two different things, and the difference is `d:`.
 
-| Indexed | `blog`, `passage`, `event`, `offer`, `need`, `place`, `poll`, `track`, `warning`, `info`, `status`, `channel`, `service`, `file`, `sos` |
-|---|---|
-| **Never indexed** | `receipt`, `ping`, `pong`, `challenge`, `response`, `command`, `result`, `request`, `reaction`, `message` |
+| | What it is | What the indexer does with it |
+|---|---|---|
+| **A publication** — no `d:`, and a type from the list below | offered to whoever is interested | answers queries about it, to anybody |
+| **Mail** — anything carrying `d:` | addressed to one station | holds it for that station and tells them it is there; never offers it to a third party (section 36.7) |
 
-The second row is the important one. Those types are transactional or private —
-a receipt is bookkeeping, a command is an instruction to one machine, and a
-`message` is addressed to somebody. **A private message must never become
-discoverable by being indexed**, and the way to guarantee that is a rule about
-types rather than a flag on a packet that somebody will one day forget to set.
+Publication types: `blog`, `passage`, `event`, `offer`, `need`, `place`,
+`poll`, `track`, `warning`, `info`, `status`, `channel`, `service`, `file`,
+`sos`.
+
+Neither published nor held: `ping` and `pong`. They measure whether a path is
+alive right now, and a stale one answers a question nobody is still asking.
+
+**Addressing decides, not the type.** A rule that named types would have to be
+re-litigated every time a type gains a `d:`, and the packet already says who it
+is for. So a `t:message` is mail, a `t:command` to a station that is asleep is
+mail, and a `t:warning` with no `d:` is a publication — which is what each of
+them plainly is.
 
 ### 36.2 The indexer is sent the packet, not a description of it
 
@@ -5625,6 +5633,44 @@ The difference that matters is not the syntax. It is that the reader chose the
 indexer, the publisher chose the indexer, and neither had to be the same choice
 for the network to work.
 
+### 36.7 An indexer is also a mailbox
+
+**The sender is usually gone.** Somebody writes a message on a phone, the phone
+is put in a pocket, the screen goes off and the radio with it. If delivery
+depended on that phone still being reachable when the recipient next wakes up,
+most messages between people who are not simultaneously awake would never
+arrive. That is the whole reason store-and-forward exists (section 13.3), and an
+indexer is the best carrier on the network for it: always on, addressable, and
+chosen deliberately.
+
+So **mail is handed to an indexer too**, and the indexer tells the recipient
+there is something waiting. An indexer is therefore a natural entry in a
+station's `hold:` list (section 13.12) — that mechanism already exists and needs
+nothing added.
+
+**Privacy is the content's problem, and the format already solved it.** Seal the
+body with `x:` (section 9.2) and the indexer stores something it cannot read:
+
+```
+t:message f:X1QZ3N d:X1RD89 ts:2026-08-13_10:14:00 x:pQ4m9xT2vB8kR until:2026-08-20_00:00:00 sig:<60 characters>
+```
+
+157 bytes. **Be clear about what that does and does not hide.** `t:`, `f:`, `d:`
+and `ts:` stay in cleartext, because a station that cannot see who a packet is
+for cannot deliver it. The indexer therefore learns that X1QZ3N wrote to X1RD89
+at that minute, and how often the two of them do that — and so did every
+APRS-IS server, for every message, in full. Encryption protects the contents;
+choosing your indexer is what protects the pattern.
+
+**It is a hold, not an archive.** `until:` bounds it, and the indexer releases
+its copy the moment it hears a receipt whose signature it has verified — the
+rule section 7 already states for every carrier, and the reason section 13.7.1
+insists a receipt be signed: an unsigned one would let a stranger delete other
+people's undelivered mail from every indexer holding it.
+
+An indexer may of course refuse to carry mail at all, or carry it only for
+stations it knows. Its disk, its bandwidth, its decision (section 31.2).
+
 ---
 
 ## 37. Implementation status
@@ -5642,6 +5688,7 @@ for the network to work.
 | Direct, group and broadcast messages | implemented |
 | Replies and reactions | implemented |
 | Receipts and carrier release | implemented, for receipts that were asked for with `q:` |
+| Section 36.7, an indexer holding mail | **specified, not implemented** as an indexer role, but the parts are live elsewhere: `MeshStore` already parks a frame for an absent station and releases it on delivery, and the LXMF propagation mailbox already holds what could not be pushed and serves it when the recipient pulls. What is missing is an indexer being a station's declared `hold:` and telling a recipient that something is waiting |
 | Section 36, publishing to chosen indexers | **specified, not implemented.** Every piece it is built from exists — the signed-record discipline, the append-only log with an (epoch, seq) cursor, indexer-to-indexer catch-up and indexers as the DHT's anchors are all live for FILES (`files/dht/`, `social/relay_node.dart`) — but nothing yet keeps a publication log, pushes packets to a chosen indexer, or answers a query from their fields. The section deliberately adds no packet type and no key, so there is nothing on the wire to implement: the work is all plumbing |
 | Section 3.1, one person on several devices | **specified, not implemented.** Nothing numbers a device today: a station wears its bare callsign, and the chat wapp matches `d:` against that alone. The pieces the rule needs are already on the air — a beacon carries `f:` and `lx:`, so a device can see a sibling and tell it apart — but no code adopts a suffix, prefers the conventional number for its `type:`, or refuses a command addressed to a person |
 | Section 13.7.1, receipts signed by default | **specified, not implemented.** Signing exists (section 9.1) and receipts do not use it yet, which leaves the forged-`s:ack` deletion described there open on any station that honours the section 7 carrier release. The Reticulum side is not exposed to it — its acknowledgement is a link, not an XPRS packet — but an XPRS-native carrier would be |

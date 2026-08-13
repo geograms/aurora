@@ -1093,5 +1093,10 @@
 "wire": "t:moderate f:X5A3F2 d:X5A3F2 ts:... revoke:X32DVA since:... sig:...",
 "bytes": null,
 "id": "31f92e"
+},
+{
+"wire": "t:message f:X1QZ3N d:X1RD89 ts:2026-08-13_10:14:00 x:pQ4m9xT2vB8kR until:2026-08-20_00:00:00 sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": 157,
+"id": "96d56c"
 }
 ]

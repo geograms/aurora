@@ -110,6 +110,37 @@ static void op_msg_transferred(void *ctx, const char *peer, const char *am)
     snprintf(nd->transferred[nd->transferred_n++], 7, "%s", am);
 }
 
+/* Browse-before-carry: list the outbox as parked entries; pull by am. */
+static int op_msg_list(void *ctx, blemesh_msp_list_entry_t *out, int max)
+{
+    node_t *nd = ctx;
+    int n = 0;
+    for (int i = 0; i < nd->outbox_n && n < max; i++) {
+        memcpy(out[n].am, nd->outbox[i].am, 7);
+        snprintf(out[n].target, sizeof(out[n].target), "X1RD89");
+        out[n].urg = 2;
+        out[n].len = (uint16_t)nd->outbox[i].len;
+        out[n].age_s = 300;
+        n++;
+    }
+    return n;
+}
+
+static int op_msg_pop_am(void *ctx, const char *am, uint8_t *wire, int cap,
+                         uint32_t *ts)
+{
+    (void)cap;
+    node_t *nd = ctx;
+    for (int i = 0; i < nd->outbox_n; i++) {
+        if (strcmp(nd->outbox[i].am, am) == 0) {
+            memcpy(wire, nd->outbox[i].wire, nd->outbox[i].len);
+            *ts = 0x01020304;
+            return nd->outbox[i].len;
+        }
+    }
+    return 0;
+}
+
 static int op_msg_rx(void *ctx, const char *peer, const char *am, uint32_t ts,
                      const uint8_t *wire, int len)
 {
@@ -217,6 +248,8 @@ static const blemesh_session_ops_t OPS_TMPL = {
     .msg_pop = op_msg_pop,
     .msg_transferred = op_msg_transferred,
     .msg_rx = op_msg_rx,
+    .msg_list = op_msg_list,
+    .msg_pop_am = op_msg_pop_am,
     .gossip_build = op_gossip_build,
     .gossip_rx = op_gossip_rx,
     .bulk_next = op_bulk_next,
@@ -455,6 +488,55 @@ int main(void)
         pump(&a, &b, &to_b, &to_a);
         CHECK(na.done_fail_tx == 1, "tx sees hash fail");
         CHECK(nb.done_fail_rx == 1, "rx reports hash fail");
+    }
+
+    /* --- LIST / PULL (browse-before-carry) fixtures -------------------------- */
+    {
+        node_t na, nb;
+        node_init(&na, "A"); node_init(&nb, "B");
+        strcpy(na.outbox[0].am, "a1b2c3");
+        memcpy(na.outbox[0].wire, "X1\x1FX2\x1Fhi", 8);
+        na.outbox[0].len = 8;
+        na.outbox_n = 1;
+        na.popped = 1;                  /* keep drain_custody's hands off it */
+
+        queue_t to_b, to_a;
+        blemesh_session_t a, b;
+        blemesh_session_ops_t oa, ob;
+        link_up(&na, &nb, &to_b, &to_a, &a, &b, &oa, &ob);
+        /* Hand-deliver only the HELLOs: a full pump runs the session to its
+         * polite BYE and a closed session ignores everything — a browse
+         * happens MID-session. */
+        blemesh_session_rx(&b, to_b.frames[0], to_b.lens[0], 100);
+        blemesh_session_rx(&a, to_a.frames[0], to_a.lens[0], 100);
+        to_b.head = to_b.tail;
+        to_a.head = to_a.tail;
+
+        /* B asks A for its listing (raw frame, fixture from the Dart side). */
+        static const uint8_t listreq[] = {0x4D, 0x01, MSP_MSG_LIST};
+        int before = to_b.tail;
+        blemesh_session_rx(&a, listreq, sizeof(listreq), 100);
+        CHECK(to_b.tail == before + 1, "LIST answered");
+        hexstr(to_b.frames[before], to_b.lens[before], hx);
+        /* count=1, am, urg 2, len 8 (0800), age 300, target X1RD89 */
+        CHECK(strcmp(hx,
+              "4d01140161316232633302" "08002c01000006583152443839") == 0,
+              "LIST_R fixture");
+        if (strcmp(hx, "4d0114016131623263330208002c01000006583152443839"))
+            printf("  got %s\n", hx);
+
+        /* B pulls a1b2c3 (and one id A no longer holds — skipped, not fatal). */
+        static const uint8_t pull[] = {0x4D, 0x01, MSP_MSG_PULL, 2,
+            'a','1','b','2','c','3', 'f','f','e','e','0','0'};
+        before = to_b.tail;
+        blemesh_session_rx(&a, pull, sizeof(pull), 100);
+        CHECK(to_b.tail == before + 1, "one MSG for the held id only");
+        CHECK(to_b.frames[before][2] == MSP_MSG, "pull answered on MSG lane");
+        pump(&a, &b, &to_b, &to_a);   /* delivers the MSG, the ack, the byes */
+        CHECK(nb.rx_n == 1 && strcmp(nb.rx_ams[0], "a1b2c3") == 0,
+              "pulled custody arrived");
+        CHECK(na.transferred_n == 1 && strcmp(na.transferred[0], "a1b2c3") == 0,
+              "giver archived on ack");
     }
 
     free(data);

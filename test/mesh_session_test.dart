@@ -65,6 +65,29 @@ void main() {
       expect(d!.seqs, [7, 9]);
     });
 
+    test('MSG_LIST / MSG_LIST_R / MSG_PULL (browse-before-carry)', () {
+      expect(hex(MspMsgListReq().encode()), '4d0113');
+      expect(mspDecode(unhex('4d0113')), isA<MspMsgListReq>());
+
+      final list = MspMsgList([
+        MspMsgListEntry(
+            am: 'a1b2c3', target: 'X1RD89', urg: 2, len: 240, ageS: 300),
+      ]).encode();
+      expect(hex(list), '4d011401613162326333' '02f0002c01000006583152443839');
+      final dl = mspDecode(list) as MspMsgList?;
+      expect(dl!.entries, hasLength(1));
+      expect(dl.entries[0].am, 'a1b2c3');
+      expect(dl.entries[0].target, 'X1RD89');
+      expect(dl.entries[0].urg, 2);
+      expect(dl.entries[0].len, 240);
+      expect(dl.entries[0].ageS, 300);
+
+      final pull = MspMsgPull(['a1b2c3', 'ffee00']).encode();
+      expect(hex(pull), '4d011502613162326333666665653030');
+      final dp = mspDecode(pull) as MspMsgPull?;
+      expect(dp!.ams, ['a1b2c3', 'ffee00']);
+    });
+
     test('GOSSIP', () {
       final f = MspGossip(
         more: false,

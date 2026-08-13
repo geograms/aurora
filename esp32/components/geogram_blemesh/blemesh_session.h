@@ -36,10 +36,24 @@ extern "C" {
 enum {
     MSP_HELLO = 0x01, MSP_GOSSIP = 0x02, MSP_BYE = 0x03,
     MSP_MSG = 0x10, MSP_MSG_ACK = 0x11, MSP_MSG_REJ = 0x12,
+    /* Browse-before-carry: list the custody store, pull chosen entries over
+     * the ordinary MSG lane (same acks, same handover). */
+    MSP_MSG_LIST = 0x13, MSP_MSG_LIST_R = 0x14, MSP_MSG_PULL = 0x15,
     MSP_FILE_OFFER = 0x20, MSP_FILE_ACCEPT = 0x21, MSP_FILE_REJECT = 0x22,
     MSP_CHUNK = 0x23, MSP_WIN_ACK = 0x24, MSP_FILE_DONE = 0x25,
     MSP_FILE_OK = 0x26, MSP_FILE_FAIL = 0x27,
 };
+
+/* One row of a MSG_LIST_R: the envelope a chooser needs, never the content
+ * (a carrier holds ciphertext; what it may show is who a thing is for and
+ * how it has been treated). Wire: [am 6B][urg u8][len u16][age_s u32][cs target]. */
+typedef struct {
+    char     am[7];
+    char     target[10];
+    uint8_t  urg;
+    uint16_t len;
+    uint32_t age_s;
+} blemesh_msp_list_entry_t;
 
 /* HELLO capability bits. */
 #define MSP_CAP_MSG       (1 << 0)
@@ -102,6 +116,16 @@ typedef struct {
     /* Custody rx: park an inbound frame. 0 = accepted, else MSP_REJ_*. */
     int  (*msg_rx)(void *ctx, const char *peer, const char *am, uint32_t ts,
                    const uint8_t *wire, int len);
+
+    /* Browse-before-carry (both optional; NULL = this node does not serve
+     * them and inbound LIST/PULL frames are ignored). */
+    /* Fill [out] with up to [max] parked entries; return the count. */
+    int  (*msg_list)(void *ctx, blemesh_msp_list_entry_t *out, int max);
+    /* Pop the parked frame with custody id [am] regardless of the pop rate
+     * limit (the peer asked for it BY NAME). Fill wire/ts; return wire length
+     * or 0 when it is no longer held. */
+    int  (*msg_pop_am)(void *ctx, const char *am, uint8_t *wire, int cap,
+                       uint32_t *ts);
 
     /* Gossip: build our GOSSIP frame (WITH envelope) into [frame]; return
      * length or 0 to skip. Inbound body (after envelope) lands in gossip_rx. */

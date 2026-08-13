@@ -181,6 +181,56 @@ class MeshSessionManager {
   Future<void> byeClient() async {
     await _client?.bye(MspBye.politeness);
   }
+
+  // --- browse-before-carry (the Mesh wapp's "take some with you") -----------
+
+  /// The live dialed session with [callsign], dialing one up when needed.
+  /// Null when the radio is busy with somebody else, the peer cannot be
+  /// dialed, or the session never reaches active within [wait].
+  Future<MeshSession?> _sessionWith(String callsign, Duration wait) async {
+    final want = callsign.trim().toUpperCase();
+    if (want.isEmpty) return null;
+    final up = _client;
+    if (up != null &&
+        up.state == MeshSessionState.active &&
+        up.peerCallsign.toUpperCase() == want) {
+      return up;
+    }
+    if (anyActive) return null; // one session at a time — same rule as the scheduler
+    if (hooks.dial?.call(want) != true) return null;
+    final t0 = DateTime.now();
+    while (DateTime.now().difference(t0) < wait) {
+      await Future.delayed(const Duration(milliseconds: 200));
+      final s = _client;
+      if (s == null) continue;
+      if (s.state == MeshSessionState.active &&
+          s.peerCallsign.toUpperCase() == want) {
+        return s;
+      }
+      if (s.state == MeshSessionState.closed) return null;
+    }
+    return null;
+  }
+
+  /// What [callsign]'s custody store holds — envelopes only. Null when the
+  /// station cannot be reached (or does not serve listings).
+  Future<List<MspMsgListEntry>?> browseCarried(String callsign) async {
+    final s = await _sessionWith(callsign, const Duration(seconds: 12));
+    if (s == null) return null;
+    final l = await s.requestMsgList();
+    return l?.entries;
+  }
+
+  /// Take custody of [ams] from [callsign]. The messages arrive over the MSG
+  /// lane into our own store (the delegate parks them); the station archives
+  /// its copies on our acks. True when the request went out on a live session.
+  Future<bool> pullCarried(String callsign, List<String> ams) async {
+    if (ams.isEmpty) return false;
+    final s = await _sessionWith(callsign, const Duration(seconds: 12));
+    if (s == null) return false;
+    await s.pullMsgs(ams);
+    return true;
+  }
 }
 
 /// The delegate: SCF store + mesh table behind the session FSM. Bulk is
@@ -280,7 +330,16 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
       _log('took custody of $key for $to again (via $peer)');
       return 0;
     }
-    return MspMsgRej.duplicate;
+    // The store would not take it. "Duplicate" is only true when we KNOW the
+    // message (a row we hold, or one we saw delivered) — the giver archives
+    // on that answer, so claiming it for a refusal (carrying switched off,
+    // quota) left the mail belonging to NOBODY: observed live, a carrying-off
+    // phone answered duplicate and three parked messages evaporated off their
+    // custodian. A plain refusal answers quota and the giver keeps custody.
+    if (key.isNotEmpty && (store.holds(key) || store.wasReceived(key))) {
+      return MspMsgRej.duplicate;
+    }
+    return MspMsgRej.quota;
   }
 
   @override

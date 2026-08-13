@@ -207,6 +207,23 @@ void blemesh_scf_sweep(uint32_t now)
 
 int blemesh_scf_count(void) { return s_scf_n; }
 
+int blemesh_scf_pop_am(const char *am, uint32_t now, uint8_t *frame, int cap,
+                       uint32_t *ts)
+{
+    if (!am || !am[0]) return 0;
+    for (int i = 0; i < s_scf_n; i++) {
+        scf_t *e = &s_scf[i];
+        if (e->len > cap || strcmp(e->am, am) != 0) continue;
+        memcpy(frame, e->frame, e->len);
+        if (ts) *ts = e->ts;
+        /* No rate-limit CHECK — the peer asked for this one by name. Stamp it
+         * so the ordinary drain does not double-offer it right after. */
+        e->last_custody = now;
+        return e->len;
+    }
+    return 0;
+}
+
 int blemesh_scf_pop_custody(const char *peer, uint32_t now, char am[8],
                             uint8_t *frame, int cap, uint32_t *ts)
 {

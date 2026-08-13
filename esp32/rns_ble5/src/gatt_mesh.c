@@ -418,6 +418,37 @@ static int op_msg_pop(void *ctx, const char *peer, char am[7],
     return n;
 }
 
+/* Browse-before-carry (MSP_MSG_LIST / MSP_MSG_PULL): a person standing next
+ * to this station may look at the envelopes it carries and take custody of
+ * the ones they choose. Envelopes only — the content stays whatever it was
+ * (usually ciphertext). */
+static int op_msg_list(void *ctx, blemesh_msp_list_entry_t *out, int max)
+{
+    (void)ctx;
+    int n = 0;
+    uint32_t now = now_s();
+    for (int i = 0; i < blemesh_scf_count() && n < max; i++) {
+        const char *tg = "", *am = "";
+        int ln = 0; uint32_t age = 0; uint8_t urg = 0;
+        if (!blemesh_scf_at(i, &tg, &am, &ln, &age, now, &urg)) break;
+        memset(&out[n], 0, sizeof(out[n]));
+        snprintf(out[n].am, sizeof(out[n].am), "%s", am);
+        snprintf(out[n].target, sizeof(out[n].target), "%s", tg);
+        out[n].urg = urg;
+        out[n].len = (uint16_t)ln;
+        out[n].age_s = age;
+        n++;
+    }
+    return n;
+}
+
+static int op_msg_pop_am(void *ctx, const char *am, uint8_t *wire, int cap,
+                         uint32_t *ts)
+{
+    (void)ctx;
+    return blemesh_scf_pop_am(am, now_s(), wire, cap, ts);
+}
+
 static void op_msg_transferred(void *ctx, const char *peer, const char *am)
 {
     (void)ctx;
@@ -647,6 +678,8 @@ static const blemesh_session_ops_t OPS = {
     .msg_pop = op_msg_pop,
     .msg_transferred = op_msg_transferred,
     .msg_rx = op_msg_rx,
+    .msg_list = op_msg_list,
+    .msg_pop_am = op_msg_pop_am,
     .gossip_build = op_gossip_build,
     .gossip_rx = op_gossip_rx,
     .bulk_next = op_bulk_next,

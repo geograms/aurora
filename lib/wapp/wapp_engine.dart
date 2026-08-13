@@ -27,6 +27,7 @@ import '../services/reticulum/rns_service.dart';
 import '../services/log_service.dart';
 import '../services/social/email_resolve_service.dart';
 import '../services/social/node_role_api.dart';
+import '../services/mesh/mesh_carry_broker.dart';
 import '../services/mesh/mesh_service.dart';
 import '../services/xprs/xprs_monitor.dart';
 import '../services/torrent_service.dart';
@@ -3505,6 +3506,39 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
 
+    // hal_mesh_carry: browse a nearby station's custody store and take chosen
+    // messages (kick-off-and-poll; the dial takes seconds and a HAL call may
+    // not stall the engine). {"op":"browse"|"status"|"pull"|"reset", ...} →
+    // {"state","station","pulled","entries":[{id,target,len,age,urg}]}.
+    final halMeshCarry = WasmFunction(
+      (int cmdPtr, int cmdLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        Map<String, dynamic> rsp;
+        try {
+          final c = jsonDecode(_readStr(cmdPtr, cmdLen)) as Map<String, dynamic>;
+          final b = MeshCarryBroker.instance;
+          rsp = switch ((c['op'] ?? 'status').toString()) {
+            'browse' => b.browse((c['station'] ?? '').toString()),
+            'pull' => b.pull(
+                (c['station'] ?? '').toString(),
+                [
+                  for (final v in (c['ids'] as List? ?? const []))
+                    v.toString(),
+                ]),
+            'reset' => b.reset(),
+            _ => b.status(),
+          };
+        } catch (_) {
+          rsp = MeshCarryBroker.instance.status();
+        }
+        final bytes = utf8.encode(jsonEncode(rsp));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+
     // ── Contacts HAL (reusable people picker source) ────────────────────────
     final halContactsQuery = WasmFunction(
       (int qPtr, int qLen, int outPtr, int outCap) {
@@ -3798,6 +3832,7 @@ class WappEngine {
       WasmImport('hal', 'mesh_transfers', halMeshTransfers),
       WasmImport('hal', 'mesh_held', halMeshHeld),
       WasmImport('hal', 'mesh_set_pref', halMeshSetPref),
+      WasmImport('hal', 'mesh_carry', halMeshCarry),
       WasmImport('hal', 'rns_hubs', halRnsHubs),
       WasmImport('hal', 'rns_nodes', halRnsNodes),
       // Contacts (reusable people picker source)

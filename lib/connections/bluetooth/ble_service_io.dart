@@ -1293,7 +1293,12 @@ class BleService {
   /// Send a large payload point-to-point over GATT. If a link is up, enqueue it
   /// to the connected peer(s); otherwise stash it and let auto-pair open a link.
   void _gattSend(Uint8List payload) {
-    final peers = _connectedPeers();
+    // A connected peer is not necessarily a PARCEL peer: the MSP-only dongle
+    // holds a link during custody sessions and never receipts a parcel. The
+    // queue learns which addresses are parcel-deaf; sending to one anyway
+    // burned the whole retry ladder per message and kept the radio busy.
+    final peers =
+        _connectedPeers().where((p) => !_queue.isParcelDeaf(p)).toList();
     if (peers.isNotEmpty) {
       for (final id in peers) {
         _queue.enqueue(BLEOutgoingMessage(payload: payload, targetDeviceId: id));
@@ -1364,10 +1369,12 @@ class BleService {
     // ever — silently, while the two phones held a perfectly good link. The
     // send callback already routes by role (client → peer's FFF1, server →
     // notify the central), so any connected peer will do.
-    final peer = (_ngClientUp ? _ngClientPeer : null) ??
-        _ngServerCentral ??
-        _gatt?.peerId ??
-        _gattServer?.clientIds.firstOrNull;
+    final peer = [
+      if (_ngClientUp && _ngClientPeer != null) _ngClientPeer!,
+      if (_ngServerCentral != null) _ngServerCentral!,
+      if (_gatt?.peerId != null) _gatt!.peerId!,
+      ...?_gattServer?.clientIds,
+    ].where((p) => !_queue.isParcelDeaf(p)).firstOrNull;
     if (peer == null) return;
     for (final p in _pendingGatt) {
       _queue.enqueue(BLEOutgoingMessage(payload: p, targetDeviceId: peer));

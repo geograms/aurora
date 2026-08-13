@@ -146,41 +146,104 @@ static int out_slots_used(const blemesh_session_t *s)
     return n;
 }
 
+/* Send one custody MSG for [am]/[wire] and claim an out slot. Returns 0 on
+ * success, -1 when no slot is free or the send failed. */
+static int send_custody_msg(blemesh_session_t *s, const char am[7],
+                            const uint8_t *wire, int wl, uint32_t ts)
+{
+    int slot = -1;
+    for (int i = 0; i < MSP_MSG_OUT_MAX; i++)
+        if (!s->out_msgs[i].used) { slot = i; break; }
+    if (slot < 0) return -1;
+
+    s->next_seq = (uint8_t)(s->next_seq + 1);
+    uint8_t seq = s->next_seq;
+
+    uint8_t f[3 + 2 + 6 + 4 + 2 + BLEMESH_SCF_FRAME_MAX];
+    int o = env(f, MSP_MSG);
+    f[o++] = seq;
+    f[o++] = am[0] ? 1 : 0;
+    uint8_t amb[6] = {0};
+    for (int i = 0; i < 6 && am[i]; i++) amb[i] = (uint8_t)am[i];
+    memcpy(f + o, amb, 6); o += 6;
+    w32(f + o, ts); o += 4;
+    w16(f + o, (uint16_t)wl); o += 2;
+    memcpy(f + o, wire, wl); o += wl;
+    if (ctl_send(s, f, o) != 0) return -1;
+
+    s->out_msgs[slot].used = true;
+    s->out_msgs[slot].seq = seq;
+    memcpy(s->out_msgs[slot].am, am, 7);
+    return 0;
+}
+
 static void drain_custody(blemesh_session_t *s)
 {
     if (s->state != 1 || !(s->peer_caps & MSP_CAP_MSG)) return;
     while (out_slots_used(s) < MSP_MSG_OUT_MAX) {
-        int slot = -1;
-        for (int i = 0; i < MSP_MSG_OUT_MAX; i++)
-            if (!s->out_msgs[i].used) { slot = i; break; }
-        if (slot < 0) break;
-
         char am[7] = "";
         uint8_t wire[BLEMESH_SCF_FRAME_MAX];
         uint32_t ts = 0;
         int wl = s->ops->msg_pop(s->ops->ctx, s->peer, am, wire, sizeof(wire), &ts);
         if (wl <= 0) break;
-
-        s->next_seq = (uint8_t)(s->next_seq + 1);
-        uint8_t seq = s->next_seq;
-
-        uint8_t f[3 + 2 + 6 + 4 + 2 + BLEMESH_SCF_FRAME_MAX];
-        int o = env(f, MSP_MSG);
-        f[o++] = seq;
-        f[o++] = am[0] ? 1 : 0;
-        uint8_t amb[6] = {0};
-        for (int i = 0; i < 6 && am[i]; i++) amb[i] = (uint8_t)am[i];
-        memcpy(f + o, amb, 6); o += 6;
-        w32(f + o, ts); o += 4;
-        w16(f + o, (uint16_t)wl); o += 2;
-        memcpy(f + o, wire, wl); o += wl;
-        if (ctl_send(s, f, o) != 0) return;
-
-        s->out_msgs[slot].used = true;
-        s->out_msgs[slot].seq = seq;
-        memcpy(s->out_msgs[slot].am, am, 7);
+        if (send_custody_msg(s, am, wire, wl, ts) != 0) return;
     }
     s->custody_drained = true;
+}
+
+/* MSP_MSG_LIST: answer with the custody store's envelopes. The reply must fit
+ * one frame (<=512 B at the transport, minus the envelope), so the list is
+ * capped — a chooser sees the first page, and pulling shrinks the store. */
+static void on_msg_list_req(blemesh_session_t *s)
+{
+    if (!s->ops->msg_list) return;      /* not served here; silently ignored */
+    blemesh_msp_list_entry_t es[BLEMESH_SCF_MAX];
+    int n = s->ops->msg_list(s->ops->ctx, es, BLEMESH_SCF_MAX);
+    if (n < 0) n = 0;
+
+    uint8_t f[512];
+    int o = env(f, MSP_MSG_LIST_R);
+    int cnt_at = o++;                   /* count patched at the end */
+    int cnt = 0;
+    for (int i = 0; i < n && cnt < 255; i++) {
+        /* am 6 + urg 1 + len 2 + age 4 + cs (1+9 max) */
+        if (o + 6 + 1 + 2 + 4 + 1 + BLEMESH_CALLSIGN_MAX > (int)sizeof(f)) break;
+        uint8_t amb[6] = {0};
+        for (int k = 0; k < 6 && es[i].am[k]; k++) amb[k] = (uint8_t)es[i].am[k];
+        memcpy(f + o, amb, 6); o += 6;
+        f[o++] = es[i].urg;
+        w16(f + o, es[i].len); o += 2;
+        w32(f + o, es[i].age_s); o += 4;
+        o += w_cs(f + o, es[i].target, BLEMESH_CALLSIGN_MAX);
+        cnt++;
+    }
+    f[cnt_at] = (uint8_t)cnt;
+    ctl_send(s, f, o);
+}
+
+/* MSP_MSG_PULL: the peer asked for these BY NAME — hand them over on the MSG
+ * lane (same acks, same handover: our copy archives on the MSG_ACK). Slots
+ * may run out mid-list; the peer simply pulls again. */
+static void on_msg_pull(blemesh_session_t *s, const uint8_t *d, int len)
+{
+    if (!s->ops->msg_pop_am || len < 1) return;
+    int n = d[0];
+    if (1 + n * 6 > len) return;
+    for (int i = 0; i < n; i++) {
+        char am[7] = "";
+        int k = 0;
+        for (int b = 0; b < 6; b++) {
+            uint8_t c = d[1 + i * 6 + b];
+            if (c) am[k++] = (char)c;
+        }
+        am[k] = 0;
+        if (!am[0]) continue;
+        uint8_t wire[BLEMESH_SCF_FRAME_MAX];
+        uint32_t ts = 0;
+        int wl = s->ops->msg_pop_am(s->ops->ctx, am, wire, sizeof(wire), &ts);
+        if (wl <= 0) continue;          /* gone (acked/evicted) — skip */
+        if (send_custody_msg(s, am, wire, wl, ts) != 0) return;
+    }
 }
 
 static void on_msg(blemesh_session_t *s, const uint8_t *d, int len)
@@ -515,6 +578,12 @@ void blemesh_session_rx(blemesh_session_t *s, const uint8_t *d, int len,
         if (bl >= 2) ack_seq(s, b[0], b[1] == MSP_REJ_DUP);
         if (out_slots_used(s) == 0 && s->custody_drained)
             maybe_start_bulk(s, now);
+        break;
+    case MSP_MSG_LIST:
+        if (s->state == 1) on_msg_list_req(s);
+        break;
+    case MSP_MSG_PULL:
+        if (s->state == 1) on_msg_pull(s, b, bl);
         break;
     case MSP_FILE_OFFER:
         if (s->state == 1) on_offer(s, b, bl);

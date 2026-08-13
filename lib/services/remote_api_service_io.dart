@@ -908,6 +908,7 @@ class RemoteApiService {
         final data = await _body(req);
         final type = (data['type'] ?? 'info').toString();
         final text = (data['m'] ?? '').toString();
+        final dest = (data['d'] ?? '').toString().trim().toUpperCase();
         final self = MeshService.instance.tableCallsign.trim();
         if (self.isEmpty) {
           return _json(res, {'ok': false, 'error': 'no callsign yet'},
@@ -917,7 +918,8 @@ class RemoteApiService {
         String two(int n) => n.toString().padLeft(2, '0');
         final ts = '${now.year}-${two(now.month)}-${two(now.day)}_'
             '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
-        var p = XprsPacket.parse('t:$type f:$self ts:$ts m:$text');
+        var p = XprsPacket.parse(
+            't:$type f:$self${dest.isEmpty ? '' : ' d:$dest'} ts:$ts m:$text');
         if (p == null || !p.fits) {
           return _json(res, {'ok': false, 'error': 'malformed or too long'},
               status: HttpStatus.badRequest);

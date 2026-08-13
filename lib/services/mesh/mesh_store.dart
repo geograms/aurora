@@ -207,6 +207,17 @@ class MeshStore {
     return true;
   }
 
+  /// Whether any row — in transit or archived — holds [key]. The custody
+  /// answer for an offer the store refused turns on this: a key we KNOW may
+  /// be answered "duplicate" (the giver archives), a key we merely refused
+  /// must be answered "quota" (the giver keeps custody), or refused mail
+  /// belongs to nobody.
+  bool holds(String key) {
+    final db = _db;
+    if (db == null || key.isEmpty) return false;
+    return db.select('SELECT 1 FROM mesh_store WHERE am = ?', [key]).isNotEmpty;
+  }
+
   /// Carry forward a store written before urgency replaced `prio 0/1`.
   ///
   /// The old column only ever held 0 (a stranger's mail) or 1 (ours, or a

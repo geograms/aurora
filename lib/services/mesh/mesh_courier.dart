@@ -125,11 +125,13 @@ class MeshCourier {
   }
 
   void _tick() {
-    if (_armed.isEmpty) {
+    _retryUnresolved();
+    if (_armed.isEmpty && _unresolved.isEmpty) {
       _pump?.cancel();
       _pump = null;
       return;
     }
+    if (_armed.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     _armed.removeWhere((a) {
       final age = now - a.armedMs;
@@ -347,10 +349,21 @@ class MeshCourier {
     // they published, which cannot be forged without the private half.
     final srcHex = RnsService.instance.lxmfDestForCallsign(f.from);
     if (srcHex.isEmpty) {
-      MeshCourierCounters.ingestDropped++;
-      LogService.instance.add(
-          'Courier: packet from ${f.from} whose key we have never heard — '
-          'no address to answer, dropped');
+      // The author's key is not resolvable RIGHT NOW — which is the ordinary
+      // case for carried mail: it arrives precisely because the sender is
+      // away. Dropping here lost the message forever (the custodian archived
+      // its copy on our ack). Hold it and retry when the sender's announce
+      // returns; un-remember the id so a later custody redelivery can also
+      // retry instead of collapsing into the dedup.
+      _ingested.remove('id:${f.id}');
+      if (_unresolved.length < 32 &&
+          !_unresolved.any((u) => u.id == f.id)) {
+        _unresolved.add(_UnresolvedMail(f.id, f.from, body, via));
+        _pump ??= Timer.periodic(const Duration(seconds: 5), (_) => _tick());
+        LogService.instance.add(
+            'Courier: holding a carried packet from ${f.from} until its '
+            'key is heard (${_unresolved.length} waiting)');
+      }
       return false;
     }
 
@@ -360,6 +373,28 @@ class MeshCourier {
     LogService.instance
         .add('Courier: delivered a carried packet from ${f.from} (via $via)');
     return true;
+  }
+
+  /// Carried mail whose author we cannot address yet. Retried from [_tick];
+  /// a day is plenty — after that the sender is not coming back soon and the
+  /// content is only growing stale.
+  final List<_UnresolvedMail> _unresolved = [];
+
+  void _retryUnresolved() {
+    if (_unresolved.isEmpty) return;
+    final now = DateTime.now();
+    _unresolved.removeWhere((u) {
+      if (now.difference(u.since) > const Duration(hours: 24)) return true;
+      final srcHex = RnsService.instance.lxmfDestForCallsign(u.from);
+      if (srcHex.isEmpty) return false;
+      _ingested.add('id:${u.id}');
+      RnsService.instance
+          .injectLxmf(sourceHex: srcHex, content: u.body, title: '', via: u.via);
+      MeshCourierCounters.ingested++;
+      LogService.instance.add(
+          'Courier: delivered a held packet from ${u.from} — its key arrived');
+      return true;
+    });
   }
 
   /// A frame addressed to us arrived — overheard on air, or handed over by a
@@ -497,6 +532,17 @@ class MeshCourier {
     if (sp < 0) return _Token(s.substring(tag.length), '');
     return _Token(s.substring(tag.length, sp), s.substring(sp + 1));
   }
+}
+
+/// One carried packet delivered to us whose author's key was unknown at the
+/// time — held by [MeshCourier] and retried until the key is heard.
+class _UnresolvedMail {
+  final String id;
+  final String from;
+  final String body;
+  final String via;
+  final DateTime since = DateTime.now();
+  _UnresolvedMail(this.id, this.from, this.body, this.via);
 }
 
 class _Token {

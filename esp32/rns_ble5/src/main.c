@@ -1608,6 +1608,35 @@ static void console_handle(char *line)
         printf("queued %dB to %s\n", n, to);
         return;
     }
+    if (strncmp(line, "xpark ", 6) == 0) {
+        /* Inject a message straight into the custody store (test/demo): park
+         * an XPRS 1:1 as if it had been heard on the air — delivered by the
+         * ordinary sighting/custody machinery when the recipient appears.
+         * [from] is explicit because a receiver's inbox maps the author's
+         * published key; mail authored by a key-less station is carried but
+         * not displayed. */
+        char *from = line + 6;
+        char *sp = strchr(from, ' ');
+        if (!sp) { printf("usage: xpark <from> <to> <text>\n"); return; }
+        *sp = 0;
+        char *to = sp + 1;
+        sp = strchr(to, ' ');
+        if (!sp) { printf("usage: xpark <from> <to> <text>\n"); return; }
+        *sp = 0;
+        char tf[32], wire[XPRS_MAX_WIRE + 1];
+        xprs_time_field(tf, sizeof tf);
+        int n = snprintf(wire, sizeof wire, "t:message f:%s d:%s %s m:%s",
+                         from, to, tf, sp + 1);
+        if (n <= 0 || n >= (int)sizeof wire) { printf("too long\n"); return; }
+        char id[XPRS_ID_LEN];
+        if (!xprs_id_of(wire, n, id)) { printf("bad wire\n"); return; }
+        if (blemesh_scf_offer(to, id, (const uint8_t *)wire, n, now_sec(),
+                              BLEMESH_URG_NORMAL))
+            printf("parked %s for %s (%dB)\n", id, to, n);
+        else
+            printf("not parked (duplicate or store full)\n");
+        return;
+    }
     if (strncmp(line, "xid ", 4) == 0) {
         char id[XPRS_ID_LEN];
         if (xprs_id_of(line + 4, (int)strlen(line + 4), id))

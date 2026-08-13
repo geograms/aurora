@@ -49,6 +49,11 @@ class MspType {
   static const msg = 0x10;
   static const msgAck = 0x11;
   static const msgRej = 0x12;
+  // Browse-before-carry (the Mesh wapp's "take some with you"): list what the
+  // peer's custody store holds, then pull chosen entries over the MSG lane.
+  static const msgList = 0x13; // request, empty body
+  static const msgListR = 0x14; // the store's contents
+  static const msgPull = 0x15; // ids the requester wants custody of
   static const fileOffer = 0x20;
   static const fileAccept = 0x21;
   static const fileReject = 0x22;
@@ -203,6 +208,12 @@ Object? mspDecode(Uint8List frame) {
       return MspMsgAck._decode(r);
     case MspType.msgRej:
       return MspMsgRej._decode(r);
+    case MspType.msgList:
+      return MspMsgListReq();
+    case MspType.msgListR:
+      return MspMsgList._decode(r);
+    case MspType.msgPull:
+      return MspMsgPull._decode(r);
     case MspType.fileOffer:
       return MspFileOffer._decode(r);
     case MspType.fileAccept:
@@ -369,6 +380,105 @@ class MspMsgAck {
     }
     if (!r.ok) return null;
     return MspMsgAck(seqs);
+  }
+}
+
+/// "Show me what you are carrying." Empty body; the peer answers MspMsgList.
+class MspMsgListReq {
+  Uint8List encode() => _env(MspType.msgList, _W());
+}
+
+/// One parked entry, as much as a chooser needs and nothing else: the content
+/// stays private (a carrier holds ciphertext), only the envelope is listed.
+class MspMsgListEntry {
+  final String am; // the 6-hex custody id
+  final String target; // who it is for
+  final int urg; // 0 low..3 urgent (docs/XPRS.md §13.5)
+  final int len; // wire bytes
+  final int ageS; // parked this many seconds ago
+  MspMsgListEntry({
+    required this.am,
+    required this.target,
+    required this.urg,
+    required this.len,
+    required this.ageS,
+  });
+}
+
+/// The custody store's listing: [u8 count] then per entry
+/// [am 6B][u8 urg][u16 len][u32 ageS][cs target].
+class MspMsgList {
+  final List<MspMsgListEntry> entries;
+  MspMsgList(this.entries);
+
+  Uint8List encode() {
+    final w = _W()..u8(entries.length.clamp(0, 255));
+    for (final e in entries.take(255)) {
+      final amB = List<int>.filled(6, 0);
+      for (var i = 0; i < e.am.length && i < 6; i++) {
+        amB[i] = e.am.codeUnitAt(i);
+      }
+      w
+        ..bytes(amB)
+        ..u8(e.urg)
+        ..u16(e.len)
+        ..u32(e.ageS)
+        ..cs(e.target);
+    }
+    return _env(MspType.msgListR, w);
+  }
+
+  static MspMsgList? _decode(_R r) {
+    final n = r.u8();
+    final es = <MspMsgListEntry>[];
+    for (var i = 0; i < n; i++) {
+      final amB = r.bytes(6);
+      final urg = r.u8();
+      final len = r.u16();
+      final age = r.u32();
+      final target = r.cs();
+      if (!r.ok) return null;
+      es.add(MspMsgListEntry(
+        am: String.fromCharCodes(amB.where((b) => b != 0)),
+        target: target,
+        urg: urg,
+        len: len,
+        ageS: age,
+      ));
+    }
+    if (!r.ok) return null;
+    return MspMsgList(es);
+  }
+}
+
+/// "I'll take these": custody ids the requester wants. The peer answers by
+/// sending each over the ordinary MSG lane — same acks, same handover rules,
+/// so a pulled message is archived on the giver exactly like a pushed one.
+class MspMsgPull {
+  final List<String> ams;
+  MspMsgPull(this.ams);
+
+  Uint8List encode() {
+    final w = _W()..u8(ams.length.clamp(0, 255));
+    for (final am in ams.take(255)) {
+      final amB = List<int>.filled(6, 0);
+      for (var i = 0; i < am.length && i < 6; i++) {
+        amB[i] = am.codeUnitAt(i);
+      }
+      w.bytes(amB);
+    }
+    return _env(MspType.msgPull, w);
+  }
+
+  static MspMsgPull? _decode(_R r) {
+    final n = r.u8();
+    final ams = <String>[];
+    for (var i = 0; i < n; i++) {
+      final amB = r.bytes(6);
+      if (!r.ok) return null;
+      ams.add(String.fromCharCodes(amB.where((b) => b != 0)));
+    }
+    return MspMsgPull(ams);
   }
 }
 
@@ -742,6 +852,10 @@ class MeshSession {
       case MspType.msgRej:
         final j = MspMsgRej._decode(r);
         if (j != null) await _onMsgRej(j);
+      case MspType.msgListR:
+        final l = MspMsgList._decode(r);
+        final w = _listWaiter;
+        if (l != null && w != null && !w.isCompleted) w.complete(l);
       case MspType.fileOffer:
         final o = MspFileOffer._decode(r);
         if (o != null && state == MeshSessionState.active) await _onOffer(o);
@@ -822,6 +936,35 @@ class MeshSession {
       _log('nothing left to exchange — saying goodbye');
       unawaited(bye(MspBye.done));
     });
+  }
+
+  // --- browse-before-carry --------------------------------------------------
+
+  Completer<MspMsgList>? _listWaiter;
+
+  /// Ask the peer what its custody store holds. Null on timeout, a closed
+  /// session, or a peer that does not serve listings (it ignores the frame,
+  /// which reads as a timeout here — same outcome).
+  Future<MspMsgList?> requestMsgList(
+      {Duration timeout = const Duration(seconds: 8)}) async {
+    if (state != MeshSessionState.active) return null;
+    final c = _listWaiter = Completer<MspMsgList>();
+    await _safeSend(MspMsgListReq().encode());
+    try {
+      return await c.future.timeout(timeout);
+    } on TimeoutException {
+      return null;
+    } finally {
+      if (identical(_listWaiter, c)) _listWaiter = null;
+    }
+  }
+
+  /// Take custody of [ams]: the peer answers over the ordinary MSG lane, so
+  /// the messages arrive through [MeshSessionDelegate.msgReceived] with the
+  /// same acks and the peer archives on handover, exactly like a push.
+  Future<void> pullMsgs(List<String> ams) async {
+    if (state != MeshSessionState.active || ams.isEmpty) return;
+    await _safeSend(MspMsgPull(ams).encode());
   }
 
   // --- custody lane ---------------------------------------------------------

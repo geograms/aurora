@@ -189,6 +189,12 @@ void blemesh_scf_clear(void);
 int blemesh_scf_pop_custody(const char *peer, uint32_t now, char am[8],
                             uint8_t *frame, int cap, uint32_t *ts);
 
+/* Pop the parked frame with custody id [am] — the browse-before-carry pull
+ * (MSP_MSG_PULL): no rate limit, the peer asked for it by name. The entry
+ * stays parked until the handover ack. Returns length or 0 when not held. */
+int blemesh_scf_pop_am(const char *am, uint32_t now, uint8_t *frame, int cap,
+                       uint32_t *ts);
+
 #ifdef __cplusplus
 }
 #endif

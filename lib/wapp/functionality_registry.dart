@@ -327,6 +327,16 @@ class FunctionalityRegistry {
           'Set a mesh tunable "key=value" (msgQuotaMb, bulkQuotaMb)', [
         ParamDef('kv', 'string', 'key=value'),
       ], ReturnDef('int', '0 ok, -1 unknown key/bad value')),
+      EndpointDef(
+          'hal_mesh_carry',
+          'Browse a nearby station\'s custody store and take chosen messages. '
+              'Kick-off-and-poll: {"op":"browse","station":C} starts a dial, '
+              '{"op":"status"} polls, {"op":"pull","station":C,"ids":[...]} '
+              'takes custody, {"op":"reset"} clears. Returns {state,station,'
+              'pulled,entries:[{id,target,len,age,urg}]} — envelopes only, '
+              'never content.',
+          [ParamDef('cmd', 'string', 'JSON command')],
+          ReturnDef('int', 'Bytes written, negated required size if too small')),
     ]),
     'hal.relay': FunctionalityDef('hal.relay',
         'NOSTR-relay store-and-forward DM backup (kind-4 over Reticulum)', [

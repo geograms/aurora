@@ -190,6 +190,21 @@ typedef bool (*xprsidx_gate_fn)(void);
  */
 void xprsindex_set_gate(xprsidx_t *st, xprsidx_gate_fn gate);
 
+/**
+ * @brief Stop the writer touching the card, and wait until it is out.
+ *
+ * For a reader that is about to do its own SD work — an HTTP request, a GATT
+ * query — and does not want to queue behind a batch of writes. Returns once the
+ * writer is out of the card, so the caller owns it. Always pair it:
+ *
+ *     xprsindex_pause_writes(st, true);
+ *     ... read, build the answer ...
+ *     xprsindex_pause_writes(st, false);
+ *
+ * Records keep being accepted into RAM while paused; only the card is idle.
+ */
+void xprsindex_pause_writes(xprsidx_t *st, bool paused);
+
 /** Records waiting in RAM, and how many were dropped because it filled. */
 void xprsindex_queue_stats(xprsidx_t *st, uint32_t *out_waiting,
                            uint32_t *out_dropped);

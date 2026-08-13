@@ -1165,6 +1165,9 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
         return ESP_FAIL;
     }
 
+    // Same card, same single httpd worker: hold the index writer off for the
+    // length of this read too, even though it is a different store.
+    xprsindex_pause_writes(s_xprs_index, true);
     size_t len;
     if (msgstore_ready(store)) {
         if (want_epoch && want_epoch != msgstore_get_epoch(store)) since_id = 0;
@@ -1181,6 +1184,8 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
             "{\"epoch\":\"?\",\"latest_index\":\"?0\",\"next\":\"?0\","
             "\"more\":false,\"count\":0,\"messages\":[]}");
     }
+
+    xprsindex_pause_writes(s_xprs_index, false);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -1339,9 +1344,13 @@ static esp_err_t tdongle_api_xprs_handler(httpd_req_t *req)
         st.epoch, (unsigned)st.count, (unsigned)st.segments,
         (unsigned long long)st.free_bytes);
 
+    // Take the card for the read, then give it straight back. The writer keeps
+    // accepting records into RAM meanwhile; only its SD access waits.
+    xprsindex_pause_writes(s_xprs_index, true);
     int64_t t0 = esp_timer_get_time();
     size_t n = s_xprs_index ? xprsindex_query(s_xprs_index, &q, tdongle_xq_emit, &ctx) : 0;
     int64_t us = esp_timer_get_time() - t0;
+    xprsindex_pause_writes(s_xprs_index, false);
 
     int m = snprintf(buffer + ctx.len, buffer_size - ctx.len,
                      "],\"n\":%u,\"truncated\":%s,\"us\":%u}",

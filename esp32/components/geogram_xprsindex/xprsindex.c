@@ -158,6 +158,7 @@ struct xprsidx_s {
     uint32_t dedup[XI_DEDUP_RING];
     int      dedup_pos;
     xprsidx_gate_fn gate;           /* "the radio is idle" — may be NULL */
+    volatile bool paused;           /* a reader owns the card right now */
     xi_rec_t queue[XI_QUEUE_LEN];   /* decided, not yet on the card */
     int      q_head, q_count;
     uint32_t q_dropped;
@@ -931,21 +932,32 @@ static void xi_writer_task(void *arg)
     xprsidx_t *st = (xprsidx_t *)arg;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(XI_DRAIN_EVERY_MS));
+        if (st->paused) continue;         /* a reader has the card */
 
-        XI_LOCK(st);
         int n = 0;
-        while (st->q_count > 0) {
-            if (st->gate && !st->gate()) break;
+        for (;;) {
+            /* ONE record per lock, never a whole drain.
+             *
+             * The HTTP server has a single worker task, so a handler that
+             * blocks on this mutex takes down every endpoint on the device, not
+             * just its own — which is exactly what holding it across a batch of
+             * SD writes did. A reader now waits for one record at most, and for
+             * nothing at all once it has asked for the pause below. */
+            XI_LOCK(st);
+            if (st->paused || st->q_count == 0) { XI_UNLOCK(st); break; }
+            if (st->gate && !st->gate()) { XI_UNLOCK(st); break; }
             xi_rec_t rec = st->queue[st->q_head];
             st->q_head = (st->q_head + 1) % XI_QUEUE_LEN;
             st->q_count--;
-            XI_UNLOCK(st);            /* a query may go in between records */
-            XI_LOCK(st);
             xi_write_rec(st, &rec);
             n++;
+            XI_UNLOCK(st);
         }
-        if (n) xi_sync_card(st);
-        XI_UNLOCK(st);
+        if (n) {
+            XI_LOCK(st);
+            xi_sync_card(st);
+            XI_UNLOCK(st);
+        }
     }
 }
 #endif
@@ -974,6 +986,17 @@ size_t xprsindex_query(xprsidx_t *st, const xprsidx_query_t *q,
 void xprsindex_set_gate(xprsidx_t *st, xprsidx_gate_fn gate)
 {
     if (st) st->gate = gate;
+}
+
+void xprsindex_pause_writes(xprsidx_t *st, bool paused)
+{
+    if (!st) return;
+    st->paused = paused;
+    if (!paused) return;
+    /* Take and release the lock once: when this returns, the writer is not
+     * inside a record, so the caller has the card to itself. */
+    XI_LOCK(st);
+    XI_UNLOCK(st);
 }
 
 void xprsindex_queue_stats(xprsidx_t *st, uint32_t *out_waiting,

@@ -1727,6 +1727,12 @@ esp_err_t http_server_start_ex(wifi_config_callback_t callback, bool enable_stat
     config.stack_size = 5120;
     config.max_uri_handlers = 24;
     config.max_open_sockets = 4;
+    // Core 1, with the SD writer. Core 0 carries the BLE controller, the NimBLE
+    // host, WiFi and app_main; a handler that reads the card from there is
+    // competing with two radios for one processor, and this server's handlers
+    // all read the card. It has ONE worker task, so whatever it waits for takes
+    // every endpoint down with it — see xprsindex_pause_writes().
+    config.core_id = 1;
 #else
     config.stack_size = 8192;
     config.max_uri_handlers = 30;

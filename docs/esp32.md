@@ -155,10 +155,23 @@ anything**:
 
 They are all defensible; none of them is the bug. The bug was the processor.
 
-### One thing that pinning broke
+### The web server belongs there too
 
-Setting `config.core_id = 1` on the **httpd** task made the server accept
-connections and never answer them. Pin the SD writer, not the web server.
+`config.core_id = 1` on the **httpd** task, for the same reason: every handler
+on this board reads the SD card, and httpd has **one worker task**, so whatever
+that task waits for takes down every endpoint rather than just its own.
+
+Two consequences worth building around:
+
+- a handler must never queue behind a batch of SD writes. `geogram_xprsindex`
+  therefore takes its lock **per record**, and offers `xprsindex_pause_writes()`
+  so a reader can hold the writer off the card for the length of a request and
+  give it straight back. Records keep arriving into RAM meanwhile.
+- an endpoint that stops answering is **not** evidence of a wedged server. On
+  this board it is usually the station having dropped off the WiFi: `curl`
+  reports a timeout, and `ping` — checked in the same breath — reports "no route
+  to host". Check reachability before you debug the server. That confusion cost
+  a day here.
 
 ## The SD card
 

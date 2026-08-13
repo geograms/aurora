@@ -56,7 +56,7 @@ import '../../util/nostr_crypto.dart';
 import '../log_service.dart';
 import '../../profile/profile_service.dart';
 import '../reticulum/rns_service.dart';
-import '../xprs/xprs_monitor.dart';
+import '../xprs/xprs_ingest.dart';
 import '../xprs/xprs_packet.dart';
 import '../xprs/xprs_sig.dart';
 import 'mesh_custody.dart';
@@ -293,7 +293,7 @@ class MeshCourier {
     // transport's own word for how it arrived ('mesh' overheard, or a session);
     // anything the monitor does not recognise as a radio or local bearer is
     // dropped there rather than mislabelled here.
-    XprsMonitor.instance.offer(p,
+    XprsIngest.heard(p,
         bearer: via == 'mesh' ? 'ble' : via,
         selfCallsign: MeshService.instance.tableCallsign);
     final senderNpub = _npubForCallsign(f.from);

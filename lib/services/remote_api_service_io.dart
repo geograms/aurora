@@ -11,7 +11,11 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../connections/bluetooth/ble5_bus.dart';
+import 'xprs/xprs_archive.dart';
+import 'xprs/xprs_ingest.dart';
 import 'xprs/xprs_packet.dart';
+import 'xprs/xprs_sig.dart';
+import 'xprs/xprs_vocab.dart';
 
 import 'package:flutter/material.dart';
 
@@ -928,12 +932,67 @@ class RemoteApiService {
             'xprs-send', Ble5Subtype.xprs,
             Uint8List.fromList(utf8.encode(p.encode())),
             ttl: const Duration(seconds: 60));
+        // A wire this station aired belongs in its own spool (§36.5) — the
+        // publisher archives its sends, and this test hook must match, or a
+        // cmd:history asked of the author cannot replay the author.
+        if (aired) XprsIngest.own(p.encode(), bearer: 'ble');
         return _json(res, {
           'ok': aired,
           'bytes': p.byteLength,
           'subtype': '0x58',
           'wire': p.encode(),
         });
+      }
+      // The heard-traffic spool, for headless validation: what this station
+      // archived, plus its counters. ?since=&until= are XPRS timestamps.
+      if (req.method == 'GET' && path == '/api/xprs/history') {
+        final q = req.uri.queryParameters;
+        final rows = XprsArchive.instance.query(
+          sinceMs: xprsParseTs(q['since']),
+          untilMs: xprsParseTs(q['until']),
+          only: q['only'],
+          limit: int.tryParse(q['limit'] ?? '') ?? 50,
+        );
+        return _json(res, {
+          'ok': true,
+          'count': rows.length,
+          'refusedRns': XprsIngest.refusedRns,
+          'archive': XprsArchive.instance.statusJson(),
+          'rows': rows,
+        });
+      }
+      // Compose and air a signed cmd:history (docs/XPRS.md §25.2) at another
+      // station — /api/xprs/send cannot emit cmd:, and the two-phone replay
+      // validation has to be drivable over adb.
+      if (req.method == 'POST' && path == '/api/xprs/ask') {
+        final data = await _body(req);
+        final dest = (data['d'] ?? '').toString().trim().toUpperCase();
+        final self = MeshService.instance.tableCallsign.trim();
+        if (self.isEmpty || dest.isEmpty) {
+          return _json(res, {'ok': false, 'error': 'need d: and a callsign'},
+              status: HttpStatus.badRequest);
+        }
+        final now = DateTime.now().toUtc();
+        String two(int n) => n.toString().padLeft(2, '0');
+        final ts = '${now.year}-${two(now.month)}-${two(now.day)}_'
+            '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
+        var wire = 't:command f:$self d:$dest ts:$ts cmd:history';
+        for (final k in ['since', 'until', 'only']) {
+          final v = (data[k] ?? '').toString().trim();
+          if (v.isNotEmpty) wire += ' $k:$v';
+        }
+        var p = XprsPacket.parse(wire);
+        if (p == null || !p.fits) {
+          return _json(res, {'ok': false, 'error': 'malformed or too long'},
+              status: HttpStatus.badRequest);
+        }
+        final d = xprsProfileScalar();
+        if (d != null) p = xprsSign(p, d);
+        final aired = await Ble5Bus.instance.advertiseFrame(
+            'xprs-ask', Ble5Subtype.xprs,
+            Uint8List.fromList(utf8.encode(p.encode())),
+            ttl: const Duration(seconds: 60));
+        return _json(res, {'ok': aired, 'wire': p.encode()});
       }
       if (req.method == 'GET' && path == '/api/ble/status') {
         return _json(res, BleService.instance.gattStatus());

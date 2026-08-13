@@ -25,7 +25,7 @@ import '../../profile/profile_service.dart';
 import '../../services/android_permissions_service.dart';
 import '../../services/log_service.dart';
 import '../../services/mesh/mesh_custody.dart';
-import '../../services/xprs/xprs_monitor.dart';
+import '../../services/xprs/xprs_ingest.dart';
 import '../../services/xprs/xprs_packet.dart';
 import '../../services/mesh/mesh_transfer_scheduler.dart';
 import '../../services/mesh/mesh_service.dart';
@@ -743,7 +743,7 @@ class BleService {
     // and seeing it is the point of the XPRS wapp.
     final xp = XprsPacket.parse(utf8.decode(f.data, allowMalformed: true));
     if (xp != null) {
-      XprsMonitor.instance.offer(xp,
+      XprsIngest.heard(xp,
           bearer: 'ble',
           selfCallsign: MeshService.instance.tableCallsign,
           rssi: f.rssi);

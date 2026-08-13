@@ -174,6 +174,17 @@ String xprsFmtDuration(int seconds) {
   return '${seconds ~/ 86400}day';
 }
 
+/// An XPRS `ts:` (`YYYY-MM-DD_hh:mm:ss`, UTC — section 4.8) as epoch
+/// milliseconds, or null when it does not parse. One implementation, because
+/// the archive orders by it, `cmd:history` windows on it, and a mailbox
+/// declaration's `since:`/`until:` bound with it — and three parsers of one
+/// format is how they disagree.
+int? xprsParseTs(String? v) {
+  if (v == null || v.length != 19 || v[10] != '_') return null;
+  final t = DateTime.tryParse('${v.substring(0, 10)}T${v.substring(11)}Z');
+  return t?.millisecondsSinceEpoch;
+}
+
 /// Messages this station holds for others and would hand over (section 10.6.5).
 ///
 /// Deliberately not part of [xprsReadingIsScoped]: mail held is a fact about the

@@ -27,6 +27,7 @@ import '../../connections/connection.dart';
 import '../../profile/profile_service.dart';
 import '../log_service.dart';
 import '../reticulum/rns_service.dart';
+import 'xprs_ingest.dart';
 import 'xprs_packet.dart';
 import 'xprs_sig.dart';
 import 'xprs_vocab.dart';
@@ -163,6 +164,15 @@ class XprsPublisher {
         ok = await b.send(wires[i], part: i + 1) && ok;
       }
       report[b.name] = ok ? 'sent' : 'refused';
+    }
+
+    // Our own publication enters our own spool the moment it was aired
+    // anywhere — a cmd:history asked of the author must be able to replay
+    // the author (section 36.5). Once per wire, whichever bearer carried it.
+    if (report.values.contains('sent')) {
+      for (final w in wires) {
+        XprsIngest.own(w, bearer: 'ble');
+      }
     }
 
     published++;

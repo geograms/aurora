@@ -25,7 +25,9 @@ import '../../profile/storage_paths.dart';
 import '../../util/media_archive.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
-import '../xprs/xprs_monitor.dart';
+import '../xprs/xprs_archive.dart';
+import '../xprs/xprs_history_server.dart';
+import '../xprs/xprs_ingest.dart';
 import '../xprs/xprs_packet.dart';
 import '../xprs/xprs_vocab.dart';
 import 'mesh_beacon.dart';
@@ -161,6 +163,16 @@ class MeshService {
         MeshStore.instance
             .init(wappsDataStorage(prefs).getAbsolutePath('mesh.sqlite3'));
         MeshStore.instance.sweep();
+        // The heard-traffic spool (docs/XPRS.md sections 24 and 31.3) lives
+        // beside the custody store and re-opens with it on profile change.
+        // Its key resolver is wired by RnsService, which owns the keys.
+        XprsArchive.instance
+          ..selfCallsign = cs
+          ..maxBytes = prefs.xprsArchiveMaxMb * 1024 * 1024
+          ..maxAgeDays = prefs.xprsArchiveMaxDays
+          ..init(wappsDataStorage(prefs)
+              .getAbsolutePath('xprs_archive.sqlite3'));
+        XprsHistoryServer.instance.install();
         MeshBulkSpool.instance.init(
             wappsDataStorage(prefs).getAbsolutePath('mesh/bulk'),
             MediaArchive.forDirectory(
@@ -247,11 +259,11 @@ class MeshService {
     final from = (p['f'] ?? '').trim().toUpperCase();
     if (from.isEmpty || from == t.selfCallsign.toUpperCase()) return;
 
-    // EVERY XPRS packet on this subtype goes to the monitor, whatever its type
-    // — an info broadcast, a warning and a beacon are all things a person
-    // watching the air should see (xprs_monitor.dart).
-    XprsMonitor.instance
-        .offer(p, bearer: 'ble', selfCallsign: t.selfCallsign, rssi: f.rssi);
+    // EVERY XPRS packet on this subtype goes through the funnel, whatever its
+    // type — the monitor for whoever is watching the air, the archive for
+    // whoever asks next month, the responder when it is a command for us.
+    XprsIngest.heard(p,
+        bearer: 'ble', selfCallsign: t.selfCallsign, rssi: f.rssi);
 
     // The rest of this is beacon handling, and only a beacon is a beacon.
     if (p.type != 'observation') return;
@@ -437,6 +449,14 @@ class MeshService {
     if (_lifeBaseSec >= 0) {
       envelope =
           envelope.with_('lifetime', xprsFmtDuration(_lifeBaseSec + upSec));
+    }
+
+    // `serve:history` (section 24): this station keeps a spool and answers
+    // cmd:history. The claim is "ask me", never a depth (31.3). Before the
+    // neighbour fit, so its bytes count against the advert budget.
+    if ((PreferencesService.instanceSync?.xprsServeHistory ?? true) &&
+        XprsArchive.instance.ready) {
+      envelope = envelope.with_('serve', 'history');
     }
 
     // Most relevant first, and this station's idea of relevant (section

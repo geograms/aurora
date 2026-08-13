@@ -267,6 +267,28 @@ class PreferencesService {
     await _prefs.setBool('mesh.carry', v);
   }
 
+  // The XPRS heard-traffic spool (docs/XPRS.md sections 24 and 31.3): does
+  // this station archive what it hears, how much disk may it use, how far
+  // back does it keep, and does it answer cmd:history. ON by default — a
+  // spool nobody keeps is a network nobody can catch up on — and bounded,
+  // because the caps are ours to pick (31.3). Device-level: they describe
+  // the station.
+  bool get xprsArchive => _prefs.getBool('xprs.archive') ?? true;
+  Future<void> setXprsArchive(bool v) async {
+    await _prefs.setBool('xprs.archive', v);
+  }
+
+  int get xprsArchiveMaxMb => _prefs.getInt('xprs.archiveMaxMb') ?? 500;
+  set xprsArchiveMaxMb(int v) => _prefs.setInt('xprs.archiveMaxMb', v);
+
+  int get xprsArchiveMaxDays => _prefs.getInt('xprs.archiveMaxDays') ?? 365;
+  set xprsArchiveMaxDays(int v) => _prefs.setInt('xprs.archiveMaxDays', v);
+
+  bool get xprsServeHistory => _prefs.getBool('xprs.serveHistory') ?? true;
+  Future<void> setXprsServeHistory(bool v) async {
+    await _prefs.setBool('xprs.serveHistory', v);
+  }
+
   // Stated by the user (-1 = not stated; we then use what we can see, and we
   // never guess "solar" for anybody).
   int get nodePower => _prefs.getInt('node.power') ?? -1;

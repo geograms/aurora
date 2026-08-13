@@ -29,8 +29,10 @@ import '../services/social/email_resolve_service.dart';
 import '../services/social/node_role_api.dart';
 import '../services/mesh/mesh_carry_broker.dart';
 import '../services/mesh/mesh_service.dart';
+import '../services/xprs/xprs_archive.dart';
 import '../services/xprs/xprs_monitor.dart';
 import '../services/xprs/xprs_publisher.dart';
+import '../services/xprs/xprs_vocab.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -3524,6 +3526,71 @@ class WappEngine {
       results: [ValueTy.i32],
     );
 
+    // hal_xprs_history: the persistent spool, past the monitor's 200-ring.
+    // Read-only; the query is a JSON filter and the reply is rows newest
+    // first. Runs synchronously on an indexed table with the limit clamped —
+    // the same cost class as the other hal reads.
+    final halXprsHistory = WasmFunction(
+      (int qPtr, int qLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        int? sinceMs, untilMs;
+        String? only;
+        var limit = 200;
+        try {
+          final q = jsonDecode(_readStr(qPtr, qLen)) as Map<String, dynamic>;
+          sinceMs = xprsParseTs(q['since'] as String?);
+          untilMs = xprsParseTs(q['until'] as String?);
+          only = q['only'] as String?;
+          limit = (q['limit'] as num?)?.toInt() ?? 200;
+        } catch (_) {}
+        final bytes = utf8.encode(jsonEncode(XprsArchive.instance.query(
+            sinceMs: sinceMs,
+            untilMs: untilMs,
+            only: only,
+            limit: limit.clamp(1, 200))));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // hal_xprs_set_pref("key=value"): archive / archiveMaxMb / archiveMaxDays
+    // / serveHistory. Persisted and live-applied.
+    final halXprsSetPref = WasmFunction(
+      (int ptr, int len) {
+        final kv = _readUtf8(ptr, len);
+        final eq = kv.indexOf('=');
+        if (eq <= 0) return -1;
+        final key = kv.substring(0, eq);
+        final v = kv.substring(eq + 1).trim();
+        final prefs = PreferencesService.instanceSync;
+        if (prefs == null) return -1;
+        switch (key) {
+          case 'archive':
+            unawaited(prefs.setXprsArchive(v == '1' || v == 'true'));
+            return 0;
+          case 'serveHistory':
+            unawaited(prefs.setXprsServeHistory(v == '1' || v == 'true'));
+            return 0;
+          case 'archiveMaxMb':
+            final n = int.tryParse(v);
+            if (n == null || n <= 0) return -1;
+            prefs.xprsArchiveMaxMb = n;
+            XprsArchive.instance.maxBytes = n * 1024 * 1024;
+            return 0;
+          case 'archiveMaxDays':
+            final n = int.tryParse(v);
+            if (n == null || n <= 0) return -1;
+            prefs.xprsArchiveMaxDays = n;
+            XprsArchive.instance.maxAgeDays = n;
+            return 0;
+        }
+        return -1;
+      },
+      params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+
     // hal_mesh_carry: browse a nearby station's custody store and take chosen
     // messages (kick-off-and-poll; the dial takes seconds and a HAL call may
     // not stall the engine). {"op":"browse"|"status"|"pull"|"reset", ...} →
@@ -3847,6 +3914,8 @@ class WappEngine {
       WasmImport('hal', 'xprs_stations', halXprsStations),
       WasmImport('hal', 'xprs_traffic', halXprsTraffic),
       WasmImport('hal', 'xprs_status', halXprsStatus),
+      WasmImport('hal', 'xprs_history', halXprsHistory),
+      WasmImport('hal', 'xprs_set_pref', halXprsSetPref),
       WasmImport('hal', 'mesh_scf_status', halMeshScfStatus),
       WasmImport('hal', 'mesh_transfers', halMeshTransfers),
       WasmImport('hal', 'mesh_held', halMeshHeld),

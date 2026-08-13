@@ -27,7 +27,11 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../../connections/bluetooth/ble5_radio.dart';
 import '../../connections/bluetooth/ble_rns_radio.dart';
 import '../files/capacity_governor.dart';
+import 'package:hex/hex.dart';
+
 import '../mesh/mesh_courier.dart';
+import '../xprs/xprs_archive.dart';
+import '../xprs/xprs_ingest.dart';
 import '../xprs/xprs_monitor.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
 import '../files/dht/dht_node.dart';
@@ -126,7 +130,20 @@ const List<String> _aspects = ['chat'];
 const List<String> _aspectsWapp = ['wapp'];
 
 class RnsService {
-  RnsService._();
+  RnsService._() {
+    // The XPRS archive verifies signatures with whatever keys this node has
+    // learned from beacons and announces. Wired here, in the one place that
+    // owns the callsign→key map, so the archive itself needs no node.
+    XprsArchive.instance.keyResolver = (base) {
+      final hex = pubkeyForCallsign(base);
+      if (hex == null || hex.isEmpty) return null;
+      try {
+        return Uint8List.fromList(HEX.decode(hex));
+      } catch (_) {
+        return null;
+      }
+    };
+  }
   static final RnsService instance = RnsService._();
 
   RnsIdentity? _id;
@@ -3831,6 +3848,14 @@ class RnsService {
   /// Queue one inbound datagram for [tag]: straight to the running wapp, else
   /// to the durable mailbox, and ask for the wapp to be started.
   void _deliverWappDatagram(String tag, String from, Uint8List payload) {
+    // Core tap for XPRS off the hub lane: archived under the mailbox-
+    // declaration rule (docs/XPRS.md sections 13.12 and 36.3), never shown
+    // as an air sighting. The wapp inbox below still gets its copy.
+    if (tag == 'xprs') {
+      try {
+        XprsIngest.reticulum(from, payload);
+      } catch (_) {}
+    }
     final q = _wappInbox[tag];
     if (q != null) {
       q.add({

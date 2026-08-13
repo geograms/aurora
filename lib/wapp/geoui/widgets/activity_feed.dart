@@ -686,7 +686,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
         mainAxisSize: MainAxisSize.min,
         children: [
           tab(Icons.public, 'Internet', _ActivityFilter.all),
-          tab(Icons.hub, 'Nomadnet', _ActivityFilter.nomadnet),
+          tab(Icons.hub, 'Mesh', _ActivityFilter.nomadnet),
           tab(Icons.people, 'Following', _ActivityFilter.following),
           tab(Icons.bookmark, 'Saved', _ActivityFilter.favorites),
         ],
@@ -703,7 +703,7 @@ class _ActivityFeedState extends State<ActivityFeed> {
       _ActivityFilter.all =>
         'No activity yet.\nPosts from groups and people you follow show here.',
       _ActivityFilter.nomadnet =>
-        'No Nomadnet posts yet.\nPublications from the Reticulum network appear here while this tab is open.',
+        'No Mesh posts yet.\nPublications from the Reticulum network appear here while this tab is open.',
     };
     return Center(
       child: Padding(

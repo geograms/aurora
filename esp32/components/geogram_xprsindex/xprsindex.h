@@ -173,6 +173,27 @@ size_t xprsindex_query(xprsidx_t *st, const xprsidx_query_t *q,
 
 void xprsindex_stats(xprsidx_t *st, xprsidx_stats_t *out);
 
+/**
+ * @brief Ask the owner whether the card may be touched right now.
+ * @return true when the radio is idle and a burst of SD traffic is harmless.
+ */
+typedef bool (*xprsidx_gate_fn)(void);
+
+/**
+ * @brief Hold SD writes while the radio is busy.
+ *
+ * The SDMMC bus desensitises the 2.4 GHz radio — measured on the T-Dongle as a
+ * WiFi station that stays associated and cannot get a frame out (1 of 96 pings
+ * answered with the card in use, 159 of 162 without). Records are decided
+ * immediately and wait in RAM; this decides when they are allowed to go down.
+ * Without a gate the writer drains on its own timer.
+ */
+void xprsindex_set_gate(xprsidx_t *st, xprsidx_gate_fn gate);
+
+/** Records waiting in RAM, and how many were dropped because it filled. */
+void xprsindex_queue_stats(xprsidx_t *st, uint32_t *out_waiting,
+                           uint32_t *out_dropped);
+
 #ifdef XPRSIDX_BENCH
 /**
  * Fill the store with @p n synthetic packets spread over two years and log how

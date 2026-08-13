@@ -381,9 +381,9 @@ esp_err_t xprslan_start(const char *callsign)
 
     s_fd = fd;
     s_active = true;
-    /* 6 KB: the task airs beacons, which derive an identifier, which is a
-     * SHA-256 — the same work that would not fit on the timer task's stack. */
-    if (xTaskCreate(xprslan_task, "xprslan", 6144, NULL, 3, NULL) != pdPASS) {
+    /* 4 KB: enough for the SHA-256 a beacon derives, and no more — the heap on
+     * this board is the scarce thing, not the stack. */
+    if (xTaskCreate(xprslan_task, "xprslan", 4096, NULL, 3, NULL) != pdPASS) {
         XL_LOGW("task create failed");
         close(fd);
         s_fd = -1;

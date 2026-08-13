@@ -986,9 +986,43 @@ static void kv4p_aprs_to_ble(const char *from, const char *to,
 #if BOARD_MODEL == MODEL_TDONGLE_S3
 /** Aurora APRS-over-BLE RX → rolling chat on the T-Dongle display.
  *  Decoded by ble_hello (the radio owner); we only format + push a line. */
+/* ---- when the card may run ---------------------------------------------- */
+
+/*
+ * The SDMMC bus desensitises the 2.4 GHz radio. Measured on this board: with
+ * the XPRS store writing as packets arrive, the WiFi station stayed associated
+ * and could not transmit — `wifi:m f null`, DNS timing out, 1 of 96 pings
+ * answered. The same firmware with FEATURE_SDCARD=0, BLE still running,
+ * answered 159 of 162.
+ *
+ * So the card is only allowed to run when nothing is trying to get on the air.
+ * Every path this firmware transmits from calls tdongle_radio_busy(), and the
+ * index writer holds its records in RAM until things have been quiet for
+ * TDONGLE_RADIO_QUIET_MS. A record waiting in memory costs nothing; a frame
+ * that misses its moment is lost.
+ */
+#define TDONGLE_RADIO_QUIET_MS  400
+
+static volatile int64_t s_last_tx_us;
+
+static inline void tdongle_radio_busy(void)
+{
+    s_last_tx_us = esp_timer_get_time();
+}
+
+static bool tdongle_card_may_run(void)
+{
+    // Associating is the worst moment of all: the handshake is several
+    // round-trips that all have to land.
+    if (geogram_wifi_get_status() == GEOGRAM_WIFI_STATUS_CONNECTING) return false;
+    int64_t quiet_us = esp_timer_get_time() - s_last_tx_us;
+    return quiet_us > (int64_t)TDONGLE_RADIO_QUIET_MS * 1000;
+}
+
 static void tdongle_aprs_rx(const char *from, const char *to,
                             const char *text, int rssi)
 {
+    tdongle_radio_busy();   /* heard on the air, and relayed straight back onto it */
     ESP_LOGI(TAG, "Aurora APRS RX (rssi=%d): %s -> %s : %s",
              rssi, from, (to && *to) ? to : "(geo)", text);
 
@@ -1124,7 +1158,7 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
         if (limit < tail) limit = tail;
     }
 
-    const size_t buffer_size = 3072;
+    const size_t buffer_size = 2048;
     char *buffer = (char *)malloc(buffer_size);
     if (!buffer) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
@@ -1162,6 +1196,7 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
  * have no network — that is the whole point of a dongle sitting on both. */
 static void tdongle_xprs_from_lan(const char *wire, int len, uint32_t ip)
 {
+    tdongle_radio_busy();          // it arrived on the air, and we may re-air it
     if (s_xprs_index) {
         // rssi 0 is the store's "unknown", which a LAN genuinely is.
         xprsindex_add(s_xprs_index, wire, len, 0, false, (uint32_t)time(NULL));
@@ -1179,6 +1214,7 @@ static void tdongle_xprs_from_lan(const char *wire, int len, uint32_t ip)
 static void tdongle_xprs_from_ble(const char *wire, int len, int rssi)
 {
     (void)rssi;
+    tdongle_radio_busy();
     xprslan_offer(wire, len);
 }
 
@@ -1205,32 +1241,38 @@ typedef struct {
     bool   full;
 } tdongle_xq_ctx_t;
 
+/* Writes straight into the response buffer. It used to build the record in two
+ * ~600-byte stack temporaries, which is a quarter of this httpd task's whole
+ * stack on the T-Dongle (5120 B, trimmed to fit the heap) — enough to take the
+ * server down mid-request and leave it accepting connections it never answers. */
 static bool tdongle_xq_emit(const xprsidx_rec_t *r, void *vctx)
 {
     tdongle_xq_ctx_t *c = (tdongle_xq_ctx_t *)vctx;
-    /* The packet is text with no quotes or control characters by construction
-     * (XPRS.md §4), but a backslash or quote inside a message field would still
-     * break the JSON, so both are escaped. */
-    char esc[XPRSIDX_WIRE_MAX * 2 + 2];
-    size_t e = 0;
-    for (const char *s = r->wire; *s && e + 2 < sizeof esc; s++) {
-        if (*s == '"' || *s == '\\') esc[e++] = '\\';
-        esc[e++] = *s;
-    }
-    esc[e] = 0;
+    size_t room = (c->len + 96 < c->size) ? c->size - c->len - 96 : 0;
+    if (room == 0) { c->full = true; return false; }
 
-    char obj[XPRSIDX_WIRE_MAX * 2 + 160];
-    int n = snprintf(obj, sizeof obj,
+    int n = snprintf(c->buf + c->len, room,
         "%s{\"i\":%u,\"ts\":%u,\"rssi\":%d,\"type\":\"%s\",\"from\":\"%s\","
-        "\"mail\":%s,\"wire\":\"%s\"}",
+        "\"mail\":%s,\"wire\":\"",
         c->first ? "" : ",", (unsigned)r->index, (unsigned)r->ts, (int)r->rssi,
         xprsidx_type_name(r->type), r->from,
-        (r->flags & XI_F_MAIL) ? "true" : "false", esc);
-    if (n < 0) return false;
-    if (c->len + (size_t)n + 64 >= c->size) { c->full = true; return false; }
-    memcpy(c->buf + c->len, obj, (size_t)n);
-    c->len += (size_t)n;
-    c->buf[c->len] = 0;
+        (r->flags & XI_F_MAIL) ? "true" : "false");
+    if (n < 0 || (size_t)n >= room) { c->full = true; return false; }
+    size_t len = c->len + (size_t)n;
+
+    /* The packet is text by construction (XPRS.md §4), but a quote or backslash
+     * inside a message field would still break the JSON. */
+    for (const char *w = r->wire; *w; w++) {
+        if (len + 4 >= c->size) { c->full = true; return false; }
+        if (*w == '"' || *w == '\\') c->buf[len++] = '\\';
+        c->buf[len++] = *w;
+    }
+    if (len + 3 >= c->size) { c->full = true; return false; }
+    c->buf[len++] = '"';
+    c->buf[len++] = '}';
+    c->buf[len] = 0;
+
+    c->len = len;
     c->first = false;
     return true;
 }

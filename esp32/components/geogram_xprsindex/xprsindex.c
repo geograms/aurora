@@ -34,6 +34,7 @@ static uint64_t xi_card_free(const char *d) { (void)d; return 0; }
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 static const char *TAG = "xprsidx";
 #define XI_LOGI(fmt, ...) ESP_LOGI(TAG, fmt, ##__VA_ARGS__)
 #define XI_LOGW(fmt, ...) ESP_LOGW(TAG, fmt, ##__VA_ARGS__)
@@ -61,6 +62,54 @@ static uint64_t xi_card_free(const char *d);
  * kept every segment in memory would cost 384 KB on a full card, which is the
  * whole SRAM budget. */
 #define XI_SEG_CACHE      8
+
+/* ── Getting off the radio's back ───────────────────────────────────────── */
+
+/*
+ * The card is not allowed on the receive path.
+ *
+ * A record is 320 bytes and an fsync, and this firmware's own notes say why
+ * that matters: "the SDMMC bus desensitises the 2.4 GHz radio". Writing one per
+ * heard packet, from the NimBLE host task, cost the WiFi station its ability to
+ * transmit — associated, but `wifi:m f null`, DNS timing out, 0 of 90 pings
+ * answered. With the writes removed the same firmware never dropped one.
+ *
+ * So xprsindex_add() still does all the DECIDING on the caller's thread — parse,
+ * type, identifier, duplicate — and then hands the finished 320-byte record to a
+ * ring that a low-priority task drains. The radio path touches no card, and the
+ * writer syncs once per batch instead of once per packet.
+ */
+#define XI_QUEUE_LEN  8         /* records buffered before the writer runs.
+                                 * 8 x 320 B: this board has no PSRAM and the
+                                 * HTTP handlers need their allocation more. */
+
+/*
+ * How often the card is allowed to be busy at all.
+ *
+ * Measured on the T-Dongle: with the SD store active the WiFi station stays
+ * associated and cannot transmit — `wifi:m f null`, DNS timing out, 1 of 95
+ * pings answered. The same firmware with FEATURE_SDCARD=0 and BLE still running
+ * answered 159 of 162. The SDMMC bus desensitises the 2.4 GHz radio, which this
+ * firmware already knew (see the mount in main.cpp) and which the index made
+ * continuous by writing a record per heard packet.
+ *
+ * A burst every few seconds is fine; a trickle is not. Records wait in RAM and
+ * go down together, leaving the bus quiet in between.
+ */
+/*
+ * How often the writer is allowed to touch the card.
+ *
+ * Two separate things go wrong when it is too eager. It used to write a record
+ * per heard packet from the receive path, on core 0 where the radios live, and
+ * the WiFi station could not transmit at all (1 of 96 pings). Moving the writes
+ * to a task pinned to core 1 fixed that (178 of 182) — but a writer that then
+ * wakes ten times a second keeps the FATFS layer busy, and every other reader of
+ * the card, including the unrelated APRS archive endpoints, waits behind it.
+ *
+ * So: records wait in RAM and go down in one burst every couple of seconds,
+ * leaving the card free the rest of the time.
+ */
+#define XI_DRAIN_EVERY_MS  2000
 
 /* ── On-disk shapes ─────────────────────────────────────────────────────── */
 
@@ -108,6 +157,10 @@ struct xprsidx_s {
     uint32_t since_flush;     /* adds since the zone entry last hit the card */
     uint32_t dedup[XI_DEDUP_RING];
     int      dedup_pos;
+    xprsidx_gate_fn gate;           /* "the radio is idle" — may be NULL */
+    xi_rec_t queue[XI_QUEUE_LEN];   /* decided, not yet on the card */
+    int      q_head, q_count;
+    uint32_t q_dropped;
 #ifndef XPRSIDX_HOST_TEST
     SemaphoreHandle_t lock;
 #endif
@@ -346,6 +399,22 @@ static uint32_t xi_type_tail(const xprsidx_t *st, int type, uint32_t want,
     return got;
 }
 
+static bool xi_write_rec(xprsidx_t *st, const xi_rec_t *rec);
+static void xi_sync_card(xprsidx_t *st);
+#ifndef XPRSIDX_HOST_TEST
+static void xi_writer_task(void *arg);
+#endif
+#ifdef XPRSIDX_HOST_TEST
+/* No writer task on the host, so the record goes down immediately and the
+ * behaviour a test sees matches the device's once its queue has drained. */
+static bool xi_write_rec_fwd(xprsidx_t *st, const xi_rec_t *r)
+{
+    bool ok = xi_write_rec(st, r);
+    xi_sync_card(st);
+    return ok;
+}
+#endif
+
 /* ── Records ────────────────────────────────────────────────────────────── */
 
 static bool xi_read_rec(xprsidx_t *st, uint32_t index, xi_rec_t *out)
@@ -495,6 +564,20 @@ xprsidx_t *xprsindex_open(const char *dir)
         st->count = st->next_index;   /* eviction rewrites this below */
     }
     st->ready = true;
+#ifndef XPRSIDX_HOST_TEST
+    /* Core 1, deliberately. The BLE controller and host are pinned to core 0
+     * (CONFIG_BT_NIMBLE_PINNED_TO_CORE 0), WiFi runs there and so does the main
+     * task, while core 1 sits nearly idle. SD transactions are long and this is
+     * the one job in the firmware with no reason to compete with a radio for
+     * the same processor. */
+    if (xTaskCreatePinnedToCore(xi_writer_task, "xprsidx_wr", 3072, st, 2, NULL,
+                                1) != pdPASS) {
+        XI_LOGW("writer task failed to start — nothing will reach the card");
+        st->ready = false;
+        free(st);
+        return NULL;
+    }
+#endif
     XI_LOGI("open %s: %u records, %u segments", st->dir,
             (unsigned)st->count, (unsigned)st->nseg);
     return st;
@@ -520,6 +603,28 @@ uint32_t xprsindex_latest_index(const xprsidx_t *st)
 char xprsindex_epoch(const xprsidx_t *st) { return st ? st->epoch : '?'; }
 
 /* ── Add ────────────────────────────────────────────────────────────────── */
+
+/* Hand a finished record to the writer. Called with the lock held. */
+static bool xi_queue_rec(xprsidx_t *st, const xi_rec_t *r)
+{
+#ifdef XPRSIDX_HOST_TEST
+    return xi_write_rec_fwd(st, r);      /* the host has no task: write it now */
+#else
+    if (st->q_count >= XI_QUEUE_LEN) {
+        /* The card is slower than the air. Losing the newest is better than
+         * blocking the receive path, which is the whole point of the ring. */
+        st->q_dropped++;
+        if (st->q_dropped == 1 || (st->q_dropped % 100) == 0) {
+            XI_LOGW("write queue full — %u records dropped (card too slow)",
+                    (unsigned)st->q_dropped);
+        }
+        return false;
+    }
+    st->queue[(st->q_head + st->q_count) % XI_QUEUE_LEN] = *r;
+    st->q_count++;
+    return true;
+#endif
+}
 
 static bool xi_add_locked(xprsidx_t *st, const char *wire, int len,
                           int rssi, bool outgoing, uint32_t ts_now)
@@ -565,6 +670,21 @@ static bool xi_add_locked(xprsidx_t *st, const char *wire, int len,
     if (xprs_get(&p, "sig", &vlen)) r.flags |= XI_F_SIGNED;
     memcpy(r.wire, wire, (size_t)len);
 
+    /* Decided. The card work is somebody else's problem now. */
+    st->dedup[st->dedup_pos] = h;
+    st->dedup_pos = (st->dedup_pos + 1) % XI_DEDUP_RING;
+    st->next_index++;
+    st->count++;
+    return xi_queue_rec(st, &r);
+}
+
+/* The half that touches the card. Runs on the writer task (or, on the host,
+ * straight from xi_add_locked). The lock is already held. */
+static bool xi_write_rec(xprsidx_t *st, const xi_rec_t *rec)
+{
+    const xi_rec_t r = *rec;
+    int code = r.type;
+
     uint32_t seg_first = xi_seg_of(r.index);
     if (!st->active_fp || st->active_first != seg_first) {
         if (st->active_fp) fclose(st->active_fp);
@@ -584,25 +704,28 @@ static bool xi_add_locked(xprsidx_t *st, const char *wire, int len,
     if (fseek(st->active_fp, off, SEEK_SET) != 0) return false;
     if (fwrite(&r, sizeof r, 1, st->active_fp) != 1) return false;
     fflush(st->active_fp);
-    /* fflush only pushes stdio's buffer into FatFs. FatFs writes the file's
-     * DIRECTORY ENTRY on sync or close, and nothing closes this handle when the
-     * power goes — so without this the whole active segment is invisible after
-     * a reboot: the records are on the card, the entry still says the file is
-     * empty, and the next open counts none of them. Measured on the dongle by
-     * losing 2000 records to a reset. A station that carries other people's
-     * mail does not get to lose it that way. */
-    fsync(fileno(st->active_fp));
 
     /* Indexes AFTER the record: they are derived, so a power cut between the
      * two leaves them short and rebuildable rather than pointing at nothing. */
     xi_zone_touch(st, &r);
     xi_type_append(st, code, r.index);
-
-    st->dedup[st->dedup_pos] = h;
-    st->dedup_pos = (st->dedup_pos + 1) % XI_DEDUP_RING;
-    st->next_index++;
-    st->count++;
     return true;
+}
+
+/* fflush only pushes stdio's buffer into FatFs. FatFs writes the file's
+ * DIRECTORY ENTRY on sync or close, and nothing closes this handle when the
+ * power goes — so without this the whole active segment is invisible after a
+ * reboot: the records are on the card, the entry still says the file is empty,
+ * and the next open counts none of them. Measured by losing 2000 records to a
+ * reset.
+ *
+ * Once per drained batch rather than once per record: a batch is a fraction of
+ * a second of traffic, and per-record it was the SD bus running constantly
+ * underneath the radio. */
+static void xi_sync_card(xprsidx_t *st)
+{
+    if (st->active_fp) fsync(fileno(st->active_fp));
+    xi_zone_flush(st);
 }
 
 /* ── Query ──────────────────────────────────────────────────────────────── */
@@ -796,6 +919,37 @@ void xprsindex_bench(xprsidx_t *st, uint32_t n)
 }
 #endif /* XPRSIDX_BENCH */
 
+#ifndef XPRSIDX_HOST_TEST
+/*
+ * The only task that touches the card for writing. Low priority on purpose:
+ * everything else — the radios, the BLE host, the web server — matters more
+ * than how soon a record is durable, and a full ring is a bounded loss whereas
+ * a busy SD bus is a station nobody can reach.
+ */
+static void xi_writer_task(void *arg)
+{
+    xprsidx_t *st = (xprsidx_t *)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(XI_DRAIN_EVERY_MS));
+
+        XI_LOCK(st);
+        int n = 0;
+        while (st->q_count > 0) {
+            if (st->gate && !st->gate()) break;
+            xi_rec_t rec = st->queue[st->q_head];
+            st->q_head = (st->q_head + 1) % XI_QUEUE_LEN;
+            st->q_count--;
+            XI_UNLOCK(st);            /* a query may go in between records */
+            XI_LOCK(st);
+            xi_write_rec(st, &rec);
+            n++;
+        }
+        if (n) xi_sync_card(st);
+        XI_UNLOCK(st);
+    }
+}
+#endif
+
 /* The public entry points hold the lock; everything below them assumes it. */
 bool xprsindex_add(xprsidx_t *st, const char *wire, int len,
                    int rssi, bool outgoing, uint32_t ts_now)
@@ -815,6 +969,18 @@ size_t xprsindex_query(xprsidx_t *st, const xprsidx_query_t *q,
     size_t n = xi_query_locked(st, q, cb, ctx);
     XI_UNLOCK(st);
     return n;
+}
+
+void xprsindex_set_gate(xprsidx_t *st, xprsidx_gate_fn gate)
+{
+    if (st) st->gate = gate;
+}
+
+void xprsindex_queue_stats(xprsidx_t *st, uint32_t *out_waiting,
+                           uint32_t *out_dropped)
+{
+    if (out_waiting) *out_waiting = st ? (uint32_t)st->q_count : 0;
+    if (out_dropped) *out_dropped = st ? st->q_dropped : 0;
 }
 
 void xprsindex_stats(xprsidx_t *st, xprsidx_stats_t *out)

@@ -92,6 +92,10 @@ static const char *TAG = "ble_hello";
  * primaries arrive as separate adverts (one 0xFFFF entry each), so they survive
  * the collapse and reassemble on both BlueZ and Android. The receiver still
  * accepts 0x51 continuations for backward compatibility. */
+/* The XPRS discovery beacon rides its own subtype (docs/ble5.md §2): the packet
+ * itself, as text, after the marker and subtype. */
+#define XPRS_SUBTYPE        0x58        /* 'X' — one XPRS packet, verbatim */
+
 #define BCAST_PRIMARY       0x50        /* 'P' — chunk primary (ADV) */
 #define BCAST_CONT          0x51        /* 'Q' — chunk continuation (SCAN_RSP, receive-only) */
 #define BCAST_NACK          0x52        /* 'R' — receiver→sender resend request */
@@ -173,6 +177,21 @@ static ble_hello_aprs_cb_t s_aprs_cb;
  * NULL = no SD store, queries return empty). */
 static msgstore_t *s_msgstore;
 void ble_hello_set_msgstore(msgstore_t *st) { s_msgstore = st; }
+
+/* XPRS index: every XPRS packet this station hears, answerable over the
+ * xprs_query GATT path (docs/XPRS.md §36). NULL = not an indexer. */
+static xprsidx_t *s_xprsidx;
+void ble_hello_set_xprsindex(xprsidx_t *st) { s_xprsidx = st; }
+
+/* Offer a heard payload to the index. Anything that is not an XPRS packet is
+ * refused inside xprsindex_add(), so every receive path can call this without
+ * first deciding what it is holding. */
+static void xprs_ingest(const uint8_t *payload, int len, int rssi)
+{
+    if (!s_xprsidx || !payload || len <= 0) return;
+    xprsindex_add(s_xprsidx, (const char *)payload, len, rssi, false,
+                  (uint32_t)time(NULL));
+}
 
 /* APRS relay state */
 typedef struct {
@@ -925,6 +944,98 @@ static void handle_aprs_query(uint16_t conn, cJSON *root)
     }
 }
 
+/* ---- XPRS index query over GATT ---------------------------------------- */
+
+typedef struct {
+    char *buf; size_t size; size_t len;
+    bool first; bool full;
+} xq_ctx_t;
+
+/* One record as {"i":index,"w":"<the packet, verbatim>","r":rssi}. The packet is
+ * what was signed, so it is emitted unmodified and the asker verifies it. */
+static bool xq_emit(const xprsidx_rec_t *r, void *vctx)
+{
+    xq_ctx_t *c = (xq_ctx_t *)vctx;
+    char obj[320];
+    int n = snprintf(obj, sizeof obj, "%s{\"i\":%u,\"r\":%d,\"w\":\"",
+                     c->first ? "" : ",", (unsigned)r->index, (int)r->rssi);
+    if (n < 0 || n >= (int)sizeof obj) return false;
+    size_t ol = (size_t)n;
+    if (!ms_json_esc(obj, sizeof obj, &ol, r->wire)) return false;
+    n = snprintf(obj + ol, sizeof obj - ol, "\"}");
+    if (n < 0 || ol + (size_t)n >= sizeof obj) return false;
+    ol += (size_t)n;
+
+    if (c->len + ol + 32 >= c->size) { c->full = true; return false; }
+    memcpy(c->buf + c->len, obj, ol);
+    c->len += ol;
+    c->buf[c->len] = 0;
+    c->first = false;
+    return true;
+}
+
+/* Handle {"type":"xprs_query","since":<epoch>,"until":<epoch>,"pkt":"warning",
+ *         "from":"X1A67X","asker":"X1RD89","limit":N,"recent":true}.
+ *
+ * `asker` is what the §36 mail rule is checked against. On this link it is
+ * SELF-DECLARED — there is no authenticated identity on a GATT write — so it
+ * stops the station from handing a stranger's mail to a passer-by, and is not
+ * proof of who is asking. The mail body is sealed anyway (§9.2); what the rule
+ * protects is the envelope.
+ */
+static void handle_xprs_query(uint16_t conn, cJSON *root)
+{
+    xprsidx_query_t q = { .type = -1 };
+    char asker[XPRSIDX_CALL_LEN] = {0}, from[XPRSIDX_CALL_LEN] = {0};
+    cJSON *j;
+
+    if ((j = cJSON_GetObjectItem(root, "since")) && cJSON_IsNumber(j))
+        q.since_ts = (uint32_t)j->valuedouble;
+    if ((j = cJSON_GetObjectItem(root, "until")) && cJSON_IsNumber(j))
+        q.until_ts = (uint32_t)j->valuedouble;
+    if ((j = cJSON_GetObjectItem(root, "pkt")) && cJSON_IsString(j))
+        q.type = xprsidx_type_code(j->valuestring);
+    if ((j = cJSON_GetObjectItem(root, "from")) && cJSON_IsString(j))
+        strlcpy(from, j->valuestring, sizeof from);
+    if ((j = cJSON_GetObjectItem(root, "asker")) && cJSON_IsString(j))
+        strlcpy(asker, j->valuestring, sizeof asker);
+    if ((j = cJSON_GetObjectItem(root, "limit")) && cJSON_IsNumber(j))
+        q.limit = (uint32_t)j->valuedouble;
+    if ((j = cJSON_GetObjectItem(root, "recent")))
+        q.newest_first = cJSON_IsTrue(j);
+    q.from  = from[0]  ? from  : NULL;
+    q.asker = asker[0] ? asker : NULL;
+
+    uint16_t mtu = ble_att_mtu(conn);
+    size_t cap = (mtu > 23) ? (size_t)(mtu - 3) : 20;
+    static char page[512];              /* NimBLE host task is single-threaded */
+    if (cap > sizeof page) cap = sizeof page;
+
+    xprsidx_stats_t st;
+    xprsindex_stats(s_xprsidx, &st);
+
+    xq_ctx_t ctx = { .buf = page, .size = cap, .len = 0, .first = true, .full = false };
+    ctx.len = (size_t)snprintf(page, cap,
+        "{\"type\":\"xprs_page\",\"epoch\":\"%c\",\"count\":%u,\"recs\":[",
+        st.epoch, (unsigned)st.count);
+
+    int64_t t0 = esp_timer_get_time();
+    size_t n = s_xprsidx ? xprsindex_query(s_xprsidx, &q, xq_emit, &ctx) : 0;
+    int64_t us = esp_timer_get_time() - t0;
+
+    int m = snprintf(page + ctx.len, cap - ctx.len,
+                     "],\"n\":%u,\"more\":%s,\"us\":%u}",
+                     (unsigned)n, ctx.full ? "true" : "false", (unsigned)us);
+    if (m > 0) ctx.len += (size_t)m;
+    ESP_LOGI(TAG, "xprs_query -> %u rec in %u us", (unsigned)n, (unsigned)us);
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(page, ctx.len);
+    if (om) {
+        int rc = ble_gatts_notify_custom(conn, s_notify_handle, om);
+        if (rc != 0) ESP_LOGW(TAG, "xprs_page notify failed: %d", rc);
+    }
+}
+
 static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -957,6 +1068,9 @@ static int gatt_write_cb(uint16_t conn_handle, uint16_t attr_handle,
             } else if (type && cJSON_IsString(type) &&
                        strcmp(type->valuestring, "aprs_query") == 0) {
                 handle_aprs_query(conn_handle, root);
+            } else if (type && cJSON_IsString(type) &&
+                       strcmp(type->valuestring, "xprs_query") == 0) {
+                handle_xprs_query(conn_handle, root);
             }
             cJSON_Delete(root);
         }
@@ -1352,6 +1466,12 @@ static bool aprs_decode(const uint8_t *payload, int len, int rssi)
 {
     if (len <= 0) return false;
 
+    /* Every compact frame, GATT parcel and reassembled broadcast reaches this
+     * function, so it is the one place the indexer needs. An XPRS packet has no
+     * 0x1F separators and would be dropped below as "not an Aurora frame"; it
+     * is offered here first, before any of that. */
+    xprs_ingest(payload, len, rssi);
+
     /* Field buffers: text is large enough for a full GATT parcel frame, not
      * just a legacy advert. */
     char from[16] = {0}, to[16] = {0}, text[240] = {0};
@@ -1371,6 +1491,11 @@ static bool aprs_decode(const uint8_t *payload, int len, int rssi)
         if (fp < caps[fi]) fields[fi][fp++] = (char)b;
     }
     if (!saw_sep) return false;     /* not an Aurora APRS frame */
+
+    /* An Aurora frame can carry an XPRS packet inside TEXT (docs/ble5.md §2:
+     * subtype 0x41 carries XPRS mail). The envelope was already offered above
+     * and refused; the payload is the packet. */
+    xprs_ingest((const uint8_t *)text, (int)strlen(text), rssi);
 
     /* Ping reach-test control frames: handle + suppress chat/relay. */
     if (strcmp(to, PING_TO) == 0 || strcmp(to, PONG_TO) == 0)
@@ -1661,6 +1786,16 @@ static int ble_hello_gap_event(struct ble_gap_event *event, void *arg)
             (mfg[3] == BCAST_PRIMARY || mfg[3] == BCAST_CONT)) {
             track_device(addr);
             brx_ingest(addr, &mfg[2], mlen - 2, event->disc.rssi);
+            break;
+        }
+
+        /* XPRS discovery beacon (docs/ble5.md §2, subtype 0x58): the packet
+         * follows the subtype byte, as text. Checked BEFORE the presence branch
+         * below — that one reads mfg[4..] as a callsign, and this frame's
+         * mfg[4..] is `t:observation f:…`, which would poison the heard list. */
+        if (mlen > 4 && mfg[2] == GEOGRAM_MARKER && mfg[3] == XPRS_SUBTYPE) {
+            track_device(addr);
+            xprs_ingest(&mfg[4], mlen - 4, event->disc.rssi);
             break;
         }
 

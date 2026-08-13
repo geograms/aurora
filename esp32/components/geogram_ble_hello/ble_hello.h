@@ -16,6 +16,7 @@
 #include "esp_err.h"
 #include <stdbool.h>
 #include "msgstore.h"
+#include "xprsindex.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +68,16 @@ void ble_hello_set_aprs_cb(ble_hello_aprs_cb_t cb);
  *        NULL disables on-device query results (queries return empty).
  */
 void ble_hello_set_msgstore(msgstore_t *st);
+
+/**
+ * @brief Attach the XPRS index, making this station an indexer (docs/XPRS.md
+ *        §36): every XPRS packet heard on any receive path is stored, and the
+ *        `xprs_query` GATT command answers questions about it.
+ *
+ * NULL (the default) means packets are still relayed but nothing is kept, and
+ * a query answers empty.
+ */
+void ble_hello_set_xprsindex(xprsidx_t *st);
 
 /**
  * @brief Set this station's position (decimal degrees) used in BLE ping

@@ -93,6 +93,8 @@
     #include "esp_wifi.h"
     #include "sdcard.h"
     #include "msgstore.h"
+    #include "xprsindex.h"
+    #include "esp_timer.h"
     #include "esp_heap_caps.h"
     // Log free heap + largest contiguous block at a boot stage. WiFi STA netif /
     // DHCP, httpd, and the SD/FATFS mount all allocate here on a no-PSRAM S3;
@@ -367,6 +369,7 @@ static void start_mesh_mode(void)
 /* Two independent SD archives: text messages and automated position beacons. */
 static msgstore_t *s_msg_store    = NULL;
 static msgstore_t *s_beacon_store = NULL;
+static xprsidx_t  *s_xprs_index   = NULL;
 
 /* iGate position/radius persisted in NVS so it survives reboots. */
 #define TDONGLE_IGATE_NVS_NS  "igate"
@@ -1155,6 +1158,125 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
 static esp_err_t tdongle_api_messages_handler(httpd_req_t *req) { return tdongle_archive_query(req, s_msg_store); }
 static esp_err_t tdongle_api_beacons_handler(httpd_req_t *req)  { return tdongle_archive_query(req, s_beacon_store); }
 
+/* ---- GET /api/xprs — the indexer, over HTTP ----------------------------- */
+
+typedef struct {
+    char  *buf;
+    size_t size;
+    size_t len;
+    bool   first;
+    bool   full;
+} tdongle_xq_ctx_t;
+
+static bool tdongle_xq_emit(const xprsidx_rec_t *r, void *vctx)
+{
+    tdongle_xq_ctx_t *c = (tdongle_xq_ctx_t *)vctx;
+    /* The packet is text with no quotes or control characters by construction
+     * (XPRS.md §4), but a backslash or quote inside a message field would still
+     * break the JSON, so both are escaped. */
+    char esc[XPRSIDX_WIRE_MAX * 2 + 2];
+    size_t e = 0;
+    for (const char *s = r->wire; *s && e + 2 < sizeof esc; s++) {
+        if (*s == '"' || *s == '\\') esc[e++] = '\\';
+        esc[e++] = *s;
+    }
+    esc[e] = 0;
+
+    char obj[XPRSIDX_WIRE_MAX * 2 + 160];
+    int n = snprintf(obj, sizeof obj,
+        "%s{\"i\":%u,\"ts\":%u,\"rssi\":%d,\"type\":\"%s\",\"from\":\"%s\","
+        "\"mail\":%s,\"wire\":\"%s\"}",
+        c->first ? "" : ",", (unsigned)r->index, (unsigned)r->ts, (int)r->rssi,
+        xprsidx_type_name(r->type), r->from,
+        (r->flags & XI_F_MAIL) ? "true" : "false", esc);
+    if (n < 0) return false;
+    if (c->len + (size_t)n + 64 >= c->size) { c->full = true; return false; }
+    memcpy(c->buf + c->len, obj, (size_t)n);
+    c->len += (size_t)n;
+    c->buf[c->len] = 0;
+    c->first = false;
+    return true;
+}
+
+/* GET /api/xprs?type=warning&recent=1&limit=20
+ *              ?since=<epoch>&until=<epoch>&from=X1A67X&asker=X1RD89
+ *
+ * `us` in the reply is the query's own time on the device, so the two questions
+ * this store exists to answer can be measured rather than described.
+ */
+static esp_err_t tdongle_api_xprs_handler(httpd_req_t *req)
+{
+    char query[224] = {0};
+    char param[48];
+    xprsidx_query_t q = { .type = -1 };
+    char from[XPRSIDX_CALL_LEN] = {0}, asker[XPRSIDX_CALL_LEN] = {0};
+    uint32_t days = 0;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "type", param, sizeof(param)) == ESP_OK)
+            q.type = xprsidx_type_code(param);
+        if (httpd_query_key_value(query, "since", param, sizeof(param)) == ESP_OK)
+            q.since_ts = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "until", param, sizeof(param)) == ESP_OK)
+            q.until_ts = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "days", param, sizeof(param)) == ESP_OK)
+            days = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "limit", param, sizeof(param)) == ESP_OK)
+            q.limit = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "recent", param, sizeof(param)) == ESP_OK)
+            q.newest_first = (param[0] == '1' || param[0] == 't');
+        if (httpd_query_key_value(query, "from", param, sizeof(param)) == ESP_OK)
+            strlcpy(from, param, sizeof from);
+        if (httpd_query_key_value(query, "asker", param, sizeof(param)) == ESP_OK)
+            strlcpy(asker, param, sizeof asker);
+    }
+    if (days > 0) {
+        time_t nowt = time(NULL);
+        if (nowt > 1600000000) q.since_ts = (uint32_t)nowt - days * 86400u;
+    }
+    q.from  = from[0]  ? from  : NULL;
+    q.asker = asker[0] ? asker : NULL;
+    if (q.limit == 0 || q.limit > 200) q.limit = (q.limit > 200) ? 200 : 30;
+
+    /* 3 KB, like the APRS archive handler above: this S3 has no PSRAM and an
+     * 8 KB request-time malloc fails once WiFi, BLE and FATFS have taken their
+     * share of the heap. A packet is at most 250 B, so this still carries a
+     * useful page; `truncated` tells the client to narrow. */
+    const size_t buffer_size = 3072;
+    char *buffer = (char *)malloc(buffer_size);
+    if (!buffer) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    xprsidx_stats_t st;
+    xprsindex_stats(s_xprs_index, &st);
+
+    tdongle_xq_ctx_t ctx = { .buf = buffer, .size = buffer_size, .len = 0,
+                             .first = true, .full = false };
+    ctx.len = (size_t)snprintf(buffer, buffer_size,
+        "{\"epoch\":\"%c\",\"count\":%u,\"segments\":%u,\"free_bytes\":%llu,"
+        "\"recs\":[",
+        st.epoch, (unsigned)st.count, (unsigned)st.segments,
+        (unsigned long long)st.free_bytes);
+
+    int64_t t0 = esp_timer_get_time();
+    size_t n = s_xprs_index ? xprsindex_query(s_xprs_index, &q, tdongle_xq_emit, &ctx) : 0;
+    int64_t us = esp_timer_get_time() - t0;
+
+    int m = snprintf(buffer + ctx.len, buffer_size - ctx.len,
+                     "],\"n\":%u,\"truncated\":%s,\"us\":%u}",
+                     (unsigned)n, ctx.full ? "true" : "false", (unsigned)us);
+    if (m > 0) ctx.len += (size_t)m;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, buffer, ctx.len);
+    free(buffer);
+    return ESP_OK;
+}
+
 /* POST /api/igate/position?lat=&lon=&radius_km= — set + persist the iGate
  * coordinates and nearby radius (lat=0&lon=0 clears the position filter). */
 static esp_err_t tdongle_igate_position_handler(httpd_req_t *req)
@@ -1198,10 +1320,13 @@ static void tdongle_register_igate_status(void)
         .handler = tdongle_api_messages_handler, .user_ctx = NULL };
     static const httpd_uri_t u_beacons = { .uri = "/api/beacons", .method = HTTP_GET,
         .handler = tdongle_api_beacons_handler, .user_ctx = NULL };
+    static const httpd_uri_t u_xprs = { .uri = "/api/xprs", .method = HTTP_GET,
+        .handler = tdongle_api_xprs_handler, .user_ctx = NULL };
     httpd_register_uri_handler(srv, &u_status);
     httpd_register_uri_handler(srv, &u_pos);
     httpd_register_uri_handler(srv, &u_msgs);
     httpd_register_uri_handler(srv, &u_beacons);
+    httpd_register_uri_handler(srv, &u_xprs);
     ESP_LOGI(TAG, "iGate endpoints registered (/api/igate[/position], /api/aprs, /api/beacons)");
 }
 #endif  /* MODEL_TDONGLE_S3 */
@@ -1386,6 +1511,30 @@ extern "C" void app_main(void)
                             s_beacon_store = msgstore_open("/sdcard/aprs/beacon");
                             aprsis_set_stores(s_msg_store, s_beacon_store);
                             ble_hello_set_msgstore(s_msg_store);
+                            // Indexer (docs/XPRS.md §36), on by default and
+                            // alongside store-and-forward: every XPRS packet
+                            // heard is kept here and answerable. Its own
+                            // directory and epoch — the APRS archives above
+                            // keep their record shape and their clients.
+                            s_xprs_index = xprsindex_open("/sdcard/xprs");
+                            if (xprsindex_ready(s_xprs_index)) {
+                                ble_hello_set_xprsindex(s_xprs_index);
+                                xprsidx_stats_t xs;
+                                xprsindex_stats(s_xprs_index, &xs);
+                                ESP_LOGI(TAG, "XPRS indexer ready — %u records, "
+                                              "epoch %c, %u segments",
+                                         (unsigned)xs.count, xs.epoch,
+                                         (unsigned)xs.segments);
+                            } else {
+                                ESP_LOGW(TAG, "XPRS indexer unavailable — "
+                                              "packets are relayed, none kept");
+                            }
+#ifdef XPRSIDX_BENCH
+                            // -DXPRSIDX_BENCH only: fill the store and time the
+                            // two headline queries on real SD hardware. Never
+                            // in a shipped build (see xprsindex.h).
+                            xprsindex_bench(s_xprs_index, XPRSIDX_BENCH);
+#endif
                         } else {
                             ESP_LOGW(TAG, "No usable SD card — APRS persistence disabled");
                         }

@@ -631,6 +631,34 @@ class MeshService {
   List<Map<String, dynamic>> held({int limit = 200}) =>
       MeshStore.instance.heldJson(limit: limit);
 
+  /// What ANOTHER station is carrying, as plain rows; null when it could not
+  /// be reached (or does not serve listings).
+  ///
+  /// Browsing a neighbour's custody store means dialling it and running an MSP
+  /// session — a transport act, and therefore this layer's job rather than the
+  /// caller's. The rows come back as data, so a screen can render them without
+  /// naming a session type: `{am, target, urg, len, ageS}`, the same shape the
+  /// wapp-facing broker uses (mesh_carry_broker.dart).
+  Future<List<Map<String, dynamic>>?> carriedBy(String callsign) async {
+    final entries = await MeshSessionManager.instance.browseCarried(callsign);
+    if (entries == null) return null;
+    return [
+      for (final e in entries)
+        {
+          'am': e.am,
+          'target': e.target,
+          'urg': e.urg,
+          'len': e.len,
+          'ageS': e.ageS,
+        },
+    ];
+  }
+
+  /// Take custody of [ids] from [callsign] — they transfer over the session
+  /// and land in our own store. True when the request went out on a live one.
+  Future<bool> takeCustody(String callsign, List<String> ids) =>
+      MeshSessionManager.instance.pullCarried(callsign, ids);
+
   /// Bulk-lane transfers in flight.
   List<Map<String, dynamic>> transfers() =>
       MeshBulkSpool.instance.transfersJson();

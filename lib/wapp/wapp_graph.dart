@@ -1069,6 +1069,267 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         ]),
       );
 
+  /// A walkable distance from a BLE RSSI, because "-62 dBm" means nothing to
+  /// most people. Log-distance path loss (measured power -59 dBm at 1 m, path
+  /// exponent 2.2 — indoor free-ish air), rounded HARD: multipath and pockets
+  /// swing the reading by ±6 dB, so anything finer than "about N metres" would
+  /// be a lie with decimals.
+  static String bleDistanceEstimate(int rssi) {
+    if (rssi >= 0) return '';
+    final d = pow(10, (-59 - rssi) / 22.0).toDouble();
+    if (d < 2) return '~1 m';
+    if (d < 12) return '~${d.round()} m';
+    if (d < 45) return '~${(d / 5).round() * 5} m';
+    return '50 m +';
+  }
+
+  /// One icon stat tile of the XPRS station card. Fixed width so they flow
+  /// two-up on a phone and three-up on a desktop panel.
+  Widget _statTile(IconData icon, String value, String label,
+          {Color color = _gSelf}) =>
+      Container(
+        width: 148,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF161B22),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: _gBorder),
+        ),
+        child: Row(children: [
+          Icon(icon, size: 22, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: _gFg, fontSize: 15, fontWeight: FontWeight.w700)),
+              Text(label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _gMuted, fontSize: 11)),
+            ]),
+          ),
+        ]),
+      );
+
+  /// The XPRS station card body: what the beacon said, drawn to be read at a
+  /// glance (docs/XPRS.md §10.5-10.6). Distance instead of dBm, tiles instead
+  /// of a key/value waterfall, and the door into the station's carried mail.
+  List<Widget> _xprsStats(RnsGraphNode n, Map<String, dynamic> m) {
+    final bearer = (m['bearer'] ?? '').toString();
+    final rssi = (m['rssi'] as num?)?.toInt() ?? 0;
+    final uptime = (m['uptime'] ?? '').toString();
+    final lifetime = (m['lifetime'] ?? '').toString();
+    final mail = (m['mail'] as num?)?.toInt() ?? 0;
+    final packets = (m['packets'] as num?)?.toInt() ?? 0;
+    final dist = bearer == 'ble' && rssi != 0 ? bleDistanceEstimate(rssi) : '';
+    return [
+      Wrap(spacing: 8, runSpacing: 8, children: [
+        if (dist.isNotEmpty)
+          _statTile(Icons.social_distance_outlined, dist, 'away, roughly'),
+        if (dist.isEmpty && bearer.isNotEmpty)
+          _statTile(Icons.podcasts_outlined, bearer.toUpperCase(), 'heard over'),
+        if (uptime.isNotEmpty)
+          _statTile(Icons.timer_outlined, uptime, 'running now'),
+        if (lifetime.isNotEmpty)
+          _statTile(Icons.history, lifetime, 'total service',
+              color: _gGeo),
+        if (packets > 0)
+          _statTile(Icons.graphic_eq, '$packets', 'packets heard'),
+        if (m['firstSeen'] != null)
+          _statTile(Icons.visibility_outlined, _ago(m['firstSeen']),
+              'first heard'),
+        if (mail > 0)
+          _statTile(Icons.markunread_mailbox_outlined, '$mail',
+              'mail carried', color: const Color(0xFFFFD54F)),
+      ]),
+      if (dist.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text('distance is a rough estimate from signal ($rssi dBm)',
+              style: const TextStyle(color: _gMuted, fontSize: 11)),
+        ),
+      if (mail > 0) ...[
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.luggage_outlined, size: 18),
+            label: Text('Carried mail ($mail)'),
+            onPressed: () => _openCarriedMail(n),
+          ),
+        ),
+      ],
+      const SizedBox(height: 8),
+    ];
+  }
+
+  /// Browse a station's custody store and take chosen messages with you.
+  ///
+  /// Two short dials rather than one held-open session: the first fetches the
+  /// listing and closes politely, the second (on "Carry") sends the pull and
+  /// receives the messages over the ordinary custody lane. Between the two the
+  /// user can think as long as they like without holding the radio.
+  Future<void> _openCarriedMail(RnsGraphNode n) async {
+    final call = (n.meta['callsign'] ?? n.label).toString();
+    final picked = <String>{};
+    // Plain rows from the service facade — browsing a neighbour's store is a
+    // transport act, so this screen asks MeshService for it rather than
+    // dialling a session itself (docs/architecture.md section 1).
+    List<Map<String, dynamic>>? entries;
+    var phase = 0; // 0 fetching, 1 list, 2 unreachable, 3 pulling
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSheet) {
+        if (phase == 0) {
+          unawaited(MeshService.instance.carriedBy(call).then((r) {
+            if (!ctx.mounted) return;
+            setSheet(() {
+              // Only id-keyed entries can be pulled BY NAME; frames parked
+              // before the XPRS port carry no id and deliver on their own.
+              entries =
+                  r?.where((e) => (e['am'] ?? '').toString().isNotEmpty).toList();
+              phase = r == null ? 2 : 1;
+            });
+          }));
+          phase = -1; // fetch in flight
+        }
+        Widget body;
+        if (phase == -1 || phase == 3) {
+          body = Padding(
+            padding: const EdgeInsets.all(28),
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 12),
+              Text(phase == 3 ? 'Taking custody…' : 'Asking $call…',
+                  style: const TextStyle(color: _gMuted)),
+            ]),
+          );
+        } else if (phase == 2) {
+          body = Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+                'Could not reach $call right now — the radio may be busy or '
+                'the station out of range. Try again in a moment.',
+                style: const TextStyle(color: _gMuted, fontSize: 13)),
+          );
+        } else if ((entries ?? const []).isEmpty) {
+          body = const Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+                'Nothing here you can pick. Mail parked before this update '
+                'carries no id and delivers on its own; new mail will be '
+                'listed and pickable.',
+                style: TextStyle(color: _gMuted, fontSize: 13)),
+          );
+        } else {
+          const urgNames = ['low', 'normal', 'high', 'urgent'];
+          body = Column(mainAxisSize: MainAxisSize.min, children: [
+            Flexible(
+              child: ListView(shrinkWrap: true, children: [
+                for (final e in entries!)
+                  Builder(builder: (_) {
+                  final am = (e['am'] ?? '').toString();
+                  final urg = (e['urg'] as num?)?.toInt() ?? 1;
+                  return CheckboxListTile(
+                    dense: true,
+                    value: picked.contains(am),
+                    onChanged: (v) => setSheet(
+                        () => v == true ? picked.add(am) : picked.remove(am)),
+                    title: Text('For ${e['target'] ?? '?'}',
+                        style: const TextStyle(color: _gFg, fontSize: 14)),
+                    subtitle: Text(
+                        '${e['len'] ?? 0} B · '
+                        'parked ${_agoS((e['ageS'] as num?)?.toInt() ?? 0)} · '
+                        '${urgNames[urg.clamp(0, 3)]} · $am',
+                        style:
+                            const TextStyle(color: _gMuted, fontSize: 11.5)),
+                    secondary: const Icon(Icons.mail_outline,
+                        size: 18, color: _gSelf),
+                  );
+                  }),
+              ]),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.luggage_outlined, size: 18),
+                  label: Text(picked.isEmpty
+                      ? 'Pick messages to carry'
+                      : 'Carry ${picked.length} with me'),
+                  onPressed: picked.isEmpty
+                      ? null
+                      : () async {
+                          setSheet(() => phase = 3);
+                          final ok = await MeshService.instance
+                              .takeCustody(call, picked.toList());
+                          if (!ctx.mounted) return;
+                          Navigator.of(ctx).pop();
+                          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                              SnackBar(
+                                  content: Text(ok
+                                      ? 'Taking custody of ${picked.length} '
+                                          'message(s) — they transfer over '
+                                          'this session.'
+                                      : 'Could not reach $call — nothing '
+                                          'was taken.')));
+                        },
+                ),
+              ),
+            ),
+          ]);
+        }
+        return SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+              child: Row(children: [
+                const Icon(Icons.markunread_mailbox_outlined,
+                    size: 18, color: _gSelf),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('Mail carried by $call',
+                      style: const TextStyle(
+                          color: _gFg,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700)),
+                ),
+              ]),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                    'Envelopes only — the content stays sealed for its '
+                    'recipient. What you take, you deliver.',
+                    style: TextStyle(color: _gMuted, fontSize: 11.5)),
+              ),
+            ),
+            body,
+          ]),
+        );
+      }),
+    );
+  }
+
+  static String _agoS(int s) {
+    if (s < 60) return '${s}s ago';
+    if (s < 3600) return '${s ~/ 60}m ago';
+    if (s < 86400) return '${s ~/ 3600}h ago';
+    return '${s ~/ 86400}d ago';
+  }
+
   String _shorten(String s, {int head = 10, int tail = 6}) {
     if (s.length <= head + tail + 1) return s;
     return tail > 0
@@ -1233,42 +1494,32 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         ),
         _chips(n.services),
       ],
-      if ((m['nickname'] ?? '').toString().isNotEmpty &&
-          (m['nickname'] ?? '').toString().toUpperCase() !=
-              (m['callsign'] ?? '').toString().toUpperCase())
-        _kv('Nickname', m['nickname'].toString()),
-      if ((m['callsign'] ?? '').toString().isNotEmpty)
-        _kv('Callsign', m['callsign'].toString()),
-      if ((m['role'] ?? '').toString().isNotEmpty)
-        _kv('Relay role', m['role'].toString()),
-      if (m['caps'] is List && (m['caps'] as List).isNotEmpty)
-        _kv('Capabilities', (m['caps'] as List).join(', ')),
-      if (n.kind != 'self') _kv('Hops', '${n.hops}'),
-      if (n.via.isNotEmpty) _kv('Via', n.via),
-      // The XPRS beacon's own account of the station (docs/XPRS.md §10.5-10.6):
-      // where it was heard, how loud, how long it has run and what it carries.
-      if (n.kind == 'xprs') ...[
-        if ((m['bearer'] ?? '').toString().isNotEmpty)
-          _kv('Heard over', m['bearer'].toString().toUpperCase()),
-        if ((m['rssi'] as num?)?.toInt() != null &&
-            (m['rssi'] as num).toInt() != 0)
-          _kv('Signal', '${(m['rssi'] as num).toInt()} dBm'),
-        if ((m['uptime'] ?? '').toString().isNotEmpty)
-          _kv('Uptime', m['uptime'].toString()),
-        if ((m['lifetime'] ?? '').toString().isNotEmpty)
-          _kv('Lifetime', m['lifetime'].toString()),
-        if ((m['mail'] as num?) != null && (m['mail'] as num).toInt() > 0)
-          _kv('Mail held', '${(m['mail'] as num).toInt()}'),
-        if ((m['packets'] as num?) != null)
-          _kv('Packets heard', '${(m['packets'] as num).toInt()}'),
+      // An XPRS station gets a compact, glanceable account instead of the key/
+      // value waterfall: icon tiles (distance, service record, mail) and the
+      // door into its carried mail. The generic rows below mostly duplicate it
+      // (callsign = the title, hops = 1, via = the bearer tile) — skipped.
+      if (n.kind == 'xprs') ..._xprsStats(n, m),
+      if (n.kind != 'xprs') ...[
+        if ((m['nickname'] ?? '').toString().isNotEmpty &&
+            (m['nickname'] ?? '').toString().toUpperCase() !=
+                (m['callsign'] ?? '').toString().toUpperCase())
+          _kv('Nickname', m['nickname'].toString()),
+        if ((m['callsign'] ?? '').toString().isNotEmpty)
+          _kv('Callsign', m['callsign'].toString()),
+        if ((m['role'] ?? '').toString().isNotEmpty)
+          _kv('Relay role', m['role'].toString()),
+        if (m['caps'] is List && (m['caps'] as List).isNotEmpty)
+          _kv('Capabilities', (m['caps'] as List).join(', ')),
+        if (n.kind != 'self') _kv('Hops', '${n.hops}'),
+        if (n.via.isNotEmpty) _kv('Via', n.via),
+        if (n.effectiveKind == 'hub' && n.members > 0)
+          _kv('Peers heard', '≈ ${n.members} (sample)'),
+        if (m['firstSeen'] != null) _kv('First seen', _ago(m['firstSeen'])),
+        // The two long identifiers are things you COPY (paste into Mail, into a
+        // relay query) — printed raw they are just a wall of hex you cannot use.
+        if (n.npub.isNotEmpty) _kvCopy('npub', n.npub),
+        if (n.id.isNotEmpty) _kvCopy('Identity', n.id),
       ],
-      if (n.effectiveKind == 'hub' && n.members > 0)
-        _kv('Peers heard', '≈ ${n.members} (sample)'),
-      if (m['firstSeen'] != null) _kv('First seen', _ago(m['firstSeen'])),
-      // The two long identifiers are things you COPY (paste into Mail, into a
-      // relay query) — printed raw they are just a wall of hex you cannot use.
-      if (n.npub.isNotEmpty) _kvCopy('npub', n.npub),
-      if (n.id.isNotEmpty) _kvCopy('Identity', n.id),
     ]);
   }
 

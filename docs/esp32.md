@@ -196,6 +196,54 @@ Two consequences worth building around:
     whole active file is invisible after a reboot. 2000 records were lost to a
     reset exactly this way.
 
+## Heap is the binding constraint — check it first
+
+Every mysterious failure on this board so far has been heap. The symptoms do not
+look like memory:
+
+| What you see | What it actually is |
+|---|---|
+| `wifi:m f null` repeating | the driver cannot allocate its keepalive frame |
+| ping fails while the log says the station is associated | lwip has no buffers |
+| HTTP accepts TCP and never answers | the handler's 2–3 KB response `malloc` fails |
+| `APRS-IS iGate init failed: ESP_FAIL` at boot | nothing left to start it with |
+| a reboot every ~14 s | a task stack overflowed |
+
+BLE is the reason there is nothing left. Measured on the T-Dongle:
+
+```
+heap after nostr init:   164,516
+heap after WiFi AP/STA:  120,848
+heap after httpd start:  103,928
+heap after BLE init:      11,432   <- NimBLE and the controller take ~90 KB
+```
+
+Eleven kilobytes is what the whole rest of the firmware had to live in, and any
+task stack added to it took the station off the air — 117 of 117 pings answered
+became 1 of 86 by adding two background tasks.
+
+**Where the 90 KB was hiding.** The defaults are sized for a busy central, not
+for a station that advertises, scans and holds at most one connection:
+
+| Setting | Was | Now | Frees |
+|---|---|---|---|
+| `BT_NIMBLE_MSYS_2_BLOCK_COUNT` | 24 × 320 B | 8 | ~5 KB |
+| `BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT` | 24 × 255 B | 8 | ~4 KB |
+| `BT_NIMBLE_HOST_TASK_STACK_SIZE` | 8192 | 5120 | 3 KB |
+| `BT_CTRL_BLE_MAX_ACT` | 6 | 3 | |
+| `BT_CTRL_SCAN_DUPL_CACHE_SIZE` | 100 | 20 | |
+| `BT_NIMBLE_ROLE_CENTRAL` | on | off (we never dial out) | |
+
+Free heap after BLE init went **11,432 → 29,408**, largest block 7,680 → 21,504.
+With that, reachability is 137/137, the iGate connects for the first time, and
+every HTTP endpoint answers including the SD-backed ones.
+
+**The file that matters is `esp32/sdkconfig.tdongle_s3`**, not
+`boards/sdkconfig.tdongle_s3`. The board fragment is a defaults seed; PlatformIO
+maintains the generated one at the project root and that is what the build uses.
+The fragment had asked for `MSYS_1=6` and no central role for who knows how
+long, and the build had 12 and central enabled.
+
 ## Memory budget (no PSRAM)
 
 `CONFIG_SPIRAM` is **not** set on the T-Dongle, so everything comes out of

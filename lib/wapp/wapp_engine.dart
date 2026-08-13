@@ -30,6 +30,7 @@ import '../services/social/node_role_api.dart';
 import '../services/mesh/mesh_carry_broker.dart';
 import '../services/mesh/mesh_service.dart';
 import '../services/xprs/xprs_monitor.dart';
+import '../services/xprs/xprs_publisher.dart';
 import '../services/torrent_service.dart';
 import '../util/media_archive.dart';
 import '../util/media_ref.dart';
@@ -3506,6 +3507,23 @@ class WappEngine {
       params: [ValueTy.i32, ValueTy.i32], results: [ValueTy.i32],
     );
 
+    // hal_xprs_status: publish a short status (docs/XPRS.md §27) on every
+    // active bearer. The wapp supplies the words; the CORE chooses transports
+    // (BLE5 now, Reticulum broadcast, LoRa when a radio exists), splits long
+    // text into §6.6 parts and signs with the profile key. Fire-and-forget,
+    // like hal_nostr_post.
+    final halXprsStatus = WasmFunction(
+      (int textPtr, int textLen, int moodPtr, int moodLen) {
+        final text = _readStr(textPtr, textLen);
+        final mood = moodLen > 0 ? _readStr(moodPtr, moodLen) : null;
+        if (text.trim().isEmpty) return -1;
+        unawaited(XprsPublisher.instance.publishStatus(text, mood: mood));
+        return 0;
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+
     // hal_mesh_carry: browse a nearby station's custody store and take chosen
     // messages (kick-off-and-poll; the dial takes seconds and a HAL call may
     // not stall the engine). {"op":"browse"|"status"|"pull"|"reset", ...} →
@@ -3828,6 +3846,7 @@ class WappEngine {
       WasmImport('hal', 'mesh_devices', halMeshDevices),
       WasmImport('hal', 'xprs_stations', halXprsStations),
       WasmImport('hal', 'xprs_traffic', halXprsTraffic),
+      WasmImport('hal', 'xprs_status', halXprsStatus),
       WasmImport('hal', 'mesh_scf_status', halMeshScfStatus),
       WasmImport('hal', 'mesh_transfers', halMeshTransfers),
       WasmImport('hal', 'mesh_held', halMeshHeld),

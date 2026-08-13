@@ -17,6 +17,9 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:hex/hex.dart';
+
+import '../../profile/profile_service.dart';
 import '../../util/aprx_sign.dart';
 import '../../util/nostr_crypto.dart';
 import 'xprs_id.dart';
@@ -54,6 +57,26 @@ Uint8List xprsSignedDigest(XprsPacket p) =>
 /// stay last (section 4) — [XprsPacket.with_] already does that.
 XprsPacket xprsSign(XprsPacket p, BigInt d) =>
     p.with_('sig', AprxSign.b85encode(AprxSign.sign(xprsSignedDigest(p), d)));
+
+/// The private scalar XPRS signs with: the active profile's nsec, decoded.
+///
+/// Null when there is no profile or the nsec does not decode — the caller
+/// then transmits unsigned, which the spec permits (section 9.1). ONE
+/// implementation of "which key signs XPRS": the courier and the publisher
+/// both come here.
+BigInt? xprsProfileScalar() {
+  final nsec = ProfileService.instance.activeProfile?.nsec ?? '';
+  if (nsec.isEmpty) return null;
+  try {
+    var d = BigInt.zero;
+    for (final b in HEX.decode(NostrCrypto.decodeNsec(nsec))) {
+      d = (d << 8) | BigInt.from(b);
+    }
+    return d;
+  } catch (_) {
+    return null;
+  }
+}
 
 /// Check the `sig:` on [p] against [pubXonly], the signer's 32-byte x-only key.
 ///

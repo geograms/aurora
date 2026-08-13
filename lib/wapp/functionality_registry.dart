@@ -290,11 +290,24 @@ class FunctionalityRegistry {
       ], ReturnDef('int', '0 ok, -1 unknown key/bad value')),
     ]),
     'hal.xprs': FunctionalityDef('hal.xprs',
-        'What this device has heard on the air: XPRS stations and packets. '
-        'READ-ONLY DIAGNOSTICS \u2014 it names what was heard and never steers '
-        'delivery. Internet traffic is not in it: the bearer is recorded where '
-        'a packet arrives and only radio/local bearers are collected, so there '
-        'is nothing to filter out later.', [
+        'What this device has heard on the air: XPRS stations and packets, '
+        'read-only \u2014 plus ONE publish verb, hal_xprs_status, where the '
+        'wapp supplies words and the core chooses every transport. Nothing '
+        'here steers delivery. Internet traffic is not in the diagnostics: '
+        'the bearer is recorded where a packet arrives and only radio/local '
+        'bearers are collected, so there is nothing to filter out later.', [
+      EndpointDef(
+          'hal_xprs_status',
+          'Publish a short status (XPRS \u00a727) on every active bearer \u2014 '
+              'BLE now, Reticulum, LoRa when available. The core builds the '
+              'packet, splits long text into \u00a76.6 parts, signs with the '
+              'profile key and picks the transports; scope: in the future '
+              'gates reach. Fire-and-forget.',
+          [
+            ParamDef('text', 'string', 'the status text'),
+            ParamDef('mood', 'string', 'optional mood word (\u00a727.1), may be empty'),
+          ],
+          ReturnDef('int', '0 queued, -1 empty text')),
       EndpointDef(
           'hal_xprs_stations',
           'Stations heard over the air, as people-widget sections '

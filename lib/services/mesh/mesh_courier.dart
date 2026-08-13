@@ -275,19 +275,9 @@ class MeshCourier {
     }
   }
 
-  BigInt? _privScalar() {
-    final nsec = ProfileService.instance.activeProfile?.nsec ?? '';
-    if (nsec.isEmpty) return null;
-    try {
-      var d = BigInt.zero;
-      for (final b in HEX.decode(NostrCrypto.decodeNsec(nsec))) {
-        d = (d << 8) | BigInt.from(b);
-      }
-      return d;
-    } catch (_) {
-      return null;
-    }
-  }
+  // The signing key lives in ONE place now: xprsProfileScalar (xprs_sig.dart),
+  // shared with the XPRS publisher.
+  BigInt? _privScalar() => xprsProfileScalar();
 
   // ── inbound ───────────────────────────────────────────────────────────────
 

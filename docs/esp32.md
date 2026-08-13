@@ -1,7 +1,10 @@
 # ESP32 firmware — map & special characteristics
 
 Read this before touching `esp32/` — it saves re-reading the tree. Covers the
-project layout, which firmware is which, the BLE protocol state, and the traps.
+project layout, which firmware is which, the BLE protocol state, the traps, and
+the three constraints this board keeps punishing people for: **which processor
+the work runs on**, **when the SD card is allowed to run**, and **how little
+memory is left**.
 
 ## Two projects, one component library
 
@@ -93,12 +96,150 @@ mesh identity is the iGate callsign from NVS, fallback `TDONGLE`).
 - SD is the T-Dongle's hidden microSD slot (under the USB-A cap); mounted at
   `/sdcard` via `geogram_sdcard` (SDMMC). Absent card must degrade gracefully.
 - WiFi + BLE coexist: the ext scan runs at 60% duty (0x60 itvl / 0x50 window)
-  deliberately, so WiFi (iGate) still gets airtime.
+  deliberately, so WiFi (iGate) still gets airtime. That duty is about the
+  handshake, not about throughput — when WiFi collapses later, the cause is
+  almost certainly the processor, not the antenna. See "The two processors".
 - Secrets (`igate_secrets.h`) are gitignored; provisioning writes them to NVS
   on first boot and NVS is the source of truth afterwards.
 - `build.sh` menu does NOT list tdongle_s3 or rns_ble5 — build those directly
   (`pio run -e tdongle_s3` at the root, or `pio run` inside `rns_ble5/`).
 - A full cold build takes >10 min (IDF from scratch); incremental is fast.
+
+## The two processors — the rule that matters most
+
+This chip has two cores and this firmware puts everything that matters on one
+of them:
+
+| Core 0 | Core 1 |
+|---|---|
+| BLE controller (`CONFIG_BT_CTRL_PINNED_TO_CORE 0`) | |
+| NimBLE host (`CONFIG_BT_NIMBLE_PINNED_TO_CORE 0`) | |
+| WiFi task (IDF default) | |
+| `app_main` and everything it calls (`CONFIG_ESP_MAIN_TASK_AFFINITY 0x0`) | |
+| | nearly idle |
+
+`xTaskCreate()` leaves a task with no affinity, which is not the same as putting
+it on core 1. **Anything that blocks for milliseconds at a time — SD, FATFS,
+crypto over big buffers — must be pinned to core 1**:
+
+```c
+xTaskCreatePinnedToCore(task, "name", stack, arg, prio, NULL, 1);
+```
+
+### What this looked like when it was wrong
+
+The XPRS index wrote a 320-byte record to microSD for every packet heard, from
+the receive path. The WiFi station stayed associated and could not transmit:
+`wifi:m f null` repeating, DNS timing out, the device unreachable. Measured by
+pinging once a second:
+
+| Configuration | Reachable |
+|---|---|
+| BLE on, SD on, writes on core 0 | **1 of 96** |
+| BLE on, SD off | 159 of 162 |
+| BLE on, SD on, writes on **core 1** | **178 of 182** |
+
+### What did not work, so nobody repeats it
+
+The symptom reads exactly like a radio problem, and the firmware's own comment
+about the SDMMC bus desensitising the 2.4 GHz radio encourages that reading. All
+four of these were tried against the 1-of-96 baseline and **none of them changed
+anything**:
+
+- `esp_wifi_set_ps(WIFI_PS_MIN_MODEM)` — what ESP-IDF's own coexistence example
+  marks "must call this"
+- the BLE scan cut from 60% to 10% duty (20 ms window / 200 ms interval)
+- `esp_coex_preference_set(ESP_COEX_PREFER_WIFI)` instead of `BALANCE`
+- stopping BLE entirely (advertising, scanning and any open connection) for the
+  duration of the WPA2 handshake
+
+They are all defensible; none of them is the bug. The bug was the processor.
+
+### One thing that pinning broke
+
+Setting `config.core_id = 1` on the **httpd** task made the server accept
+connections and never answer them. Pin the SD writer, not the web server.
+
+## The SD card
+
+- The T-Dongle's microSD is under the USB-A cap, SDMMC, mounted at `/sdcard`.
+  An absent card must degrade gracefully — several components run without one.
+- **Never write from a receive path.** Decide on the caller's thread (parse,
+  identify, deduplicate — all cheap) and hand the finished record to a queue
+  that a core-1 task drains.
+- **Drain in bursts, not as a trickle.** A writer waking ten times a second
+  keeps the FATFS layer busy and every other reader of the card queues behind
+  it — including unrelated endpoints like `/api/beacons`. Two seconds between
+  bursts is enough to keep the card free the rest of the time.
+- **FatFs is not thread-safe and this is not theoretical.** Two tasks adding
+  records while two servers read them, through one `FILE*`, returns records that
+  are half another task's seek. Stores need their own mutex.
+- **A file's size lives in its directory entry, and FatFs writes that on sync or
+  close.** Two consequences, both cost a day to find:
+  - a second `fopen()` of the segment currently being appended sees the size
+    from the last sync — usually zero — so records just written read back empty.
+    Read the active file through the handle that is writing it.
+  - nothing closes that handle when the power goes, so without an `fsync()` the
+    whole active file is invisible after a reboot. 2000 records were lost to a
+    reset exactly this way.
+
+## Memory budget (no PSRAM)
+
+`CONFIG_SPIRAM` is **not** set on the T-Dongle, so everything comes out of
+internal SRAM, and the app partition is nearly full:
+
+| | |
+|---|---|
+| App partition | 1,966,080 B |
+| Current app | ~1,860,000 B (≈105 KB spare) |
+| Free heap after httpd starts | ~104 KB, largest block ~40 KB |
+
+Consequences that have already bitten:
+
+- an 8 KB request-time `malloc()` in an HTTP handler fails outright — 2–3 KB is
+  the realistic ceiling
+- the httpd task stack is trimmed to **5120 B** on this board, so a handler that
+  puts a couple of 600-byte buffers on the stack can take the server down; build
+  responses straight into the response buffer
+- SQLite does not fit, which is why `geogram_xprsindex` is what it is
+
+## What the T-Dongle stores and speaks
+
+- `geogram_msgstore` — the APRS archives (`/sdcard/aprs/msg`, `.../beacon`),
+  192-byte records, served by `/api/aprs` and `/api/beacons`.
+- `geogram_xprsindex` — every XPRS packet heard, verbatim, 320-byte records in
+  segments, with a zone map for time ranges and a tail index per type. Serves
+  `/api/xprs` and the GATT `xprs_query`. Section 36 of `XPRS.md` is enforced in
+  the store: a packet with `d:` is held and never handed to a third party.
+- `geogram_xprslan` — XPRS as UDP broadcast on the LAN, port 42672. See
+  [lan.md](lan.md). Not Reticulum (that is 42671, `geogram_lanwatch`, listen
+  only) and not the internet.
+
+## Validating on the device
+
+- **Opening `/dev/ttyACM0` reboots the board.** `monitor-capture.sh` asserts DTR
+  whether or not `-r` is passed, and the board needs ~28 s afterwards before it
+  is on the network again. A probe sent during a capture hits a rebooting
+  device, and the result means nothing.
+- So **measure over the network** — ping, curl, UDP — with no serial open. Use
+  serial only for facts that are only visible at boot: heap sizes, "HTTP server
+  started", WiFi disconnect reasons.
+- Reachability is the honest metric for anything touching the radio. One ping a
+  second for three minutes, reported as *n* of *m*, is what turned a week of
+  plausible theories into the table above.
+- Change one thing at a time and keep the baseline. Four radio settings were
+  changed on a wrong hypothesis before an A/B against `FEATURE_SDCARD=0` showed
+  where the problem actually was.
+
+### Open
+
+- SD-backed HTTP endpoints (`/api/xprs`, and the pre-existing `/api/beacons`)
+  time out in longer runs even though httpd starts cleanly with ~104 KB free.
+  Not diagnosed.
+- Reachability has been measured at 178/182 and, an hour later on the same
+  firmware, 0/70 with the STA failing to associate (reasons 202/205). Whether
+  that is the access point or a late regression is unresolved — re-measure
+  before trusting a single run.
 
 ## Known gaps / next steps
 

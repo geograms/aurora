@@ -134,7 +134,7 @@ See [ble5.md](ble5.md) for transmission budgets and
 dart tool/arch_guard.dart            # check; exit 1 on a new violation
 dart tool/arch_guard.dart --list     # all violations, including the baseline
 dart tool/arch_guard.dart --baseline # re-record the baseline
-./tool/install-hooks.sh              # install as a pre-commit hook
+./tool/install-hooks.sh              # install the pre-commit + pre-push hooks
 ```
 
 The guard is a baseline checker. Violations recorded in
@@ -148,6 +148,27 @@ observed during the guard's own self-test before release.
 
 The baseline is currently empty. Every violation it originally recorded has been
 fixed or annotated, so any new violation fails the build immediately.
+
+### What the pre-push hook refuses, and why
+
+`./tool/install-hooks.sh` also installs a **pre-push** hook, and it enforces
+something the architecture rules cannot: that CI is compiling the same code you
+compiled.
+
+It refuses a push while anything under `lib/`, `test/` or `assets/` is
+uncommitted, and warns (without refusing) when the `../reticulum-dart` sibling
+has uncommitted work or sits ahead of its remote.
+
+The reason is a failure that has happened repeatedly and always looks the same:
+a commit names a symbol whose definition is still unstaged, `flutter test`
+passes here because this machine has both halves, and the build is the first
+thing to find out. The sibling is the sharper version — aurora depends on
+reticulum-dart by path, so it resolves to your working tree locally and to
+`geograms/reticulum-dart@main` in CI, which means an uncommitted change there is
+invisible to every local check at the same time as it is invisible to CI.
+
+Both checks are pure git, so the hook costs milliseconds and says nothing at all
+when the tree is clean. Skip it with `git push --no-verify` when you mean to.
 
 Rules enforced:
 

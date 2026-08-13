@@ -104,6 +104,176 @@ condition of the licence. Section 9.4.1 states the rule and section 9.4.2 shows
 how an operator ties a callsign that *was* issued to them to the key they sign
 with.
 
+### 3.1 One person, several devices
+
+The same person runs a phone, a tablet, and a node in the shed. All three hold
+the same key, so all three derive the same four characters -- and on the air they
+are one callsign saying three different things.
+
+APRS answered this with an SSID: `CT1ABC-9`. XPRS keeps that notation, because
+it is the one every operator already reads, and changes what sits underneath it.
+
+**The bare callsign is the person. A suffix is one of their devices.**
+
+```
+X1A67X      the person, on whatever device is in reach
+X1A67X-1    one of their devices
+X1A67X-2    another
+```
+
+Numbers run `-1` to `-99`. `-0` is never written: the bare form already means
+the person. The suffix costs two or three bytes on `f:` and on `d:`, and nothing
+anywhere else.
+
+#### 3.1.1 Choosing a number, without anyone to ask
+
+A device starts bare and stays bare while it is alone -- most stations never
+number themselves at all.
+
+It learns it is not alone the moment it hears a beacon (section 10.6) carrying
+**its own callsign and a different key**. Two devices of one person share the
+person's key; they do not share the key their own destination is derived from,
+and on a beacon that difference is visible as `lx:`:
+
+```
+t:observation f:X1A67X-1 link:ble peers:2 lx:5463d9bc93aebda57d1f704a3cfbee80
+t:observation f:X1A67X-2 link:ble peers:2 lx:23698e7593f05e2053f5183580e2cf98
+```
+
+77 bytes each. Each device then takes **the lowest number it has not heard in
+use**, and when two would take the same one, the device whose own key sorts
+lower keeps it and the other picks again. Both sides compute that from what they
+have already heard, so there is no negotiation, no registry, no coordinator, and
+no state that can be lost -- only a rule that two devices apply to the same facts
+and reach the same answer.
+
+A number, once adopted, is kept across restarts. A device that has been alone
+for a long time may drop back to bare, and nothing breaks if it does not.
+
+#### 3.1.2 What the numbers mean
+
+APRS gave its SSIDs conventional meanings, and a generation of operators reads
+them fluently: `-9` is the car, `-7` is the handheld, `-13` is a weather
+station. XPRS keeps those meanings for `-1` to `-15`, unchanged, so an operator
+who has been reading them for twenty years reads ours correctly and a gateway
+maps both ways without a table of its own.
+
+| Suffix | APRS convention | XPRS `type:` it usually goes with |
+|---|---|---|
+| *(bare)* | primary / home station | -- the person |
+| `-1` to `-4` | generic, digipeater | `digi`, `node` |
+| `-5` | other networks, smartphone | `portable` |
+| `-6` | special activity, satellite, camping | `portable` |
+| `-7` | handheld | `portable` |
+| `-8` | boats, RV, second mobile | `boat`, `sailboat` |
+| `-9` | primary mobile | `car` |
+| `-10` | internet gateway | `node` |
+| `-11` | balloon, aircraft, spacecraft | `balloon`, `airplane`, `glider`, `drone` |
+| `-12` | trackers, DTMF, RFID devices | `drone`, `node` |
+| `-13` | weather station | `wx` |
+| `-14` | trucker, full-time driver | `truck` |
+| `-15` | generic, digipeater | `digi` |
+
+**`-16` to `-99` mean nothing at all, and that is the extension.** APRS stopped
+at 15 because four bits was what it had. We have room, so the numbers above 15
+are plain serials for a person with more devices than the conventions have names
+-- a fourth tablet is not a *kind* of thing, it is the fourth one.
+
+**Where the two disagree, `type:` wins.** A suffix is a hint for people and for
+gateways; `type:` (section 35) is the machine-readable answer, and APRS never
+had one:
+
+```
+t:observation f:X1A67X-9 type:car link:ble peers:2 lx:5463d9bc93aebda57d1f704a3cfbee80
+```
+
+86 bytes. **A receiver never infers what a station is from its suffix when
+`type:` is present**, and never rejects a station for wearing a number that
+disagrees with it. The conventions are there to be helpful, not to be enforced.
+
+This also improves the numbering above: a device that knows its own `type:`
+**prefers the conventional number for it** when that number is free. A phone in
+a car self-numbers to `-9` without anyone typing anything, and an operator who
+has never read this document still guesses right.
+
+#### 3.1.3 What is addressed to whom
+
+| `d:` | Reaches | Use it for |
+|---|---|---|
+| `X1A67X` | the person, on whatever device is reachable | everything ordinary |
+| `X1A67X-2` | that one device | what only that machine can answer |
+
+Ordinary traffic names the person, because a person is not their tablet:
+
+```
+t:message f:X1RD89 d:X1A67X ts:2026-08-12_17:28:52 m:on my way
+```
+
+62 bytes. Every device of that person shows it, and the sender does not have to
+know or care which screen its reader is in front of.
+
+A suffix is for when the machine is the point -- the photos are on the tablet,
+the sensor is wired to the shed:
+
+```
+t:message f:X1RD89 d:X1A67X-2 ts:2026-08-12_17:28:52 m:the tablet has the photos
+```
+
+80 bytes.
+
+**Commands are the other way round.** `cmd:door-open` addressed to a person is
+meaningless -- a person is not a door -- so a command (section 25) names a
+device:
+
+```
+t:command f:X1A67X-1 d:X1A67X-2 ts:2026-08-12_17:28:52 cmd:status
+```
+
+65 bytes. A station receiving a command addressed to the bare callsign may
+refuse it, and should, unless it is the only device wearing that callsign.
+
+**A station accepts a packet addressed to its own suffixed name or to the bare
+callsign, and no other.** Everything a receiver keys on a *person* -- a thread, a
+reputation, a block, a follow -- keys on the bare callsign, so numbering a device
+never splits a conversation in two.
+
+#### 3.1.4 Two devices, one recipient
+
+Both will answer, and that is correct rather than a fault to suppress. A receipt
+(section 13.7.1) names the device that sent it:
+
+```
+t:receipt f:X1A67X-1 d:X1RD89 r:40f357 s:ack sig:<60 characters>
+t:receipt f:X1A67X-2 d:X1RD89 r:40f357 s:ack sig:<60 characters>
+```
+
+109 bytes each, both naming the one message in `r:`. The sender collapses them
+on that identifier: one message, delivered -- and, if it cares to look, delivered
+to two of the three devices that person carries.
+
+Mail held for a bare callsign (section 13.3) is discharged by handing it to
+**any** device wearing it. The person has their message; the carrier's job is
+finished. Getting that message onto their *other* devices is not the mesh's
+business -- it is the same key on all of them, and their own software can settle
+it between themselves.
+
+#### 3.1.5 What a suffix is not
+
+It is not authentication, and nothing should be built as though it were. Every
+device of one person holds the same private key, so any of them can sign as that
+person and any of them can claim any number. A suffix distinguishes devices that
+are cooperating, never devices that are competing.
+
+The device's real name on the wire is `lx:` -- a destination derived from a key
+that device alone holds. When it genuinely matters which machine is being
+addressed, that is what proves it; the digits after the hyphen are a convenience
+for people.
+
+Which is the difference from APRS worth stating plainly. There the SSID was
+typed by the operator and meant something by convention. Here the **person is
+proven by the key**, the **device is proven by `lx:`**, and the suffix exists so
+a human can say which one they mean.
+
 ---
 
 ## 4. Packet
@@ -915,7 +1085,10 @@ t:receipt f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 s:no
 55 bytes.
 
 Any station may act on a receipt it overhears. A station holding a message for
-later delivery discards its copy on hearing the matching `s:ack`.
+later delivery discards its copy on hearing the matching `s:ack` **whose
+signature it has verified** -- and on no other. An acknowledgement releases mail
+across the whole network, so an unsigned one is a way to delete a message the
+attacker never held (section 13.7.1).
 
 ---
 
@@ -2076,8 +2249,8 @@ home the same way the message came.
 
 | `s:` | Means | Signed |
 |---|---|---|
-| `ack` | it reached a device | no |
-| `read` | it was opened | no |
+| `ack` | it reached a device | **by default** (section 13.7.1) |
+| `read` | it was opened | **by default** (section 13.7.1) |
 | `sign` | a person acknowledged it | **required** |
 
 **An `s:sign` receipt without a valid `sig:` is not a signed receipt.** A receiver
@@ -2135,9 +2308,35 @@ anyone listening that this callsign is here and awake. Two stations that have
 already exchanged a direct message have both of those costs priced in; a
 stranger has not agreed to either.
 
-An automatic receipt is never signed and carries no `q:`. It is a device
-reporting bytes, not a person agreeing to anything — that remains `s:sign`
-(section 13.7), which is still asked for explicitly.
+An automatic receipt carries no `q:` — it is a device reporting bytes, not a
+person agreeing to anything, and that remains `s:sign` (section 13.7), which is
+still asked for explicitly. But it **is signed**, and this is the one place
+where that is not a preference:
+
+```
+t:receipt f:X1A67X d:X1RD89 r:40f357 s:ack sig:<60 characters>
+```
+
+107 bytes, against 44 unsigned. The reason is what an unsigned one is worth to
+an attacker. `s:ack` is not merely a note to the sender: section 7 has every
+carrier holding that message **discard its copy** when it hears the matching
+acknowledgement. So a forged receipt is not a lie about delivery — it is a way
+to delete a message from the whole mesh, cheaply, without holding anyone's key,
+for any callsign the attacker cares to name. The victim is told their message
+arrived, the carriers drop it, and nobody ever finds out.
+
+**A receipt whose signature does not verify changes nothing.** It does not mark
+a message delivered, it does not release a held copy, and it does not stop a
+retry. A station that has never heard the signer's key cannot verify one, and
+must treat it the same way: unverifiable is not "probably fine". Section 13.7
+already says this of `s:sign` — *a state that can be claimed without proof is
+worth less than no state at all* — and the same sentence was always true of
+`s:ack`; it simply had not been written down.
+
+On a rated bearer 107 bytes is two and a half times the airtime of 44. The
+answer is to send **fewer** receipts — section 13.7.2 already spends them only
+against evidence the peer is there — and never to send unsigned ones. An
+acknowledgement nobody can check is airtime spent on nothing.
 
 ### 13.7.2 When to stop trying
 
@@ -5226,6 +5425,8 @@ document.
 | Direct, group and broadcast messages | implemented |
 | Replies and reactions | implemented |
 | Receipts and carrier release | implemented, for receipts that were asked for with `q:` |
+| Section 3.1, one person on several devices | **specified, not implemented.** Nothing numbers a device today: a station wears its bare callsign, and the chat wapp matches `d:` against that alone. The pieces the rule needs are already on the air — a beacon carries `f:` and `lx:`, so a device can see a sibling and tell it apart — but no code adopts a suffix, prefers the conventional number for its `type:`, or refuses a command addressed to a person |
+| Section 13.7.1, receipts signed by default | **specified, not implemented.** Signing exists (section 9.1) and receipts do not use it yet, which leaves the forged-`s:ack` deletion described there open on any station that honours the section 7 carrier release. The Reticulum side is not exposed to it — its acknowledgement is a link, not an XPRS packet — but an XPRS-native carrier would be |
 | Section 13.7.2, parking a retry with no evidence | **implemented** on the Reticulum side: a retry is spent only against a live path or a beacon heard in the last three minutes (`RnsService._peerReachable`), otherwise the entry parks without burning a rung and the copy stays held |
 | Section 13.7.1, receipts without asking | **specified, not yet on the air.** The rule and its exclusions are settled and the two example packets are test fixtures; no station sends an unasked `s:ack` yet. What made it necessary is fixed already on the Reticulum side: an unacknowledged single-packet delivery no longer reports itself as delivered, and the sender retries at 20s/60s/5min before leaving the copy held (`lxmf_router.dart`) |
 | Long messages in parts | implemented |

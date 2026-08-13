@@ -10,6 +10,46 @@
 "id": "e41201"
 },
 {
+"wire": "t:observation f:X1A67X-1 link:ble peers:2 lx:5463d9bc93aebda57d1f704a3cfbee80",
+"bytes": null,
+"id": "6d0767"
+},
+{
+"wire": "t:observation f:X1A67X-2 link:ble peers:2 lx:23698e7593f05e2053f5183580e2cf98",
+"bytes": null,
+"id": "fb7e2f"
+},
+{
+"wire": "t:observation f:X1A67X-9 type:car link:ble peers:2 lx:5463d9bc93aebda57d1f704a3cfbee80",
+"bytes": 86,
+"id": "b8d020"
+},
+{
+"wire": "t:message f:X1RD89 d:X1A67X ts:2026-08-12_17:28:52 m:on my way",
+"bytes": 62,
+"id": "40f357"
+},
+{
+"wire": "t:message f:X1RD89 d:X1A67X-2 ts:2026-08-12_17:28:52 m:the tablet has the photos",
+"bytes": 80,
+"id": "ea0020"
+},
+{
+"wire": "t:command f:X1A67X-1 d:X1A67X-2 ts:2026-08-12_17:28:52 cmd:status",
+"bytes": 65,
+"id": "b34d5d"
+},
+{
+"wire": "t:receipt f:X1A67X-1 d:X1RD89 r:40f357 s:ack sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": null,
+"id": "d19b6a"
+},
+{
+"wire": "t:receipt f:X1A67X-2 d:X1RD89 r:40f357 s:ack sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": null,
+"id": "6ad6e3"
+},
+{
 "wire": "t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 tag:vacation m:back on Monday, radio off until then",
 "bytes": 102,
 "id": "e95a5d"
@@ -265,6 +305,11 @@
 "id": "d9c457"
 },
 {
+"wire": "t:observation f:X3RLY7 link:ble peers:4 mail:3 uptime:26h lifetime:38day",
+"bytes": 72,
+"id": "8c4299"
+},
+{
 "wire": "t:observation f:X3RLY7 ts:2026-08-08_14:26:40 link:lora busy:41% txtime:6%",
 "bytes": 74,
 "id": "d23c4f"
@@ -435,13 +480,13 @@
 "id": "d27713"
 },
 {
-"wire": "t:message f:X1RD89 d:X1A67X ts:2026-08-12_17:28:52 m:on my way",
-"bytes": 62,
-"id": "40f357"
-},
-{
 "wire": "t:receipt f:X1A67X d:X1RD89 r:40f357 s:ack",
 "bytes": 42,
+"id": "d1718d"
+},
+{
+"wire": "t:receipt f:X1A67X d:X1RD89 r:40f357 s:ack sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": 107,
 "id": "d1718d"
 },
 {

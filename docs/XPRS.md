@@ -2218,6 +2218,29 @@ identified by the identifier of section 5. Two digipeaters in range of each
 other otherwise trade the same packet until the limit is reached, which is legal
 under the rules above and still a waste of the channel.
 
+### 13.2.1 When to re-air
+
+The rules above say whether a packet may be relayed. They do not say **when**,
+and on a shared bearer that is the difference between one transmission and five.
+
+Every station in range hears the same packet at the same moment, and every one
+of them that is willing to relay it is ready to transmit in the same instant.
+On a LAN they collide as duplicates; on a radio they collide as radio.
+
+So a station **waits a short random moment before re-airing**, and **drops its
+copy if it hears the packet again during that wait**. Somebody else was closer
+to the front of the queue; the packet is already travelling and a second copy
+adds nothing but noise.
+
+The wait is a fraction of a second on a fast bearer and longer on a slow one --
+what matters is that it is random, so that two stations do not choose the same
+instant, and that hearing the packet cancels it.
+
+This works without a new field because a section 5 identifier is computed with
+`sig:` and `via:` removed: the same packet relayed by a different station has
+the same identifier. "Somebody already said this" is decidable from what is on
+the air.
+
 ### 13.3 Carried messages
 
 A carrier holding a message for a station that is not currently reachable

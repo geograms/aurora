@@ -32,11 +32,26 @@ static uint64_t xi_card_free(const char *d) { (void)d; return 0; }
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 static const char *TAG = "xprsidx";
 #define XI_LOGI(fmt, ...) ESP_LOGI(TAG, fmt, ##__VA_ARGS__)
 #define XI_LOGW(fmt, ...) ESP_LOGW(TAG, fmt, ##__VA_ARGS__)
 static uint64_t xi_card_total(const char *d);
 static uint64_t xi_card_free(const char *d);
+#endif
+
+/* One store, several tasks. The BLE task and the LAN bearer both add records,
+ * and the HTTP server and the GATT server both read — all through the same
+ * FILE* for the active segment, which FatFs does not make thread-safe. Without
+ * this, a query issued while a packet is being written reads a record that is
+ * half somebody else's seek. */
+#ifdef XPRSIDX_HOST_TEST
+#define XI_LOCK(st)    ((void)(st))
+#define XI_UNLOCK(st)  ((void)(st))
+#else
+#define XI_LOCK(st)    do { if ((st)->lock) xSemaphoreTake((st)->lock, portMAX_DELAY); } while (0)
+#define XI_UNLOCK(st)  do { if ((st)->lock) xSemaphoreGive((st)->lock); } while (0)
 #endif
 
 #define XI_RECS_PER_SEG   4096u
@@ -93,6 +108,9 @@ struct xprsidx_s {
     uint32_t since_flush;     /* adds since the zone entry last hit the card */
     uint32_t dedup[XI_DEDUP_RING];
     int      dedup_pos;
+#ifndef XPRSIDX_HOST_TEST
+    SemaphoreHandle_t lock;
+#endif
 };
 
 /* ── Type vocabulary ────────────────────────────────────────────────────── */
@@ -452,6 +470,9 @@ xprsidx_t *xprsindex_open(const char *dir)
     xi_copy(st->dir, sizeof st->dir, dir, -1);
     st->epoch = 'A';
     st->tail_type = -1;
+#ifndef XPRSIDX_HOST_TEST
+    st->lock = xSemaphoreCreateMutex();
+#endif
     xi_mkdirs(st);
 
     /* Find the highest segment on the card. */
@@ -500,8 +521,8 @@ char xprsindex_epoch(const xprsidx_t *st) { return st ? st->epoch : '?'; }
 
 /* ── Add ────────────────────────────────────────────────────────────────── */
 
-bool xprsindex_add(xprsidx_t *st, const char *wire, int len,
-                   int rssi, bool outgoing, uint32_t ts_now)
+static bool xi_add_locked(xprsidx_t *st, const char *wire, int len,
+                          int rssi, bool outgoing, uint32_t ts_now)
 {
     if (!st || !st->ready || !wire || len <= 0) return false;
     if (len > XPRSIDX_WIRE_MAX) return false;
@@ -665,8 +686,8 @@ static void xi_sync(xprsidx_t *st)
     if (st->active_fp) fflush(st->active_fp);
 }
 
-size_t xprsindex_query(xprsidx_t *st, const xprsidx_query_t *q,
-                       xprsidx_emit_cb_t cb, void *ctx)
+static size_t xi_query_locked(xprsidx_t *st, const xprsidx_query_t *q,
+                              xprsidx_emit_cb_t cb, void *ctx)
 {
     if (!st || !st->ready || !q) return 0;
     xi_sync(st);
@@ -774,6 +795,27 @@ void xprsindex_bench(xprsidx_t *st, uint32_t n)
             (unsigned long long)s.free_bytes);
 }
 #endif /* XPRSIDX_BENCH */
+
+/* The public entry points hold the lock; everything below them assumes it. */
+bool xprsindex_add(xprsidx_t *st, const char *wire, int len,
+                   int rssi, bool outgoing, uint32_t ts_now)
+{
+    if (!st) return false;
+    XI_LOCK(st);
+    bool ok = xi_add_locked(st, wire, len, rssi, outgoing, ts_now);
+    XI_UNLOCK(st);
+    return ok;
+}
+
+size_t xprsindex_query(xprsidx_t *st, const xprsidx_query_t *q,
+                       xprsidx_emit_cb_t cb, void *ctx)
+{
+    if (!st) return 0;
+    XI_LOCK(st);
+    size_t n = xi_query_locked(st, q, cb, ctx);
+    XI_UNLOCK(st);
+    return n;
+}
 
 void xprsindex_stats(xprsidx_t *st, xprsidx_stats_t *out)
 {

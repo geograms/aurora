@@ -80,6 +80,26 @@ void ble_hello_set_msgstore(msgstore_t *st);
 void ble_hello_set_xprsindex(xprsidx_t *st);
 
 /**
+ * @brief Callback for every XPRS packet heard on the BLE air (docs/XPRS.md).
+ *
+ * The packet is handed over verbatim and is valid only during the call. Used to
+ * put what the radio heard on another bearer — the LAN, in this firmware. This
+ * component never decides where a packet goes next.
+ */
+typedef void (*ble_hello_xprs_cb_t)(const char *wire, int len, int rssi);
+void ble_hello_set_xprs_cb(ble_hello_xprs_cb_t cb);
+
+/**
+ * @brief Put one XPRS packet on the BLE air, verbatim, through the
+ *        broadcast-parcel chunker that Aurora scanners already reassemble.
+ *
+ * For packets that arrived on another bearer. Content-deduped like every other
+ * relay, so airing the same packet twice is free of charge and does nothing.
+ * @return true when it was queued for broadcast.
+ */
+bool ble_hello_air_xprs(const char *wire, int len);
+
+/**
  * @brief Set this station's position (decimal degrees) used in BLE ping
  *        replies. Pass (0,0) to mark it unknown (replies omit coordinates and
  *        the pinger falls back to an RSSI distance estimate).

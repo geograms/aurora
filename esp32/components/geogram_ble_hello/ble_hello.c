@@ -6,6 +6,7 @@
 #include "ble_hello.h"
 #include "ble_parcel.h"
 #include "msgstore.h"
+#include "xprs.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -183,14 +184,24 @@ void ble_hello_set_msgstore(msgstore_t *st) { s_msgstore = st; }
 static xprsidx_t *s_xprsidx;
 void ble_hello_set_xprsindex(xprsidx_t *st) { s_xprsidx = st; }
 
-/* Offer a heard payload to the index. Anything that is not an XPRS packet is
- * refused inside xprsindex_add(), so every receive path can call this without
- * first deciding what it is holding. */
+/* Told about every XPRS packet heard on the air, so the owner can put it on
+ * another bearer. Kept as a callback rather than a call into the LAN component:
+ * this file owns the radio and nothing else. */
+static ble_hello_xprs_cb_t s_xprs_cb;
+void ble_hello_set_xprs_cb(ble_hello_xprs_cb_t cb) { s_xprs_cb = cb; }
+
+/* Offer a heard payload to the index and to whoever wants to bridge it.
+ * Anything that is not an XPRS packet is refused inside xprsindex_add(), so
+ * every receive path can call this without first deciding what it is holding —
+ * the callback is told only when the packet really was XPRS. */
 static void xprs_ingest(const uint8_t *payload, int len, int rssi)
 {
-    if (!s_xprsidx || !payload || len <= 0) return;
-    xprsindex_add(s_xprsidx, (const char *)payload, len, rssi, false,
-                  (uint32_t)time(NULL));
+    if (!payload || len <= 0) return;
+    bool kept = s_xprsidx && xprsindex_add(s_xprsidx, (const char *)payload, len,
+                                           rssi, false, (uint32_t)time(NULL));
+    if (s_xprs_cb && (kept || (!s_xprsidx && xprs_looks_like(payload, len)))) {
+        s_xprs_cb((const char *)payload, len, rssi);
+    }
 }
 
 /* APRS relay state */
@@ -496,6 +507,23 @@ static void relay_enqueue_broadcast(const uint8_t *payload, int len,
 
 /* Pick the next live broadcast chunk (round-robin), reaping expired slots;
  * returns its index, or -1 if none pending. */
+/* Put one XPRS packet on the BLE air, verbatim, through the broadcast-parcel
+ * chunker every Aurora scanner already reassembles. High priority: a packet
+ * that came from another bearer is a message somebody is waiting on, not a
+ * position beacon. Content-deduped by relay_seen() like every other relay. */
+bool ble_hello_air_xprs(const char *wire, int len)
+{
+    if (!s_active || !wire || len <= 0 || len > BCAST_MAX) return false;
+    if (!xprs_looks_like((const uint8_t *)wire, len)) return false;
+
+    uint32_t ch = fnv1a((const uint8_t *)wire, len);
+    if (relay_seen(ch)) return false;
+    relay_remember(ch);
+    relay_enqueue_broadcast((const uint8_t *)wire, len, BCH_PRIO_HIGH, BCH_TTL_MSG);
+    ESP_LOGI(TAG, "XPRS onto the BLE air: %d B", len);
+    return true;
+}
+
 static int bch_pick(void)
 {
     uint32_t t = now_sec();

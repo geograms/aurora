@@ -94,6 +94,7 @@
     #include "sdcard.h"
     #include "msgstore.h"
     #include "xprsindex.h"
+    #include "xprslan.h"
     #include "esp_timer.h"
     #include "esp_heap_caps.h"
     // Log free heap + largest contiguous block at a boot stage. WiFi STA netif /
@@ -1155,6 +1156,42 @@ static esp_err_t tdongle_archive_query(httpd_req_t *req, msgstore_t *store)
     return ESP_OK;
 }
 
+/* ---- the LAN bearer: XPRS to and from everyone on the wire -------------- */
+
+/* Heard on the LAN. Keep it, and put it on the BLE air for the stations that
+ * have no network — that is the whole point of a dongle sitting on both. */
+static void tdongle_xprs_from_lan(const char *wire, int len, uint32_t ip)
+{
+    if (s_xprs_index) {
+        // rssi 0 is the store's "unknown", which a LAN genuinely is.
+        xprsindex_add(s_xprs_index, wire, len, 0, false, (uint32_t)time(NULL));
+    }
+#if FEATURE_BLE
+    ble_hello_air_xprs(wire, len);
+#endif
+    ESP_LOGI(TAG, "XPRS from the LAN (%u.%u.%u.%u): %d B",
+             (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+             (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF), len);
+}
+
+/* Heard on the BLE air. Offer it to the LAN, which waits a random moment and
+ * drops it if another station gets there first (see xprslan.h). */
+static void tdongle_xprs_from_ble(const char *wire, int len, int rssi)
+{
+    (void)rssi;
+    xprslan_offer(wire, len);
+}
+
+/* This station, on the bearer it is describing (docs/XPRS.md section 10.6).
+ * Built on the bearer's own task — see xprslan_set_beacon(). */
+static int tdongle_xprs_lan_beacon(char *out, int cap)
+{
+    const char *call = nostr_keys_get_callsign();
+    if (!call || !*call) return 0;
+    return snprintf(out, (size_t)cap, "t:observation f:%s link:lan peers:%d",
+                    call, xprslan_peer_count(600));
+}
+
 static esp_err_t tdongle_api_messages_handler(httpd_req_t *req) { return tdongle_archive_query(req, s_msg_store); }
 static esp_err_t tdongle_api_beacons_handler(httpd_req_t *req)  { return tdongle_archive_query(req, s_beacon_store); }
 
@@ -1552,6 +1589,7 @@ extern "C" void app_main(void)
                 if (ret == ESP_OK) {
                     ESP_LOGI(TAG, "BLE HELLO active — callsign: %s", callsign);
                     ble_hello_set_aprs_cb(tdongle_aprs_rx);
+                    ble_hello_set_xprs_cb(tdongle_xprs_from_ble);
                     esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
                 } else {
                     ESP_LOGW(TAG, "BLE HELLO init failed: %s", esp_err_to_name(ret));
@@ -1560,6 +1598,23 @@ extern "C" void app_main(void)
 #else
                 ESP_LOGW(TAG, "[FEATURE_BLE=0] BLE HELLO disabled for diagnostics");
 #endif
+
+                // XPRS on the LAN (docs/lan.md): broadcast to and from everyone
+                // on this network, on its own UDP port. Not Reticulum and not
+                // the internet — it never leaves the wire it is attached to.
+                // Started whatever WiFi ended up doing: with only the SoftAP
+                // up, the stations joining it are still a local network.
+                if (xprslan_start(callsign) == ESP_OK) {
+                    xprslan_set_rx_cb(tdongle_xprs_from_lan);
+                    // Say we are here 20 s in (DHCP done by then), and every
+                    // 5 minutes after. It runs on the bearer's task, not an
+                    // esp_timer: building a beacon derives a SHA-256 identifier
+                    // and the timer task's stack is not sized for that.
+                    xprslan_set_beacon(tdongle_xprs_lan_beacon, 300, 20);
+                    ESP_LOGI(TAG, "XPRS LAN bearer up on UDP %d", XPRSLAN_PORT);
+                } else {
+                    ESP_LOGW(TAG, "XPRS LAN bearer failed to start");
+                }
 
                 // APRS-IS iGate: bridges APRS-IS <-> BLE once WiFi is up.
                 // Coordinates default undefined (no GPS) so only messages to

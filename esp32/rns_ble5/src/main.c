@@ -695,11 +695,37 @@ static bool xprs_words_has(const char *list, const char *word)
 
 /* Air one XPRS wire on [subtype], remembering its identifier first so the
  * echo (and any phone's relay of it) reads as already-handled. */
+/* XPRS identifiers get their OWN dedup ring. The shared relay ring is 32
+ * slots across three planes (RNS, compact, XPRS) and a busy street evicts an
+ * id within a couple of minutes — measured live: an echo then re-relayed as
+ * "new" 104 s after the original, which is exactly the spam the digipeater
+ * policy exists to stop. XPRS traffic is low-rate (one unique id per packet,
+ * not per airing), so 64 slots hold the full dedup window comfortably. */
+#define XPRS_SEEN_MAX 64
+static struct { uint32_t idh; uint32_t t; } s_xseen[XPRS_SEEN_MAX];
+static int s_xseen_rr;
+
+static bool xprs_seen(uint32_t idh)
+{
+    uint32_t t = now_sec();
+    for (int i = 0; i < XPRS_SEEN_MAX; i++)
+        if (s_xseen[i].idh == idh && s_xseen[i].t &&
+            (t - s_xseen[i].t) < RELAY_DEDUP_SEC) return true;
+    return false;
+}
+
+static void xprs_seen_remember(uint32_t idh)
+{
+    s_xseen[s_xseen_rr % XPRS_SEEN_MAX].idh = idh;
+    s_xseen[s_xseen_rr % XPRS_SEEN_MAX].t = now_sec();
+    s_xseen_rr++;
+}
+
 static void xprs_air(const char *wire, int len, uint8_t subtype)
 {
     char id[XPRS_ID_LEN];
     if (xprs_id_of(wire, len, id))
-        relay_remember((uint32_t)strtoul(id, NULL, 16));
+        xprs_seen_remember((uint32_t)strtoul(id, NULL, 16));
     uint8_t ad[256];
     int n = build_ad(subtype, (const uint8_t *)wire, len, ad);
     if (n > 0) relay_enqueue(ad, n);
@@ -744,6 +770,49 @@ static void xprs_pong(const char *to, int rssi)
     ESP_LOGI(TAG, "TX pong -> %s (their signal here: %ddBm)", to, rssi);
 }
 
+/* ── Digipeater discipline (docs/XPRS.md §13 + the anti-spam rule) ────── *
+ *
+ * A message is digipeated ONCE. Hearing the same identifier again re-airs it
+ * only when the copy comes from the ORIGIN — no via:, meaning the sender
+ * itself is still transmitting (a courier retry, a long advert) — and then
+ * at most once per XPRS_DIGI_REPEAT_SEC and XPRS_DIGI_TIMES_MAX times in
+ * total, so a stuck beacon cannot ride us forever. Copies wearing a via: are
+ * the mesh echoing (our own repeat included) and never re-trigger anything.
+ * The repeat mirrors the sender's own persistence and nothing else: when the
+ * origin goes quiet, so do we. */
+#define XPRS_DIGI_MAX        24
+#define XPRS_DIGI_REPEAT_SEC 90
+#define XPRS_DIGI_TIMES_MAX  5
+
+typedef struct {
+    uint32_t idh;        /* the derived identifier, as u32 */
+    uint32_t last_digi;  /* when we last aired our repeat of it */
+    uint8_t  times;      /* how many times we have aired it in total */
+} xprs_digi_t;
+static xprs_digi_t s_digi[XPRS_DIGI_MAX];
+static int s_digi_rr;                    /* ring insert position */
+static volatile uint32_t s_digi_repeats; /* origin-follow repeats (status) */
+
+static xprs_digi_t *digi_find(uint32_t idh)
+{
+    for (int i = 0; i < XPRS_DIGI_MAX; i++)
+        if (s_digi[i].idh == idh && s_digi[i].times) return &s_digi[i];
+    return 0;
+}
+
+static void digi_record(uint32_t idh, uint32_t now)
+{
+    xprs_digi_t *e = digi_find(idh);
+    if (!e) {
+        e = &s_digi[s_digi_rr % XPRS_DIGI_MAX];
+        s_digi_rr++;
+        e->idh = idh;
+        e->times = 0;
+    }
+    e->last_digi = now;
+    if (e->times < 255) e->times++;
+}
+
 /* One XPRS packet heard on the air — from its own subtype 0x58 or as the
  * text form of 0x41 (the handle_aprs seam). This is the station's front
  * door: dedup, sighting, ping/pong, receipt release, custody, relay. */
@@ -760,6 +829,13 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
     buf[len] = 0;
     if (!xprs_parse(buf, len, &p)) return;
 
+    char type[16] = "", from[10] = "", to[12] = "";
+    xprs_type(&p, type, sizeof type);
+    xprs_get_str(&p, "f", from, sizeof from);
+    xprs_get_str(&p, "d", to, sizeof to);
+    if (!from[0]) return;                                  /* unattributable */
+    if (strcasecmp(from, s_aprs_call) == 0) return;        /* our own echo */
+
     /* Dedup by the DERIVED identifier (§5), not by content: via: grows at
      * every hop, so the same packet has a different content hash at each —
      * and the same identifier at all of them. This is also what makes our
@@ -767,15 +843,30 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
     char id[XPRS_ID_LEN];
     xprs_id(&p, id);
     uint32_t idh = (uint32_t)strtoul(id, NULL, 16);
-    if (relay_seen(idh)) return;
-    relay_remember(idh);
-
-    char type[16] = "", from[10] = "", to[12] = "";
-    xprs_type(&p, type, sizeof type);
-    xprs_get_str(&p, "f", from, sizeof from);
-    xprs_get_str(&p, "d", to, sizeof to);
-    if (!from[0]) return;                                  /* unattributable */
-    if (strcasecmp(from, s_aprs_call) == 0) return;        /* our own echo */
+    if (xprs_seen(idh)) {
+        /* Already handled once. The one thing a repeat sighting may do is
+         * extend the digipeat — and only when it is the ORIGIN repeating
+         * (no via:), only for something we actually repeated before, and
+         * only inside the rate/lifetime bounds above. Advert rotation and
+         * mesh echoes fall through all three gates and die here. */
+        if (xprs_via_count(&p) != 0) return;   /* an echo, not the sender */
+        xprs_digi_t *e = digi_find(idh);
+        uint32_t now = now_sec();
+        if (!e || e->times >= XPRS_DIGI_TIMES_MAX ||
+            now - e->last_digi < XPRS_DIGI_REPEAT_SEC) return;
+        int rl = xprs_append_via(buf, len, s_aprs_call, rewired, 249);
+        if (rl <= 0) return;
+        uint8_t ad[256];
+        int an = build_ad(subtype, (const uint8_t *)rewired, rl, ad);
+        if (an <= 0) return;
+        relay_enqueue(ad, an);
+        digi_record(idh, now);
+        s_digi_repeats++;
+        ESP_LOGI(TAG, "digipeat again: %s id=%s — the origin is still "
+                 "transmitting (repeat %u)", type, id, (unsigned)e->times);
+        return;
+    }
+    xprs_seen_remember(idh);
 
     ESP_LOGI(TAG, "RX XPRS %s %s>%s id=%s rssi=%d %dB",
              type, from, to[0] ? to : "*", id, rssi, len);
@@ -858,6 +949,9 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
             if (an > 0) {
                 relay_enqueue(ad, an);
                 s_relayed_count++;
+                /* Remember WHAT we repeated: only these ids may be repeated
+                 * again when the origin keeps transmitting (above). */
+                digi_record(idh, now_sec());
                 ESP_LOGI(TAG, "relayed XPRS %s id=%s +via:%s (#%u)",
                          type, id, s_aprs_call, (unsigned)s_relayed_count);
             }
@@ -920,7 +1014,7 @@ static void mesh_deliver_pending(const char *target)
              * a fresh packet. */
             char id[XPRS_ID_LEN];
             if (xprs_id_of((const char *)out, olen, id))
-                relay_remember((uint32_t)strtoul(id, NULL, 16));
+                xprs_seen_remember((uint32_t)strtoul(id, NULL, 16));
         }
         uint8_t ad[256];
         int an = build_aprs_ad(out, olen, ad);
@@ -1529,6 +1623,9 @@ static void console_handle(char *line)
         xprs_fmt_duration(s_life_base + now_sec(), life, sizeof life);
         printf("uptime=%s lifetime=%s (life base %us, saved every %ds)\n",
                up, life, (unsigned)s_life_base, LIFE_SAVE_SEC);
+        printf("digipeat: %u origin-follow repeat(s), window %ds, cap %d\n",
+               (unsigned)s_digi_repeats, XPRS_DIGI_REPEAT_SEC,
+               XPRS_DIGI_TIMES_MAX);
         if (s_rssi_n) {
             printf("rx rssi: min=%d max=%d avg=-%lu n=%lu\n", s_rssi_min,
                    s_rssi_max, (unsigned long)(s_rssi_sum / s_rssi_n),
@@ -1643,6 +1740,18 @@ static void console_handle(char *line)
             printf("id=%s\n", id);
         else
             printf("not an XPRS packet\n");
+        return;
+    }
+    if (strncmp(line, "xhear ", 6) == 0) {
+        /* Feed a wire into the XPRS front door as if heard on the air —
+         * deterministic digipeater tests over serial (repeat the SAME line
+         * to exercise the origin-follow policy; the radio makes identical
+         * repeats hard to stage on demand). Test-only: it runs on the
+         * console task while real traffic runs on the host task, so use it
+         * on a quiet bench. */
+        const char *w = line + 6;
+        handle_xprs((const uint8_t *)w, (int)strlen(w), 0, SUBTYPE_XPRS);
+        printf("heard %dB\n", (int)strlen(w));
         return;
     }
     if (strncmp(line, "ack ", 4) == 0) {

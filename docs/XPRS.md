@@ -1552,7 +1552,11 @@ t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m seatemp:18.4C type:boat ts:
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
 | `uptime` | `qty` | how long the station has run without interruption | duration |
 | `lifetime` | `qty` | how long the station has run in total, across every restart | duration |
+| `odometer` | `qty` | distance travelled over the station's service life | distance |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
+
+Radiation readings — ionizing and electromagnetic — are their own family,
+section 10.5.1.
 
 `rssi` and `snr` describe the radio path a packet arrived on and are reported by the
 receiver, in a `pong` reply. A station does not transmit its own received signal
@@ -1581,7 +1585,73 @@ form — `uptime:26h` rather than `uptime:94340s` — because the reading change
 by the second while its meaning changes by the hour, and the bytes are better
 spent elsewhere.
 
+`odometer:` is the moving station's counterpart to `lifetime:`: how far it has
+travelled over its service life, in any distance unit (section 10.9). The word
+is the instrument's own, so a reader needs no glossary, and the key fits the
+eight characters a key is allowed exactly.
+
+```
+t:observation f:X1SHIP pos:38.7012,-9.1523 spd:12kt odometer:15420nmi lifetime:210day ts:2026-08-13_10:00:00
+```
+
+108 bytes: a ship with 15,420 nautical miles behind it across a 210-day
+service record. A car reports `odometer:48213km`. Like `lifetime:` it is the
+station's own account — a receiver weighs it, not verifies it.
+
 An observation carries a note in `m:`, the same key a message uses.
+
+### 10.5.1 Radiation
+
+Radiation a station can measure and a person would want to know about:
+ionizing radiation from nuclear sources, and the electromagnetic fields of
+transmitters and power systems. One family, one discipline, built to grow.
+
+| Key | Type | Meaning | Quantity |
+|---|---|---|---|
+| `dose` | `qty` | ambient ionizing dose rate — what a Geiger counter shows | dose rate |
+| `lifedose` | `qty` | ionizing dose accumulated since the station's records began | dose |
+| `radon` | `qty` | radon activity concentration in the air | activity concentration |
+| `rf` | `qty` | radio-frequency power density | power density |
+| `efield` | `qty` | electric field strength | electric field |
+| `mfield` | `qty` | magnetic flux density | magnetic flux density |
+
+```
+t:observation f:X3WX01 pos:38.7223,-9.1393 dose:0.14uSv/h ts:2026-08-13_10:00:00
+t:observation f:X3WX01 dose:0.14uSv/h lifedose:1.2mSv lifetime:38day ts:2026-08-13_10:00:00
+t:observation f:X3WX01 rf:120uW/m2 efield:1.8V/m mfield:0.3uT ts:2026-08-13_10:00:00
+t:observation f:X3LAB1 radon:120Bq/m3 ts:2026-08-13_10:00:00
+```
+
+80, 91, 84 and 60 bytes. Normal background dose rate is roughly `0.1uSv/h` to
+`0.3uSv/h`, so `dose:2.5uSv/h` reads as anomalous on sight — which is the
+point of putting the unit on the value rather than in a manual.
+
+**These are instrument readings, never health claims.** A receiver may plot
+them, compare them against its own idea of background, and decide what it
+thinks; the sender asserts only what its instrument showed. And an absent key
+means *not measured*, never *safe* — the same rule `cw:` states in section
+4.6, for the same reason.
+
+`lifedose` pairs with `lifetime:` exactly as it reads: everything the station
+absorbed over the service record it is already reporting. `dose` is the now,
+`lifedose` is the history.
+
+A telemetry stream is not an alarm. A station watching a **sustained**
+anomaly raises `t:warning kind:radiation` (section 16), which carries the
+nine-relay budget an emergency deserves; the observation stream keeps its
+ordinary three and its ordinary cadence (section 31.1).
+
+**Counts per minute are refused.** A CPM figure is a property of the tube
+that produced it and means nothing without out-of-band calibration, which
+design rule 6 forbids. A station converts to dose rate before transmitting,
+using its own tube's factor — the one party that reliably knows it.
+
+**Growing the family** costs what section 4.9 says and nothing more: a new
+reading takes a new key in this table and its unit family in section 10.9
+with a canonical unit — no new packet type, no version, no negotiation. A
+reading not yet adopted here travels under a `z`-key until it is. Candidates
+already visible from here: an ultraviolet index, and separated beta and
+neutron dose for stations with instruments that discriminate.
 
 ### 10.6 The radio itself
 
@@ -1827,12 +1897,24 @@ t:observation f:X3WX01 pos:38.7223,-9.1393 temp:57.6F hum:78% press:29.92inHg wi
 | proportion | `%` | `%` |
 | signal power | `dBm` | `dBm` |
 | signal ratio | `dB` | `dB` |
+| dose rate | `nSv/h`, `uSv/h`, `mSv/h` | `uSv/h` |
+| dose | `uSv`, `mSv`, `Sv` | `uSv` |
+| activity concentration | `Bq/m3`, `pCi/L` | `Bq/m3` |
+| power density | `uW/m2`, `mW/m2`, `W/m2` | `W/m2` |
+| electric field | `V/m`, `kV/m` | `V/m` |
+| magnetic flux density | `nT`, `uT`, `mT`, `mG` | `uT` |
 
 `deg` is degrees true and `degm` is degrees magnetic. The difference is not
 cosmetic: magnetic declination exceeds 20 degrees in parts of the world and
 changes with the year, so a bearing whose reference is assumed is a bearing that
 is wrong by an amount nobody can recover. A station reports whichever its
 instrument gives it and says which that was.
+
+`mG` and `pCi/L` are in the radiation families for the same reason: cheap EMF
+meters read milligauss and radon reports in some countries come in picocuries
+per litre, and the station's job is to report what its instrument showed, not
+to convert it. Conversion is the receiver's (1 mG = 0.1 uT; 1 pCi/L = 37
+Bq/m3).
 
 Each key accepts only the units of its own quantity. `temp:48km/h` is not a cold
 day, it is a malformed value, and a receiver skips it rather than trying to make
@@ -4971,7 +5053,21 @@ packet **250 bytes**, on every transport.
 | `mail` | `int` | messages held for other stations (section 10.6.5) | |
 | `rssi` | `qty` | received signal strength | signal power |
 | `snr` | `qty` | signal-to-noise ratio | signal ratio |
+| `uptime` | `qty` | how long the station has run without interruption | duration |
+| `lifetime` | `qty` | how long the station has run in total, across every restart | duration |
+| `odometer` | `qty` | distance travelled over the station's service life | distance |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
+
+### Radiation (section 10.5.1)
+
+| Key | Type | Meaning | Quantity |
+|---|---|---|---|
+| `dose` | `qty` | ambient ionizing dose rate | dose rate |
+| `lifedose` | `qty` | ionizing dose accumulated since records began | dose |
+| `radon` | `qty` | radon activity concentration in the air | activity concentration |
+| `rf` | `qty` | radio-frequency power density | power density |
+| `efield` | `qty` | electric field strength | electric field |
+| `mfield` | `qty` | magnetic flux density | magnetic flux density |
 
 ### Time
 
@@ -5005,6 +5101,12 @@ Every measurement carries its unit, immediately after the number, with no space.
 | proportion | `%` | `%` |
 | signal power | `dBm` | `dBm` |
 | signal ratio | `dB` | `dB` |
+| dose rate | `nSv/h`, `uSv/h`, `mSv/h` | `uSv/h` |
+| dose | `uSv`, `mSv`, `Sv` | `uSv` |
+| activity concentration | `Bq/m3`, `pCi/L` | `Bq/m3` |
+| power density | `uW/m2`, `mW/m2`, `W/m2` | `W/m2` |
+| electric field | `V/m`, `kV/m` | `V/m` |
+| magnetic flux density | `nT`, `uT`, `mT`, `mG` | `uT` |
 
 `deg` is true and `degm` is magnetic. A receiver converts to the canonical unit
 before comparing, storing or plotting. `pos:` is the one measurement with no
@@ -5501,3 +5603,4 @@ document.
 | `batt`, `volt` telemetry | not implemented; charging state is tracked, charge level is not |
 | `rssi`, `snr` telemetry | implemented on the receive paths |
 | `uptime`, `lifetime` telemetry | implemented on the ESP32 T-Dongle beacon (`esp32/rns_ble5`, lifetime accumulated in NVS); the phone beacon does not carry them yet |
+| `dose`, `lifedose`, `radon`, `rf`, `efield`, `mfield` radiation (section 10.5.1), `odometer` | specified; no shipping station has a sensor for any of them yet |

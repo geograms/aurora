@@ -5512,7 +5512,122 @@ document.
 
 ---
 
-## 36. Implementation status
+## 36. Publishing, and the indexers you choose
+
+APRS-IS is a server you connect to. Everything you send becomes everyone's,
+everywhere, and everything anyone sends comes back at you as a firehose you
+filter locally. It works, it has worked for decades, and it has one centre.
+
+This section describes the same service without the centre: **a station keeps
+its own publications and hands them to the indexers its operator chose.** No
+station is obliged to have an indexer, and no indexer sees traffic from a
+station that did not pick it.
+
+### 36.1 What a publication is
+
+A publication is a packet that is **durable, addressable and publicly offered**:
+
+| Indexed | `blog`, `passage`, `event`, `offer`, `need`, `place`, `poll`, `track`, `warning`, `info`, `status`, `channel`, `service`, `file`, `sos` |
+|---|---|
+| **Never indexed** | `receipt`, `ping`, `pong`, `challenge`, `response`, `command`, `result`, `request`, `reaction`, `message` |
+
+The second row is the important one. Those types are transactional or private —
+a receipt is bookkeeping, a command is an instruction to one machine, and a
+`message` is addressed to somebody. **A private message must never become
+discoverable by being indexed**, and the way to guarantee that is a rule about
+types rather than a flag on a packet that somebody will one day forget to set.
+
+### 36.2 The indexer is sent the packet, not a description of it
+
+An indexer receives the publication **exactly as it was composed and signed**:
+
+```
+t:warning f:X3RLY7 pos:39.40,-8.20 rad:5km dest:38.72,-9.14 near:40km urg:urgent kind:fire sev:danger until:2026-08-10_00:00:00 ts:2026-08-08_14:26:40
+```
+
+150 bytes — the section 16 example, unchanged, because nothing about publishing
+changes a packet. There is no envelope format, no summary record and no
+transformation step, which means there is also no second schema to design, keep
+in step with the first, and get subtly wrong.
+
+**Why this is affordable, when the file layer's answer was the opposite.** The
+DHT stores pointers and never content, because a file is megabytes and a pointer
+is 176 bytes. A publication is at most 250 bytes. Pointer and content are the
+same order of size, so paying for a pointer *and then* a fetch costs more than
+handing over the thing itself. The rule is not "always send pointers"; it is
+"send whichever is smaller", and for XPRS that is the packet.
+
+**Everything a query needs is already in it.** `t:` the type, `f:` the author,
+`ts:` when it was composed, `pos:` where it is, `dest:` and `near:` the region
+it is addressed to, `until:` when it stops mattering, `scope:` how far it may
+travel. An indexer answers by reading fields it was handed.
+
+**And the signature travels with it.** An indexer passing on a third party's
+publication can neither forge it, retarget it nor resurrect it, and the receiver
+verifies against the author's key rather than trusting the indexer that handed
+it over. That is what makes gossip between indexers safe, and it is the same
+property section 9.1 already gives every signed packet.
+
+### 36.3 You choose your indexers
+
+**A station pushes to the indexers its operator picked, and to no others.**
+
+- The list is configuration: editable, with defaults, and adding or removing an
+  indexer is an ordinary act rather than a reinstall.
+- **Zero indexers is a valid, working configuration.** Such a station keeps its
+  publications and serves them to anyone who asks over the radio (section 36.5).
+  It is simply not findable by somebody who was not listening at the time. That
+  is a fair trade and it must remain available: a station that talks only to the
+  people in range of it is not a degraded station, it is a private one.
+- The choice is **per station, not per operator**. One person's phone may push
+  to two indexers while their node in the shed pushes to none.
+- An indexer may decline what it is offered. Its disk, its bandwidth, its
+  decision — the same rule section 31.2 states for serving strangers.
+
+The station remembers **what each indexer has already had**, as a position in
+its own log rather than a time (section 13 makes the same argument for cursors:
+a position cannot skew, and a device with no clock can still persist one). A
+reconnect resumes; it does not re-send.
+
+### 36.4 When to push
+
+**When there is a link and it is cheap.** Publishing is not urgent traffic: a
+blog post that reaches the index four hours late has lost nothing, and a station
+that spends its LoRa duty cycle pushing publications has spent it on the wrong
+thing (section 31.1).
+
+So the push belongs to the bearer that is cheap and plentiful — internet or a
+wired link — and the radio carries publications the way it always did: as
+packets, to whoever is listening, once.
+
+### 36.5 Asking a station directly
+
+A station that heard something and wants the rest asks the author, with a verb
+that already exists:
+
+```
+t:command f:X1BOA3 d:X3RLY7 ts:2026-08-08_14:26:40 cmd:history since:2026-08-04_00:00:00 sig:<60 characters>
+```
+
+153 bytes (section 25.2). It is already metered by the airtime rules, already
+refusable with `code:429`, and already the answer to "I was not here, what did I
+miss". Publishing adds no verb of its own.
+
+### 36.6 What replaces the filter
+
+An APRS-IS client subscribes with a filter and receives a stream. Here a reader
+**asks an indexer a question** and gets the packets that answer it: by author,
+by type, by region and radius, by time window. Every one of those reads a field
+the packet already carries, so the query surface needs no vocabulary of its own
+and cannot drift from the format it queries.
+
+The difference that matters is not the syntax. It is that the reader chose the
+indexer, the publisher chose the indexer, and neither had to be the same choice
+for the network to work.
+
+---
+
+## 37. Implementation status
 
 | Element | State |
 |---|---|
@@ -5527,6 +5642,7 @@ document.
 | Direct, group and broadcast messages | implemented |
 | Replies and reactions | implemented |
 | Receipts and carrier release | implemented, for receipts that were asked for with `q:` |
+| Section 36, publishing to chosen indexers | **specified, not implemented.** Every piece it is built from exists — the signed-record discipline, the append-only log with an (epoch, seq) cursor, indexer-to-indexer catch-up and indexers as the DHT's anchors are all live for FILES (`files/dht/`, `social/relay_node.dart`) — but nothing yet keeps a publication log, pushes packets to a chosen indexer, or answers a query from their fields. The section deliberately adds no packet type and no key, so there is nothing on the wire to implement: the work is all plumbing |
 | Section 3.1, one person on several devices | **specified, not implemented.** Nothing numbers a device today: a station wears its bare callsign, and the chat wapp matches `d:` against that alone. The pieces the rule needs are already on the air — a beacon carries `f:` and `lx:`, so a device can see a sibling and tell it apart — but no code adopts a suffix, prefers the conventional number for its `type:`, or refuses a command addressed to a person |
 | Section 13.7.1, receipts signed by default | **specified, not implemented.** Signing exists (section 9.1) and receipts do not use it yet, which leaves the forged-`s:ack` deletion described there open on any station that honours the section 7 carrier release. The Reticulum side is not exposed to it — its acknowledgement is a link, not an XPRS packet — but an XPRS-native carrier would be |
 | Section 13.7.2, parking a retry with no evidence | **implemented** on the Reticulum side: a retry is spent only against a live path or a beacon heard in the last three minutes (`RnsService._peerReachable`), otherwise the entry parks without burning a rung and the copy stays held |

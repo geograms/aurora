@@ -310,6 +310,31 @@
 "id": "8c4299"
 },
 {
+"wire": "t:observation f:X1SHIP pos:38.7012,-9.1523 spd:12kt odometer:15420nmi lifetime:210day ts:2026-08-13_10:00:00",
+"bytes": 108,
+"id": "4f6008"
+},
+{
+"wire": "t:observation f:X3WX01 pos:38.7223,-9.1393 dose:0.14uSv/h ts:2026-08-13_10:00:00",
+"bytes": 80,
+"id": "f01a77"
+},
+{
+"wire": "t:observation f:X3WX01 dose:0.14uSv/h lifedose:1.2mSv lifetime:38day ts:2026-08-13_10:00:00",
+"bytes": 91,
+"id": "cede7d"
+},
+{
+"wire": "t:observation f:X3WX01 rf:120uW/m2 efield:1.8V/m mfield:0.3uT ts:2026-08-13_10:00:00",
+"bytes": 84,
+"id": "9e5c72"
+},
+{
+"wire": "t:observation f:X3LAB1 radon:120Bq/m3 ts:2026-08-13_10:00:00",
+"bytes": 60,
+"id": "59208e"
+},
+{
 "wire": "t:observation f:X3RLY7 ts:2026-08-08_14:26:40 link:lora busy:41% txtime:6%",
 "bytes": 74,
 "id": "d23c4f"
@@ -1068,30 +1093,5 @@
 "wire": "t:moderate f:X5A3F2 d:X5A3F2 ts:... revoke:X32DVA since:... sig:...",
 "bytes": null,
 "id": "31f92e"
-},
-{
-"wire": "t:observation f:X3WX01 pos:38.7223,-9.1393 dose:0.14uSv/h ts:2026-08-13_10:00:00",
-"bytes": 80,
-"id": "f01a77"
-},
-{
-"wire": "t:observation f:X3WX01 dose:0.14uSv/h lifedose:1.2mSv lifetime:38day ts:2026-08-13_10:00:00",
-"bytes": 91,
-"id": "cede7d"
-},
-{
-"wire": "t:observation f:X3WX01 rf:120uW/m2 efield:1.8V/m mfield:0.3uT ts:2026-08-13_10:00:00",
-"bytes": 84,
-"id": "9e5c72"
-},
-{
-"wire": "t:observation f:X3LAB1 radon:120Bq/m3 ts:2026-08-13_10:00:00",
-"bytes": 60,
-"id": "59208e"
-},
-{
-"wire": "t:observation f:X1SHIP pos:38.7012,-9.1523 spd:12kt odometer:15420nmi lifetime:210day ts:2026-08-13_10:00:00",
-"bytes": 108,
-"id": "4f6008"
 }
 ]

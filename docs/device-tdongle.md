@@ -66,7 +66,10 @@ device presence only and is a different protocol.
 | §36.9 `serve:index` announcement | every 10 minutes on BLE5 and the LAN: `t:service f:<call> serve:index,history,mailbox count:<n>` — how a station discovers this indexer exists at all |
 | §36.9 XDIR1 directory | who it archives, one `call ts` line per station, sorted; served at `GET /api/xprs/dir` |
 | §36.9 content never crosses | it archives only what it hears on its own bearers; it imports nothing from another indexer |
-| §9.1 signatures | **it signs** everything it originates — service announcements, beacons, pongs — with a 48-byte short-Schnorr over secp256k1, base85 to the 60 characters `sig:` carries. The key is generated once and kept in NVS |
+| §9.1 signatures | **it signs** everything it originates — identity, service announcements, beacons, pongs — with the 48-byte short-Schnorr over secp256k1 that `sig:` carries as 60 base85 characters |
+| §9.3 `t:identity` | announced every 10 minutes: `t:identity f:<call> ts:… k:npub1… sig:…`, self-signed. A receiver stores the callsign→key binding and can then verify everything else this station says |
+| §3 callsign binding | the callsign IS derived from the npub, so a receiver re-derives it and sees that name and key belong together. A station carrying an older auto-derived callsign migrates once |
+| Identity | the station's **NOSTR key** (`geogram_nostr`): secp256k1, npub, NVS, and the callsign derivation — one key for the callsign, the signature and the identity packet |
 
 **Types it knows** (30, plus `other` for anything it does not): `message`,
 `observation`, `receipt`, `reaction`, `request`, `identity`, `track`, `sos`,
@@ -91,9 +94,7 @@ index that does not know it.
 | **No XPRS `ping` responder** | it will not answer `t:ping` |
 | **Mail is held, not delivered** | mail is stored and kept private, but the device does not announce it, does not appear in a `hold:` list, and does not release it on a verified receipt |
 | **No eviction** | the store grows until the card is full. At 320 B a record a 32 GB card is a very long time, but nothing deletes anything yet |
-| **It publishes no `t:identity`** | §9.3 announces the key as an npub, which needs bech32 this firmware does not have. Until then a receiver has no way to LEARN the key from the air, so signatures read as "unverified" rather than "verified" — the key is fetchable at `GET /api/xprs/key`, which is a bench convenience and not the spec |
-| **The callsign is not derived from the signing key** | §3 derives an X3 callsign from the signing key so a receiver can re-derive it and see the two belong together. This station's callsign predates its signing key and came from provisioning; new stations derive it correctly, existing ones do not |
-| **It verifies nothing** | it signs, but does not check the signatures on packets it receives, so it cannot mark a sender forged |
+| **It verifies nothing** | it signs, but does not check the signatures on packets it receives, so it cannot mark a sender verified or forged, and does not store the callsign→key bindings it hears |
 | **The directory is not a content-addressed file** | §36.9 has it named by `file:<ref>.xdir` in the announcement and fetched with `cmd:file`. There is no file transfer here yet, so the same bytes are served over HTTP instead |
 | **No `m:try` redirect, no peer directories** | a miss is simply a miss; it neither names peers that hold a callsign nor fetches anybody else's directory |
 | **Not a §36.8 gateway** | it does not release sealed mail to a station whose observation lists the recipient in `hears:` — mail is held and served only to a matching asker |

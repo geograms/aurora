@@ -171,6 +171,36 @@ void main() {
     });
   });
 
+  test('serveInline: 202 + wires + 200 on the socket lane, 404 when empty',
+      () {
+    seed(3);
+    final page = srv.serveInline(
+        _p('t:command f:X1BBB d:X1SELF ts:2026-08-13_12:00:00 cmd:history '
+            'until:2026-08-13_11:00:00'),
+        selfBase: 'X1SELF');
+    expect(page, hasLength(5));
+    expect(_p(page.first)['code'], '202');
+    expect(_p(page.last)['code'], '200');
+    // The middle is the stored wires, newest first, byte-identical.
+    expect(page[1], contains('m:packet number 2'));
+    expect(page[3], contains('m:packet number 0'));
+
+    final empty = srv.serveInline(
+        _p('t:command f:X1BBB d:X1SELF ts:2026-08-13_12:01:00 cmd:history '
+            'since:2027-01-01_00:00:00'),
+        selfBase: 'X1SELF');
+    expect(empty, hasLength(1));
+    expect(_p(empty.single)['code'], '404');
+
+    // Not for us / not a history command: nothing.
+    expect(
+        srv.serveInline(
+            _p('t:command f:X1BBB d:X1ELSE ts:2026-08-13_12:02:00 '
+                'cmd:history'),
+            selfBase: 'X1SELF'),
+        isEmpty);
+  });
+
   test('one replay in flight: a second requester gets 429, self unmetered',
       () {
     seed(14);

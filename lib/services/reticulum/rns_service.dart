@@ -33,6 +33,7 @@ import '../mesh/mesh_courier.dart';
 import '../xprs/xprs_archive.dart';
 import '../xprs/xprs_ingest.dart';
 import '../xprs/xprs_monitor.dart';
+import '../xprs/xprs_tcp.dart';
 import '../files/dht/dht_core.dart' show kDhtAspects;
 import '../files/dht/dht_node.dart';
 import '../files/dht/holder_hint.dart';
@@ -3396,6 +3397,9 @@ class RnsService {
             transport: _transport!,
             onPacket: _onInbound,
             log: (m) => LogService.instance.add('RNS/tcps: $m'),
+            // Dual-protocol port (docs/XPRS.md section 24.4): a connection
+            // whose first byte is not the HDLC flag speaks XPRS as text.
+            onPlainText: XprsTcp.attach,
           );
           await _server!.bind();
           break;
@@ -3454,6 +3458,9 @@ class RnsService {
             onPacket: _onInbound,
             shared: false,
             log: (m) => LogService.instance.add('RNS/gw: $m'),
+            // The same dual-protocol contract as the public port (24.4), so
+            // a local tool can speak XPRS text to its own node.
+            onPlainText: XprsTcp.attach,
           );
           await g.bind();
           _gateway = g;

@@ -183,17 +183,68 @@ class XprsHistoryServer {
   }
 
   void _airControl(String self, String to, String cmdId, int code) {
+    final p = _result(self, to, cmdId, code);
+    if (p == null) return;
+    unawaited(
+        _air('xprs-hist:c$code', p.encode(), const Duration(seconds: 30)));
+  }
+
+  XprsPacket? _result(String self, String to, String cmdId, int code) {
     final now = DateTime.now().toUtc();
     String two(int n) => n.toString().padLeft(2, '0');
     final ts = '${now.year}-${two(now.month)}-${two(now.day)}_'
         '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
     var p = XprsPacket.parse(
         't:result f:$self d:$to ts:$ts r:$cmdId code:$code');
-    if (p == null) return;
+    if (p == null) return null;
     final d = signingKey();
     if (d != null) p = xprsSign(p, d);
-    unawaited(
-        _air('xprs-hist:c$code', p.encode(), const Duration(seconds: 30)));
+    return p;
+  }
+
+  /// Serve a `cmd:history` INLINE — the TCP lane of section 24.4, where the
+  /// reply travels the socket that carried the ask. No airtime, so no pacing
+  /// and a larger page; no metering, because the asker's own connection is
+  /// the budget. Returns the reply wires in order: the result code, the
+  /// original packets newest first, then 200 or 206 — or a single 404.
+  /// Empty when [cmd] is not a history command addressed to us.
+  static const int inlinePageSize = 50;
+
+  List<String> serveInline(XprsPacket cmd, {required String selfBase}) {
+    if (cmd.type != 'command' || (cmd['cmd'] ?? '') != 'history') return [];
+    if (_base(cmd['d'] ?? '') != selfBase) return [];
+    if (!(PreferencesService.instanceSync?.xprsServeHistory ?? true)) {
+      return [];
+    }
+    final archive = XprsArchive.instance;
+    if (!archive.ready) return [];
+    final from = _base(cmd['f'] ?? '');
+    if (from.isEmpty) return [];
+    if (cmd.has('sig')) {
+      final state = xprsVerify(cmd, archive.keyResolver?.call(from));
+      if (state == XprsSigState.forged) return [];
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    archive.flush(nowMs: now);
+    final cmdId = xprsIdentifier(cmd);
+    final rows = archive.query(
+        sinceMs: xprsParseTs(cmd['since']),
+        untilMs: xprsParseTs(cmd['until']) ?? (now + 1),
+        only: cmd['only'],
+        limit: inlinePageSize + 1);
+    answered++;
+    if (rows.isEmpty) {
+      return [
+        if (_result(selfBase, from, cmdId, 404) case final p?) p.encode()
+      ];
+    }
+    final more = rows.length > inlinePageSize;
+    return [
+      if (_result(selfBase, from, cmdId, 202) case final p?) p.encode(),
+      for (final r in rows.take(inlinePageSize)) r['wire'] as String,
+      if (_result(selfBase, from, cmdId, more ? 206 : 200) case final p?)
+        p.encode(),
+    ];
   }
 
   Future<bool> _air(String key, String wire, Duration ttl) {

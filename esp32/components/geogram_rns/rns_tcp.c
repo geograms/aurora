@@ -39,7 +39,16 @@ static const char *TAG = "rns_tcp";
 #define RECONNECT_SLOW_MS   30000
 #define FAST_ATTEMPTS       5
 
-static char     s_host[64];
+/* Several hubs, tried in turn. The list matters: the address that used to be
+ * the default here and in the Flutter app — rns.beleth.net — does not answer at
+ * all, so a station that only knew that one was never on the network. Measured
+ * from a domestic line: wisco 113 ms, birdsnet 225 ms, inertia 285 ms, sydney
+ * 287 ms, beleth timed out. */
+static char     s_hosts[RNS_TCP_MAX_HUBS][64];
+static uint16_t s_ports[RNS_TCP_MAX_HUBS];
+static int      s_nhosts;
+static int      s_cur;                  /* which one we are on */
+static char     s_host[64];             /* the one currently dialled */
 static uint16_t s_port;
 static volatile int s_sock = -1;
 static volatile bool s_running;
@@ -101,6 +110,16 @@ static void on_frame(const uint8_t *frame, size_t len, void *ctx)
     if (s_rx_cb) s_rx_cb(frame, len, s_rx_ctx);
 }
 
+/* Move to the next hub. Rotating rather than restarting from the top means a
+ * station whose first hub is down does not retry it before every attempt. */
+static void next_hub(void)
+{
+    if (s_nhosts <= 0) return;
+    s_cur = (s_cur + 1) % s_nhosts;
+    snprintf(s_host, sizeof s_host, "%s", s_hosts[s_cur]);
+    s_port = s_ports[s_cur];
+}
+
 static int dial(void)
 {
     struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
@@ -148,6 +167,7 @@ static void rns_tcp_task(void *arg)
         int sock = dial();
         if (sock < 0) {
             attempts++;
+            next_hub();          /* try the next one rather than this one again */
             vTaskDelay(pdMS_TO_TICKS(attempts <= FAST_ATTEMPTS ? RECONNECT_FAST_MS
                                                                : RECONNECT_SLOW_MS));
             continue;
@@ -179,12 +199,25 @@ static void rns_tcp_task(void *arg)
     vTaskDelete(NULL);
 }
 
+esp_err_t rns_tcp_add_hub(const char *host, uint16_t port)
+{
+    if (!host || !*host || s_nhosts >= RNS_TCP_MAX_HUBS) return ESP_ERR_INVALID_ARG;
+    snprintf(s_hosts[s_nhosts], sizeof s_hosts[0], "%s", host);
+    s_ports[s_nhosts] = port ? port : RNS_TCP_DEFAULT_PORT;
+    s_nhosts++;
+    return ESP_OK;
+}
+
+const char *rns_tcp_current_hub(void) { return s_host; }
+
 esp_err_t rns_tcp_start(const char *host, uint16_t port)
 {
     if (s_running) return ESP_OK;
-    if (!host || !*host) return ESP_ERR_INVALID_ARG;
-    snprintf(s_host, sizeof s_host, "%s", host);
-    s_port = port ? port : RNS_TCP_DEFAULT_PORT;
+    if (host && *host) rns_tcp_add_hub(host, port);
+    if (s_nhosts == 0) return ESP_ERR_INVALID_ARG;
+    s_cur = 0;
+    snprintf(s_host, sizeof s_host, "%s", s_hosts[0]);
+    s_port = s_ports[0];
     if (!s_tx_mtx) s_tx_mtx = xSemaphoreCreateMutex();
     if (!s_tx_mtx) return ESP_ERR_NO_MEM;
     s_running = true;
@@ -195,7 +228,8 @@ esp_err_t rns_tcp_start(const char *host, uint16_t port)
         s_running = false;
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "interface to %s:%u starting", s_host, (unsigned)s_port);
+    ESP_LOGI(TAG, "interface starting — %d hub(s), first %s:%u",
+             s_nhosts, s_host, (unsigned)s_port);
     return ESP_OK;
 }
 

@@ -186,6 +186,12 @@ void rns_hdlc_rx_feed(rns_hdlc_rx_t *rx, const uint8_t *in, size_t len,
 
 typedef struct {
     uint8_t  header_type;
+    /* HEADER_2 only: the transport node that relayed it. Everything a hub
+     * relays arrives this way, so a station that refuses HEADER_2 hears
+     * nothing from the wider network — which is exactly what this one did
+     * until a real hub was pointed at it. */
+    uint8_t  transport_id[RNS_HASH_LEN];
+    bool     have_transport_id;
     uint8_t  context_flag;
     uint8_t  transport_type;
     uint8_t  dest_type;
@@ -197,9 +203,22 @@ typedef struct {
     size_t   data_len;
 } rns_packet_t;
 
-/** HEADER_1 only: flags(1) hops(1) dest(16) context(1) data. Returns len or -1. */
+/**
+ * @brief Build a HEADER_1 packet: flags(1) hops(1) dest(16) context(1) data.
+ *
+ * Only HEADER_1 is built: a leaf addresses a destination, it does not relay for
+ * anybody, and HEADER_2 is what a transport node emits.
+ * @return length, or -1.
+ */
 int rns_packet_build(const rns_packet_t *p, uint8_t *out, size_t out_cap);
-/** Parse; [out]->data points into [in]. False when it is not a packet. */
+
+/**
+ * @brief Parse either header form. [out]->data points into [in].
+ *
+ * HEADER_2 carries a 16-byte transport id BEFORE the destination; read as
+ * HEADER_1 its transport id would be taken for the address, which is a packet
+ * silently attributed to the wrong destination.
+ */
 bool rns_packet_parse(const uint8_t *in, size_t len, rns_packet_t *out);
 
 #ifdef __cplusplus

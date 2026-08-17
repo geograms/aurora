@@ -68,6 +68,7 @@
 #include "xprsindex.h"
 #include "xprslan.h"
 #include "rns_tcp.h"
+#include "esp_netif_sntp.h"
 
 /* Provisioning defaults (WiFi creds + callsign). The real file is gitignored;
  * values are written to NVS on first boot and NVS is the source of truth after.
@@ -94,11 +95,20 @@ static uint8_t s_own_addr_type;
 #define SUBTYPE      0x55   /* Reticulum packet */
 #define SUBTYPE_APRS 0x41   /* APRS broadcast parcel ('A') — plaintext */
 #define SUBTYPE_MESH BLEMESH_SUBTYPE /* 0x4D street-mesh route beacon ('M') */
-/* The hub this station dials. rns.beleth.net is the one the Aurora side has
- * been using; a station with its own is expected to change this. */
-#ifndef RNS_HUB_HOST
-#define RNS_HUB_HOST "rns.beleth.net"
-#endif
+/* Hubs this station dials, in order, until one answers. Measured from a
+ * domestic line rather than copied: wisco 113 ms, birdsnet 225 ms, inertia
+ * 285 ms, sydney 287 ms — and rns.beleth.net, which was the default here and in
+ * the Flutter app, does not answer at all. A station that knew only that one
+ * was never on the network.
+ *
+ * -DRNS_HUB_HOST=\"host\" puts one in front of these, which is how a private
+ * hub or a laptop running one is pointed at for a test. */
+static const struct { const char *host; uint16_t port; } k_rns_hubs[] = {
+    { "rns.wisco.network",   4242 },
+    { "rns.birdsnet.com.br", 4242 },
+    { "use.inertia.chat",    4242 },
+    { "sydney.reticulum.au", 4242 },
+};
 
 #define SUBTYPE_XPRS 0x58   /* XPRS text packet ('X') — docs/ble5.md §2 */
 
@@ -363,10 +373,25 @@ static void air_raw_ad(const uint8_t *ad, int n)
     if (rc != 0 && rc != BLE_HS_EALREADY) ESP_LOGE(TAG, "ext_adv_start rc=%d", rc);
 }
 
+/* A fresh connection announces immediately; after that, at most this often. */
+#define HUB_ANNOUNCE_MIN_SEC 900
+static uint32_t s_last_hub_announce;
+static volatile bool s_hub_announce_force;
+
 static void announce(const char *app, int applen)
 {
+    /* random_hash is NOT ten random bytes: RNS reads it as 5 random bytes plus
+     * 5 big-endian seconds since the epoch, and hubs judge an announce's
+     * freshness by that timestamp. Filling all ten with random gave every
+     * announce a nonsense time, and the public hubs accepted our connection,
+     * took the bytes and propagated none of them — which is exactly what a
+     * replay looks like from their side. */
     uint8_t random_hash[RANDOM_HASH_LEN];
-    randombytes(random_hash, RANDOM_HASH_LEN);
+    randombytes(random_hash, 5);
+    uint64_t now = (uint64_t)time(NULL);
+    for (int i = 0; i < 5; i++) {
+        random_hash[5 + i] = (uint8_t)((now >> ((4 - i) * 8)) & 0xFF);
+    }
 
     /* signed_data = dest + pubkey + name_hash + random_hash + app  (no ratchet) */
     uint8_t *signed_data = s_signed;
@@ -406,15 +431,29 @@ static void announce(const char *app, int applen)
 
     air_raw_ad(ad, n);
 
-    /* The same announce, unwrapped, to the hub. The BLE advert carries the RNS
-     * packet after a 6-byte manufacturer-data header (len, company, marker,
-     * subtype); everything from there on IS the packet, so the two bearers
-     * share one signature and one random hash rather than announcing twice
-     * with different bytes. */
-    if (rns_tcp_is_up()) rns_tcp_send(ad + 6, (size_t)(n - 6));
+    /* The same announce, unwrapped, to the hub — but far more rarely than on
+     * the air. The BLE advert carries the RNS packet after a 6-byte
+     * manufacturer-data header, so everything from ad+6 IS the packet and the
+     * two bearers share one signature.
+     *
+     * The cadence is the point. Bluetooth neighbours come and go in seconds, so
+     * announcing every half-minute there is right; a Reticulum hub keeps a path
+     * for as long as it is used and rate-limits destinations that announce
+     * faster than they need to — the reference target is an hour. Announcing to
+     * the hub at the BLE cadence got every one of ours dropped: the hub took
+     * the bytes and relayed none of them, while a one-off announce from this
+     * laptop was relayed immediately. */
+    bool hub_due = s_hub_announce_force ||
+                   (now_sec() - s_last_hub_announce) >= HUB_ANNOUNCE_MIN_SEC;
+    if (rns_tcp_is_up() && hub_due) {
+        s_hub_announce_force = false;
+        s_last_hub_announce = now_sec();
+        rns_tcp_send(ad + 6, (size_t)(n - 6));
+        ESP_LOGI(TAG, "announced to the hub");
+    }
 
     ESP_LOGI(TAG, "TX announce app=\"%.*s\" (%dB adv%s)", applen, app, n,
-             rns_tcp_is_up() ? ", and to the hub" : "");
+             hub_due && rns_tcp_is_up() ? ", and to the hub" : "");
 }
 
 /* ---- repeater (BLE5 RNS transport node) --------------------------------- */
@@ -1020,6 +1059,12 @@ static void heartbeat_task(void *arg)
         xprsindex_queue_stats(s_xprs_index, &qwait, &qdrop);
         xprsidx_stats_t xs;
         xprsindex_stats(s_xprs_index, &xs);
+        uint32_t hrx = 0, htx = 0, hconn = 0, hdrop = 0;
+        rns_tcp_stats(&hrx, &htx, &hconn, &hdrop);
+        ESP_LOGW(TAG, "hub %s%s rx=%u tx=%u conns=%u dropped=%u",
+                 rns_tcp_is_up() ? "" : "(down) ",
+                 rns_tcp_current_hub(), (unsigned)hrx, (unsigned)htx,
+                 (unsigned)hconn, (unsigned)hdrop);
         ESP_LOGW(TAG, "alive %us heap=%u min=%u big=%u recs=%u q=%u/%u lan=%d",
                  (unsigned)(esp_timer_get_time() / 1000000ULL),
                  (unsigned)esp_get_free_heap_size(),
@@ -1082,6 +1127,7 @@ static void rns_from_hub(const uint8_t *frame, size_t len, void *ctx)
          * signature is not something to put on a socket task's stack — the
          * same mistake the LAN beacon made on an esp_timer. */
         s_hub_announce_pending = true;
+        s_hub_announce_force = true;    /* a new hub knows nothing about us */
         ESP_LOGI(TAG, "hub connected — announce queued");
         return;
     }
@@ -1878,6 +1924,27 @@ static void igate_provision(void)
  * exists before the first BLE frame arrives, so traffic heard during the WiFi
  * connect window is buffered and gated once connected (not lost). No-op (warns)
  * if there are no WiFi credentials. */
+/* Waits for the first sync and says so. "SNTP started" is not the same thing as
+ * "the clock is right", and the difference is invisible until an announce is
+ * quietly dropped by every hub on the network for carrying a 1970 timestamp. */
+static void sntp_wait_task(void *arg)
+{
+    (void)arg;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(15000)) == ESP_OK) {
+            time_t now = time(NULL);
+            struct tm tm;
+            gmtime_r(&now, &tm);
+            ESP_LOGW(TAG, "clock set: %04d-%02d-%02d %02d:%02d:%02dZ (epoch %lld)",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                     tm.tm_hour, tm.tm_min, tm.tm_sec, (long long)now);
+            vTaskDelete(NULL);
+        }
+        ESP_LOGW(TAG, "clock still not set (attempt %d)", attempt + 1);
+    }
+    vTaskDelete(NULL);
+}
+
 static void igate_start(void)
 {
     s_ig_heard_mtx = xSemaphoreCreateMutex();
@@ -1906,6 +1973,18 @@ static void igate_start(void)
     strncpy(cfg.password, pass, sizeof cfg.password - 1);
     cfg.callback = NULL;
     geogram_wifi_connect(&cfg);
+
+    /* A clock, at last. Reticulum stamps every announce with the time and hubs
+     * drop the ones that look stale, so a station with no clock is a station
+     * the network ignores. It is also what makes the `ts:` on packets this
+     * dongle originates mean anything — until now they carried seconds since
+     * boot, which is a timestamp in the early 1970s. */
+    esp_sntp_config_t sntp = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    if (esp_netif_sntp_init(&sntp) == ESP_OK) {
+        xTaskCreate(sntp_wait_task, "sntp_wait", 3072, NULL, 2, NULL);
+    } else {
+        ESP_LOGW(TAG, "SNTP failed to start — announces will be ignored");
+    }
 
     /* LAN reach: listen for the Aurora UDP discovery broadcast (announces) so
      * the dashboard can count geogram devices on the same network. Passive
@@ -2259,7 +2338,13 @@ void app_main(void)
      * is in. It reconnects on its own, so it is started whether or not WiFi has
      * finished associating. */
     rns_tcp_set_rx_cb(rns_from_hub, NULL);
-    if (rns_tcp_start(RNS_HUB_HOST, RNS_TCP_DEFAULT_PORT) != ESP_OK) {
+#ifdef RNS_HUB_HOST
+    rns_tcp_add_hub(RNS_HUB_HOST, RNS_TCP_DEFAULT_PORT);
+#endif
+    for (size_t i = 0; i < sizeof k_rns_hubs / sizeof k_rns_hubs[0]; i++) {
+        rns_tcp_add_hub(k_rns_hubs[i].host, k_rns_hubs[i].port);
+    }
+    if (rns_tcp_start(NULL, 0) != ESP_OK) {
         ESP_LOGW(TAG, "Reticulum interface failed to start");
     }
 

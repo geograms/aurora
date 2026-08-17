@@ -300,10 +300,32 @@ static void test_packet_header(void)
     n = rns_packet_build(&p, wire, sizeof wire);
     CHECK(n > 0 && (wire[0] & 0x03) == RNS_PACKET_ANNOUNCE, "announce flags wrong");
 
-    /* HEADER_2 is not spoken here, and must be refused rather than mis-read:
-     * its transport id would be taken for the destination. */
-    wire[0] |= (RNS_HEADER_2 << 6);
-    CHECK(!rns_packet_parse(wire, (size_t)n, &q), "HEADER_2 was accepted");
+    /* HEADER_2, as every announce a hub relays arrives: a transport id sits
+     * before the destination, and reading it as HEADER_1 attributes the packet
+     * to the wrong address entirely. */
+    uint8_t tid[RNS_HASH_LEN];
+    for (int i = 0; i < RNS_HASH_LEN; i++) tid[i] = (uint8_t)(0xC0 + i);
+    uint8_t h2[96];
+    h2[0] = (uint8_t)((RNS_HEADER_2 << 6) | RNS_PACKET_ANNOUNCE);
+    h2[1] = 3;                                   /* hops, as a relay sets */
+    memcpy(h2 + 2, tid, RNS_HASH_LEN);
+    memcpy(h2 + 2 + RNS_HASH_LEN, dest, RNS_HASH_LEN);
+    h2[2 + 2 * RNS_HASH_LEN] = 0;
+    memcpy(h2 + 3 + 2 * RNS_HASH_LEN, body, sizeof body - 1);
+    size_t h2len = 3 + 2 * RNS_HASH_LEN + sizeof body - 1;
+
+    CHECK(rns_packet_parse(h2, h2len, &q), "HEADER_2 was refused");
+    CHECK(q.header_type == RNS_HEADER_2, "header type wrong");
+    CHECK(q.have_transport_id && memcmp(q.transport_id, tid, sizeof tid) == 0,
+          "transport id came back wrong");
+    CHECK(memcmp(q.dest, dest, RNS_HASH_LEN) == 0,
+          "destination read from the transport id's position");
+    CHECK(q.hops == 3, "hops came back %u", q.hops);
+    CHECK(q.data_len == sizeof body - 1 &&
+          memcmp(q.data, body, q.data_len) == 0, "HEADER_2 payload wrong");
+
+    /* A truncated HEADER_2 must be refused, not read into the next field. */
+    CHECK(!rns_packet_parse(h2, 3 + RNS_HASH_LEN, &q), "short HEADER_2 accepted");
 }
 
 int main(void)

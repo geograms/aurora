@@ -25,6 +25,8 @@ extern "C" {
 
 /** The port Reticulum hubs answer on. */
 #define RNS_TCP_DEFAULT_PORT 4242
+/** How many hubs may be listed. Tried in turn; one connection at a time. */
+#define RNS_TCP_MAX_HUBS 6
 
 /**
  * @brief One received packet, already de-framed.
@@ -34,6 +36,11 @@ extern "C" {
  * a station that has not spoken since it connected.
  */
 typedef void (*rns_tcp_rx_cb_t)(const uint8_t *frame, size_t len, void *ctx);
+
+/** Add a hub to try. Call before rns_tcp_start(), or pass the first to it. */
+esp_err_t rns_tcp_add_hub(const char *host, uint16_t port);
+/** The hub currently dialled — for a status line. */
+const char *rns_tcp_current_hub(void);
 
 esp_err_t rns_tcp_start(const char *host, uint16_t port);
 void      rns_tcp_stop(void);

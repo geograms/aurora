@@ -393,13 +393,22 @@ bool rns_packet_parse(const uint8_t *in, size_t len, rns_packet_t *out)
     out->transport_type = (in[0] >> 4) & 0x01;
     out->dest_type      = (in[0] >> 2) & 0x03;
     out->packet_type    = in[0] & 0x03;
-    /* HEADER_2 carries a transport id before the destination; this station
-     * only speaks HEADER_1 and says so rather than mis-reading the address. */
-    if (out->header_type != RNS_HEADER_1) return false;
     out->hops = in[1];
-    memcpy(out->dest, in + 2, RNS_HASH_LEN);
-    out->context = in[2 + RNS_HASH_LEN];
-    out->data = in + 3 + RNS_HASH_LEN;
-    out->data_len = len - (3 + RNS_HASH_LEN);
+
+    /* HEADER_2 puts the relaying transport node's id before the destination.
+     * Everything a hub relays looks like this, so reading only HEADER_1 means
+     * hearing nothing from beyond the local link. */
+    size_t off = 2;
+    if (out->header_type == RNS_HEADER_2) {
+        if (len < 3 + 2 * RNS_HASH_LEN) return false;
+        memcpy(out->transport_id, in + off, RNS_HASH_LEN);
+        out->have_transport_id = true;
+        off += RNS_HASH_LEN;
+    }
+    memcpy(out->dest, in + off, RNS_HASH_LEN);
+    off += RNS_HASH_LEN;
+    out->context = in[off++];
+    out->data = in + off;
+    out->data_len = len - off;
     return true;
 }

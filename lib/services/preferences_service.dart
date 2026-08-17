@@ -732,7 +732,7 @@ class PreferencesService {
   set rnsAutoStart(bool v) => _prefs.setBool('rns.autoStart', v);
 
   String get rnsBootstrapHost =>
-      _prefs.getString('rns.bootstrapHost') ?? 'rns.beleth.net';
+      _prefs.getString('rns.bootstrapHost') ?? 'rns.wisco.network';
   /// destHex|callsign pairs the core has heard announce. Persisted because the
   /// peer a carrier is FOR is the one that stopped announcing: resolving its
   /// name only from live traffic makes store-and-forward useless exactly when
@@ -755,15 +755,21 @@ class PreferencesService {
   /// Editable, ordered list of Reticulum TCP bootstrap hubs ("host:port"). The
   /// node tries each in turn until one answers with real Reticulum traffic. The
   /// defaults are public testnet hubs; users can edit the list in Settings.
-  // Verified-reachable community TCP hubs (TCPClientInterface, port 4242). The
-  // old *.connect.reticulum.network testnet is decommissioned (NXDOMAIN) and
-  // betweentheborders is a web server, so they're intentionally excluded.
+  // Community TCP hubs (TCPClientInterface, port 4242), ordered by measured
+  // round-trip from a domestic line and re-checked 2026-08-17: each one below
+  // answered and delivered real HDLC-framed Reticulum traffic, with announces
+  // whose Ed25519 signatures verify.
+  //
+  // rns.beleth.net was FIRST in this list and does not answer at all — the
+  // connection times out — so every node that took the default was dialling a
+  // dead address before it ever reached a live one. The old
+  // *.connect.reticulum.network testnet is decommissioned (NXDOMAIN) and
+  // betweentheborders is a web server; both remain excluded.
   static const List<String> _defaultRnsServers = [
-    'rns.beleth.net:4242',
-    'use.inertia.chat:4242',
-    'rns.wisco.network:4242',
-    'sydney.reticulum.au:4242',
-    'rns.birdsnet.com.br:4242',
+    'rns.wisco.network:4242',    // 113 ms
+    'rns.birdsnet.com.br:4242',  // 225 ms
+    'use.inertia.chat:4242',     // 285 ms
+    'sydney.reticulum.au:4242',  // 287 ms
   ];
 
   /// Blossom servers (media over the internet: images in the feed come FROM

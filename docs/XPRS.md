@@ -1901,6 +1901,7 @@ So a station reports **once per bearer** and says nothing it cannot mean:
 | `lora` | LoRa on an ISM band |
 | `ble` | Bluetooth Low Energy |
 | `wifi` | 2.4 or 5 GHz WiFi, including WiFi Direct and WiFi Aware |
+| `espnow` | ESP-NOW, the connectionless 2.4 GHz protocol of the ESP32 family |
 | `halow` | 802.11ah, sub-GHz WiFi |
 | `lan` | a wired or local network the station is attached to |
 | `internet` | reached through a gateway, wherever that gateway is |
@@ -3946,6 +3947,62 @@ nor a receiver can tell whether the sender holds one. Announcing a channel is
 not a claim of authority to use it, and section 9.4 continues to govern what may
 be transmitted where.
 
+### 23.7 Meeting on a working channel
+
+Radio settled this long ago: everyone monitors a calling channel, and a pair
+with real business moves off it. A file transfer at calling-channel rates is
+minutes of a jammed commons; the move costs one packet there and puts the
+minutes somewhere private. This section is that move, in vocabulary the
+document already has.
+
+**A `t:channel` with `d:` is an invitation**: this channel, for you, now.
+Every field keeps its section 23 meaning — the keys say where, `until:` says
+how long the inviter will wait there, `q:ack` asks for the answer, and `r:`
+names the exchange the move serves, usually the `cmd:file` or `cmd:put` that
+made a working channel worth having.
+
+```
+192  t:channel f:X1QZ3N d:X1RD89 freq:433.900MHz mode:lora bw:250kHz until:2026-08-17_16:20:00 q:ack r:b47210 ts:2026-08-17_16:00:00 sig:<60 characters>
+```
+
+When the meeting place is a technology rather than a frequency, `link:`
+(section 10.6.1's bearer word) names it and `ch:` carries whatever label that
+technology needs — a WiFi channel number, a network name:
+
+```
+164  t:channel f:X1QZ3N d:X1RD89 link:espnow ch:6 until:2026-08-17_16:10:00 q:ack ts:2026-08-17_16:00:00 sig:<60 characters>
+```
+
+The invitee answers the ordinary way — `s:ack` is "moving now", `s:no` is
+"cannot", with the reason where reasons go:
+
+```
+107  t:receipt f:X1RD89 d:X1QZ3N r:72fe2f s:ack sig:<60 characters>
+127  t:receipt f:X1RD89 d:X1QZ3N r:d8b7be s:no sig:<60 characters> m:no espnow hardware
+```
+
+Rules, all inherited:
+
+- **The working channel is borrowed, never claimed.** Both stations return to
+  the calling channel when the exchange ends or `until:` passes, whichever is
+  first. A pair that stops answering on the commons has not moved, it has
+  vanished, and section 31 already says what a vanished station owes nobody.
+- **One channel per invitation** (section 23.5). Offering a fallback is a
+  second invitation, and the answer says which was taken by which `r:` it
+  names.
+- **An unsigned invitation is not followed.** "Meet me elsewhere" is the
+  cheapest lure there is — it parks the recipient on an empty frequency and
+  takes them off the shared one — which puts it in the same class as the
+  unsigned mailbox declaration of section 13.12: ignored, not displayed.
+- **Moving is transmitting.** Section 23.6 and 9.4 govern the working channel
+  exactly as they governed the calling one; an invitee without the licence or
+  the hardware answers `s:no` and the pair uses what they share.
+
+This is also the missing handshake of section 25.2.2: when a pair's best bulk
+lane is not obvious from the bearers they are already on, the invitation is
+how one proposes and the other agrees — and the transfer's control packets
+then bracket a lane both actually chose.
+
 ---
 
 ## 24. Services
@@ -4320,7 +4377,10 @@ said without moving a byte.
 
 The same two XPRS packets bracket the transfer whatever the bearer — a
 Reticulum resource, a LAN fetch, a swarm — with only the middle block
-changing, which is the point of keeping it out of this document.
+changing, which is the point of keeping it out of this document. When the
+lane is not obvious from where the pair already is, one of them proposes it
+with a working-channel invitation (section 23.7) and the other agrees or
+declines before a byte moves.
 
 ### 25.3 Keeping it out of the conversation
 
@@ -5585,6 +5645,12 @@ UTC time of day the cycle is anchored to, default `00:00:00`. The 3-3-3 plan is
 `freq:` is what you tune to hear the station. A repeater's input is `shift:` as
 an offset or `input:` outright, the latter for cross-band.
 
+A `t:channel` WITH `d:` is a working-channel invitation (section 23.7): meet
+me there — `until:` how long I wait, `r:` the exchange it serves, `link:` +
+`ch:` when the place is a technology (wifi, espnow) rather than a frequency.
+Signed or ignored. Answer `s:ack` (moving) or `s:no` (cannot, reason in
+`m:`); both return to the calling channel when done.
+
 `range:` is the operator's estimate, not a guarantee.
 
 ### Carrying toward a place
@@ -6239,6 +6305,7 @@ every indexer can point across it.
 | Section 36.6, `only:` matching inside list fields | **partly implemented**: the shipped history responder matches `only:` against author and addressee (`xprs_archive.dart` query); `hears:`/`hold:`/`via:`/`grant:` containment is not searched yet |
 | Section 36.8, sealed-mail release to a hearing gateway | **specified, not implemented**; the nearest live relatives are the chat iGate mailbox (mail pulled from APRS-IS by an in-range station) and MeshStore custody, neither of which is driven by a published `hears:` claim |
 | Section 36.9, `serve:index` and the XDIR1 directory exchange | **specified, not implemented**; the philosophy already ships for files — `pointer_sync.dart` gossips signed ADDRESSES between file-indexers and re-verifies on merge, never copying content — but no station publishes a callsign directory or answers a miss with `m:try` |
+| Section 23.7, working-channel invitations | **specified, not implemented** as packets; the dance itself ships in binary for one pair of bearers — the WiFi-Direct negotiation (BLE subtype `0x57` ADVERT/REQ/OFFER, `docs/ble5.md`) coordinates exactly this move from the shared advert channel to a private fast lane — and 23.7 is that handshake generalised to every bearer, in text, signed |
 | Section 3.1, one person on several devices | **specified, not implemented.** Nothing numbers a device today: a station wears its bare callsign, and the chat wapp matches `d:` against that alone. The pieces the rule needs are already on the air — a beacon carries `f:` and `lx:`, so a device can see a sibling and tell it apart — but no code adopts a suffix, prefers the conventional number for its `type:`, or refuses a command addressed to a person |
 | Section 13.7.1, receipts signed by default | **specified, not implemented.** Signing exists (section 9.1) and receipts do not use it yet, which leaves the forged-`s:ack` deletion described there open on any station that honours the section 7 carrier release. The Reticulum side is not exposed to it — its acknowledgement is a link, not an XPRS packet — but an XPRS-native carrier would be |
 | Section 13.7.2, parking a retry with no evidence | **implemented** on the Reticulum side: a retry is spent only against a live path or a beacon heard in the last three minutes (`RnsService._peerReachable`), otherwise the entry parks without burning a rung and the copy stays held |

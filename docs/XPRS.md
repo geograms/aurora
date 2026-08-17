@@ -1969,6 +1969,13 @@ Three limits, stated because a topology map invites over-reading:
   and nothing here detects that. What it buys an attacker is being chosen as a
   carrier, which is why `hears:` informs a choice and never compels one.
 
+The truncation of section 10.6.4 is **per bearer**, not a property of the
+list. The advert channel cuts `hears:` to what fits one advert; the same
+observation pushed to an indexer (section 36) carries the full list, over
+section 6.6 parts when a busy gateway hears more than one packet holds —
+about twenty-five callsigns fit a packet, two hundred fit nine. `peers:`
+stays the true total either way, so a cut list is always visibly cut.
+
 ### 10.6.4 `peers:` says how many were left out
 
 ```
@@ -5894,7 +5901,17 @@ An indexer holds two different things, and the difference is `d:`.
 
 Publication types: `blog`, `passage`, `event`, `offer`, `need`, `place`,
 `poll`, `track`, `warning`, `info`, `status`, `channel`, `service`, `file`,
-`sos`.
+`sos`, `observation`, `identity`.
+
+The last two are what makes a gateway useful to anyone beyond its own hill. A
+gateway publishing its OWN `t:observation` is publishing a reachability
+record: `f:` says which gateway, `hears:` says which radio-only stations are
+at its ear right now, and `ts:` says how fresh that claim is — the whole
+"where can X1BOA3 be reached" question answered by a packet that already
+existed. And a gateway passes on the `t:identity` (and `t:mailbox`) packets
+of the stations it hears verbatim, which section 36.2 already makes safe:
+the author's signature travels with the packet, so an indexer's copy proves
+itself against the author's key, not against the gateway's honesty.
 
 Neither published nor held: `ping` and `pong`. They measure whether a path is
 alive right now, and a stale one answers a question nobody is still asking.
@@ -5991,6 +6008,30 @@ by type, by region and radius, by time window. Every one of those reads a field
 the packet already carries, so the query surface needs no vocabulary of its own
 and cannot drift from the format it queries.
 
+One reading rule makes the reachability question askable without any new
+word: **`only:` matches a callsign wherever the packet carries it** — as
+author, as addressee, or inside a list field (`hears:`, `hold:`, `via:`,
+`grant:`). "Everything about X1BOA3" naturally includes the gateway
+observations that list it as heard, which is the answer to "where can X1BOA3
+be reached". Worked, against an indexer:
+
+```
+165  t:command f:X1QZ3N d:X3IDX1 ts:2026-08-17_14:00:00 cmd:history only:X1BOA3 since:2026-08-17_13:00:00 sig:<60 characters>
+```
+
+The reply is the section 25.2.1 replay — `code:202`, the original packets,
+`code:200` — and among them:
+
+```
+169  t:observation f:X3RLY7 link:lora peers:6 hears:X1BOA3,CT1ABC-9,X5A3F2 uptime:9day ts:2026-08-17_13:59:20 sig:<60 characters>
+```
+
+The gateway's own packet, unchanged, signature and all: X1BOA3 was at
+X3RLY7's ear forty seconds before the ask. The reader now knows which
+internet-connected station is one radio hop from the recipient, and how
+stale that knowledge is — `ts:` is the freshness, and a reader that gets
+three gateways back simply prefers the newest.
+
 The difference that matters is not the syntax. It is that the reader chose the
 indexer, the publisher chose the indexer, and neither had to be the same choice
 for the network to work.
@@ -6033,6 +6074,55 @@ people's undelivered mail from every indexer holding it.
 An indexer may of course refuse to carry mail at all, or carry it only for
 stations it knows. Its disk, its bandwidth, its decision (section 31.2).
 
+### 36.8 The gateway is the last mile
+
+Sections 36.1 and 36.6 built the outbound half: the gateway told the indexer
+who it hears, and a sender found the gateway. This section is the return leg
+— how mail deposited at an indexer reaches a station that has never touched
+the internet and never will.
+
+The tension is real and must be stated before it is resolved. Section 36.7
+says mail is never offered to a third party, and a gateway asking for
+somebody else's mail IS a third party. Section 13.12 solves it only for
+stations that declared a mailbox — and a solar tracker on a ridge has had no
+way to declare anything to an indexer it cannot reach.
+
+The resolution splits on what the mail is:
+
+- **Sealed mail travels on the strength of the seal.** A packet whose body is
+  `x:` (section 9.2) is ciphertext to everyone but the recipient; carrying it
+  is what custody already is (section 13.6), and handing it to one more
+  carrier discloses nothing the airwaves would not. An indexer releases
+  sealed mail to a station whose own published observation currently lists
+  the recipient in `hears:` — the gateway one radio hop from delivering. A
+  false `hears:` buys an attacker a copy of ciphertext and the envelope
+  metadata the indexer already held, which section 36.7 already priced.
+- **Clear mail is released only to a declared holder** (`hold:`, section
+  13.12) or fetched by the recipient itself. Plaintext is disclosure, and
+  disclosure follows the recipient's stated arrangements or nobody's.
+
+The delivery is then ordinary. The sender seals and deposits:
+
+```
+162  t:message f:X1QZ3N d:X1BOA3 ts:2026-08-17_14:02:00 x:pQ4m9xT2vB8kRZ7cW0yLuJ3gRhN8sEiDoQ6vXaB1MnYw sig:<60 characters>
+```
+
+The gateway X3RLY7, whose observation listed X1BOA3, collects it, airs it on
+the radio under the custody rules of section 13, and the receipt comes back
+the same path:
+
+```
+130  t:receipt f:X1BOA3 d:X1QZ3N r:b47210 ts:2026-08-17_14:19:12 s:ack sig:<60 characters>
+```
+
+The receipt is signed by the recipient, so the indexer verifies it and
+releases its held copy (section 36.7), the gateway archives its own, and the
+sender — three networks away — knows the tracker on the ridge has the
+message. Nothing in the chain trusted the gateway with anything but
+ciphertext and effort. This is APRS's iGate rebuilt with the trust turned
+the right way around: the iGate proved useful by what it heard and carried,
+never by what it could read.
+
 ---
 
 ## 37. Implementation status
@@ -6052,6 +6142,9 @@ stations it knows. Its disk, its bandwidth, its decision (section 31.2).
 | Receipts and carrier release | implemented, for receipts that were asked for with `q:` |
 | Section 36.7, an indexer holding mail | **specified, not implemented** as an indexer role, but the parts are live elsewhere: `MeshStore` already parks a frame for an absent station and releases it on delivery, and the LXMF propagation mailbox already holds what could not be pushed and serves it when the recipient pulls. What is missing is an indexer being a station's declared `hold:` and telling a recipient that something is waiting |
 | Section 36, publishing to chosen indexers | **specified, not implemented.** Every piece it is built from exists — the signed-record discipline, the append-only log with an (epoch, seq) cursor, indexer-to-indexer catch-up and indexers as the DHT's anchors are all live for FILES (`files/dht/`, `social/relay_node.dart`) — but nothing yet keeps a publication log, pushes packets to a chosen indexer, or answers a query from their fields. The section deliberately adds no packet type and no key, so there is nothing on the wire to implement: the work is all plumbing |
+| Section 36.1, gateway reachability publications (`observation`/`identity` to an indexer) | **specified, not implemented** as a push; the raw material is live — every phone beacons `hears:` and the ESP32 digipeats — but no gateway publishes its observation to an indexer and no indexer answers for one |
+| Section 36.6, `only:` matching inside list fields | **partly implemented**: the shipped history responder matches `only:` against author and addressee (`xprs_archive.dart` query); `hears:`/`hold:`/`via:`/`grant:` containment is not searched yet |
+| Section 36.8, sealed-mail release to a hearing gateway | **specified, not implemented**; the nearest live relatives are the chat iGate mailbox (mail pulled from APRS-IS by an in-range station) and MeshStore custody, neither of which is driven by a published `hears:` claim |
 | Section 3.1, one person on several devices | **specified, not implemented.** Nothing numbers a device today: a station wears its bare callsign, and the chat wapp matches `d:` against that alone. The pieces the rule needs are already on the air — a beacon carries `f:` and `lx:`, so a device can see a sibling and tell it apart — but no code adopts a suffix, prefers the conventional number for its `type:`, or refuses a command addressed to a person |
 | Section 13.7.1, receipts signed by default | **specified, not implemented.** Signing exists (section 9.1) and receipts do not use it yet, which leaves the forged-`s:ack` deletion described there open on any station that honours the section 7 carrier release. The Reticulum side is not exposed to it — its acknowledgement is a link, not an XPRS packet — but an XPRS-native carrier would be |
 | Section 13.7.2, parking a retry with no evidence | **implemented** on the Reticulum side: a retry is spent only against a live path or a beacon heard in the last three minutes (`RnsService._peerReachable`), otherwise the entry parks without burning a rung and the copy stays held |

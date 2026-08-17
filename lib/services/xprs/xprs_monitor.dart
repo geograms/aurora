@@ -30,7 +30,9 @@ import 'xprs_vocab.dart';
 /// Deliberately a subset of the XPRS `link:` vocabulary: `internet` is absent,
 /// because this is the record of what arrived over the air or over a local
 /// network, and an entry claiming otherwise would make the whole view a lie.
-const Set<String> kBearers = {'ble', 'lan', 'lora', 'wifi', 'vhf', 'uhf', 'hf'};
+const Set<String> kBearers = {
+  'ble', 'lan', 'espnow', 'lora', 'wifi', 'vhf', 'uhf', 'hf',
+};
 
 /// One packet, as heard.
 class XprsSighting {

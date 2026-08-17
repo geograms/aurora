@@ -5799,8 +5799,9 @@ or another indexer's verbatim copy of the signed announcement.
 t:observation f:X3RLY7 ts:... link:lora busy:41% txtime:6% hears:X1QZ3N,X32DVA
 ```
 
-**`link:` names the bearer and is required** -- `lora` `ble` `wifi` `halow` `lan`
-`internet` `vhf` `uhf` `hf` `cb` `pmr` `satellite` `other` -- because a station
+**`link:` names the bearer and is required** -- `lora` `ble` `wifi` `espnow`
+`halow` `lan` `internet` `vhf` `uhf` `hf` `cb` `pmr` `satellite` `other` --
+because a station
 here is not one radio on one channel, and a figure averaged across LoRa and a LAN
 is not a quantity. A reading without it is discarded; report once per bearer.
 

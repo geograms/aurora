@@ -42,10 +42,13 @@ device happened to learn off the air, which is a smaller claim than it sounds
 | BLE compact frame, subtype `0x41` | receive | `FROM 0x1F TO 0x1F TEXT`; an XPRS packet inside `TEXT` is taken |
 | BLE broadcast-parcel chunks (`0x50`/`0x51`, NACK `0x52`) | receive + transmit | reassembled payloads up to 300 B — how a packet is put back on the BLE air |
 | BLE GATT (`FFE0`, write `FFF1`, notify `FFF2`) | both | parcels from phones, and the query verbs below |
+| ESP-NOW broadcast, on the station's WiFi channel | both | one XPRS packet per frame, verbatim ([espnow.md](espnow.md)). 250 bytes fits exactly, and the frame carries RSSI |
 | LAN, UDP broadcast port **4242** | both | one XPRS packet per datagram ([lan.md](lan.md)) — the port XPRS answers on over TCP too (§24.4) |
 | APRS-IS over the internet | both | **APRS only, never XPRS** |
 
-No LoRa on this board. Reticulum's LAN discovery (UDP 42671) is listened to for
+No LoRa on this board. ESP-NOW only reaches devices on the same WiFi channel,
+which for an associated station is its access point's — two dongles on different
+networks never hear each other and nothing says so. Reticulum's LAN discovery (UDP 42671) is listened to for
 device presence only and is a different protocol.
 
 ## What of XPRS is implemented

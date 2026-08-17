@@ -11,15 +11,24 @@ the three constraints this board keeps punishing people for: **which processor
 the work runs on**, **when the SD card is allowed to run**, and **how little
 memory is left**.
 
-## Two projects, one component library
+## Three projects, one component library
 
-| | Main multi-board project (`esp32/`) | `esp32/rns_ble5/` |
-|---|---|---|
-| Build | PlatformIO, `platformio.ini` with 8 envs (`pio run -e <env>`) | Own PlatformIO project, single env (`pio run` inside the dir) |
-| Framework | ESP-IDF **5.2.1** (espressif32@6.7.0) — pinned, see memory note about needing a real framework dir | same |
-| App | `src/main.cpp` (one binary, `HAS_*`/`FEATURE_*` gates per board) | `src/main.c` + `tweetnacl.c` |
-| BLE | **Legacy advertising only** (31 B) — `geogram_ble_hello` | **BLE5 extended advertising** (`CONFIG_BT_NIMBLE_EXT_ADV=y`) |
-| Boards | epaper-S3 (default env!), generic, C3, KV4P, Heltec v1/v2/v3, tdongle_s3 | T-Dongle-S3 (board id `esp32s3-devkitc-1`) |
+| | Main multi-board project (`esp32/`) | `esp32/rns_ble5/` | `esp32/m5stack/` |
+|---|---|---|---|
+| Build | PlatformIO, `platformio.ini` with 8 envs (`pio run -e <env>`) | Own PlatformIO project, single env (`pio run` inside the dir) | same, `pio run` inside `esp32/m5stack/` |
+| Framework | ESP-IDF **5.2.1** (espressif32@6.7.0) — pinned, see memory note about needing a real framework dir | same | same |
+| App | `src/main.cpp` (one binary, `HAS_*`/`FEATURE_*` gates per board) | `src/main.c` + `tweetnacl.c` | `src/main.c`, ~200 lines |
+| BLE | **Legacy advertising only** (31 B) — `geogram_ble_hello` | **BLE5 extended advertising** (`CONFIG_BT_NIMBLE_EXT_ADV=y`) | **none** — this chip has no ext-adv |
+| Boards | epaper-S3 (default env!), generic, C3, KV4P, Heltec v1/v2/v3, tdongle_s3 | T-Dongle-S3 (board id `esp32s3-devkitc-1`) | M5Stack Core, original ESP32-D0WDQ6, CP2104 at `/dev/ttyUSB0` |
+
+`esp32/m5stack/` exists to be a **second voice on the air**: testing a bearer
+with one device only proves that its loopback works. It shares the
+communication components by symlink (`geogram_xprs`, `geogram_xprsbearer`,
+`geogram_xprsnow`, `geogram_xprslan`) and runs XPRS over ESP-NOW and the LAN.
+Its WiFi credentials live in a gitignored `src/wifi_secrets.h`, and they matter
+for one reason: **ESP-NOW rides the channel the station is on**, so associating
+to the same access point as the dongle is what puts both on the same channel
+without anybody guessing one.
 
 **The mesh/BLE5-capable dongle firmware is `rns_ble5`** — the main project's
 T-Dongle env is the older legacy-BLE APRS firmware. They cannot be merged

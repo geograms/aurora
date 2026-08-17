@@ -119,6 +119,7 @@ const Set<String> kXprsBearers = {
   'lora',
   'ble',
   'wifi',
+  'espnow',
   'halow',
   'lan',
   'internet',

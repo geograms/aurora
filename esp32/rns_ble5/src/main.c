@@ -67,6 +67,7 @@
 #include "esp_http_server.h"
 #include "xprsindex.h"
 #include "xprslan.h"
+#include "xprsnow.h"
 #include "rns_tcp.h"
 #include "xprssig.h"
 #include "bech32.h"
@@ -177,6 +178,7 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi);
 /* iGate: remember a callsign heard over BLE5 (for the APRS-IS filter). */
 #define XPRS_BEARER_BLE 1
 #define XPRS_BEARER_LAN 2
+#define XPRS_BEARER_NOW 3
 static void igate_heard_add(const char *call, uint8_t bearer);
 static int  xprs_hears_render(uint8_t bearer, char *out, int cap, int *total);
 static bool xprs_verify_sig(const xprs_t *p, const uint8_t pub[32]);
@@ -1231,31 +1233,39 @@ static void heartbeat_task(void *arg)
     }
 }
 
-static void xprs_from_lan(const char *wire, int len, uint32_t ip)
+/*
+ * A packet heard on a NON-BLUETOOTH bearer — the LAN or ESP-NOW.
+ *
+ * One function for both, because none of this is about the medium: who spoke,
+ * whether it was direct, whether it is an ask for us, storing it, and putting
+ * it on the Bluetooth air. Only the bearer id and what to print differ, and a
+ * second copy would be a second place to fix the next rule.
+ */
+static void xprs_from_bearer(const char *wire, int len, int rssi,
+                             uint8_t bearer, const char *where)
 {
-    /* Who just spoke on the wire. §10.6.3 admits only DIRECTLY heard stations
-     * to a `hears:` list, and a relayed copy carries the originator in `f:`
-     * exactly like a direct one — so a packet wearing `via:` reached us through
-     * somebody else and says nothing about what this station can hear.
+    /* Who just spoke. §10.6.3 admits only DIRECTLY heard stations to a `hears:`
+     * list, and a relayed copy carries the originator in `f:` exactly like a
+     * direct one — so a packet wearing `via:` reached us through somebody else
+     * and says nothing about what this station can hear.
      *
      * Without this the iGate was deaf to the LAN by construction: a desktop
      * could broadcast all day and never appear in the gateway's heard list,
      * because only the Bluetooth path ever fed it. */
     {
-        static xprs_t hp;                   /* the LAN task's own, not a stack */
+        static xprs_t hp;              /* the bearer task's own, not a stack */
         char from[16], type[16];
         if (xprs_parse(wire, len, &hp)) {
             bool direct = xprs_get(&hp, "via", NULL) == NULL;
             if (direct && xprs_get_str(&hp, "f", from, sizeof from) &&
                 strcasecmp(from, s_aprs_call) != 0) {
-                igate_heard_add(from, XPRS_BEARER_LAN);
+                igate_heard_add(from, bearer);
             }
-            /* The LAN is a bearer like the radio, so an ask arriving on it is
-             * answered on it — a reply aired somewhere else is a reply the
-             * requester never hears. */
+            /* An ask arriving on a bearer is answered on it — a reply aired
+             * somewhere else is a reply the requester never hears. */
             xprs_type(&hp, type, sizeof type);
             if (strcmp(type, "command") == 0) {
-                xprs_hist_accept(wire, len, &hp, XPRS_BEARER_LAN);
+                xprs_hist_accept(wire, len, &hp, bearer);
             } else if (strcmp(type, "identity") == 0) {
                 xprs_identity_heard(&hp);
             }
@@ -1263,20 +1273,21 @@ static void xprs_from_lan(const char *wire, int len, uint32_t ip)
     }
 
     if (s_xprs_index) {
-        /* rssi 0 — the store's "unknown", which a network genuinely is. */
-        xprsindex_add(s_xprs_index, wire, len, 0, false, (uint32_t)time(NULL));
+        /* A network reports no signal and passes 0, which is the store's
+         * "unknown"; ESP-NOW measured one and passes it. */
+        xprsindex_add(s_xprs_index, wire, len, rssi, false, (uint32_t)time(NULL));
     }
 
     /* Onto the BLE5 air under the SAME rules as anything heard on the radio:
      * append ourselves to via:, which also refuses when we are already in the
      * path or the type's hop budget is spent (§13.1, §13.2). It used to go out
-     * verbatim, so a packet could cross the LAN and the air forever without
+     * verbatim, so a packet could cross a bearer and the air forever without
      * either copy ever admitting it had been relayed. */
     char rewired[XPRS_MAX_WIRE + 1];
     int rl = xprs_append_via(wire, len, s_aprs_call, rewired, XPRS_MAX_WIRE - 1);
     if (rl <= 0) {
-        ESP_LOGI(TAG, "not re-airing from the LAN: already in the path, or "
-                      "the hop budget is spent");
+        ESP_LOGI(TAG, "not re-airing from %s: already in the path, or the hop "
+                      "budget is spent", where);
         return;
     }
     char id[XPRS_ID_LEN];
@@ -1288,9 +1299,26 @@ static void xprs_from_lan(const char *wire, int len, uint32_t ip)
     uint8_t ad[256];
     int an = build_ad(SUBTYPE_XPRS, (const uint8_t *)rewired, rl, ad);
     if (an > 0) relay_enqueue_id(ad, an, idh);
-    ESP_LOGI(TAG, "XPRS from the LAN (%u.%u.%u.%u): %d B",
-             (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
-             (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF), len);
+    if (rssi) ESP_LOGI(TAG, "XPRS from %s: %d B, %d dBm", where, len, rssi);
+    else      ESP_LOGI(TAG, "XPRS from %s: %d B", where, len);
+}
+
+static void xprs_from_lan(const char *wire, int len, uint32_t ip)
+{
+    (void)ip;
+    xprs_from_bearer(wire, len, 0, XPRS_BEARER_LAN, "the LAN");
+    /* And on to the other short-range bearer. The bearer refuses when we are
+     * already in `via:` or the budget is spent, so this is safe to offer
+     * unconditionally. */
+    xprsnow_offer(wire, len);
+}
+
+static void xprs_from_now(const char *wire, int len, const uint8_t mac[6],
+                          int rssi)
+{
+    (void)mac;
+    xprs_from_bearer(wire, len, rssi, XPRS_BEARER_NOW, "ESP-NOW");
+    xprslan_offer(wire, len);
 }
 
 /* A packet from the hub, or (frame == NULL) the moment the socket comes up.
@@ -1327,6 +1355,15 @@ static void xprs_heard_on_lan(const char *id, const char *wire, int len)
     /* Only a copy somebody has ALREADY relayed stands us down. The origin
      * repeating itself means nobody carried it yet, which is when a digipeater
      * is most useful — `via:` is the difference. */
+    xprs_t hp;
+    if (!xprs_parse(wire, len, &hp) || xprs_via_count(&hp) == 0) return;
+    relay_cancel((uint32_t)strtoul(id, NULL, 16));
+}
+
+/* The same for ESP-NOW: a copy somebody already relayed there means our
+ * Bluetooth copy is redundant. */
+static void xprs_heard_on_now(const char *id, const char *wire, int len)
+{
     xprs_t hp;
     if (!xprs_parse(wire, len, &hp) || xprs_via_count(&hp) == 0) return;
     relay_cancel((uint32_t)strtoul(id, NULL, 16));
@@ -1475,6 +1512,34 @@ static int xprs_lan_beacon(char *out, int cap)
              - (s_xprs_can_sign ? 5 + XPRSSIG_B85_LEN : 0);
     if (room > (int)sizeof hears) room = (int)sizeof hears;
     int hn = (room > 1) ? xprs_hears_render(XPRS_BEARER_LAN, hears, room, &total)
+                        : 0;
+
+    n += snprintf(out + n, (size_t)(cap - n), " peers:%d", total);
+    if (hn > 0 && n < cap) {
+        n += snprintf(out + n, (size_t)(cap - n), " hears:%s", hears);
+    }
+    if (n <= 0 || n >= cap) return 0;
+    return xprs_sign_wire(out, n, cap);
+}
+
+/* The same beacon on the other short-range bearer. §10.6.1 is why this is a
+ * separate packet rather than one with two link: values: a reading belongs to
+ * the bearer it names, and who we hear over ESP-NOW is not who we hear on the
+ * wire. `peers:` and `hears:` therefore come from the ESP-NOW half of the heard
+ * ring, not the LAN's. */
+static int xprs_now_beacon(char *out, int cap)
+{
+    if (!s_aprs_call[0]) return 0;
+    int n = snprintf(out, (size_t)cap, "t:observation f:%s link:espnow",
+                     s_aprs_call);
+    if (n <= 0 || n >= cap) return 0;
+
+    int total = 0;
+    char hears[XPRS_MAX_WIRE];
+    int room = XPRS_MAX_WIRE - n - 24
+             - (s_xprs_can_sign ? 5 + XPRSSIG_B85_LEN : 0);
+    if (room > (int)sizeof hears) room = (int)sizeof hears;
+    int hn = (room > 1) ? xprs_hears_render(XPRS_BEARER_NOW, hears, room, &total)
                         : 0;
 
     n += snprintf(out + n, (size_t)(cap - n), " peers:%d", total);
@@ -1708,8 +1773,9 @@ static struct { uint32_t id; uint32_t t; } s_hist_answered[XPRS_ANSWERED_RING];
  * somewhere else is a reply the requester never hears. */
 static void xprs_air_on(const char *wire, int len, uint8_t bearer)
 {
-    if (bearer == XPRS_BEARER_LAN) xprslan_send(wire, len);
-    else                           xprs_air(wire, len, SUBTYPE_XPRS);
+    if (bearer == XPRS_BEARER_LAN)      xprslan_send(wire, len);
+    else if (bearer == XPRS_BEARER_NOW) xprsnow_send(wire, len);
+    else                                xprs_air(wire, len, SUBTYPE_XPRS);
 }
 
 static void xprs_air_result(const char *to, const char *cmdid, int code,
@@ -2011,6 +2077,7 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
         xprsindex_add(s_xprs_index, buf, len, rssi, false, (uint32_t)time(NULL));
     }
     xprslan_offer(buf, len);
+    xprsnow_offer(buf, len);
 
     /* Dedup by the DERIVED identifier (§5), not by content: via: grows at
      * every hop, so the same packet has a different content hash at each —
@@ -2677,6 +2744,7 @@ static struct {
     uint32_t t;          /* heard on ANY local bearer */
     uint32_t t_ble;
     uint32_t t_lan;
+    uint32_t t_now;      /* ESP-NOW */
 } s_ig_heard[IG_HEARD_MAX];
 static SemaphoreHandle_t s_ig_heard_mtx;
 
@@ -2704,13 +2772,15 @@ static void igate_heard_add(const char *call, uint8_t bearer)
         /* A new tenant of this slot inherits none of the old one's history. */
         s_ig_heard[slot].t_ble = 0;
         s_ig_heard[slot].t_lan = 0;
+        s_ig_heard[slot].t_now = 0;
     }
     strncpy(s_ig_heard[slot].call, c, sizeof s_ig_heard[slot].call - 1);
     s_ig_heard[slot].call[sizeof s_ig_heard[slot].call - 1] = 0;
     if (!t) t = 1;
     s_ig_heard[slot].t = t;
-    if (bearer == XPRS_BEARER_BLE) s_ig_heard[slot].t_ble = t;
+    if (bearer == XPRS_BEARER_BLE)      s_ig_heard[slot].t_ble = t;
     else if (bearer == XPRS_BEARER_LAN) s_ig_heard[slot].t_lan = t;
+    else if (bearer == XPRS_BEARER_NOW) s_ig_heard[slot].t_now = t;
     xSemaphoreGive(s_ig_heard_mtx);
 }
 
@@ -2747,8 +2817,17 @@ static int xprs_hears_render(uint8_t bearer, char *out, int cap, int *total)
 
     xSemaphoreTake(s_ig_heard_mtx, portMAX_DELAY);
     for (int i = 0; i < IG_HEARD_MAX; i++) {
-        uint32_t t = (bearer == XPRS_BEARER_LAN) ? s_ig_heard[i].t_lan
-                                                 : s_ig_heard[i].t_ble;
+        /* Per bearer, and NOT with a default that silently answers for another
+         * one: a `link:espnow` beacon that listed the stations heard over
+         * Bluetooth is a false statement about that radio, which is the whole
+         * thing §10.6.1 exists to prevent. It shipped that way for one build. */
+        uint32_t t;
+        switch (bearer) {
+            case XPRS_BEARER_LAN: t = s_ig_heard[i].t_lan; break;
+            case XPRS_BEARER_NOW: t = s_ig_heard[i].t_now; break;
+            case XPRS_BEARER_BLE: t = s_ig_heard[i].t_ble; break;
+            default: continue;                /* an unknown bearer hears nobody */
+        }
         if (!t || (now - t) >= XPRS_HEARS_TTL_SEC) continue;
         memcpy(snap[n].call, s_ig_heard[i].call, sizeof snap[n].call);
         snap[n].t = t;
@@ -3354,6 +3433,19 @@ void app_main(void)
         ESP_LOGI(TAG, "XPRS LAN bearer up on UDP %d", XPRSLAN_PORT);
     } else {
         ESP_LOGW(TAG, "XPRS LAN bearer failed to start");
+    }
+
+    /* XPRS over ESP-NOW (docs/espnow.md): the same 250-byte packet, on the WiFi
+     * radio with no access point in the middle. Started AFTER the LAN bearer
+     * because that bearer's task is what pumps both — see xb_register_ticked().
+     *
+     * It rides whatever channel the station is on, so two devices only hear
+     * each other when they are on the same one. Nothing reports otherwise: the
+     * symptom is a peer count that stays at zero. */
+    if (xprsnow_start(s_aprs_call[0] ? s_aprs_call : "TDONGLE") == ESP_OK) {
+        xprsnow_set_rx_cb(xprs_from_now);
+        xprsnow_set_heard_cb(xprs_heard_on_now);
+        xprsnow_set_beacon(xprs_now_beacon, 300, 25);
     }
 
     api_start();

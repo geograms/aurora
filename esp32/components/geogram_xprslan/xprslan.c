@@ -2,13 +2,16 @@
  * XPRS over the LAN — see xprslan.h for the bearer, and docs/lan.md for the
  * wire it shares with everything else that speaks it.
  *
- * The socket work is a handful of lines borrowed from geogram_lanwatch. What is
- * worth reading is the queue: a packet bridged onto the LAN waits a random
- * moment and is thrown away if somebody else airs it first.
+ * What used to be most of this file — the re-air queue, the identifier rings,
+ * the §13.2.1 cancel, the beacon scheduler — now lives in `geogram_xprsbearer`,
+ * because ESP-NOW wanted the same logic and the BLE relay had already written
+ * it a second time. What is left here is what is actually about a LAN: a UDP
+ * socket, a task to read it, and a mutex, wired to that core through five
+ * function pointers.
  *
- * Everything except the socket compiles on the host (XPRSLAN_HOST_TEST), which
- * is where the queue, the rings and the relay decisions are tested — none of
- * that needs a network, and all of it is what actually goes wrong.
+ * Everything except the socket still compiles on the host (XPRSLAN_HOST_TEST),
+ * which is where the timing and the relay decisions are tested — none of that
+ * needs a network, and all of it is what actually goes wrong.
  */
 
 #include "xprslan.h"
@@ -17,6 +20,7 @@
 #include <stdio.h>
 
 #include "xprs.h"
+#include "xprsbearer.h"
 
 #ifdef XPRSLAN_HOST_TEST
 
@@ -32,20 +36,20 @@ int      xl_test_aired_len;
 int      xl_test_air_count;
 uint32_t xl_test_random = 12345;
 
-/* The host harness is single-threaded; the lock is a device concern. */
-#define XL_TX_LOCK()   ((void)0)
-#define XL_TX_UNLOCK() ((void)0)
-
 static uint32_t xl_now_ms(void) { return xl_test_now_ms; }
 static uint32_t xl_random(void) { return xl_test_random; }
-static bool xl_air(const char *wire, int len)
+static bool xl_air(void *ctx, const char *wire, int len)
 {
+    (void)ctx;
     memcpy(xl_test_aired, wire, (size_t)len);
     xl_test_aired[len] = 0;
     xl_test_aired_len = len;
     xl_test_air_count++;
     return true;
 }
+/* The host harness is single-threaded; the lock is a device concern. */
+#define XL_LOCK_FN   NULL
+#define XL_UNLOCK_FN NULL
 
 #else /* on the device */
 
@@ -76,15 +80,18 @@ static int s_fd = -1;
  * one socket, one already-aired ring and one counter, and none of the three
  * survives two writers. */
 static SemaphoreHandle_t s_tx_mtx;
-#define XL_TX_LOCK()   do { if (s_tx_mtx) xSemaphoreTake(s_tx_mtx, portMAX_DELAY); } while (0)
-#define XL_TX_UNLOCK() do { if (s_tx_mtx) xSemaphoreGive(s_tx_mtx); } while (0)
+static void xl_lock(void *ctx)   { (void)ctx; if (s_tx_mtx) xSemaphoreTake(s_tx_mtx, portMAX_DELAY); }
+static void xl_unlock(void *ctx) { (void)ctx; if (s_tx_mtx) xSemaphoreGive(s_tx_mtx); }
+#define XL_LOCK_FN   xl_lock
+#define XL_UNLOCK_FN xl_unlock
 
 static uint32_t xl_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static uint32_t xl_random(void) { return esp_random(); }
 
 /* One datagram to everyone on the wire. */
-static bool xl_air(const char *wire, int len)
+static bool xl_air(void *ctx, const char *wire, int len)
 {
+    (void)ctx;
     if (s_fd < 0) return false;
     struct sockaddr_in to = {
         .sin_family = AF_INET,
@@ -101,255 +108,54 @@ static bool xl_air(const char *wire, int len)
 
 #endif
 
-/* ── State ──────────────────────────────────────────────────────────────── */
+/* ── This bearer ────────────────────────────────────────────────────────── */
 
-#define XL_ID_LEN     XPRS_ID_LEN     /* 6 hex + NUL (§5) */
-#define XL_SEEN_RING  32              /* identifiers remembered, for both rings */
-#define XL_SEEN_MS    60000u          /* how long "already heard" lasts */
-
-typedef struct {
-    char     wire[XPRSLAN_WIRE_MAX + 1];
-    int      len;
-    char     id[XL_ID_LEN];
-    uint32_t due_ms;
-    bool     used;
-} xl_queued_t;
-
-typedef struct {
-    char     id[XL_ID_LEN];
-    uint32_t t_ms;
-} xl_seen_t;
-
-typedef struct {
-    uint32_t ip;
-    uint32_t t_ms;
-} xl_peer_t;
-
-static char        s_call[16];
-static bool        s_active;
-static xl_queued_t s_queue[XPRSLAN_QUEUE_MAX];
-static xl_seen_t   s_heard[XL_SEEN_RING];   /* seen on the LAN */
-static int         s_heard_pos;
-static xl_seen_t   s_aired[XL_SEEN_RING];   /* put on the LAN by us */
-static int         s_aired_pos;
-static xl_peer_t   s_peers[XPRSLAN_PEERS_MAX];
+static xb_t s_lan;
 static xprslan_rx_cb_t s_rx_cb;
-static xprslan_heard_cb_t s_heard_cb;
-static xprslan_beacon_cb_t s_beacon_cb;
-static uint32_t    s_beacon_every_ms, s_beacon_due_ms;
-static uint32_t    s_rx_count, s_tx_count, s_cancelled;
 
-/* ── Identifier rings ───────────────────────────────────────────────────── */
-
-static bool xl_ring_has(const xl_seen_t *ring, const char *id, uint32_t now)
+/* The core speaks of a peer as an opaque 64-bit number so a MAC fits; on this
+ * bearer it is an IPv4 address, which is what our callers already expect. */
+static void xl_rx_shim(const char *wire, int len, uint64_t peer, int rssi)
 {
-    for (int i = 0; i < XL_SEEN_RING; i++) {
-        if (!ring[i].id[0]) continue;
-        if (now - ring[i].t_ms >= XL_SEEN_MS) continue;
-        if (strcmp(ring[i].id, id) == 0) return true;
-    }
-    return false;
+    (void)rssi;                      /* a network reports no signal */
+    if (s_rx_cb) s_rx_cb(wire, len, (uint32_t)peer);
 }
 
-static void xl_ring_add(xl_seen_t *ring, int *pos, const char *id, uint32_t now)
+static const xb_ops_t k_lan_ops = {
+    .air = xl_air,
+    .now_ms = xl_now_ms,
+    .random = xl_random,
+    .lock = XL_LOCK_FN,
+    .unlock = XL_UNLOCK_FN,
+    .ctx = NULL,
+    .name = "lan",
+};
+
+void xprslan_offer(const char *wire, int len) { xb_offer(&s_lan, wire, len); }
+bool xprslan_send(const char *wire, int len)  { return xb_send(&s_lan, wire, len); }
+bool xprslan_is_active(void)                  { return xb_is_active(&s_lan); }
+
+void xprslan_set_rx_cb(xprslan_rx_cb_t cb)
 {
-    snprintf(ring[*pos].id, XL_ID_LEN, "%s", id);
-    ring[*pos].t_ms = now;
-    *pos = (*pos + 1) % XL_SEEN_RING;
+    s_rx_cb = cb;
+    xb_set_rx_cb(&s_lan, cb ? xl_rx_shim : NULL);
 }
-
-/* ── The queue ──────────────────────────────────────────────────────────── */
-
-/* Somebody aired this identifier. Anything of ours waiting to say the same
- * thing is now pointless — this is the whole reason for the delay. */
-static void xl_cancel(const char *id)
-{
-    for (int i = 0; i < XPRSLAN_QUEUE_MAX; i++) {
-        if (!s_queue[i].used) continue;
-        if (strcmp(s_queue[i].id, id) != 0) continue;
-        s_queue[i].used = false;
-        s_cancelled++;
-        XL_LOGI("%s already aired by somebody else — dropping our copy", id);
-    }
-}
-
-/* Air everything whose moment has come. Returns how many went out. */
-static int xl_pump(uint32_t now)
-{
-    int sent = 0;
-    for (int i = 0; i < XPRSLAN_QUEUE_MAX; i++) {
-        if (!s_queue[i].used) continue;
-        if ((int32_t)(now - s_queue[i].due_ms) < 0) continue;
-        s_queue[i].used = false;
-        XL_TX_LOCK();
-        bool ok = xl_air(s_queue[i].wire, s_queue[i].len);
-        if (ok) {
-            xl_ring_add(s_aired, &s_aired_pos, s_queue[i].id, now);
-            s_tx_count++;
-        }
-        XL_TX_UNLOCK();
-        if (ok) sent++;
-    }
-    return sent;
-}
-
-static void xl_queue_push(const char *wire, int len, const char *id, uint32_t now)
-{
-    uint32_t span = XPRSLAN_JITTER_MAX_MS - XPRSLAN_JITTER_MIN_MS;
-    uint32_t due = now + XPRSLAN_JITTER_MIN_MS + (xl_random() % (span + 1));
-
-    int slot = -1;
-    for (int i = 0; i < XPRSLAN_QUEUE_MAX; i++) {
-        if (!s_queue[i].used) { slot = i; break; }
-    }
-    if (slot < 0) {                     /* full — the one closest to its moment
-                                           has waited longest, so keep it */
-        slot = 0;
-        for (int i = 1; i < XPRSLAN_QUEUE_MAX; i++) {
-            if ((int32_t)(s_queue[i].due_ms - s_queue[slot].due_ms) > 0) slot = i;
-        }
-        XL_LOGW("re-air queue full — dropping %s for %s", s_queue[slot].id, id);
-    }
-    memcpy(s_queue[slot].wire, wire, (size_t)len);
-    s_queue[slot].wire[len] = 0;
-    s_queue[slot].len = len;
-    snprintf(s_queue[slot].id, XL_ID_LEN, "%s", id);
-    s_queue[slot].due_ms = due;
-    s_queue[slot].used = true;
-}
-
-/* ── Offering a packet from another bearer ──────────────────────────────── */
-
-void xprslan_offer(const char *wire, int len)
-{
-    if (!s_active || !wire || len <= 0 || len > XPRSLAN_WIRE_MAX) return;
-    if (!xprs_looks_like((const uint8_t *)wire, len)) return;
-
-    char id[XL_ID_LEN];
-    if (!xprs_id_of(wire, len, id)) return;
-
-    uint32_t now = xl_now_ms();
-    /* Already on the LAN, from us or from anybody: nothing to add. */
-    if (xl_ring_has(s_aired, id, now) || xl_ring_has(s_heard, id, now)) return;
-    for (int i = 0; i < XPRSLAN_QUEUE_MAX; i++) {
-        if (s_queue[i].used && strcmp(s_queue[i].id, id) == 0) return;
-    }
-
-    /* Whether this may be relayed at all is geogram_xprs's decision, not ours:
-     * -1 means we are already in via: (§13.2) or the type's budget is spent
-     * (§13.1). Relaying is also what puts us in the path for everyone else. */
-    char out[XPRSLAN_WIRE_MAX + 1];
-    int n = xprs_append_via(wire, len, s_call, out, (int)sizeof out);
-    if (n <= 0) return;
-
-    xl_queue_push(out, n, id, now);
-}
-
-/* ── Receiving ──────────────────────────────────────────────────────────── */
-
-static void xl_peer_touch(uint32_t ip, uint32_t now)
-{
-    int slot = -1, oldest = 0;
-    for (int i = 0; i < XPRSLAN_PEERS_MAX; i++) {
-        if (s_peers[i].ip == ip || s_peers[i].ip == 0) { slot = i; break; }
-        if ((int32_t)(s_peers[i].t_ms - s_peers[oldest].t_ms) < 0) oldest = i;
-    }
-    if (slot < 0) slot = oldest;
-    s_peers[slot].ip = ip;
-    s_peers[slot].t_ms = now;
-}
-
-/* One datagram. Anything that is not an XPRS packet is not our business. */
-static void xl_on_datagram(const char *wire, int len, uint32_t ip)
-{
-    if (len <= 0 || len > XPRSLAN_WIRE_MAX) return;
-    if (!xprs_looks_like((const uint8_t *)wire, len)) return;
-
-    char id[XL_ID_LEN];
-    if (!xprs_id_of(wire, len, id)) return;
-
-    uint32_t now = xl_now_ms();
-    if (ip) xl_peer_touch(ip, now);
-    s_rx_count++;
-
-    /* Only a copy that has ALREADY been relayed cancels ours. The origin
-     * repeating itself is the opposite signal — it means nobody has carried the
-     * packet yet, which is exactly when a digipeater should — so `via:` is what
-     * distinguishes "somebody else got there first" from "say it again". */
-    xprs_t hp;
-    bool relayed_by_other = xprs_parse(wire, len, &hp) && xprs_via_count(&hp) > 0;
-    if (relayed_by_other) xl_cancel(id);
-    /* Every hearing, duplicates included — an owner with its own queue on
-     * another bearer needs the repeats, which is exactly what the line below
-     * throws away. */
-    if (s_heard_cb) s_heard_cb(id, wire, len);
-
-    if (xl_ring_has(s_heard, id, now)) return;   /* the LAN repeats itself */
-    xl_ring_add(s_heard, &s_heard_pos, id, now);
-
-    if (s_rx_cb) s_rx_cb(wire, len, ip);
-}
-
-/* ── Our own packets ────────────────────────────────────────────────────── */
-
-bool xprslan_send(const char *wire, int len)
-{
-    if (!s_active || !wire || len <= 0 || len > XPRSLAN_WIRE_MAX) return false;
-    if (!xprs_looks_like((const uint8_t *)wire, len)) return false;
-
-    uint32_t now = xl_now_ms();
-    char id[XL_ID_LEN];
-    bool have_id = xprs_id_of(wire, len, id);   /* a SHA-256: outside the lock */
-
-    XL_TX_LOCK();
-    if (have_id) xl_ring_add(s_aired, &s_aired_pos, id, now);
-    bool ok = xl_air(wire, len);
-    if (ok) s_tx_count++;
-    XL_TX_UNLOCK();
-    return ok;
-}
-
-void xprslan_set_rx_cb(xprslan_rx_cb_t cb) { s_rx_cb = cb; }
-void xprslan_set_heard_cb(xprslan_heard_cb_t cb) { s_heard_cb = cb; }
+void xprslan_set_heard_cb(xprslan_heard_cb_t cb) { xb_set_heard_cb(&s_lan, cb); }
 
 void xprslan_set_beacon(xprslan_beacon_cb_t cb, uint32_t interval_sec,
                         uint32_t first_delay_sec)
 {
-    s_beacon_cb = cb;
-    s_beacon_every_ms = interval_sec * 1000u;
-    s_beacon_due_ms = xl_now_ms() + first_delay_sec * 1000u;
+    xb_set_beacon(&s_lan, cb, interval_sec, first_delay_sec);
 }
-
-/* Called from the bearer's task, nowhere else. */
-static void xl_beacon_tick(uint32_t now)
-{
-    if (!s_beacon_cb || !s_beacon_every_ms) return;
-    if ((int32_t)(now - s_beacon_due_ms) < 0) return;
-    s_beacon_due_ms = now + s_beacon_every_ms;
-
-    char wire[XPRSLAN_WIRE_MAX + 1];
-    int n = s_beacon_cb(wire, (int)sizeof wire);
-    if (n > 0) xprslan_send(wire, n);
-}
-bool xprslan_is_active(void) { return s_active; }
 
 int xprslan_peer_count(uint32_t max_age_sec)
 {
-    uint32_t now = xl_now_ms();
-    int n = 0;
-    for (int i = 0; i < XPRSLAN_PEERS_MAX; i++) {
-        if (!s_peers[i].ip) continue;
-        if (max_age_sec && (now - s_peers[i].t_ms) >= max_age_sec * 1000u) continue;
-        n++;
-    }
-    return n;
+    return xb_peer_count(&s_lan, max_age_sec);
 }
 
 void xprslan_stats(uint32_t *out_rx, uint32_t *out_tx, uint32_t *out_cancelled)
 {
-    if (out_rx) *out_rx = s_rx_count;
-    if (out_tx) *out_tx = s_tx_count;
-    if (out_cancelled) *out_cancelled = s_cancelled;
+    xb_stats(&s_lan, out_rx, out_tx, out_cancelled);
 }
 
 /* ── The socket and its task ────────────────────────────────────────────── */
@@ -373,21 +179,19 @@ static void xprslan_task(void *arg)
              * if a stack ever did, the identifier rings would drop it — so
              * there is no source-address check to get wrong. */
             buf[n] = 0;
-            xl_on_datagram(buf, n, src.sin_addr.s_addr);
+            xb_on_wire(&s_lan, buf, n, (uint64_t)src.sin_addr.s_addr, 0);
         }
-        /* The same task airs what is due: one place, no locking, and the delay
-         * is measured in hundreds of milliseconds so 100 ms of granularity is
-         * well inside the jitter it is implementing. */
-        uint32_t now = xl_now_ms();
-        xl_pump(now);
-        xl_beacon_tick(now);
+        /* The same task airs what is due, for EVERY bearer that asked to be
+         * driven from here. 100 ms of granularity is well inside the 200–1200 ms
+         * jitter it is implementing, and a second task would cost 5 KB of a heap
+         * this board does not have. */
+        xb_tick_all(xl_now_ms());
     }
 }
 
 esp_err_t xprslan_start(const char *callsign)
 {
-    if (s_active) return ESP_OK;
-    snprintf(s_call, sizeof s_call, "%s", callsign ? callsign : "");
+    if (xb_is_active(&s_lan)) return ESP_OK;
 
     int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (fd < 0) {
@@ -412,7 +216,8 @@ esp_err_t xprslan_start(const char *callsign)
     s_fd = fd;
     if (!s_tx_mtx) s_tx_mtx = xSemaphoreCreateMutex();
     if (!s_tx_mtx) { close(fd); s_fd = -1; return ESP_ERR_NO_MEM; }
-    s_active = true;
+    xb_init(&s_lan, &k_lan_ops, callsign);
+    xb_register_ticked(&s_lan);
     /* 5 KB. Every datagram costs two SHA-256 derivations (the identifier here,
      * and again when the index decides on it), a BLE re-air and a log line, all
      * on this stack — 4 KB overflowed under a burst and took the board down. */
@@ -420,16 +225,18 @@ esp_err_t xprslan_start(const char *callsign)
         XL_LOGW("task create failed");
         close(fd);
         s_fd = -1;
-        s_active = false;
+        xb_stop(&s_lan);
         return ESP_FAIL;
     }
-    XL_LOGI("XPRS on the LAN: UDP %u, callsign %s", XPRSLAN_PORT, s_call);
+    /* This task is now the one that pumps every registered bearer. */
+    xb_set_driver(true);
+    XL_LOGI("XPRS on the LAN: UDP %u, callsign %s", XPRSLAN_PORT, callsign);
     return ESP_OK;
 }
 
 void xprslan_stop(void)
 {
-    s_active = false;
+    xb_stop(&s_lan);
     if (s_fd >= 0) { close(s_fd); s_fd = -1; }
 }
 
@@ -437,31 +244,33 @@ void xprslan_stop(void)
 
 esp_err_t xprslan_start(const char *callsign)
 {
-    snprintf(s_call, sizeof s_call, "%s", callsign ? callsign : "");
-    s_active = true;
+    xb_init(&s_lan, &k_lan_ops, callsign);
+    xb_register_ticked(&s_lan);
+    xb_set_driver(true);
     return 0;
 }
-void xprslan_stop(void) { s_active = false; }
+void xprslan_stop(void) { xb_stop(&s_lan); }
 
 /* Handles the host test reaches for. */
 void xl_test_datagram(const char *wire, int len, uint32_t ip)
 {
-    xl_on_datagram(wire, len, ip);
+    xb_on_wire(&s_lan, wire, len, (uint64_t)ip, 0);
 }
 int xl_test_pump(uint32_t now)
 {
-    int n = xl_pump(now);
-    xl_beacon_tick(now);       /* the device runs both from the same task */
-    return n;
+    uint32_t before = 0;
+    xb_stats(&s_lan, NULL, &before, NULL);
+    xb_tick(&s_lan, now);          /* the device runs pump and beacon together */
+    uint32_t after = 0;
+    xb_stats(&s_lan, NULL, &after, NULL);
+    return (int)(after - before);
 }
 void xl_test_reset(void)
 {
-    memset(s_queue, 0, sizeof s_queue);
-    memset(s_heard, 0, sizeof s_heard);
-    memset(s_aired, 0, sizeof s_aired);
-    memset(s_peers, 0, sizeof s_peers);
-    s_heard_pos = s_aired_pos = 0;
-    s_rx_count = s_tx_count = s_cancelled = 0;
+    char call[16];
+    snprintf(call, sizeof call, "%s", s_lan.call);
+    xb_init(&s_lan, &k_lan_ops, call);
+    xb_set_rx_cb(&s_lan, s_rx_cb ? xl_rx_shim : NULL);
     xl_test_air_count = 0;
     xl_test_aired_len = 0;
     xl_test_aired[0] = 0;
@@ -469,9 +278,9 @@ void xl_test_reset(void)
 int xl_test_queue_len(void)
 {
     int n = 0;
-    for (int i = 0; i < XPRSLAN_QUEUE_MAX; i++) if (s_queue[i].used) n++;
+    for (int i = 0; i < XB_QUEUE_MAX; i++) if (s_lan.queue[i].used) n++;
     return n;
 }
-uint32_t xl_test_queue_due(int i) { return s_queue[i].due_ms; }
+uint32_t xl_test_queue_due(int i) { return s_lan.queue[i].due_ms; }
 
 #endif

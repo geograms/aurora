@@ -54,3 +54,4 @@ archive/
 # Local Reticulum update-host test folder (.folder.json holds the master
 # private key — must never be committed)
 updates-host/
+esp32/m5stack/src/wifi_secrets.h

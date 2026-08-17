@@ -63,6 +63,10 @@
  * speaks now. This station reads it, answers pings, parks 1:1 mail and
  * relays with a via: path. */
 #include "xprs.h"
+#include "esp_heap_caps.h"
+#include "esp_http_server.h"
+#include "xprsindex.h"
+#include "xprslan.h"
 
 /* Provisioning defaults (WiFi creds + callsign). The real file is gitignored;
  * values are written to NVS on first boot and NVS is the source of truth after.
@@ -135,6 +139,12 @@ static bool s_mesh_up;
 static char s_aprs_call[10];            /* tentative; defined with iGate below */
 /* XPRS station: ingest (both 0x58 and text-form 0x41), pong, presence beacon. */
 static void handle_xprs(const uint8_t *payload, int len, int rssi, uint8_t subtype);
+static void xprs_air(const char *wire, int len, uint8_t subtype);
+
+/* The card-backed index (XPRS.md §36) and the LAN bearer (docs/lan.md). Both
+ * are the components the legacy T-Dongle firmware proved; this firmware is the
+ * one that can also put a packet on the BLE5 air. */
+static xprsidx_t *s_xprs_index;
 static void xprs_beacon_air(void);
 static uint32_t s_boot_epoch;           /* NVS boot counter (XPRS.md §10.7) */
 /* lifetime: (XPRS.md §10.5) — cumulative service seconds across every restart,
@@ -816,6 +826,175 @@ static void digi_record(uint32_t idh, uint32_t now)
 /* One XPRS packet heard on the air — from its own subtype 0x58 or as the
  * text form of 0x41 (the handle_aprs seam). This is the station's front
  * door: dedup, sighting, ping/pong, receipt release, custody, relay. */
+/* Heard on the LAN: keep it, and put it on the BLE5 air for the stations that
+ * have no network. That is the whole point of a dongle sitting on both. */
+/*
+ * One line every 15 s. This board logs only new callsigns and its WiFi
+ * reconnect goes quiet after ten attempts, so a healthy idle dongle and a
+ * wedged one look identical on the console. `min` is the heap low-water mark:
+ * a dip that has already recovered is invisible any other way, and on this
+ * hardware the dips are what take the station off the air.
+ */
+/* ---- the query surface (XPRS.md §36.6) ---------------------------------- */
+
+/*
+ * GET /api/xprs?type=&recent=&since=&until=&days=&from=&asker=&limit=
+ *
+ * Deliberately NOT the geogram_http component: that one pulls in the station
+ * API, websockets, mesh and nostr, and this firmware wants a socket and one
+ * handler. Everything a reader can ask is a field the packet already carries.
+ */
+typedef struct { char *buf; size_t size, len; bool first, full; } xq_ctx_t;
+
+static bool xq_emit(const xprsidx_rec_t *r, void *vctx)
+{
+    xq_ctx_t *c = (xq_ctx_t *)vctx;
+    size_t room = (c->len + 96 < c->size) ? c->size - c->len - 96 : 0;
+    if (!room) { c->full = true; return false; }
+    int n = snprintf(c->buf + c->len, room,
+        "%s{\"i\":%u,\"ts\":%u,\"rssi\":%d,\"type\":\"%s\",\"from\":\"%s\","
+        "\"mail\":%s,\"wire\":\"",
+        c->first ? "" : ",", (unsigned)r->index, (unsigned)r->ts, (int)r->rssi,
+        xprsidx_type_name(r->type), r->from,
+        (r->flags & XI_F_MAIL) ? "true" : "false");
+    if (n < 0 || (size_t)n >= room) { c->full = true; return false; }
+    size_t len = c->len + (size_t)n;
+    for (const char *w = r->wire; *w; w++) {          /* escape, never overrun */
+        if (len + 4 >= c->size) { c->full = true; return false; }
+        if (*w == '"' || *w == '\\') c->buf[len++] = '\\';
+        c->buf[len++] = *w;
+    }
+    if (len + 3 >= c->size) { c->full = true; return false; }
+    c->buf[len++] = '"'; c->buf[len++] = '}'; c->buf[len] = 0;
+    c->len = len; c->first = false;
+    return true;
+}
+
+static esp_err_t api_xprs_get(httpd_req_t *req)
+{
+    char query[224] = {0}, param[48];
+    xprsidx_query_t q = { .type = -1 };
+    char from[XPRSIDX_CALL_LEN] = {0}, asker[XPRSIDX_CALL_LEN] = {0};
+    uint32_t days = 0;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof query) == ESP_OK) {
+        if (httpd_query_key_value(query, "type", param, sizeof param) == ESP_OK)
+            q.type = xprsidx_type_code(param);
+        if (httpd_query_key_value(query, "since", param, sizeof param) == ESP_OK)
+            q.since_ts = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "until", param, sizeof param) == ESP_OK)
+            q.until_ts = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "days", param, sizeof param) == ESP_OK)
+            days = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "limit", param, sizeof param) == ESP_OK)
+            q.limit = (uint32_t)strtoul(param, NULL, 10);
+        if (httpd_query_key_value(query, "recent", param, sizeof param) == ESP_OK)
+            q.newest_first = (param[0] == '1' || param[0] == 't');
+        if (httpd_query_key_value(query, "from", param, sizeof param) == ESP_OK)
+            strlcpy(from, param, sizeof from);
+        if (httpd_query_key_value(query, "asker", param, sizeof param) == ESP_OK)
+            strlcpy(asker, param, sizeof asker);
+    }
+    if (days) {
+        time_t nowt = time(NULL);
+        if (nowt > 1600000000) q.since_ts = (uint32_t)nowt - days * 86400u;
+    }
+    q.from  = from[0]  ? from  : NULL;
+    q.asker = asker[0] ? asker : NULL;
+    if (q.limit == 0 || q.limit > 200) q.limit = 30;
+
+    char *buf = malloc(2048);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    xprsidx_stats_t st;
+    xprsindex_stats(s_xprs_index, &st);
+    xq_ctx_t ctx = { .buf = buf, .size = 2048, .len = 0, .first = true };
+    ctx.len = (size_t)snprintf(buf, 2048,
+        "{\"epoch\":\"%c\",\"count\":%u,\"segments\":%u,\"recs\":[",
+        st.epoch, (unsigned)st.count, (unsigned)st.segments);
+
+    /* Take the card for the read and hand it straight back: the writer keeps
+     * accepting records into RAM meanwhile, and this server has one worker. */
+    xprsindex_pause_writes(s_xprs_index, true);
+    int64_t t0 = esp_timer_get_time();
+    size_t n = s_xprs_index ? xprsindex_query(s_xprs_index, &q, xq_emit, &ctx) : 0;
+    int64_t us = esp_timer_get_time() - t0;
+    xprsindex_pause_writes(s_xprs_index, false);
+
+    int m = snprintf(buf + ctx.len, 2048 - ctx.len,
+                     "],\"n\":%u,\"truncated\":%s,\"us\":%u}",
+                     (unsigned)n, ctx.full ? "true" : "false", (unsigned)us);
+    if (m > 0) ctx.len += (size_t)m;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, ctx.len);
+    free(buf);
+    return ESP_OK;
+}
+
+static void api_start(void)
+{
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.stack_size = 5120;
+    cfg.max_uri_handlers = 4;
+    cfg.max_open_sockets = 4;
+    cfg.lru_purge_enable = true;
+    httpd_handle_t srv = NULL;
+    if (httpd_start(&srv, &cfg) != ESP_OK) {
+        ESP_LOGW(TAG, "HTTP API failed to start");
+        return;
+    }
+    static const httpd_uri_t u = { .uri = "/api/xprs", .method = HTTP_GET,
+                                   .handler = api_xprs_get, .user_ctx = NULL };
+    httpd_register_uri_handler(srv, &u);
+    ESP_LOGI(TAG, "HTTP API up: GET /api/xprs");
+}
+
+static void heartbeat_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(15000));
+        uint32_t qwait = 0, qdrop = 0;
+        xprsindex_queue_stats(s_xprs_index, &qwait, &qdrop);
+        xprsidx_stats_t xs;
+        xprsindex_stats(s_xprs_index, &xs);
+        ESP_LOGW(TAG, "alive %us heap=%u min=%u big=%u recs=%u q=%u/%u lan=%d",
+                 (unsigned)(esp_timer_get_time() / 1000000ULL),
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)esp_get_minimum_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                            MALLOC_CAP_8BIT),
+                 (unsigned)xs.count, (unsigned)qwait, (unsigned)qdrop,
+                 xprslan_is_active() ? xprslan_peer_count(600) : -1);
+    }
+}
+
+static void xprs_from_lan(const char *wire, int len, uint32_t ip)
+{
+    if (s_xprs_index) {
+        /* rssi 0 — the store's "unknown", which a network genuinely is. */
+        xprsindex_add(s_xprs_index, wire, len, 0, false, (uint32_t)time(NULL));
+    }
+    xprs_air(wire, len, SUBTYPE_XPRS);
+    ESP_LOGI(TAG, "XPRS from the LAN (%u.%u.%u.%u): %d B",
+             (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+             (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF), len);
+}
+
+/* This station, on the bearer it is describing (§10.6). Built on the bearer's
+ * own task: deriving an identifier is a SHA-256 and a timer task's stack is not
+ * sized for that. */
+static int xprs_lan_beacon(char *out, int cap)
+{
+    if (!s_aprs_call[0]) return 0;
+    return snprintf(out, (size_t)cap, "t:observation f:%s link:lan peers:%d",
+                    s_aprs_call, xprslan_peer_count(600));
+}
+
 static void handle_xprs(const uint8_t *payload, int len, int rssi,
                         uint8_t subtype)
 {
@@ -835,6 +1014,15 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
     xprs_get_str(&p, "d", to, sizeof to);
     if (!from[0]) return;                                  /* unattributable */
     if (strcasecmp(from, s_aprs_call) == 0) return;        /* our own echo */
+
+    /* Keep it, and offer it to the other bearer. The index refuses what must
+     * not be stored (ping/pong, duplicates) and holds mail privately; the LAN
+     * bearer appends via:, honours the §13.1 hop budget, waits a random moment
+     * and drops its copy if somebody else airs the packet first (§13.2.1). */
+    if (s_xprs_index) {
+        xprsindex_add(s_xprs_index, buf, len, rssi, false, (uint32_t)time(NULL));
+    }
+    xprslan_offer(buf, len);
 
     /* Dedup by the DERIVED identifier (§5), not by content: via: grows at
      * every hop, so the same packet has a different content hash at each —
@@ -1906,6 +2094,36 @@ void app_main(void)
     }
     blemesh_scf_init(scf_path);
     s_mesh_up = true;
+
+    /* The XPRS index, on by default when there is a card (XPRS.md §36). Its
+     * writer runs on core 1: the BLE controller, the NimBLE host and WiFi are
+     * all on core 0 and an SD transaction is long — writing from a receive path
+     * cost the other firmware its ability to transmit at all. */
+    if (sdcard_is_mounted()) {
+        s_xprs_index = xprsindex_open("/sdcard/xprs");
+        if (xprsindex_ready(s_xprs_index)) {
+            xprsidx_stats_t xs;
+            xprsindex_stats(s_xprs_index, &xs);
+            ESP_LOGI(TAG, "XPRS indexer ready — %u records, epoch %c, %u segments",
+                     (unsigned)xs.count, xs.epoch, (unsigned)xs.segments);
+        } else {
+            ESP_LOGW(TAG, "XPRS indexer unavailable — packets relayed, none kept");
+            s_xprs_index = NULL;
+        }
+    }
+
+    /* XPRS on the LAN (docs/lan.md): broadcast to and from everyone on this
+     * network, on its own UDP port. Not Reticulum and not the internet. */
+    if (xprslan_start(s_aprs_call[0] ? s_aprs_call : "TDONGLE") == ESP_OK) {
+        xprslan_set_rx_cb(xprs_from_lan);
+        xprslan_set_beacon(xprs_lan_beacon, 300, 20);
+        ESP_LOGI(TAG, "XPRS LAN bearer up on UDP %d", XPRSLAN_PORT);
+    } else {
+        ESP_LOGW(TAG, "XPRS LAN bearer failed to start");
+    }
+
+    api_start();
+    xTaskCreatePinnedToCore(heartbeat_task, "heartbeat", 3072, NULL, 1, NULL, 1);
 
     xTaskCreate(console_task, "console", 4096, NULL, 3, NULL);
 

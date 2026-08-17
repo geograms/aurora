@@ -355,6 +355,8 @@ static void xi_tail_close(xprsidx_t *st)
 
 static void xi_type_append(xprsidx_t *st, int type, uint32_t index)
 {
+    /* See the reader: 0 cannot be told from a hole, so it is never stored. */
+    if (index == 0) return;
     if (st->tail_type != type) {
         xi_tail_close(st);
         char path[96];
@@ -378,8 +380,10 @@ static void xi_type_append(xprsidx_t *st, int type, uint32_t index)
 }
 
 /* Newest-last, so the most recent N are the last N entries. */
-static uint32_t xi_type_tail(const xprsidx_t *st, int type, uint32_t want,
-                             uint32_t *out, uint32_t cap)
+/* Read a window of the tail, [skip_end] entries back from the end. Newest last,
+ * as stored. Returns how many were read. */
+static uint32_t xi_type_tail(const xprsidx_t *st, int type, uint32_t skip_end,
+                             uint32_t want, uint32_t *out, uint32_t cap)
 {
     char path[96];
     xi_type_path(st, path, sizeof path, type);
@@ -388,10 +392,12 @@ static uint32_t xi_type_tail(const xprsidx_t *st, int type, uint32_t want,
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
     long end = ftell(f);
     uint32_t have = (uint32_t)(end / (long)sizeof(uint32_t));
-    uint32_t take = want < have ? want : have;
+    if (skip_end >= have) { fclose(f); return 0; }
+    uint32_t avail = have - skip_end;
+    uint32_t take = want < avail ? want : avail;
     if (take > cap) take = cap;
     if (take == 0) { fclose(f); return 0; }
-    if (fseek(f, end - (long)take * (long)sizeof(uint32_t), SEEK_SET) != 0) {
+    if (fseek(f, (long)(avail - take) * (long)sizeof(uint32_t), SEEK_SET) != 0) {
         fclose(f);
         return 0;
     }
@@ -726,34 +732,62 @@ static bool xi_write_rec(xprsidx_t *st, const xi_rec_t *rec)
 static void xi_sync_card(xprsidx_t *st)
 {
     if (st->active_fp) fsync(fileno(st->active_fp));
+    /* The tail needs it for the same reason the segment does: FatFs writes a
+     * file's size on sync or close, and appended bytes that never reach the
+     * card leave the file LONGER than its contents — the reader then finds
+     * zeroes where the newest entries should be, and "the most recent N of this
+     * type" answers nothing while the records sit safely in their segment. */
+    if (st->tail_fp) { fflush(st->tail_fp); fsync(fileno(st->tail_fp)); }
     xi_zone_flush(st);
 }
 
 /* ── Query ──────────────────────────────────────────────────────────────── */
 
 /* "The most recent N of this type" — straight off the type tail. */
+/* Entries read per pass, and the most we will look at before giving up. */
+#define XI_TAIL_WINDOW   32
+#define XI_TAIL_MAX_SCAN 4096
+
 static size_t xi_query_recent_typed(xprsidx_t *st, const xprsidx_query_t *q,
                                     xprsidx_emit_cb_t cb, void *ctx,
                                     uint32_t limit)
 {
-    /* Ask for more than needed: some will be filtered out by ts/from/mail. */
-    uint32_t want = limit * 4;
-    if (want > 256) want = 256;
-    uint32_t *idx = calloc(want, sizeof(uint32_t));
-    if (!idx) return 0;
-    uint32_t got = xi_type_tail(st, q->type, want, idx, want);
-
+    uint32_t idx[XI_TAIL_WINDOW];
     size_t emitted = 0;
+    uint32_t skip = 0;
+    bool stopped = false;
     xi_rec_t r;
     xprsidx_rec_t pub;
-    for (uint32_t i = got; i > 0 && emitted < limit; i--) {  /* newest first */
-        if (!xi_read_rec(st, idx[i - 1], &r)) continue;
-        if (!xi_matches(&r, q)) continue;
-        xi_to_public(&r, &pub);
-        emitted++;
-        if (cb && !cb(&pub, ctx)) break;
+
+    /* Walk the tail backwards a window at a time rather than taking one fixed
+     * bite of it. Entries get skipped for ordinary reasons — the record is mail
+     * this asker may not see, it falls outside the time range — and for
+     * disagreeable ones: a torn tail can end in zeroes that point at record 0.
+     * A single fixed window meant a handful of those hid every real answer
+     * behind them, and asking for ONE recent warning returned none while asking
+     * for three returned three. */
+    while (emitted < limit && !stopped && skip < XI_TAIL_MAX_SCAN) {
+        uint32_t got = xi_type_tail(st, q->type, skip, XI_TAIL_WINDOW,
+                                    idx, XI_TAIL_WINDOW);
+        if (got == 0) break;                       /* reached the start */
+        for (uint32_t i = got; i > 0 && emitted < limit; i--) {
+            uint32_t n = idx[i - 1];
+            /* A zero is ambiguous: it is either a pointer to record 0 or the
+             * hole a half-synced file leaves behind, and nothing on disk tells
+             * the two apart. Treated as a hole — the cost is that the very
+             * first record a store ever takes is not in the fast path for its
+             * type, and a range query still finds it. */
+            if (n == 0) continue;
+            if (n >= st->next_index) continue;     /* never written: torn tail */
+            if (!xi_read_rec(st, n, &r)) continue;
+            if (!xi_matches(&r, q)) continue;
+            xi_to_public(&r, &pub);
+            emitted++;
+            if (cb && !cb(&pub, ctx)) { stopped = true; break; }
+        }
+        skip += got;
+        if (got < XI_TAIL_WINDOW) break;           /* that was the whole file */
     }
-    free(idx);
     return emitted;
 }
 
@@ -882,7 +916,7 @@ void xprsindex_bench(xprsidx_t *st, uint32_t n)
     {
         uint32_t idx[8];
         xi_sync(st);
-        uint32_t got = xi_type_tail(st, XI_T_WARNING, 8, idx, 8);
+        uint32_t got = xi_type_tail(st, XI_T_WARNING, 0, 8, idx, 8);
         XI_LOGW("bench: warning tail holds %u of the last 8", (unsigned)got);
         for (uint32_t i = 0; i < got; i++) {
             xi_rec_t r;

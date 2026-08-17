@@ -255,6 +255,64 @@ static void test_wire_is_kept_verbatim(const char *dir)
     xprsindex_close(st);
 }
 
+/* ── a torn tail must not hide the answers behind it ─────────────────────── */
+
+/*
+ * The dongle produced exactly this: the newest entries of t/08.idx were zeroes
+ * (FatFs had the file's size but not its bytes), so "the most recent warning"
+ * answered nothing while the record sat readable in its segment — and asking
+ * for three answered three, because a bigger window reached past the damage.
+ */
+static void test_torn_tail_still_answers(const char *dir)
+{
+    rm_rf(dir);
+    xprsidx_t *st = xprsindex_open(dir);
+    char w[280];
+
+    /* Record 0 is deliberately NOT a warning, as it was on the dongle: that is
+     * what let four zero entries quietly answer "no recent warnings". */
+    const char *first = "t:observation f:X3WX01 link:ble peers:2 "
+                        "ts:2026-08-09_09:00:00";
+    xprsindex_add(st, first, (int)strlen(first), -60, false, 0);
+    for (int i = 0; i < 6; i++) {
+        snprintf(w, sizeof w, "t:warning f:X3RLY%d pos:39.40,-8.20 kind:fire "
+                              "sev:danger ts:2026-08-1%d_09:00:00", i, i);
+        xprsindex_add(st, w, (int)strlen(w), -60, false, 0);
+    }
+    /* Real newest warning, the one a reader must get back. */
+    const char *newest = "t:warning f:X1LAST pos:38.72,-9.14 kind:flood "
+                         "sev:danger ts:2026-08-17_09:00:00";
+    CHECK(xprsindex_add(st, newest, (int)strlen(newest), -60, false, 0),
+          "newest warning not stored");
+    xprsindex_close(st);
+
+    /* Tear the tail: four zero entries appended, as a half-synced file reads. */
+    char path[256];
+    snprintf(path, sizeof path, "%s/t/%02d.idx", dir, XI_T_WARNING);
+    FILE *f = fopen(path, "ab");
+    CHECK(f != NULL, "no warning tail to tear");
+    if (f) {
+        uint32_t zero = 0;
+        for (int i = 0; i < 4; i++) fwrite(&zero, sizeof zero, 1, f);
+        fclose(f);
+    }
+
+    st = xprsindex_open(dir);
+    collect_t c = {0};
+    xprsidx_query_t q = { .type = XI_T_WARNING, .newest_first = true, .limit = 1 };
+    size_t n = xprsindex_query(st, &q, collect, &c);
+    CHECK(n == 1, "asked for 1 recent warning past a torn tail, got %zu", n);
+    CHECK(strcmp(c.first.from, "X1LAST") == 0,
+          "wrong warning came back: %s", c.first.from);
+
+    /* And the same store answers a larger request consistently. */
+    collect_t c3 = {0};
+    xprsidx_query_t q3 = { .type = XI_T_WARNING, .newest_first = true, .limit = 3 };
+    CHECK(xprsindex_query(st, &q3, collect, &c3) == 3, "limit 3 did not fill");
+    CHECK(strcmp(c3.first.from, "X1LAST") == 0, "newest-first order broken");
+    xprsindex_close(st);
+}
+
 int main(void)
 {
     const char *dir = "/tmp/xprsidx_test";
@@ -266,6 +324,7 @@ int main(void)
     test_reopen(dir);
     test_survives_a_lost_index(dir);
     test_wire_is_kept_verbatim(dir);
+    test_torn_tail_still_answers(dir);
     rm_rf(dir);
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

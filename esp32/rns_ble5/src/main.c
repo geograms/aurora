@@ -68,6 +68,7 @@
 #include "xprsindex.h"
 #include "xprslan.h"
 #include "rns_tcp.h"
+#include "xprssig.h"
 #include "esp_netif_sntp.h"
 
 /* Provisioning defaults (WiFi creds + callsign). The real file is gitignored;
@@ -151,6 +152,13 @@ static uint8_t s_x_pk[32];
 static uint8_t s_pubkey[KEYSIZE];     /* x25519_pub(32) || ed25519_pub(32) */
 static uint8_t s_id_hash[16];
 static uint8_t s_name_hash[NAME_HASH_LEN];
+
+/* The XPRS signing key (§9.1): secp256k1, entirely separate from the Ed25519
+ * identity Reticulum uses. Two networks, two key types; sharing one would mean
+ * one compromise costing both. */
+static uint8_t s_xprs_sk[XPRSSIG_KEY_LEN];
+static uint8_t s_xprs_pk[XPRSSIG_KEY_LEN];
+static bool    s_xprs_can_sign;
 static uint8_t s_dest_hash[DST_HASH_LEN];
 
 /* Repeater: re-air a received RNS packet so out-of-range nodes still get it. */
@@ -181,6 +189,7 @@ static void xprs_air(const char *wire, int len, uint8_t subtype);
  * one that can also put a packet on the BLE5 air. */
 static xprsidx_t *s_xprs_index;
 static void xprs_beacon_air(void);
+static int  xprs_sign_wire(char *wire, int len, int cap);
 static uint32_t s_boot_epoch;           /* NVS boot counter (XPRS.md §10.7) */
 /* lifetime: (XPRS.md §10.5) — cumulative service seconds across every restart,
  * accumulated in NVS. s_life_base is the total saved by PREVIOUS runs; the
@@ -355,6 +364,30 @@ static void identity_init(void)
         crypto_sign_keypair(s_ed_pk, s_ed_sk);
         randombytes(s_x_sk, sizeof(s_x_sk));
     }
+    /* The XPRS signing key, kept in the same namespace and generated once. */
+    {
+        nvs_handle_t hk;
+        if (nvs_open("rns", NVS_READWRITE, &hk) == ESP_OK) {
+            size_t klen = sizeof s_xprs_sk;
+            bool have = (nvs_get_blob(hk, "xprs_sk", s_xprs_sk, &klen) == ESP_OK &&
+                         klen == sizeof s_xprs_sk);
+            if (!have) {
+                have = xprssig_generate(s_xprs_sk);
+                if (have) {
+                    nvs_set_blob(hk, "xprs_sk", s_xprs_sk, sizeof s_xprs_sk);
+                    nvs_commit(hk);
+                    ESP_LOGI(TAG, "generated an XPRS signing key");
+                }
+            }
+            nvs_close(hk);
+            if (have) s_xprs_can_sign = xprssig_public_key(s_xprs_sk, s_xprs_pk);
+        }
+        if (!s_xprs_can_sign) {
+            ESP_LOGW(TAG, "no XPRS signing key — packets will go out unsigned, "
+                          "and a receiver may not treat f: as established");
+        }
+    }
+
     memcpy(s_ed_pk, s_ed_sk + 32, 32);               /* pub = sk[32:64] */
     crypto_scalarmult_base(s_x_pk, s_x_sk);          /* X25519 pubkey */
 
@@ -924,6 +957,7 @@ static void xprs_pong(const char *to, int rssi)
     int n = snprintf(wire, sizeof wire, "t:pong f:%s d:%s %s rssi:%ddBm",
                      s_aprs_call[0] ? s_aprs_call : "TDONGLE", to, tf, rssi);
     if (n <= 0 || n >= (int)sizeof wire) return;
+    n = xprs_sign_wire(wire, n, (int)sizeof wire);
     xprs_air(wire, n, SUBTYPE_XPRS);
     ESP_LOGI(TAG, "TX pong -> %s (their signal here: %ddBm)", to, rssi);
 }
@@ -1107,11 +1141,36 @@ static esp_err_t api_xprs_dir_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /api/xprs/key — this station's x-only public key, hex.
+ *
+ * §9.3 publishes it as a t:identity packet carrying an npub, which needs bech32
+ * this firmware does not have yet. Until then a signature here is verifiable
+ * only by someone who fetched this — which is enough to prove the signer works,
+ * and not enough to be the identity announcement the spec asks for. */
+static esp_err_t api_xprs_key_get(httpd_req_t *req)
+{
+    char hex[2 * XPRSSIG_KEY_LEN + 48];
+    int n = 0;
+    if (!s_xprs_can_sign) {
+        n = snprintf(hex, sizeof hex, "{\"signing\":false}");
+    } else {
+        n = snprintf(hex, sizeof hex, "{\"signing\":true,\"pubx\":\"");
+        for (int i = 0; i < XPRSSIG_KEY_LEN && n < (int)sizeof hex - 4; i++) {
+            n += snprintf(hex + n, sizeof hex - n, "%02x", s_xprs_pk[i]);
+        }
+        n += snprintf(hex + n, sizeof hex - n, "\"}");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, hex, n);
+    return ESP_OK;
+}
+
 static void api_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 5120;
-    cfg.max_uri_handlers = 4;
+    cfg.max_uri_handlers = 6;
     cfg.max_open_sockets = 4;
     cfg.lru_purge_enable = true;
     httpd_handle_t srv = NULL;
@@ -1125,6 +1184,9 @@ static void api_start(void)
     static const httpd_uri_t ud = { .uri = "/api/xprs/dir", .method = HTTP_GET,
                                     .handler = api_xprs_dir_get, .user_ctx = NULL };
     httpd_register_uri_handler(srv, &ud);
+    static const httpd_uri_t uk = { .uri = "/api/xprs/key", .method = HTTP_GET,
+                                    .handler = api_xprs_key_get, .user_ctx = NULL };
+    httpd_register_uri_handler(srv, &uk);
     ESP_LOGI(TAG, "HTTP API up: GET /api/xprs, /api/xprs/dir");
 }
 
@@ -1226,6 +1288,48 @@ static void xprs_heard_on_lan(const char *id, const char *wire, int len)
     relay_cancel((uint32_t)strtoul(id, NULL, 16));
 }
 
+/*
+ * Sign a packet we are about to transmit (§9.1).
+ *
+ * `sig:` covers the packet with `sig:` and `via:` removed. A packet this
+ * station originates has neither, so the text as it stands IS the signed text —
+ * no reconstruction needed, and nothing to get wrong. `sig:` goes before `m:`
+ * when there is one, because `m:` is greedy and must stay last (§4).
+ *
+ * Returns the new length, or the original when it cannot sign or would not fit.
+ */
+static int xprs_sign_wire(char *wire, int len, int cap)
+{
+    if (!s_xprs_can_sign || len <= 0) return len;
+    if (len + 5 + XPRSSIG_B85_LEN >= cap) return len;   /* §9.1.1: no room */
+
+    uint8_t digest[32];
+    sha256((const uint8_t *)wire, (size_t)len, digest);
+
+    uint8_t sig[XPRSSIG_LEN];
+    if (!xprssig_sign(digest, s_xprs_sk, sig)) return len;
+
+    char b85[XPRSSIG_B85_LEN + 1];
+    if (xprssig_b85_encode(sig, sizeof sig, b85, sizeof b85) != XPRSSIG_B85_LEN) {
+        return len;
+    }
+
+    char *m = strstr(wire, " m:");
+    if (m) {
+        /* Insert before the message, keeping m: last. */
+        int head = (int)(m - wire);
+        char tail[XPRS_MAX_WIRE + 1];
+        int taillen = len - head;
+        if (taillen < 0 || taillen > (int)sizeof tail - 1) return len;
+        memcpy(tail, m, (size_t)taillen);
+        tail[taillen] = 0;
+        int n = snprintf(wire + head, (size_t)(cap - head), " sig:%s%s", b85, tail);
+        return (n > 0) ? head + n : len;
+    }
+    int n = snprintf(wire + len, (size_t)(cap - len), " sig:%s", b85);
+    return (n > 0) ? len + n : len;
+}
+
 /* ── announcing that this station is an indexer (XPRS.md §36.9) ─────────── */
 
 /* How often the service announcement goes out, and how many callsigns the
@@ -1261,6 +1365,7 @@ static void xprs_service_air(void)
                        "t:service f:%s serve:index,history,mailbox count:%d %s",
                        s_aprs_call, n, ts);
     if (len <= 0 || len > XPRS_MAX_WIRE) return;
+    len = xprs_sign_wire(wire, len, (int)sizeof wire);
 
     xprs_air(wire, len, SUBTYPE_XPRS);
     xprslan_send(wire, len);
@@ -1276,8 +1381,9 @@ static void xprs_service_air(void)
 static int xprs_lan_beacon(char *out, int cap)
 {
     if (!s_aprs_call[0]) return 0;
-    return snprintf(out, (size_t)cap, "t:observation f:%s link:lan peers:%d",
-                    s_aprs_call, xprslan_peer_count(600));
+    int n = snprintf(out, (size_t)cap, "t:observation f:%s link:lan peers:%d",
+                     s_aprs_call, xprslan_peer_count(600));
+    return xprs_sign_wire(out, n, cap);
 }
 
 static void handle_xprs(const uint8_t *payload, int len, int rssi,
@@ -1460,6 +1566,7 @@ static void xprs_beacon_air(void)
         n += snprintf(wire + n, sizeof wire - n, " uptime:%s lifetime:%s",
                       up, life);
     if (n <= 0 || n >= (int)sizeof wire) return;
+    n = xprs_sign_wire(wire, n, (int)sizeof wire);
     uint8_t ad[256];
     int an = build_ad(SUBTYPE_XPRS, (const uint8_t *)wire, n, ad);
     if (an > 0) air_raw_ad(ad, an);
@@ -1993,9 +2100,14 @@ static void derive_x3_callsign(char *out, int cap)
 {
     static const char CS[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
     if (cap < 7) { if (cap > 0) out[0] = 0; return; }
-    uint32_t bits = ((uint32_t)s_ed_pk[0] << 12) |
-                    ((uint32_t)s_ed_pk[1] << 4) |
-                    ((uint32_t)s_ed_pk[2] >> 4);         /* 20 bits */
+    /* From the XPRS SIGNING key, not the Reticulum one: §3 derives an X3
+     * callsign from the key that signs, which is what makes the callsign
+     * self-certifying — a receiver re-derives it from the key in a signature
+     * and sees for itself that the two belong together. */
+    const uint8_t *k = s_xprs_can_sign ? s_xprs_pk : s_ed_pk;
+    uint32_t bits = ((uint32_t)k[0] << 12) |
+                    ((uint32_t)k[1] << 4) |
+                    ((uint32_t)k[2] >> 4);               /* 20 bits */
     out[0] = 'X'; out[1] = '3';
     for (int i = 0; i < 4; i++) {
         char c = CS[(bits >> (15 - 5 * i)) & 31];

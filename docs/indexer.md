@@ -307,4 +307,5 @@ for in device time):
 - `docs/store-and-forward.md` — delivery to absent peers
 - `docs/folders.md`, `docs/NOSTR.md` — the file and relay layers that use the
   pointer-based index
-- `docs/esp32.md` — the constraints behind the dongle's implementation
+- `docs/esp32.md` — the firmware constraints behind the dongle's implementation
+- `docs/device-tdongle.md` — what the T-Dongle supports of XPRS, end to end

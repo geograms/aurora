@@ -1,5 +1,10 @@
 # ESP32 firmware — map & special characteristics
 
+**Looking for what a device supports rather than how the firmware is built?**
+[device-tdongle.md](device-tdongle.md) is the T-Dongle-S3's own page: its
+bearers, what of XPRS it implements, what it deliberately does not, and how to
+ask it questions.
+
 Read this before touching `esp32/` — it saves re-reading the tree. Covers the
 project layout, which firmware is which, the BLE protocol state, the traps, and
 the three constraints this board keeps punishing people for: **which processor

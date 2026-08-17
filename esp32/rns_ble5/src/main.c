@@ -436,13 +436,26 @@ static void relay_remember(uint32_t hash)
 /* re-air queue: full BLE AD buffers with a TTL, round-robin aired by relay_task */
 #define RELAY_MAX     8
 #define RELAY_TTL_SEC 30
-typedef struct { uint8_t ad[256]; uint8_t len; uint32_t expire; } relay_slot_t;
+/* `id_hash` and `not_before` are what make this a §13.2.1 queue rather than a
+ * plain rotation: a copy waits a random moment before it is eligible, and is
+ * thrown away if the same packet is heard from somebody else meanwhile. Three
+ * dongles in a room therefore air one copy between them, not three. */
+typedef struct {
+    uint8_t  ad[256];
+    uint8_t  len;
+    uint32_t expire;
+    uint32_t id_hash;      /* §5 identifier of the packet inside, 0 = unknown */
+    int64_t  not_before;   /* esp_timer µs; before this it is not aired */
+} relay_slot_t;
+
+#define RELAY_JITTER_MIN_MS 200
+#define RELAY_JITTER_MAX_MS 1200
 static relay_slot_t      s_relay[RELAY_MAX];
 static int               s_relay_rr;
 static SemaphoreHandle_t s_relay_mtx;
 static volatile uint32_t s_relayed_count;
 
-static void relay_enqueue(const uint8_t *ad, int len)
+static void relay_enqueue_id(const uint8_t *ad, int len, uint32_t id_hash)
 {
     if (len <= 0 || len > 256) return;
     xSemaphoreTake(s_relay_mtx, portMAX_DELAY);
@@ -452,9 +465,35 @@ static void relay_enqueue(const uint8_t *ad, int len)
         if (s_relay[i].len == 0 || s_relay[i].expire <= t) { slot = i; break; }
         if (s_relay[i].expire < soonest) { soonest = s_relay[i].expire; slot = i; }
     }
+    uint32_t span = RELAY_JITTER_MAX_MS - RELAY_JITTER_MIN_MS;
     memcpy(s_relay[slot].ad, ad, len);
     s_relay[slot].len = len;
     s_relay[slot].expire = t + RELAY_TTL_SEC;
+    s_relay[slot].id_hash = id_hash;
+    s_relay[slot].not_before = esp_timer_get_time() +
+        (int64_t)(RELAY_JITTER_MIN_MS + (esp_random() % (span + 1))) * 1000;
+    xSemaphoreGive(s_relay_mtx);
+}
+
+static void relay_enqueue(const uint8_t *ad, int len)
+{
+    relay_enqueue_id(ad, len, 0);
+}
+
+/* Somebody else aired this packet. Ours is now pointless — this is the whole
+ * reason the copy waits before going out (§13.2.1). */
+static void relay_cancel(uint32_t id_hash)
+{
+    if (!id_hash) return;
+    xSemaphoreTake(s_relay_mtx, portMAX_DELAY);
+    for (int i = 0; i < RELAY_MAX; i++) {
+        if (s_relay[i].len && s_relay[i].id_hash == id_hash) {
+            s_relay[i].len = 0;
+            s_relay[i].id_hash = 0;
+            ESP_LOGI(TAG, "%08x already aired by somebody else — dropping ours",
+                     (unsigned)id_hash);
+        }
+    }
     xSemaphoreGive(s_relay_mtx);
 }
 
@@ -467,6 +506,9 @@ static int relay_pick(uint8_t *out)
     for (int k = 0; k < RELAY_MAX; k++) {
         int i = (s_relay_rr + k) % RELAY_MAX;
         if (s_relay[i].len > 0 && s_relay[i].expire <= t) { s_relay[i].len = 0; continue; }
+        if (s_relay[i].len > 0 && esp_timer_get_time() < s_relay[i].not_before) {
+            continue;                      /* still inside its random wait */
+        }
         if (s_relay[i].len > 0) {
             memcpy(out, s_relay[i].ad, s_relay[i].len);
             got = s_relay[i].len;
@@ -979,10 +1021,45 @@ static void xprs_from_lan(const char *wire, int len, uint32_t ip)
         /* rssi 0 — the store's "unknown", which a network genuinely is. */
         xprsindex_add(s_xprs_index, wire, len, 0, false, (uint32_t)time(NULL));
     }
-    xprs_air(wire, len, SUBTYPE_XPRS);
+
+    /* Onto the BLE5 air under the SAME rules as anything heard on the radio:
+     * append ourselves to via:, which also refuses when we are already in the
+     * path or the type's hop budget is spent (§13.1, §13.2). It used to go out
+     * verbatim, so a packet could cross the LAN and the air forever without
+     * either copy ever admitting it had been relayed. */
+    char rewired[XPRS_MAX_WIRE + 1];
+    int rl = xprs_append_via(wire, len, s_aprs_call, rewired, XPRS_MAX_WIRE - 1);
+    if (rl <= 0) {
+        ESP_LOGI(TAG, "not re-airing from the LAN: already in the path, or "
+                      "the hop budget is spent");
+        return;
+    }
+    char id[XPRS_ID_LEN];
+    uint32_t idh = xprs_id_of(wire, len, id)
+                       ? (uint32_t)strtoul(id, NULL, 16) : 0;
+    if (idh && xprs_seen(idh)) return;      /* we already handled this one */
+    if (idh) xprs_seen_remember(idh);
+
+    uint8_t ad[256];
+    int an = build_ad(SUBTYPE_XPRS, (const uint8_t *)rewired, rl, ad);
+    if (an > 0) relay_enqueue_id(ad, an, idh);
     ESP_LOGI(TAG, "XPRS from the LAN (%u.%u.%u.%u): %d B",
              (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
              (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF), len);
+}
+
+/* Somebody on the LAN aired a packet — including a repeat the rx path drops.
+ * If we were about to put that same packet on the BLE5 air, we no longer need
+ * to (§13.2.1): the two bearers keep separate queues and this is how the LAN
+ * one tells the radio one to stand down. */
+static void xprs_heard_on_lan(const char *id, const char *wire, int len)
+{
+    /* Only a copy somebody has ALREADY relayed stands us down. The origin
+     * repeating itself means nobody carried it yet, which is when a digipeater
+     * is most useful — `via:` is the difference. */
+    xprs_t hp;
+    if (!xprs_parse(wire, len, &hp) || xprs_via_count(&hp) == 0) return;
+    relay_cancel((uint32_t)strtoul(id, NULL, 16));
 }
 
 /* This station, on the bearer it is describing (§10.6). Built on the bearer's
@@ -1031,6 +1108,11 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
     char id[XPRS_ID_LEN];
     xprs_id(&p, id);
     uint32_t idh = (uint32_t)strtoul(id, NULL, 16);
+    /* If somebody has already relayed this packet, our queued copy is
+     * pointless (§13.2.1). Checked ahead of the seen-ring so a repeat still
+     * counts — but only when it carries a via:, because the origin saying it
+     * again is a reason to digipeat rather than to stand down. */
+    if (xprs_via_count(&p) > 0) relay_cancel(idh);
     if (xprs_seen(idh)) {
         /* Already handled once. The one thing a repeat sighting may do is
          * extend the digipeat — and only when it is the ORIGIN repeating
@@ -1135,7 +1217,7 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
             uint8_t ad[256];
             int an = build_ad(subtype, (const uint8_t *)rewired, rl, ad);
             if (an > 0) {
-                relay_enqueue(ad, an);
+                relay_enqueue_id(ad, an, idh);
                 s_relayed_count++;
                 /* Remember WHAT we repeated: only these ids may be repeated
                  * again when the origin keeps transmitting (above). */
@@ -2116,6 +2198,7 @@ void app_main(void)
      * network, on its own UDP port. Not Reticulum and not the internet. */
     if (xprslan_start(s_aprs_call[0] ? s_aprs_call : "TDONGLE") == ESP_OK) {
         xprslan_set_rx_cb(xprs_from_lan);
+        xprslan_set_heard_cb(xprs_heard_on_lan);
         xprslan_set_beacon(xprs_lan_beacon, 300, 20);
         ESP_LOGI(TAG, "XPRS LAN bearer up on UDP %d", XPRSLAN_PORT);
     } else {

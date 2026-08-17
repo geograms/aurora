@@ -251,6 +251,50 @@ static void test_beacon_cadence(void)
     xprslan_set_beacon(NULL, 0, 0);
 }
 
+/* ── the origin repeating itself must NOT cancel our copy ────────────────── */
+
+static void test_origin_repeat_does_not_cancel(void)
+{
+    setup();
+    const char *w = "t:warning f:X3RLY7 pos:39.40,-8.20 kind:fire sev:danger ts:" TS;
+    xprslan_offer(w, (int)strlen(w));
+    CHECK(xl_test_queue_len() == 1, "not queued");
+
+    /* The SAME packet again, still with no via: — the sender repeating because
+     * nobody carried it. That is a reason to relay, not to stand down. */
+    xl_test_datagram(w, (int)strlen(w), 0x0100A8C0);
+    CHECK(xl_test_queue_len() == 1, "an origin repeat cancelled our digipeat");
+
+    advance(XPRSLAN_JITTER_MAX_MS + 10);
+    CHECK(xl_test_air_count == 1, "never aired (%d)", xl_test_air_count);
+}
+
+/* ── the heard callback sees what the rx callback is spared ──────────────── */
+
+static int heard_calls;
+static void heard_cb(const char *id, const char *wire, int len)
+{
+    (void)id; (void)wire; (void)len;
+    heard_calls++;
+}
+
+static void test_heard_cb_sees_duplicates(void)
+{
+    setup();
+    rx_calls = 0; heard_calls = 0;
+    xprslan_set_rx_cb(rx_cb);
+    xprslan_set_heard_cb(heard_cb);
+
+    const char *w = "t:warning f:X3RLY7 pos:39.40,-8.20 kind:fire sev:danger ts:" TS;
+    xl_test_datagram(w, (int)strlen(w), 0x0100A8C0);
+    xl_test_datagram(w, (int)strlen(w), 0x0200A8C0);   /* another station relays it */
+
+    CHECK(rx_calls == 1, "rx saw the duplicate (%d)", rx_calls);
+    CHECK(heard_calls == 2, "heard missed the duplicate (%d)", heard_calls);
+    xprslan_set_rx_cb(NULL);
+    xprslan_set_heard_cb(NULL);
+}
+
 int main(void)
 {
     printf("xprslan host tests\n");
@@ -263,6 +307,8 @@ int main(void)
     test_jitter_window();
     test_own_send_is_immediate();
     test_beacon_cadence();
+    test_heard_cb_sees_duplicates();
+    test_origin_repeat_does_not_cancel();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

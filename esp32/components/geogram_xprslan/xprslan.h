@@ -87,6 +87,18 @@ bool      xprslan_is_active(void);
 void xprslan_set_rx_cb(xprslan_rx_cb_t cb);
 
 /**
+ * @brief Told the §5 identifier of EVERY valid XPRS datagram, including the
+ *        duplicates the rx callback never sees.
+ *
+ * A station that queues its own copy of a packet for another bearer has to know
+ * when somebody else airs it, and "somebody else is saying it" arrives here as
+ * a repeat — which the rx path deliberately swallows. Without this the cancel
+ * in §13.2.1 only works for one bearer.
+ */
+typedef void (*xprslan_heard_cb_t)(const char *id, const char *wire, int len);
+void xprslan_set_heard_cb(xprslan_heard_cb_t cb);
+
+/**
  * @brief Air one packet of OUR OWN, now, with no jitter and no `via:` — it has
  *        taken no hops yet. Use xprslan_offer() for anything heard elsewhere.
  * @return false when the socket is down or the packet is not XPRS.

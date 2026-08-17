@@ -119,6 +119,7 @@ static xl_seen_t   s_aired[XL_SEEN_RING];   /* put on the LAN by us */
 static int         s_aired_pos;
 static xl_peer_t   s_peers[XPRSLAN_PEERS_MAX];
 static xprslan_rx_cb_t s_rx_cb;
+static xprslan_heard_cb_t s_heard_cb;
 static xprslan_beacon_cb_t s_beacon_cb;
 static uint32_t    s_beacon_every_ms, s_beacon_due_ms;
 static uint32_t    s_rx_count, s_tx_count, s_cancelled;
@@ -253,10 +254,17 @@ static void xl_on_datagram(const char *wire, int len, uint32_t ip)
     if (ip) xl_peer_touch(ip, now);
     s_rx_count++;
 
-    /* Whoever aired it, our own queued copy of the same thing is now pointless.
-     * This runs before the duplicate check below so that a repeat still counts
-     * as "somebody else is saying it". */
-    xl_cancel(id);
+    /* Only a copy that has ALREADY been relayed cancels ours. The origin
+     * repeating itself is the opposite signal — it means nobody has carried the
+     * packet yet, which is exactly when a digipeater should — so `via:` is what
+     * distinguishes "somebody else got there first" from "say it again". */
+    xprs_t hp;
+    bool relayed_by_other = xprs_parse(wire, len, &hp) && xprs_via_count(&hp) > 0;
+    if (relayed_by_other) xl_cancel(id);
+    /* Every hearing, duplicates included — an owner with its own queue on
+     * another bearer needs the repeats, which is exactly what the line below
+     * throws away. */
+    if (s_heard_cb) s_heard_cb(id, wire, len);
 
     if (xl_ring_has(s_heard, id, now)) return;   /* the LAN repeats itself */
     xl_ring_add(s_heard, &s_heard_pos, id, now);
@@ -281,6 +289,7 @@ bool xprslan_send(const char *wire, int len)
 }
 
 void xprslan_set_rx_cb(xprslan_rx_cb_t cb) { s_rx_cb = cb; }
+void xprslan_set_heard_cb(xprslan_heard_cb_t cb) { s_heard_cb = cb; }
 
 void xprslan_set_beacon(xprslan_beacon_cb_t cb, uint32_t interval_sec,
                         uint32_t first_delay_sec)

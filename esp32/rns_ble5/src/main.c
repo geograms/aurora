@@ -67,6 +67,7 @@
 #include "esp_http_server.h"
 #include "xprsindex.h"
 #include "xprslan.h"
+#include "rns_tcp.h"
 
 /* Provisioning defaults (WiFi creds + callsign). The real file is gitignored;
  * values are written to NVS on first boot and NVS is the source of truth after.
@@ -93,6 +94,12 @@ static uint8_t s_own_addr_type;
 #define SUBTYPE      0x55   /* Reticulum packet */
 #define SUBTYPE_APRS 0x41   /* APRS broadcast parcel ('A') — plaintext */
 #define SUBTYPE_MESH BLEMESH_SUBTYPE /* 0x4D street-mesh route beacon ('M') */
+/* The hub this station dials. rns.beleth.net is the one the Aurora side has
+ * been using; a station with its own is expected to change this. */
+#ifndef RNS_HUB_HOST
+#define RNS_HUB_HOST "rns.beleth.net"
+#endif
+
 #define SUBTYPE_XPRS 0x58   /* XPRS text packet ('X') — docs/ble5.md §2 */
 
 #define RNS_PKT_ANNOUNCE 0x01
@@ -398,7 +405,16 @@ static void announce(const char *app, int applen)
     ad[0] = n - 1;          /* AD length = everything after the length byte */
 
     air_raw_ad(ad, n);
-    ESP_LOGI(TAG, "TX announce app=\"%.*s\" (%dB adv)", applen, app, n);
+
+    /* The same announce, unwrapped, to the hub. The BLE advert carries the RNS
+     * packet after a 6-byte manufacturer-data header (len, company, marker,
+     * subtype); everything from there on IS the packet, so the two bearers
+     * share one signature and one random hash rather than announcing twice
+     * with different bytes. */
+    if (rns_tcp_is_up()) rns_tcp_send(ad + 6, (size_t)(n - 6));
+
+    ESP_LOGI(TAG, "TX announce app=\"%.*s\" (%dB adv%s)", applen, app, n,
+             rns_tcp_is_up() ? ", and to the hub" : "");
 }
 
 /* ---- repeater (BLE5 RNS transport node) --------------------------------- */
@@ -1048,6 +1064,30 @@ static void xprs_from_lan(const char *wire, int len, uint32_t ip)
              (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF), len);
 }
 
+/* A packet from the hub, or (frame == NULL) the moment the socket comes up.
+ *
+ * A hub knows nothing about a station that has not spoken since it connected,
+ * so the first thing we do on a fresh connection is announce; after that, what
+ * arrives is fed to the same decoder the BLE5 air uses, because an announce is
+ * an announce whichever interface carried it. */
+/* Set from the socket task, acted on by relay_task — see rns_from_hub(). */
+static volatile bool s_hub_announce_pending;
+
+static void rns_from_hub(const uint8_t *frame, size_t len, void *ctx)
+{
+    (void)ctx;
+    if (!frame || len == 0) {
+        /* Ask the relay task to announce rather than doing it here. announce()
+         * signs into static buffers that relay_task also uses, and an Ed25519
+         * signature is not something to put on a socket task's stack — the
+         * same mistake the LAN beacon made on an esp_timer. */
+        s_hub_announce_pending = true;
+        ESP_LOGI(TAG, "hub connected — announce queued");
+        return;
+    }
+    handle_rns_packet(frame, (int)len, 0);
+}
+
 /* Somebody on the LAN aired a packet — including a repeat the rx path drops.
  * If we were about to put that same packet on the BLE5 air, we no longer need
  * to (§13.2.1): the two bearers keep separate queues and this is how the LAN
@@ -1365,6 +1405,14 @@ static void relay_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(1500));
         uint32_t t = now_sec();
         gatt_mesh_tick();   /* MSP session timeouts (politeness/stall) */
+
+        /* A hub learns nothing about a station that has not spoken since it
+         * connected, so a fresh socket asks for an announce here — on the task
+         * that owns the signing buffers. */
+        if (s_hub_announce_pending) {
+            s_hub_announce_pending = false;
+            announce("tdongle-s3 online", 17);
+        }
 
         /* Housekeeping: age out dead neighbors/routes + expired parked mail. */
         if (t - last_sweep >= 60) {
@@ -2206,6 +2254,15 @@ void app_main(void)
     }
 
     api_start();
+    /* The Reticulum interface. One socket to one hub: the station is then
+     * reachable from anywhere on the network rather than only from the room it
+     * is in. It reconnects on its own, so it is started whether or not WiFi has
+     * finished associating. */
+    rns_tcp_set_rx_cb(rns_from_hub, NULL);
+    if (rns_tcp_start(RNS_HUB_HOST, RNS_TCP_DEFAULT_PORT) != ESP_OK) {
+        ESP_LOGW(TAG, "Reticulum interface failed to start");
+    }
+
     xTaskCreatePinnedToCore(heartbeat_task, "heartbeat", 3072, NULL, 1, NULL, 1);
 
     xTaskCreate(console_task, "console", 4096, NULL, 3, NULL);

@@ -5,6 +5,6 @@ idf_component_register(
              esp_wifi esp_event esp_netif driver
              geogram_model_tdongle_s3 geogram_st7735 geogram_tdongle_ui
              geogram_wifi geogram_aprsis geogram_blemesh geogram_sdcard
-             geogram_lanwatch geogram_xprs geogram_xprsindex geogram_xprslan
+             geogram_lanwatch geogram_xprs geogram_xprsindex geogram_xprslan geogram_rns
              esp_http_server
 )

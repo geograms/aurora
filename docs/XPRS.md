@@ -3981,6 +3981,44 @@ The invitee answers the ordinary way — `s:ack` is "moving now", `s:no` is
 127  t:receipt f:X1RD89 d:X1QZ3N r:d8b7be s:no sig:<60 characters> m:no espnow hardware
 ```
 
+**The choreography, exactly — because a device listens ONE frequency at a
+time**, and a step out of order strands somebody on a channel nobody else is
+tuned to. Implementations follow this sequence and expect it of each other:
+
+1. **Invite, on the calling channel.** The inviter keeps listening there — it
+   has promised nothing yet and moves nowhere until somebody accepts.
+2. **Accept, on the calling channel.** The acceptance is the commitment. A
+   `s:no`, or silence until the invitation's freshness runs out, ends the
+   matter with everyone still on the commons.
+3. **Move.** On HEARING the acceptance the inviter tunes to the working
+   channel and listens; on SENDING it the invitee tunes and follows. From
+   this moment both are deaf to the calling channel — which the rest of the
+   network handles as ordinary absence: anything addressed to them waits in
+   custody or a mailbox like mail for any station that is away (section 13.3).
+4. **"I am also here — start sending."** The invitee re-airs its acceptance
+   ON the working channel: the same signed packet, the same identifier, and
+   hearing it there is the proof it cannot fake from anywhere else — the
+   party is tuned, present, and ready. The station with the bulk to transmit
+   sends nothing until it hears this. Same packet twice is deliberate: the
+   first airing commits, the second locates, and no new word was needed.
+5. **Work, then give the channel back.** The exchange runs (section 25.2.2's
+   middle block); when it ends — or `until:` passes, whichever is first —
+   everyone returns to the calling channel. A transfer the working channel
+   killed mid-way is resumed later with `off:` (section 25.2) on whatever
+   lane the pair next shares; the commons is not the place to debug it.
+6. **Nobody came.** An inviter alone on the working channel at `until:`
+   returns to the commons and treats the acceptance as overtaken by events —
+   no error packet, because the party that failed to arrive is not listening
+   anywhere useful to send one.
+
+**More than two parties** works the same way, because every step is already
+per-station: the invitation goes to a group (`d:` takes a group name), each
+member accepts or declines individually on the commons, and the transmitting
+station starts when the parties it heard arrive — step 4, once per accepting
+station — or when `until:` forces its hand. Whoever accepted but never
+arrived catches up like any absent station: `cmd:history`, a mailbox, the
+next snapshot.
+
 Rules, all inherited:
 
 - **The working channel is borrowed, never claimed.** Both stations return to
@@ -5648,8 +5686,11 @@ an offset or `input:` outright, the latter for cross-band.
 A `t:channel` WITH `d:` is a working-channel invitation (section 23.7): meet
 me there — `until:` how long I wait, `r:` the exchange it serves, `link:` +
 `ch:` when the place is a technology (wifi, espnow) rather than a frequency.
-Signed or ignored. Answer `s:ack` (moving) or `s:no` (cannot, reason in
-`m:`); both return to the calling channel when done.
+Signed or ignored. Choreography: accept with `s:ack` on the commons (or
+`s:no`, reason in `m:`) → both tune → the invitee RE-AIRS its acceptance on
+the working channel ("I am also here") → only then does the bulk sender
+transmit → done or `until:`, everyone returns to the calling channel. Groups:
+`d:` a group name, accept individually, arrive individually.
 
 `range:` is the operator's estimate, not a guarantee.
 

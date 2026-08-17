@@ -76,6 +76,11 @@ class XprsArchive {
   /// Counters for /api and for honest logs.
   int admitted = 0, dropped = 0, forged = 0;
 
+  /// Told, at flush, what each packet's signature turned out to be — including
+  /// the forged ones this drops. Set by the owner so the air view can badge a
+  /// station without doing the curve work a second time.
+  void Function(String callsign, XprsSigState state)? onVerdict;
+
   final List<_Pending> _pending = [];
   static const int _pendingMax = 512;
   static const int _flushEarlyAt = 64;
@@ -206,10 +211,19 @@ class XprsArchive {
           var sig = XprsSigState.unsigned;
           if (p.has('sig')) {
             sig = xprsVerify(p, keyResolver?.call(_base(p['f'] ?? '')));
-            if (sig == XprsSigState.forged) {
-              forged++;
-              continue;
-            }
+          }
+          // Report before acting on it: a forged packet is dropped from the
+          // spool, and if the verdict went with it nothing would ever be able
+          // to say that a callsign had been used to sign something it could
+          // not have signed.
+          try {
+            onVerdict?.call(_base(p['f'] ?? ''), sig);
+          } catch (_) {
+            // A view that throws must not cost the spool its flush.
+          }
+          if (sig == XprsSigState.forged) {
+            forged++;
+            continue;
           }
           final fromc = _base(p['f'] ?? '');
           final toc = _base(p['d'] ?? '');

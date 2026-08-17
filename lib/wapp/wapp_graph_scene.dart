@@ -607,12 +607,24 @@ NodeSprite spriteOfRnsNode(
       // kind 'xprs' = a station heard over the air (an XPRS beacon), not an
       // RNS announce. Same leaf orb in its bearer's colour, with a soft ring
       // so the eye can tell "heard" from "routable".
+      //
+      // A RED ring means a packet signed with that callsign did not match the
+      // key we hold for it (§9.1). It belongs on the canvas rather than only in
+      // the panel: somebody using a name that is not theirs is the one thing
+      // here worth noticing without clicking anything.
       final xprs = n.kind == 'xprs';
+      final forged = ((n.meta['sigForged'] as num?)?.toInt() ?? 0) > 0;
       return NodeSprite(
         radius: direct ? 22 : 17,
         coreColor: n.iface.color,
         ringColor: xprs ? Colors.white38 : null,
-        secondaryColor: n.geogram ? geogramGreen : null,
+        // The OUTER ring, which is the thick one, and red replaces the geogram
+        // green rather than sitting inside it: a station that has signed
+        // something with a name that is not its own should not still be wearing
+        // the colour that means "one of us".
+        secondaryColor: forged
+            ? const Color(0xFFF85149)
+            : (n.geogram ? geogramGreen : null),
         label: n.label,
         labelMinPx: direct ? kRnsLabelFloorPx : null,
         labelPriority: direct ? 1 : 0,

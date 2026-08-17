@@ -22,6 +22,7 @@ import 'dart:convert';
 
 import 'xprs_id.dart';
 import 'xprs_packet.dart';
+import 'xprs_sig.dart';
 import 'xprs_vocab.dart';
 
 /// Bearers a sighting may claim.
@@ -103,6 +104,25 @@ class XprsStation {
   /// Who it says it hears directly (section 10.6.3). Finding our own callsign
   /// in here is this station telling us, on the air, that it can hear us.
   List<String> hears = const [];
+
+  /// What this station's signatures have turned out to be (section 9.1).
+  ///
+  /// Counted rather than reduced to one word, because they say different
+  /// things: a station can sign some packets and not others, and one forgery
+  /// among a hundred good packets is the fact worth surfacing, not an average.
+  /// [sigForged] is never decremented — somebody used this callsign to sign
+  /// something they could not have signed, and that does not stop being true
+  /// because the next packet was fine.
+  int sigVerified = 0, sigUnverified = 0, sigForged = 0, sigUnsigned = 0;
+
+  /// The one word for a badge. Forged wins over everything.
+  XprsSigState? get sigHeadline {
+    if (sigForged > 0) return XprsSigState.forged;
+    if (sigVerified > 0) return XprsSigState.verified;
+    if (sigUnverified > 0) return XprsSigState.unverified;
+    if (sigUnsigned > 0) return XprsSigState.unsigned;
+    return null;                       // nothing judged yet: say nothing
+  }
 
   /// The last time we heard this station with no `via:` — from its own
   /// transmitter rather than through a relay.
@@ -211,6 +231,32 @@ class XprsMonitor {
         .toList()
       ..sort((a, b) => b.lastDirectMs.compareTo(a.lastDirectMs));
     return fresh.map((s) => s.callsign).toList();
+  }
+
+  /// What the archive made of a packet's signature (section 9.1).
+  ///
+  /// Fed by [XprsArchive], which verifies at flush — deliberately off the
+  /// receive path, because a verify is a curve operation and this one is
+  /// already paid for there. The monitor does no crypto of its own; it would
+  /// be the same work twice, on the isolate that draws.
+  ///
+  /// A station heard only over the internet is not in [_stations] at all, so a
+  /// verdict for one is dropped here rather than creating a sighting the air
+  /// view never had.
+  void recordVerdict(String callsign, XprsSigState state) {
+    final st = _stations[callsign.trim().toUpperCase()];
+    if (st == null) return;
+    switch (state) {
+      case XprsSigState.verified:
+        st.sigVerified++;
+      case XprsSigState.forged:
+        st.sigForged++;
+      case XprsSigState.unverified:
+        st.sigUnverified++;
+      case XprsSigState.unsigned:
+        st.sigUnsigned++;
+    }
+    revision++;
   }
 
   /// Drop stations that have gone quiet. Called before rendering.

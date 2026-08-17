@@ -2418,6 +2418,12 @@ class RnsService {
             'bearer': s.bearer,
             'rssi': s.rssi,
             'packets': s.packets,
+            // What its signatures turned out to be (§9.1), as judged by the
+            // spool. Absent when nothing of its has been judged yet, which is
+            // not the same as unsigned.
+            if (s.sigHeadline != null) 'sig': s.sigHeadline!.name,
+            if (s.sigForged > 0) 'sigForged': s.sigForged,
+            if (s.sigVerified > 0) 'sigVerified': s.sigVerified,
             // What it archives (§36.9) and who it says it hears (§10.6.3).
             if (s.count != null) 'count': s.count,
             if (s.hears.isNotEmpty) 'hears': s.hears,

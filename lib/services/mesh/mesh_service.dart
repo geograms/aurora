@@ -174,6 +174,11 @@ class MeshService {
           ..selfCallsign = cs
           ..maxBytes = prefs.xprsArchiveMaxMb * 1024 * 1024
           ..maxAgeDays = prefs.xprsArchiveMaxDays
+          // The spool is the only thing that checks a signature, and it does it
+          // off the receive path where that work belongs. The air view badges a
+          // station from ITS verdict rather than repeating the curve work on
+          // the isolate that draws.
+          ..onVerdict = XprsMonitor.instance.recordVerdict
           ..init(wappsDataStorage(prefs)
               .getAbsolutePath('xprs_archive.sqlite3'));
         XprsHistoryServer.instance.install();

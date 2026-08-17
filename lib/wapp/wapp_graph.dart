@@ -337,6 +337,12 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
         ..write(':')
         ..write(d.geogram ? 1 : 0)
         ..write(':')
+        // Whether this station has been caught signing something it could not
+        // have signed changes its ORB, so it belongs here — see the note above:
+        // anything render-visible left out of this signature goes stale on
+        // screen, because the controller keeps the old node objects.
+        ..write(((d.meta['sigForged'] as num?)?.toInt() ?? 0) > 0 ? 1 : 0)
+        ..write(':')
         ..write(d.label);
     }
     final sig = signature.toString();
@@ -1167,8 +1173,86 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
           ),
         ),
       ],
+      ..._xprsSig(m),
       ..._xprsHears(m),
       const SizedBox(height: 8),
+    ];
+  }
+
+  /// What this station's signatures turned out to be (`docs/XPRS.md` §9.1).
+  ///
+  /// The verdict is the spool's, not this widget's: checking a signature is a
+  /// curve operation and doing it here would be the same work again, on the
+  /// isolate that draws. Absent means nothing of theirs has been judged yet,
+  /// which is why this renders nothing rather than guessing "unsigned".
+  ///
+  /// A forgery is stated in full and never averaged away. Everything else is a
+  /// quiet line, because an unsigned packet is ordinary — small stations and
+  /// sensors do not sign, and §9.1 says a receiver must still accept them.
+  List<Widget> _xprsSig(Map<String, dynamic> m) {
+    final sig = (m['sig'] ?? '').toString();
+    if (sig.isEmpty) return const [];
+    final forged = (m['sigForged'] as num?)?.toInt() ?? 0;
+
+    if (forged > 0) {
+      return [
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF85149).withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFF85149)),
+          ),
+          child: Row(children: [
+            const Icon(Icons.gpp_bad_outlined,
+                size: 18, color: Color(0xFFF85149)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                forged == 1
+                    ? 'A packet signed with this callsign did not match its key'
+                    : '$forged packets signed with this callsign did not match '
+                        'its key',
+                style: const TextStyle(
+                    color: Color(0xFFF85149),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600),
+              ),
+            ),
+          ]),
+        ),
+        const Padding(
+          padding: EdgeInsets.only(top: 6),
+          child: Text(
+              'Somebody used this name to sign something they could not have '
+              'signed. Those packets were refused, not stored.',
+              style: TextStyle(color: _gMuted, fontSize: 11)),
+        ),
+      ];
+    }
+
+    final (icon, label, colour) = switch (sig) {
+      'verified' => (
+          Icons.verified_user_outlined,
+          'Signed, and it checks out',
+          _gGeo
+        ),
+      'unverified' => (
+          Icons.help_outline,
+          'Signed, but we hold no key for this callsign',
+          _gMuted
+        ),
+      _ => (Icons.lock_open_outlined, 'Not signed', _gMuted),
+    };
+    return [
+      const SizedBox(height: 10),
+      Row(children: [
+        Icon(icon, size: 15, color: colour),
+        const SizedBox(width: 6),
+        Text(label, style: TextStyle(color: colour, fontSize: 12)),
+      ]),
     ];
   }
 

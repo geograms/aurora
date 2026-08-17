@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:aurora/services/reticulum/rns_service.dart';
 import 'package:aurora/services/xprs/xprs_monitor.dart';
 import 'package:aurora/services/xprs/xprs_packet.dart';
+import 'package:aurora/services/xprs/xprs_sig.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -84,6 +85,42 @@ void main() {
         .cast<Map<String, dynamic>>();
     expect(files.any((n) => n['id'] == 'xprs:X3WWAJ'), false,
         reason: 'it never claimed files');
+
+    XprsMonitor.instance.clear();
+  });
+
+  test('a station is badged by the spool\'s verdict, and a forgery sticks', () {
+    XprsMonitor.instance.clear();
+    final beacon =
+        XprsPacket.parse('t:observation f:X3WWAJ link:lan peers:1');
+    XprsMonitor.instance
+        .offer(beacon!, bearer: 'lan', selfCallsign: 'X1TEST');
+
+    Map meta() => ((RnsService.instance.graphSnapshot(includeXprs: true)['nodes']
+                as List)
+            .cast<Map<String, dynamic>>()
+            .firstWhere((n) => n['id'] == 'xprs:X3WWAJ')['meta'] as Map);
+
+    // Nothing judged yet says nothing — which is not the same as "unsigned".
+    expect(meta().containsKey('sig'), false);
+
+    XprsMonitor.instance.recordVerdict('X3WWAJ', XprsSigState.verified);
+    expect(meta()['sig'], 'verified');
+
+    // One forgery outranks any number of good packets, and does not wash out.
+    XprsMonitor.instance.recordVerdict('X3WWAJ', XprsSigState.forged);
+    XprsMonitor.instance.recordVerdict('X3WWAJ', XprsSigState.verified);
+    expect(meta()['sig'], 'forged',
+        reason: 'a later good packet must not clear a forgery');
+    expect(meta()['sigForged'], 1);
+
+    // A verdict for a station the air view never heard is not a sighting.
+    XprsMonitor.instance.recordVerdict('X9GHOST', XprsSigState.verified);
+    expect(
+        (RnsService.instance.graphSnapshot(includeXprs: true)['nodes'] as List)
+            .cast<Map<String, dynamic>>()
+            .any((n) => n['id'] == 'xprs:X9GHOST'),
+        false);
 
     XprsMonitor.instance.clear();
   });

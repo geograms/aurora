@@ -3969,6 +3969,7 @@ t:service f:X3RLY7 pos:38.7810,-9.2043 serve:relay,mailbox ts:2026-08-08_14:26:4
 | `nostr` | runs a NOSTR relay |
 | `files` | hosts content-addressed files: answers `q:have` (section 7.1) and `cmd:file`, and accepts `cmd:put` deposits within its budgets (section 25.2) |
 | `history` | keeps a spool of what it has heard, and re-airs it on `cmd:history` |
+| `index` | an indexer (section 36): archives its depositors' publications, answers queries, and publishes its directory (section 36.9) |
 | `time` | has a clock worth trusting, usually from GNSS |
 | `weather` | publishes observations |
 | `wifi` | offers network access to people nearby |
@@ -5663,6 +5664,13 @@ parts, joined with nothing. Piece lists (`sha size` per line, piece order)
 let partial holders serve what they verified. The BitTorrent infohash is
 derived deterministically and never needs transmitting between stations.
 
+Indexers (section 36.9): content only from chosen depositors, NEVER from
+another indexer. Between indexers only the directory travels — an `XDIR1`
+listing, one `call ts` line per archived callsign, announced with
+`t:service serve:index count: file:<ref>.xdir` and fetched like any file. A
+miss answers `code:404 m:try <peers>`. Discovery: `serve:index` on the air,
+or another indexer's verbatim copy of the signed announcement.
+
 ### The radio itself
 
 ```
@@ -6032,6 +6040,10 @@ internet-connected station is one radio hop from the recipient, and how
 stale that knowledge is — `ts:` is the freshness, and a reader that gets
 three gateways back simply prefers the newest.
 
+A miss is not a dead end: an indexer that does not archive the asked-about
+callsign answers `code:404` with `m:try` naming peers whose directories list
+it (section 36.9).
+
 The difference that matters is not the syntax. It is that the reader chose the
 indexer, the publisher chose the indexer, and neither had to be the same choice
 for the network to work.
@@ -6123,6 +6135,72 @@ ciphertext and effort. This is APRS's iGate rebuilt with the trust turned
 the right way around: the iGate proved useful by what it heard and carried,
 never by what it could read.
 
+### 36.9 Indexers among themselves
+
+**An indexer never accepts content from another indexer.** This is the rule
+that keeps a federation of archives from becoming one pool of spam, and it is
+stated as a danger before it is stated as a design. A peer's archive is that
+peer's admission decisions — which callsigns its operator chose to keep, under
+which quotas — and bulk-importing it imports every decision the other
+operator got wrong, at zero cost to whoever got them made. Content enters an
+indexer exactly one way: section 36.3, from the callsigns its operator chose
+or agreed to receive. (The gateway pass-through of section 36.1 is the same
+rule, not an exception — the gateway is a depositor this indexer accepted.)
+
+What indexers DO exchange is a **directory**: which callsigns each one is
+archiving or receiving from, and the most recent time it heard from each. A
+text listing in the section 6.7.2 family:
+
+```
+XDIR1
+CT1ABC-9 2026-08-17_13:40:11
+X1BOA3 2026-08-17_14:02:36
+X1QZ3N 2026-08-17_14:05:02
+```
+
+One line per callsign, `call` then `ts` — two value types this document
+already has — sorted by callsign. The directory is an ordinary
+content-addressed file: named in its indexer's signed service announcement,
+fetched with `cmd:file`, verified against its reference like anything else.
+
+```
+198  t:service f:X3IDX1 serve:index,history,mailbox count:212 file:qA7dTf2mWx9bK4pZcV0yLuJ3gRhN8sE5iDoQ6vXaB1M.xdir ts:2026-08-17_15:00:00 sig:<60 characters>
+```
+
+`count:` says how many callsigns before anyone fetches anything. The
+economics are section 36.2's, applied between indexers: a line costs about
+28 bytes, ten thousand callsigns cost about 280 kB, and an UNCHANGED
+directory has an unchanged hash — so polling a quiet peer costs a
+`q:have`-sized question and moves nothing. What a consumer stores is
+pointers — callsign, which indexer, how fresh — never the content behind
+them, which stays where its operator admitted it.
+
+A false directory line is priced like a false `hears:` (section 10.6.3): it
+buys its author one wasted redirect per reader and nothing else, because the
+content a reader is redirected to still answers or fails on its own
+signatures.
+
+**Discovery needs nothing new.** A station finds an indexer three ways:
+`serve:index` heard in a beacon or a `t:service` on the air; another
+indexer's copy of that same signed announcement — `service` is already a
+publication type, and section 36.2 makes passing it on verbatim safe; and
+the redirect, which is how the federation answers a miss:
+
+```
+152  t:result f:X3IDX1 d:X1QZ3N ts:2026-08-17_15:04:10 r:5fd021 code:404 sig:<60 characters> m:try X3IDX2,X3IDX7
+```
+
+An indexer asked about a callsign it does not archive says so plainly and
+names, in `m:try`, the peers whose directories list it — the alternates
+section 25.2.1 defined for `429`, extended to the miss. The reader asks the
+named peer directly; the first indexer never proxies, because proxying is
+how content crosses the line this section drew.
+
+The shape that falls out is the point: the network's memory is a federation
+of small archives, each vouching only for what its operator chose to keep,
+joined by directories that say who keeps what. No indexer holds the network;
+every indexer can point across it.
+
 ---
 
 ## 37. Implementation status
@@ -6145,6 +6223,7 @@ never by what it could read.
 | Section 36.1, gateway reachability publications (`observation`/`identity` to an indexer) | **specified, not implemented** as a push; the raw material is live — every phone beacons `hears:` and the ESP32 digipeats — but no gateway publishes its observation to an indexer and no indexer answers for one |
 | Section 36.6, `only:` matching inside list fields | **partly implemented**: the shipped history responder matches `only:` against author and addressee (`xprs_archive.dart` query); `hears:`/`hold:`/`via:`/`grant:` containment is not searched yet |
 | Section 36.8, sealed-mail release to a hearing gateway | **specified, not implemented**; the nearest live relatives are the chat iGate mailbox (mail pulled from APRS-IS by an in-range station) and MeshStore custody, neither of which is driven by a published `hears:` claim |
+| Section 36.9, `serve:index` and the XDIR1 directory exchange | **specified, not implemented**; the philosophy already ships for files — `pointer_sync.dart` gossips signed ADDRESSES between file-indexers and re-verifies on merge, never copying content — but no station publishes a callsign directory or answers a miss with `m:try` |
 | Section 3.1, one person on several devices | **specified, not implemented.** Nothing numbers a device today: a station wears its bare callsign, and the chat wapp matches `d:` against that alone. The pieces the rule needs are already on the air — a beacon carries `f:` and `lx:`, so a device can see a sibling and tell it apart — but no code adopts a suffix, prefers the conventional number for its `type:`, or refuses a command addressed to a person |
 | Section 13.7.1, receipts signed by default | **specified, not implemented.** Signing exists (section 9.1) and receipts do not use it yet, which leaves the forged-`s:ack` deletion described there open on any station that honours the section 7 carrier release. The Reticulum side is not exposed to it — its acknowledgement is a link, not an XPRS packet — but an XPRS-native carrier would be |
 | Section 13.7.2, parking a retry with no evidence | **implemented** on the Reticulum side: a retry is spent only against a live path or a beacon heard in the last three minutes (`RnsService._peerReachable`), otherwise the entry parks without burning a rung and the copy stays held |

@@ -189,6 +189,11 @@ void xprs_id(const xprs_t *p, char id[XPRS_ID_LEN])
     id[6] = 0;
 }
 
+int xprs_signed_text(const xprs_t *p, char *out, int cap)
+{
+    return encode_ex(p, true, NULL, NULL, out, cap);
+}
+
 bool xprs_id_of(const char *wire, int len, char id[XPRS_ID_LEN])
 {
     xprs_t p;

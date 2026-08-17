@@ -40,7 +40,7 @@ nothing and signs nothing (see the limits below).
 | BLE compact frame, subtype `0x41` | receive | `FROM 0x1F TO 0x1F TEXT`; an XPRS packet inside `TEXT` is taken |
 | BLE broadcast-parcel chunks (`0x50`/`0x51`, NACK `0x52`) | receive + transmit | reassembled payloads up to 300 B — how a packet is put back on the BLE air |
 | BLE GATT (`FFE0`, write `FFF1`, notify `FFF2`) | both | parcels from phones, and the query verbs below |
-| LAN, UDP broadcast port **42672** | both | one XPRS packet per datagram ([lan.md](lan.md)) |
+| LAN, UDP broadcast port **4242** | both | one XPRS packet per datagram ([lan.md](lan.md)) — the port XPRS answers on over TCP too (§24.4) |
 | APRS-IS over the internet | both | **APRS only, never XPRS** |
 
 No LoRa on this board. Reticulum's LAN discovery (UDP 42671) is listened to for

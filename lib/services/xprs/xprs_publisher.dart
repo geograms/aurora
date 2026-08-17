@@ -28,6 +28,7 @@ import '../../profile/profile_service.dart';
 import '../log_service.dart';
 import '../reticulum/rns_service.dart';
 import 'xprs_ingest.dart';
+import 'xprs_lan.dart';
 import 'xprs_packet.dart';
 import 'xprs_sig.dart';
 import 'xprs_vocab.dart';
@@ -39,6 +40,11 @@ import 'xprs_vocab.dart';
 /// (LoRa, a KISS TNC, WiFi Aware) inherits them by construction.
 abstract class XprsBearer {
   String get name;
+
+  /// What the spool calls this bearer. Usually the same word; the two that
+  /// differ do so because the archive names a medium (`ble`) where the
+  /// publisher names a radio generation (`ble5`).
+  String get archiveBearer => name;
 
   /// Whether a `scope:local` packet may use this bearer (section 13.11.1:
   /// local names the short-range bearers, not a distance).
@@ -54,6 +60,8 @@ abstract class XprsBearer {
 class _Ble5Bearer implements XprsBearer {
   @override
   String get name => 'ble5';
+  @override
+  String get archiveBearer => 'ble';
   @override
   bool get shortRange => true;
   @override
@@ -74,6 +82,8 @@ class _ReticulumBearer implements XprsBearer {
   @override
   String get name => 'reticulum';
   @override
+  String get archiveBearer => 'rns';
+  @override
   bool get shortRange => false;
   @override
   Future<bool> get active async => RnsService.instance.isUp;
@@ -83,12 +93,30 @@ class _ReticulumBearer implements XprsBearer {
           'xprs', Uint8List.fromList(utf8.encode(wire)));
 }
 
+class _LanBearer implements XprsBearer {
+  @override
+  String get name => 'lan';
+  @override
+  String get archiveBearer => 'lan';
+  // The wire in the building is short-range in the sense section 13.11.1
+  // means: a `scope:local` packet on it reaches the machines here and stops.
+  @override
+  bool get shortRange => true;
+  @override
+  Future<bool> get active async => XprsLan.instance.up;
+  @override
+  Future<bool> send(String wire, {required int part}) async =>
+      XprsLan.instance.send(wire);
+}
+
 class _LoraBearer implements XprsBearer {
   // The slot the user asked to see: when a LoRa radio ships, its connection
   // reports available and statuses start riding it with no publisher change.
   final LoraConnection _lora = LoraConnection();
   @override
   String get name => 'lora';
+  @override
+  String get archiveBearer => 'lora';
   @override
   bool get shortRange => true;
   @override
@@ -104,7 +132,12 @@ class XprsPublisher {
 
   /// Replaceable for tests; order is presentation only (every active bearer
   /// is used).
-  List<XprsBearer> bearers = [_Ble5Bearer(), _ReticulumBearer(), _LoraBearer()];
+  List<XprsBearer> bearers = [
+    _Ble5Bearer(),
+    _LanBearer(),
+    _ReticulumBearer(),
+    _LoraBearer()
+  ];
 
   int published = 0;
   int refused = 0;
@@ -147,6 +180,7 @@ class XprsPublisher {
     final local = p0 != null && xprsScope(p0).scope != XprsScope.global;
 
     final report = <String, String>{};
+    String? carriedBy;
     for (final b in bearers) {
       if (local && !b.shortRange) {
         // A local packet never leaves the short-range bearers (13.11.1), and
@@ -164,14 +198,15 @@ class XprsPublisher {
         ok = await b.send(wires[i], part: i + 1) && ok;
       }
       report[b.name] = ok ? 'sent' : 'refused';
+      if (ok) carriedBy ??= b.archiveBearer;
     }
 
     // Our own publication enters our own spool the moment it was aired
     // anywhere — a cmd:history asked of the author must be able to replay
     // the author (section 36.5). Once per wire, whichever bearer carried it.
-    if (report.values.contains('sent')) {
+    if (carriedBy != null) {
       for (final w in wires) {
-        XprsIngest.own(w, bearer: 'ble');
+        XprsIngest.own(w, bearer: carriedBy);
       }
     }
 

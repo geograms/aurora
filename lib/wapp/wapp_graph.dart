@@ -1126,8 +1126,12 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     final mail = (m['mail'] as num?)?.toInt() ?? 0;
     final packets = (m['packets'] as num?)?.toInt() ?? 0;
     final dist = bearer == 'ble' && rssi != 0 ? bleDistanceEstimate(rssi) : '';
+    final count = (m['count'] as num?)?.toInt() ?? 0;
     return [
       Wrap(spacing: 8, runSpacing: 8, children: [
+        if (count > 0)
+          _statTile(Icons.inventory_2_outlined, '$count', 'callsigns archived',
+              color: _gGeo),
         if (dist.isNotEmpty)
           _statTile(Icons.social_distance_outlined, dist, 'away, roughly'),
         if (dist.isEmpty && bearer.isNotEmpty)
@@ -1163,7 +1167,83 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
           ),
         ),
       ],
+      ..._xprsHears(m),
       const SizedBox(height: 8),
+    ];
+  }
+
+  /// Who this station says it can hear directly (`docs/XPRS.md` section
+  /// 10.6.3), and whether we are on the list.
+  ///
+  /// Finding our own callsign here is the station telling us, on the air, that
+  /// it can hear us — which is a different and much stronger statement than our
+  /// hearing it. Section 10.6.4 asks a client to show that asymmetry rather
+  /// than average it away: two stations listing each other can reach each
+  /// other, one listing the other cannot.
+  List<Widget> _xprsHears(Map<String, dynamic> m) {
+    final raw = m['hears'];
+    if (raw is! List || raw.isEmpty) return const [];
+    final calls = raw.map((e) => e.toString().toUpperCase()).toList();
+    final self =
+        (ProfileService.instance.activeProfile?.callsign ?? '').toUpperCase();
+    final peers = (m['peers'] as num?)?.toInt() ?? calls.length;
+    final more = peers > calls.length ? peers - calls.length : 0;
+    return [
+      const SizedBox(height: 12),
+      Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Text(
+            more > 0 ? 'Hears (${calls.length} of $peers)' : 'Hears',
+            style: const TextStyle(
+                color: _gMuted,
+                fontSize: 11,
+                letterSpacing: 0.6,
+                fontWeight: FontWeight.w700)),
+      ),
+      Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          for (final c in calls)
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: c == self && self.isNotEmpty
+                    ? _gGeo.withValues(alpha: 0.18)
+                    : Colors.white10,
+                borderRadius: BorderRadius.circular(20),
+                border: c == self && self.isNotEmpty
+                    ? Border.all(color: _gGeo, width: 1)
+                    : null,
+              ),
+              child: Text(
+                c == self && self.isNotEmpty ? '$c · Reachable' : c,
+                style: TextStyle(
+                    color: c == self && self.isNotEmpty ? _gGeo : Colors.white70,
+                    fontSize: 12,
+                    fontWeight: c == self && self.isNotEmpty
+                        ? FontWeight.w700
+                        : FontWeight.w400),
+              ),
+            ),
+          if (more > 0)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 5),
+              child: Text('+$more not listed',
+                  style: const TextStyle(color: _gMuted, fontSize: 12)),
+            ),
+        ],
+      ),
+      if (self.isNotEmpty && !calls.contains(self))
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Text(
+              more > 0
+                  ? 'You are not in the part of the list that fitted'
+                  : 'It does not hear you — the path runs one way',
+              style: const TextStyle(color: _gMuted, fontSize: 11)),
+        ),
     ];
   }
 

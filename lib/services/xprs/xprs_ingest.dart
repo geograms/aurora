@@ -23,11 +23,15 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:hex/hex.dart';
+
+import '../../util/nostr_crypto.dart';
 import '../log_service.dart';
 import '../preferences_service.dart';
 import 'xprs_archive.dart';
 import 'xprs_monitor.dart';
 import 'xprs_packet.dart';
+import 'xprs_sig.dart';
 
 class XprsIngest {
   XprsIngest._();
@@ -37,6 +41,12 @@ class XprsIngest {
   /// listen on three radios itself).
   static void Function(XprsPacket p,
       {required String selfBase, required String bearer})? onCommand;
+
+  /// Set by RnsService, which owns the callsign→key map, so a `t:identity`
+  /// heard on any bearer lands in the same place a key learned from an
+  /// announce does. Same reasoning as [XprsArchive.keyResolver]: this file
+  /// stays free of the node.
+  static void Function(String callsign, String pubkeyHex)? onIdentity;
 
   /// Packets refused off the Reticulum lane for want of a declaration —
   /// the observable that says the admission rule is alive.
@@ -77,6 +87,13 @@ class XprsIngest {
     // arrived over a hub: the author is saying where their mail may rest.
     if (p.type == 'mailbox') XprsArchive.instance.recordMailboxDecl(p);
 
+    // `t:identity` (section 9.3) is a station publishing the key its callsign
+    // signs with, and it is the only way to LEARN that binding off the air.
+    // Without it every signature from a station we have never met stays
+    // `unverified` — not because it is bad, but because nothing here could
+    // check it.
+    if (p.type == 'identity') _bindIdentity(from, p);
+
     if (_archiveOn) {
       XprsArchive.instance
           .admit(p, bearer: _archiveBearer(bearer), rssi: rssi);
@@ -87,6 +104,53 @@ class XprsIngest {
           selfBase: _base(selfCallsign), bearer: _archiveBearer(bearer));
     } catch (e) {
       LogService.instance.add('XPRS: command handling failed: $e');
+    }
+  }
+
+  /// Identity packets verified in the current minute, and when that started.
+  /// Verification is a curve operation and this runs on the receive path, so a
+  /// station cannot be made to spend the afternoon checking invented callsigns.
+  static int _idChecks = 0;
+  static int _idWindowMs = 0;
+  static const int _idChecksPerMinute = 20;
+
+  /// Record a `k:npub…` against the callsign that signed for it.
+  ///
+  /// **Verified against the key it carries**, which is the whole point: a
+  /// station saying "this is my key" must prove it holds that key, and it can,
+  /// because the packet is signed with it. An unsigned or badly signed identity
+  /// binds nothing.
+  ///
+  /// That still does not prove the CALLSIGN is theirs — nothing on an open
+  /// bearer can — so the binding is [first-wins]: a later packet naming the
+  /// same callsign with a different key is ignored. Overwriting would let
+  /// anyone re-point a callsign by shouting last, and since the archive DROPS
+  /// packets whose signature fails against the key it holds, that is enough to
+  /// make a station's genuine traffic look forged and be thrown away.
+  static void _bindIdentity(String callsign, XprsPacket p) {
+    final hook = onIdentity;
+    final npub = p['k'];
+    if (hook == null || npub == null || !npub.startsWith('npub1')) return;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _idWindowMs > 60000) {
+      _idWindowMs = now;
+      _idChecks = 0;
+    }
+    if (++_idChecks > _idChecksPerMinute) return;
+
+    try {
+      final hex = NostrCrypto.decodeNpub(npub);
+      if (hex.length != 64) return;
+      final pub = Uint8List.fromList(HEX.decode(hex));
+      if (xprsVerify(p, pub) != XprsSigState.verified) {
+        LogService.instance
+            .add('XPRS: identity from $callsign does not sign for its own key');
+        return;
+      }
+      hook(callsign, hex);
+    } catch (_) {
+      // A malformed npub is a malformed field, and section 4 says skip it.
     }
   }
 

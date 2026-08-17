@@ -69,6 +69,8 @@
 #include "xprslan.h"
 #include "rns_tcp.h"
 #include "xprssig.h"
+#include "bech32.h"
+#include <ctype.h>
 #include "nostr_keys.h"
 #include "esp_netif_sntp.h"
 
@@ -173,7 +175,15 @@ static uint32_t now_sec(void);
  * display is a reach dashboard now, never message content). */
 static void handle_aprs(const uint8_t *payload, int len, int rssi);
 /* iGate: remember a callsign heard over BLE5 (for the APRS-IS filter). */
-static void igate_heard_add(const char *call);
+#define XPRS_BEARER_BLE 1
+#define XPRS_BEARER_LAN 2
+static void igate_heard_add(const char *call, uint8_t bearer);
+static int  xprs_hears_render(uint8_t bearer, char *out, int cap, int *total);
+static bool xprs_verify_sig(const xprs_t *p, const uint8_t pub[32]);
+static void xprs_identity_heard(const xprs_t *p);
+static void xprs_hist_accept(const char *wire, int len, const xprs_t *p,
+                             uint8_t bearer);
+static void xprs_hist_pump(void);
 static void start_scan(void);
 /* Street mesh: beacon TX + ingest + store-and-forward delivery. */
 static void handle_mesh(const uint8_t *payload, int len, int rssi);
@@ -799,7 +809,7 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi)
      * keep ENC1 ciphertext OFF APRS-IS (7-bit air mangles it into
      * "cannot decrypt" garbage on every receiver). */
     if (aurora) {
-        igate_heard_add(from);
+        igate_heard_add(from, XPRS_BEARER_BLE);
         if (to[0] && to[0] != '?' && text[0] != '?' &&
             strncmp(body, "ENC1:", 5) != 0)
             aprsis_uplink(from, to, text);
@@ -1210,6 +1220,35 @@ static void heartbeat_task(void *arg)
 
 static void xprs_from_lan(const char *wire, int len, uint32_t ip)
 {
+    /* Who just spoke on the wire. §10.6.3 admits only DIRECTLY heard stations
+     * to a `hears:` list, and a relayed copy carries the originator in `f:`
+     * exactly like a direct one — so a packet wearing `via:` reached us through
+     * somebody else and says nothing about what this station can hear.
+     *
+     * Without this the iGate was deaf to the LAN by construction: a desktop
+     * could broadcast all day and never appear in the gateway's heard list,
+     * because only the Bluetooth path ever fed it. */
+    {
+        static xprs_t hp;                   /* the LAN task's own, not a stack */
+        char from[16], type[16];
+        if (xprs_parse(wire, len, &hp)) {
+            bool direct = xprs_get(&hp, "via", NULL) == NULL;
+            if (direct && xprs_get_str(&hp, "f", from, sizeof from) &&
+                strcasecmp(from, s_aprs_call) != 0) {
+                igate_heard_add(from, XPRS_BEARER_LAN);
+            }
+            /* The LAN is a bearer like the radio, so an ask arriving on it is
+             * answered on it — a reply aired somewhere else is a reply the
+             * requester never hears. */
+            xprs_type(&hp, type, sizeof type);
+            if (strcmp(type, "command") == 0) {
+                xprs_hist_accept(wire, len, &hp, XPRS_BEARER_LAN);
+            } else if (strcmp(type, "identity") == 0) {
+                xprs_identity_heard(&hp);
+            }
+        }
+    }
+
     if (s_xprs_index) {
         /* rssi 0 — the store's "unknown", which a network genuinely is. */
         xprsindex_add(s_xprs_index, wire, len, 0, false, (uint32_t)time(NULL));
@@ -1408,9 +1447,462 @@ static void xprs_service_air(void)
 static int xprs_lan_beacon(char *out, int cap)
 {
     if (!s_aprs_call[0]) return 0;
-    int n = snprintf(out, (size_t)cap, "t:observation f:%s link:lan peers:%d",
-                     s_aprs_call, xprslan_peer_count(600));
+    int n = snprintf(out, (size_t)cap, "t:observation f:%s link:lan",
+                     s_aprs_call);
+    if (n <= 0 || n >= cap) return 0;
+
+    /* `peers:` used to be a count of distinct source ADDRESSES, which is a
+     * different quantity wearing the same name: §10.6.4 defines it as how many
+     * stations this one can reach directly, and says `hears:` lists the ones
+     * that fitted. Both now come from the same table, so they cannot disagree. */
+    int total = 0;
+    char hears[XPRS_MAX_WIRE];
+    int room = XPRS_MAX_WIRE - n
+             - 24                                    /* " peers:NN hears:" + slack */
+             - (s_xprs_can_sign ? 5 + XPRSSIG_B85_LEN : 0);
+    if (room > (int)sizeof hears) room = (int)sizeof hears;
+    int hn = (room > 1) ? xprs_hears_render(XPRS_BEARER_LAN, hears, room, &total)
+                        : 0;
+
+    n += snprintf(out + n, (size_t)(cap - n), " peers:%d", total);
+    if (hn > 0 && n < cap) {
+        n += snprintf(out + n, (size_t)(cap - n), " hears:%s", hears);
+    }
+    if (n <= 0 || n >= cap) return 0;
     return xprs_sign_wire(out, n, cap);
+}
+
+/* ---- serving cmd:history (XPRS.md sections 25.2.1 and 36) ---------------- */
+
+/*
+ * The dongle advertises `serve:index,history,mailbox` every ten minutes. This
+ * is the half that makes the claim true over the air: until now `t:command` was
+ * not even one of the types the receive path dispatched on, so the only way to
+ * ask this indexer anything was HTTP — which is a bench convenience, not the
+ * protocol.
+ *
+ * The shape is section 25.2.1's replay and it matches the Dart responder
+ * (lib/services/xprs/xprs_history_server.dart) deliberately, down to the page
+ * size and the budgets, so a station cannot tell the two apart by behaviour:
+ *
+ *   t:result f:<us> d:<asker> ts:... r:<command id> code:202     "coming"
+ *   <the stored packets, verbatim — the author's bytes, the author's sig>
+ *   t:result ... code:200            (or 206 when more is held)
+ *
+ * and 404 for an empty window, 429 over budget. One reply packet per relay-task
+ * tick, which is 1500 ms — the same pacing, and free, because that task already
+ * wakes on exactly that period.
+ */
+#define XPRS_HIST_PAGE          12
+#define XPRS_HIST_KNOWN_PH       6      /* replays/hour for a station we know */
+#define XPRS_HIST_STRANGER_PH    2
+#define XPRS_HIST_GLOBAL_PH     12
+#define XPRS_ASK_RING           16
+#define XPRS_ANSWERED_RING       8
+
+/* Callsign → signing key, learned from the `t:identity` packets other stations
+ * air (section 9.3). Small on purpose: this exists to tell a station we have
+ * met from a stranger when spending airtime, not to be a directory. */
+#define XPRS_PEERKEYS_MAX        4
+static struct { char call[10]; uint8_t pub[32]; } s_peer_keys[XPRS_PEERKEYS_MAX];
+static int s_peer_keys_n;
+
+static const uint8_t *xprs_peer_key(const char *call)
+{
+    for (int i = 0; i < s_peer_keys_n; i++) {
+        if (strcasecmp(s_peer_keys[i].call, call) == 0) return s_peer_keys[i].pub;
+    }
+    return NULL;
+}
+
+/* Remember a binding the FIRST time we hear it and never overwrite it.
+ * A callsign on an open bearer is not proof of anything, so a later packet
+ * claiming the same callsign with a different key is somebody trying to become
+ * that station — and since a wrong key turns every genuine packet from them
+ * into a forgery, last-writer-wins would be a way to silence a station by
+ * shouting. */
+static void xprs_peer_key_learn(const char *call, const uint8_t pub[32])
+{
+    if (!call || !call[0] || xprs_peer_key(call)) return;
+    if (s_peer_keys_n >= XPRS_PEERKEYS_MAX) return;
+    strncpy(s_peer_keys[s_peer_keys_n].call, call,
+            sizeof s_peer_keys[0].call - 1);
+    s_peer_keys[s_peer_keys_n].call[sizeof s_peer_keys[0].call - 1] = 0;
+    memcpy(s_peer_keys[s_peer_keys_n].pub, pub, 32);
+    s_peer_keys_n++;
+    ESP_LOGI(TAG, "XPRS: learned %s signs with %02x%02x%02x%02x...",
+             call, pub[0], pub[1], pub[2], pub[3]);
+}
+
+/* A heard `t:identity f:<call> ... k:npub1...` (section 9.3), verified against
+ * the very key it carries: a station claiming a key must show it holds it, and
+ * the packet is signed with it, so it can. */
+static void xprs_identity_heard(const xprs_t *p)
+{
+    char call[10], npub[80];
+    if (!xprs_get_str(p, "f", call, sizeof call)) return;
+    if (!xprs_get_str(p, "k", npub, sizeof npub)) return;
+    if (strncmp(npub, "npub1", 5) != 0) return;
+    if (xprs_peer_key(call)) return;          /* first speaker wins; cheap exit */
+
+    char hrp[8];
+    uint8_t data[64];
+    size_t dlen = sizeof data;
+    if (bech32_decode(npub, hrp, data, &dlen) != ESP_OK) return;
+    if (dlen != 32 || strcmp(hrp, "npub") != 0) return;
+    if (!xprs_verify_sig(p, data)) {
+        ESP_LOGW(TAG, "XPRS: %s does not sign for the key it published", call);
+        return;
+    }
+    xprs_peer_key_learn(call, data);
+}
+
+/* Check `sig:` (section 9.1) against [pub], the signer's 32-byte x-only key.
+ * False for absent, malformed or wrong — a caller deciding whether to spend
+ * airtime wants one answer, and "not proven" is the same as "no". */
+static bool xprs_verify_sig(const xprs_t *p, const uint8_t pub[32])
+{
+    char b85[XPRSSIG_B85_LEN + 1];
+    if (!xprs_get_str(p, "sig", b85, sizeof b85)) return false;
+    if (strlen(b85) != XPRSSIG_B85_LEN) return false;
+
+    uint8_t sig[XPRSSIG_LEN];
+    if (xprssig_b85_decode(b85, XPRSSIG_B85_LEN, sig, sizeof sig) != XPRSSIG_LEN)
+        return false;
+
+    char canon[XPRS_MAX_WIRE + 1];
+    int n = xprs_signed_text(p, canon, sizeof canon);
+    if (n <= 0) return false;
+
+    uint8_t digest[32];
+    sha256((const uint8_t *)canon, (size_t)n, digest);
+    return xprssig_verify(digest, sig, pub);
+}
+
+/*
+ * The replay, in two halves that run on two different processors.
+ *
+ * THE CARD MAY NOT BE TOUCHED FROM A RECEIVE PATH. `docs/esp32.md` says it twice
+ * — "never write from a receive path" and "anything that blocks for
+ * milliseconds must be pinned to core 1" — and it says what happens when you
+ * do: SD work on core 0 took this station from 178 of 182 pings to 1 of 96,
+ * with `wifi:m f null` as the symptom. A `t:command` arrives on the NimBLE host
+ * task (priority 21, core 0, the same processor as WiFi and the controller) or
+ * on the LAN bearer's task, and answering it inline put a FatFs query on both.
+ *
+ * So the receive task does only what is free: check the packet is a history ask
+ * addressed to us, that we have not already answered it, and that the asker is
+ * inside its budget. Then it copies the ask verbatim and sets a flag. Everything
+ * with a cost — the signature check, the query, the signing of every reply — runs
+ * on the relay task, which is pinned to core 1.
+ *
+ * The page holds record INDEXES, not wires: four bytes each rather than a
+ * quarter of a kilobyte, read back at air time.
+ */
+enum { HIST_IDLE = 0, HIST_PENDING, HIST_REPLAY };
+
+static struct {
+    volatile uint8_t state;               /* the only cross-task handshake */
+    uint8_t  bearer;
+    char     ask[XPRS_MAX_WIRE + 1];      /* the command, verbatim, re-parsed on core 1 */
+    int      n, i;
+    bool     more;
+    char     to[10];
+    char     cmdid[XPRS_ID_LEN];
+    uint32_t rec[XPRS_HIST_PAGE];
+} s_hist;
+
+/* A refusal owed to somebody. Composing one means signing it, which is crypto,
+ * which belongs on core 1 with everything else — so even saying "no" is queued
+ * rather than answered where the packet landed. */
+static struct {
+    volatile bool due;
+    uint8_t bearer;
+    int     code;
+    char    to[10];
+    char    cmdid[XPRS_ID_LEN];
+} s_hist_refuse;
+
+static struct { char call[10]; uint32_t t; } s_hist_asks[XPRS_ASK_RING];
+static struct { uint32_t id; uint32_t t; } s_hist_answered[XPRS_ANSWERED_RING];
+
+/* Air one packet on the bearer the ask arrived on. A reply that goes out
+ * somewhere else is a reply the requester never hears. */
+static void xprs_air_on(const char *wire, int len, uint8_t bearer)
+{
+    if (bearer == XPRS_BEARER_LAN) xprslan_send(wire, len);
+    else                           xprs_air(wire, len, SUBTYPE_XPRS);
+}
+
+static void xprs_air_result(const char *to, const char *cmdid, int code,
+                            uint8_t bearer)
+{
+    char wire[XPRS_MAX_WIRE + 1], ts[24];
+    xprs_time_field(ts, sizeof ts);
+    int n = snprintf(wire, sizeof wire, "t:result f:%s d:%s %s r:%s code:%d",
+                     s_aprs_call, to, ts, cmdid, code);
+    if (n <= 0 || n > XPRS_MAX_WIRE) return;
+    n = xprs_sign_wire(wire, n, (int)sizeof wire);
+    xprs_air_on(wire, n, bearer);
+}
+
+/* Does [call] appear in [wire] as a whole token?
+ *
+ * Section 36.6: `only:` matches a callsign WHEREVER the packet carries it — as
+ * author, as addressee, or inside a list field (`hears:`, `hold:`, `via:`,
+ * `grant:`). That one reading rule is what makes "where can X be reached" an
+ * askable question with no new vocabulary, so the match is over the whole
+ * packet rather than over two named fields. Bounded by non-alphanumerics so
+ * X1BO does not match X1BOA3. */
+static bool xprs_wire_mentions(const char *wire, int len, const char *call)
+{
+    int cl = (int)strlen(call);
+    if (cl <= 0) return false;
+    for (int i = 0; i + cl <= len; i++) {
+        if (strncasecmp(wire + i, call, (size_t)cl) != 0) continue;
+        char before = (i == 0) ? 0 : wire[i - 1];
+        char after  = (i + cl >= len) ? 0 : wire[i + cl];
+        bool lb = !(isalnum((unsigned char)before) || before == '-');
+        bool rb = !(isalnum((unsigned char)after)  || after  == '-');
+        if (lb && rb) return true;
+    }
+    return false;
+}
+
+/* How many records a single ask may look at. An `only:` that matches nothing
+ * otherwise walks the store until the query's own limit or the segments run
+ * out, and every one of those is a read from a card the radios are waiting on. */
+#define XPRS_HIST_SCAN_MAX 200
+
+struct hist_ctx { const char *only; int n; int seen; bool more; bool capped; };
+
+static bool hist_emit(const xprsidx_rec_t *rec, void *vctx)
+{
+    struct hist_ctx *c = (struct hist_ctx *)vctx;
+    if (++c->seen > XPRS_HIST_SCAN_MAX) { c->capped = true; return false; }
+    if (c->only && c->only[0] &&
+        !xprs_wire_mentions(rec->wire, rec->len, c->only)) {
+        return true;                       /* filtered, keep looking */
+    }
+    if (c->n >= XPRS_HIST_PAGE) { c->more = true; return false; }
+    s_hist.rec[c->n] = rec->index;
+    c->n++;
+    return true;
+}
+
+/* Replays this station has already answered, so the requester's advert re-airing
+ * the identical wire for its whole TTL gets one answer and then quiet. */
+static bool xprs_hist_already_answered(uint32_t id, uint32_t t)
+{
+    int slot = 0;
+    for (int i = 0; i < XPRS_ANSWERED_RING; i++) {
+        if (s_hist_answered[i].id == id && t - s_hist_answered[i].t < 300) {
+            return true;
+        }
+        if (s_hist_answered[i].t < s_hist_answered[slot].t) slot = i;
+    }
+    s_hist_answered[slot].id = id;
+    s_hist_answered[slot].t = t;
+    return false;
+}
+
+/* Section 31.3/31.4: a stranger gets less of the channel than a station we have
+ * met, and everybody together gets a ceiling. Over it is 429, out loud, because
+ * silence is indistinguishable from a dead indexer. */
+static bool xprs_hist_budget_allows(const char *call, uint32_t t)
+{
+    int global = 0, mine = 0;
+    for (int i = 0; i < XPRS_ASK_RING; i++) {
+        if (!s_hist_asks[i].t || t - s_hist_asks[i].t > 3600) continue;
+        global++;
+        if (strcasecmp(s_hist_asks[i].call, call) == 0) mine++;
+    }
+    if (global >= XPRS_HIST_GLOBAL_PH) return false;
+    int cap = xprs_peer_key(call) ? XPRS_HIST_KNOWN_PH : XPRS_HIST_STRANGER_PH;
+    return mine < cap;
+}
+
+static void xprs_hist_record_ask(const char *call, uint32_t t)
+{
+    int slot = 0;
+    for (int i = 0; i < XPRS_ASK_RING; i++) {
+        if (!s_hist_asks[i].t) { slot = i; break; }
+        if (s_hist_asks[i].t < s_hist_asks[slot].t) slot = i;
+    }
+    strncpy(s_hist_asks[slot].call, call, sizeof s_hist_asks[0].call - 1);
+    s_hist_asks[slot].call[sizeof s_hist_asks[0].call - 1] = 0;
+    s_hist_asks[slot].t = t;
+}
+
+/* ---- the receive half: free work only, on whatever task heard the packet --- */
+
+/* Queue a refusal for the relay task to sign and air. */
+static void xprs_hist_refuse(const char *to, const char *cmdid, int code,
+                             uint8_t bearer)
+{
+    if (s_hist_refuse.due) return;         /* one owed at a time is enough */
+    s_hist_refuse.bearer = bearer;
+    s_hist_refuse.code = code;
+    snprintf(s_hist_refuse.to, sizeof s_hist_refuse.to, "%s", to);
+    memcpy(s_hist_refuse.cmdid, cmdid, XPRS_ID_LEN);
+    s_hist_refuse.due = true;
+}
+
+/*
+ * One `t:command cmd:history` addressed to us, as seen by the task that heard
+ * it. Nothing here opens a file, signs anything, or blocks: it decides whether
+ * the ask is ours to answer and hands it to core 1.
+ */
+static void xprs_hist_accept(const char *wire, int len, const xprs_t *p,
+                             uint8_t bearer)
+{
+    if (!s_xprs_index || !s_aprs_call[0]) return;
+    if (len <= 0 || len > XPRS_MAX_WIRE) return;
+
+    char cmd[16], to[10], from[10];
+    if (!xprs_get_str(p, "cmd", cmd, sizeof cmd) ||
+        strcmp(cmd, "history") != 0) return;
+    /* Addressed to US. A history ask with no `d:` is addressed to the whole
+     * street, and every indexer on it answering at once is exactly the storm
+     * section 13.2.1 exists to prevent. */
+    if (!xprs_get_str(p, "d", to, sizeof to) ||
+        strcasecmp(to, s_aprs_call) != 0) return;
+    if (!xprs_get_str(p, "f", from, sizeof from) || !from[0]) return;
+
+    char cmdid[XPRS_ID_LEN];
+    xprs_id(p, cmdid);                     /* a SHA-256 over 250 bytes: cheap */
+    uint32_t t = now_sec();
+    if (xprs_hist_already_answered((uint32_t)strtoul(cmdid, NULL, 16), t)) return;
+
+    if (!xprs_hist_budget_allows(from, t)) {
+        ESP_LOGW(TAG, "XPRS: history for %s refused - over budget (429)", from);
+        xprs_hist_refuse(from, cmdid, 429, bearer);
+        return;
+    }
+    if (s_hist.state != HIST_IDLE) {
+        xprs_hist_refuse(from, cmdid, 429, bearer);
+        return;
+    }
+
+    memcpy(s_hist.ask, wire, (size_t)len);
+    s_hist.ask[len] = 0;
+    s_hist.bearer = bearer;
+    snprintf(s_hist.to, sizeof s_hist.to, "%s", from);
+    memcpy(s_hist.cmdid, cmdid, XPRS_ID_LEN);
+    xprs_hist_record_ask(from, t);
+    /* Last, and after everything it describes: the relay task reads this. */
+    s_hist.state = HIST_PENDING;
+}
+
+/* ---- the core-1 half: the signature, the card, and every reply ------------ */
+
+/* Run the query the pending ask asks for. Returns the number of records found. */
+static int xprs_hist_query(void)
+{
+    xprs_t p;
+    int len = (int)strlen(s_hist.ask);
+    if (!xprs_parse(s_hist.ask, len, &p)) return 0;
+
+    /* A forged command deserves no airtime at all — checked HERE, because a
+     * verify is a curve operation and the receive path is the wrong processor
+     * for one. Unverifiable is not forged: a station whose key we have never
+     * heard is a stranger, and strangers are metered rather than refused. */
+    const uint8_t *key = xprs_peer_key(s_hist.to);
+    if (key && xprs_get(&p, "sig", NULL) && !xprs_verify_sig(&p, key)) {
+        ESP_LOGW(TAG, "XPRS: history ask from %s is forged - ignored", s_hist.to);
+        return -1;
+    }
+
+    char since[24], until[24], only[10];
+    xprsidx_query_t q = {
+        .since_ts = xprs_get_str(&p, "since", since, sizeof since)
+                        ? xprsindex_ts_to_epoch(since, (int)strlen(since)) : 0,
+        .until_ts = xprs_get_str(&p, "until", until, sizeof until)
+                        ? xprsindex_ts_to_epoch(until, (int)strlen(until)) : 0,
+        .type     = -1,
+        .from     = NULL,
+        .asker    = s_hist.to,
+        .limit    = XPRS_HIST_PAGE + 1,
+        .newest_first = true,
+    };
+    struct hist_ctx ctx = {
+        .only = xprs_get_str(&p, "only", only, sizeof only) ? only : NULL,
+        .n = 0, .seen = 0, .more = false, .capped = false,
+    };
+
+    /* Hold the writer off the card for the length of the query and give it
+     * straight back (docs/esp32.md, "the web server belongs there too"). Records
+     * keep arriving into RAM meanwhile, so nothing is lost by the pause. */
+    xprsindex_pause_writes(s_xprs_index, true);
+    xprsindex_query(s_xprs_index, &q, hist_emit, &ctx);
+    xprsindex_pause_writes(s_xprs_index, false);
+
+    if (ctx.capped) {
+        /* Say so. A silent cap reads as "that is everything I hold", which is a
+         * different and untrue answer. */
+        ESP_LOGW(TAG, "XPRS: history for %s stopped at %d records examined",
+                 s_hist.to, XPRS_HIST_SCAN_MAX);
+        ctx.more = true;
+    }
+    s_hist.more = ctx.more;
+    return ctx.n;
+}
+
+/* One step of the replay, called once per relay-task tick (1500 ms) — the same
+ * inter-packet pacing the Dart responder uses, and free here because that task
+ * already wakes on exactly that period. Runs on core 1. */
+static void xprs_hist_pump(void)
+{
+    /* Somebody is waiting to be told no. */
+    if (s_hist_refuse.due) {
+        xprs_air_result(s_hist_refuse.to, s_hist_refuse.cmdid,
+                        s_hist_refuse.code, s_hist_refuse.bearer);
+        s_hist_refuse.due = false;
+        return;
+    }
+
+    if (s_hist.state == HIST_PENDING) {
+        int n = xprs_hist_query();
+        if (n < 0) {                        /* forged: no reply, no airtime */
+            s_hist.state = HIST_IDLE;
+            return;
+        }
+        if (n == 0) {
+            ESP_LOGI(TAG, "XPRS: history for %s - nothing in that window (404)",
+                     s_hist.to);
+            xprs_air_result(s_hist.to, s_hist.cmdid, 404, s_hist.bearer);
+            s_hist.state = HIST_IDLE;
+            return;
+        }
+        s_hist.n = n;
+        s_hist.i = 0;
+        s_hist.state = HIST_REPLAY;
+        xprs_air_result(s_hist.to, s_hist.cmdid, 202, s_hist.bearer);
+        ESP_LOGI(TAG, "XPRS: history for %s - %d packet%s%s", s_hist.to, n,
+                 n == 1 ? "" : "s", s_hist.more ? ", more held" : "");
+        return;
+    }
+
+    if (s_hist.state != HIST_REPLAY) return;
+
+    if (s_hist.i < s_hist.n) {
+        /* Read it back now and air it byte for byte: the author's packet and
+         * the author's signature (sections 25.2.1 and 36.2). Not re-signed, not
+         * re-framed — a replay that rewrote anything would invalidate the very
+         * thing it was replaying.
+         *
+         * On the STACK, not in BSS: every static byte is a byte the heap does
+         * not have, and this task's 8 KB is sized for signing already. */
+        xprsidx_rec_t rec;
+        uint32_t want = s_hist.rec[s_hist.i++];
+        if (xprsindex_get(s_xprs_index, want, &rec) && rec.len > 0) {
+            xprs_air_on(rec.wire, rec.len, s_hist.bearer);
+        }
+        return;
+    }
+    s_hist.state = HIST_IDLE;
+    xprs_air_result(s_hist.to, s_hist.cmdid, s_hist.more ? 206 : 200,
+                    s_hist.bearer);
 }
 
 static void handle_xprs(const uint8_t *payload, int len, int rssi,
@@ -1484,11 +1976,19 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
 
     /* The sender was just heard: deliver anything parked for it, and feed
      * the APRS-IS filter the same way the compact path does. */
-    igate_heard_add(from);
+    igate_heard_add(from, XPRS_BEARER_BLE);
     if (s_mesh_up) mesh_deliver_pending(from);
 
     /* ping: answer when it is for us or for anyone (§11.6). Protocol
      * machinery — never parked, never relayed (§6.5.1 bottom row). */
+    if (strcmp(type, "command") == 0) {
+        xprs_hist_accept((const char *)buf, len, &p, XPRS_BEARER_BLE);
+        return;
+    }
+    if (strcmp(type, "identity") == 0) {
+        xprs_identity_heard(&p);
+        return;
+    }
     if (strcmp(type, "ping") == 0) {
         if (!to[0] || strcasecmp(to, s_aprs_call) == 0) xprs_pong(from, rssi);
         return;
@@ -1576,12 +2076,30 @@ static void handle_xprs(const uint8_t *payload, int len, int rssi,
  * the recipient to dial a custody session. Zero-valued fields are omitted. */
 static void xprs_beacon_air(void)
 {
-    char wire[160];
+    /* 248 is the ceiling build_ad() will accept in one AD (254 minus its own
+     * six-byte header), and a wire longer than that is aired NOWHERE — the
+     * builder returns 0 and the beacon disappears without a word. */
+    char wire[249];
     int n = snprintf(wire, sizeof wire, "t:observation f:%s link:ble",
                      s_aprs_call[0] ? s_aprs_call : "TDONGLE");
-    int peers = blemesh_neighbor_count();
+    /* Who we hear on THIS radio, and how many that is in full (§10.6.4). The
+     * mesh neighbour count is a different table (DV route beacons, subtype
+     * 0x4D) and a station can be in one and not the other, so `peers:` comes
+     * from the same place `hears:` does or the two contradict each other. */
+    int total = 0;
+    char hears[120];
+    int room = (int)sizeof wire - n
+             - 24
+             - (s_xprs_can_sign ? 5 + XPRSSIG_B85_LEN : 0)
+             - 48;                    /* uptime:/lifetime:/mail: still to come */
+    if (room > (int)sizeof hears) room = (int)sizeof hears;
+    int hn = (room > 1) ? xprs_hears_render(XPRS_BEARER_BLE, hears, room, &total)
+                        : 0;
+    int peers = total > 0 ? total : blemesh_neighbor_count();
     if (peers > 0 && n < (int)sizeof wire)
         n += snprintf(wire + n, sizeof wire - n, " peers:%d", peers);
+    if (hn > 0 && n < (int)sizeof wire)
+        n += snprintf(wire + n, sizeof wire - n, " hears:%s", hears);
     int mail = blemesh_scf_count();
     if (mail > 0 && n < (int)sizeof wire)
         n += snprintf(wire + n, sizeof wire - n, " mail:%d", mail);
@@ -1725,6 +2243,11 @@ static void relay_task(void *arg)
             xprs_identity_air();
             xprs_service_air();
         }
+
+        /* One packet of a cmd:history replay per tick — 1500 ms between
+         * packets, which is the pacing section 31.4 asks for and the period
+         * this loop already runs at. */
+        xprs_hist_pump();
 
         if (s_hub_announce_pending) {
             s_hub_announce_pending = false;
@@ -2019,7 +2542,25 @@ static void on_sync(void)
     gatt_mesh_start(s_aprs_call[0] ? s_aprs_call : "TDONGLE", s_own_addr_type);
     /* relay_task owns ext-adv instance 0 (own announce + relayed packets). It has
      * a generous stack because Ed25519 signing for our own announce is heavy. */
-    xTaskCreate(relay_task, "rns_relay", 8192, NULL, 5, NULL);
+    /* CORE 1, like everything else that blocks. This task signs with secp256k1
+     * every ten minutes and now reads the card for every packet of a
+     * cmd:history replay, and docs/esp32.md puts both on the other processor:
+     * core 0 carries the BLE controller, the NimBLE host, WiFi and app_main, and
+     * SD work there took this station from 178 of 182 pings to 1 of 96. Pinning
+     * an existing task moves work OFF the radio's processor; adding a new one
+     * would spend 8 KB of a heap that has none, which is its own documented way
+     * of taking the station off the air.
+     *
+     * CHECK IT. This returned pdFAIL once, for want of heap, and the silence
+     * cost an afternoon: no relay task means no beacons, no service
+     * announcements and no replay, while every other task carried on and the
+     * board looked healthy from the outside. */
+    if (xTaskCreatePinnedToCore(relay_task, "rns_relay", 8192, NULL, 5, NULL, 1)
+        != pdPASS) {
+        ESP_LOGE(TAG, "relay task did NOT start (heap %u) - this station will "
+                      "not beacon, announce or answer",
+                 (unsigned)esp_get_free_heap_size());
+    }
 }
 
 static void on_reset(int reason) { ESP_LOGW(TAG, "nimble reset, reason=%d", reason); }
@@ -2035,14 +2576,26 @@ static void host_task(void *param)
 
 static char s_aprs_call[10];     /* station callsign (X3xxxx) used with APRS-IS */
 
-/* Callsigns heard over BLE5 APRS — the iGate filters APRS-IS for traffic to
- * these (and relays such traffic back down). Touched by the NimBLE host task
- * (igate_heard_add) and the aprsis task (igate_get_heard) → mutex-guarded. */
+/* Callsigns heard on this station's own radios — the iGate filters APRS-IS for
+ * traffic to these (and relays such traffic back down), and it is also what
+ * `hears:` publishes (§10.6.3). Touched by the NimBLE host task
+ * (igate_heard_add) and the aprsis task (igate_get_heard) → mutex-guarded.
+ *
+ * The last-heard time is kept PER BEARER, not once. §10.6.1 is explicit that a
+ * reading belongs to the bearer it names: a `link:lan` beacon claiming to hear
+ * a station that only ever spoke over Bluetooth would be a false statement
+ * about the wire, and the station on the other end would draw a map from it.
+ * `t` stays "heard on anything", which is the question the APRS-IS filter asks. */
 #define IG_HEARD_MAX 24
-static struct { char call[8]; uint32_t t; } s_ig_heard[IG_HEARD_MAX];
+static struct {
+    char     call[8];
+    uint32_t t;          /* heard on ANY local bearer */
+    uint32_t t_ble;
+    uint32_t t_lan;
+} s_ig_heard[IG_HEARD_MAX];
 static SemaphoreHandle_t s_ig_heard_mtx;
 
-static void igate_heard_add(const char *call)
+static void igate_heard_add(const char *call, uint8_t bearer)
 {
     if (!s_ig_heard_mtx || !call) return;
     char c[8]; int n = 0;                     /* normalise: upper, strip -SSID */
@@ -2062,10 +2615,86 @@ static void igate_heard_add(const char *call)
         if (s_ig_heard[i].t < s_ig_heard[oldest].t) oldest = i;
     }
     if (slot < 0) slot = oldest;
+    if (strcmp(s_ig_heard[slot].call, c) != 0) {
+        /* A new tenant of this slot inherits none of the old one's history. */
+        s_ig_heard[slot].t_ble = 0;
+        s_ig_heard[slot].t_lan = 0;
+    }
     strncpy(s_ig_heard[slot].call, c, sizeof s_ig_heard[slot].call - 1);
     s_ig_heard[slot].call[sizeof s_ig_heard[slot].call - 1] = 0;
-    s_ig_heard[slot].t = t ? t : 1;
+    if (!t) t = 1;
+    s_ig_heard[slot].t = t;
+    if (bearer == XPRS_BEARER_BLE) s_ig_heard[slot].t_ble = t;
+    else if (bearer == XPRS_BEARER_LAN) s_ig_heard[slot].t_lan = t;
     xSemaphoreGive(s_ig_heard_mtx);
+}
+
+/* How long a station stays in `hears:` without saying anything. Long enough to
+ * span the slowest beacon on either bearer (the LAN's is 300 s), short enough
+ * that the claim is about now. */
+#define XPRS_HEARS_TTL_SEC 600
+
+/* Who this station hears DIRECTLY on [bearer], most recent first — the value of
+ * `hears:` (§10.6.3), with no key and no trailing comma.
+ *
+ * The iGate's heard ring is exactly the right table to build this from: every
+ * entry got there because a packet arrived on one of our own radios, so
+ * "directly heard" holds by construction rather than by a rule somebody has to
+ * remember. It is also, precisely, what the gateway itself believes about who
+ * is on the air here — which is the thing a station asking "can you reach X"
+ * wants to know.
+ *
+ * Writes as many callsigns as fit in [cap] and reports the FULL fresh count in
+ * [total]: §10.6.4 makes `peers:` the true total even when the list is cut,
+ * because without it a short list cannot be told from a small network.
+ */
+static int xprs_hears_render(uint8_t bearer, char *out, int cap, int *total)
+{
+    if (total) *total = 0;
+    if (!out || cap <= 0) return 0;
+    out[0] = 0;
+    if (!s_ig_heard_mtx) return 0;
+
+    typedef struct { char call[8]; uint32_t t; } heard_t;
+    heard_t snap[IG_HEARD_MAX];
+    int n = 0;
+    uint32_t now = now_sec();
+
+    xSemaphoreTake(s_ig_heard_mtx, portMAX_DELAY);
+    for (int i = 0; i < IG_HEARD_MAX; i++) {
+        uint32_t t = (bearer == XPRS_BEARER_LAN) ? s_ig_heard[i].t_lan
+                                                 : s_ig_heard[i].t_ble;
+        if (!t || (now - t) >= XPRS_HEARS_TTL_SEC) continue;
+        memcpy(snap[n].call, s_ig_heard[i].call, sizeof snap[n].call);
+        snap[n].t = t;
+        n++;
+    }
+    xSemaphoreGive(s_ig_heard_mtx);
+
+    if (total) *total = n;
+    if (n == 0) return 0;
+
+    /* Most relevant first (§10.6.3), and for a gateway relevant means most
+     * recently heard: a station that spoke a minute ago is likelier to answer
+     * than one that spoke nine. Insertion sort — n is at most IG_HEARD_MAX. */
+    for (int i = 1; i < n; i++) {
+        for (int j = i; j > 0 && snap[j].t > snap[j - 1].t; j--) {
+            heard_t tmp = snap[j];
+            snap[j] = snap[j - 1];
+            snap[j - 1] = tmp;
+        }
+    }
+
+    int len = 0;
+    for (int i = 0; i < n; i++) {
+        int cl = (int)strlen(snap[i].call);
+        if (len + (len ? 1 : 0) + cl >= cap) break;   /* keep room for the NUL */
+        if (len) out[len++] = ',';
+        memcpy(out + len, snap[i].call, (size_t)cl);
+        len += cl;
+        out[len] = 0;
+    }
+    return len;
 }
 
 /* aprsis hook: fill calls[][8] with up to [max] callsigns heard within [age]. */

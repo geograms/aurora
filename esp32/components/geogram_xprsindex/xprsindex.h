@@ -174,6 +174,27 @@ size_t xprsindex_query(xprsidx_t *st, const xprsidx_query_t *q,
 void xprsindex_stats(xprsidx_t *st, xprsidx_stats_t *out);
 
 /**
+ * `ts:` (`YYYY-MM-DD_hh:mm:ss`, section 4.3) as epoch seconds, or 0 when it is
+ * not one. Public because a `cmd:history` carries `since:`/`until:` in exactly
+ * that form and has to turn them into the same numbers this index stores —
+ * a second parser would be a second set of off-by-one bugs.
+ */
+uint32_t xprsindex_ts_to_epoch(const char *ts, int len);
+
+/**
+ * Read one record by its index.
+ *
+ * For a caller that has already chosen what it wants and only needs the bytes
+ * back later — a paced `cmd:history` replay holds a page of INDEXES (four bytes
+ * each) rather than a page of wires (a quarter of a kilobyte each), which on a
+ * board with about thirteen kilobytes of free heap is the difference between
+ * working and quietly failing to create a task.
+ *
+ * @return false when the index was never written or the record is unreadable.
+ */
+bool xprsindex_get(xprsidx_t *st, uint32_t index, xprsidx_rec_t *out);
+
+/**
  * @brief Ask the owner whether the card may be touched right now.
  * @return true when the radio is idle and a burst of SD traffic is harmless.
  */

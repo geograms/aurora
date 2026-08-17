@@ -117,11 +117,10 @@ of them:
 
 | Core 0 | Core 1 |
 |---|---|
-| BLE controller (`CONFIG_BT_CTRL_PINNED_TO_CORE 0`) | |
-| NimBLE host (`CONFIG_BT_NIMBLE_PINNED_TO_CORE 0`) | |
-| WiFi task (IDF default) | |
+| BLE controller (`CONFIG_BT_CTRL_PINNED_TO_CORE 0`) | `xprsidx_wr` — the index's writer |
+| NimBLE host (`CONFIG_BT_NIMBLE_PINNED_TO_CORE 0`) | `rns_relay` — signing, and the `cmd:history` replay |
+| WiFi task (IDF default) | `rns_tcp`, `heartbeat`, the httpd worker |
 | `app_main` and everything it calls (`CONFIG_ESP_MAIN_TASK_AFFINITY 0x0`) | |
-| | nearly idle |
 
 `xTaskCreate()` leaves a task with no affinity, which is not the same as putting
 it on core 1. **Anything that blocks for milliseconds at a time — SD, FATFS,
@@ -130,6 +129,44 @@ crypto over big buffers — must be pinned to core 1**:
 ```c
 xTaskCreatePinnedToCore(task, "name", stack, arg, prio, NULL, 1);
 ```
+
+### It came back, wearing a different hat
+
+Writing this page down did not stop it happening again. `cmd:history` — an
+indexer answering "what have you heard" — was written to answer inline, on
+whatever task heard the ask. That put a FatFs query on the **NimBLE host task**
+(priority 21, core 0) for a Bluetooth ask and on the LAN bearer's task for a UDP
+one, and it put the replay's record reads on `rns_relay`, which was created with
+a bare `xTaskCreate` and therefore had no affinity at all.
+
+It did not look like this section. It looked like heap: `wifi:m f null`, the
+station associating and dropping a minute later, `ext_adv_set_data rc=519` from
+the controller, and a low-water mark of **756 bytes**. It was diagnosed as heap
+and "fixed" as heap, twice, before anyone re-read this page.
+
+What it actually needed was the split this section already prescribes — the
+receive task decides *whether* to answer (parse, dedupe, budget: all RAM), and a
+core-1 task does the query, the signature and every reply — plus one line
+turning `xTaskCreate` into `xTaskCreatePinnedToCore(..., 1)`.
+
+| | Before | After |
+|---|---|---|
+| Reachability, idle | — | 120 of 120 |
+| Reachability, during a replay | station dropped off | **120 of 120** |
+| Free heap | 8,320 | 26,828 |
+| Low-water mark | **756** | 19,996 |
+| Largest free block | 7,680 | 14,336 |
+
+The heap half of that came from `CONFIG_LV_MEM_SIZE_KILOBYTES` 32 → 16: LVGL's
+pool was the largest single buffer in the build and this display is a 160×80
+text dashboard. Two things are worth taking from it. **A file handle is not
+free** — `CONFIG_FATFS_SECTOR_4096` with `CONFIG_FATFS_PER_FILE_CACHE` means
+every open `FILE` holds a 4 KB sector cache, and a store that keeps three open
+and a query that opens two more wants 16–20 KB it has to borrow from WiFi. And
+**a task that fails to start says nothing**: `xTaskCreate`'s result was ignored,
+so three kilobytes of new static silently meant no relay task at all — no
+beacons, no announcements, no replay, and a board that looked healthy from
+every other angle. Check the result and log it.
 
 ### What this looked like when it was wrong
 
@@ -298,9 +335,10 @@ Consequences that have already bitten:
   segments, with a zone map for time ranges and a tail index per type. Serves
   `/api/xprs` and the GATT `xprs_query`. Section 36 of `XPRS.md` is enforced in
   the store: a packet with `d:` is held and never handed to a third party.
-- `geogram_xprslan` — XPRS as UDP broadcast on the LAN, port 42672. See
-  [lan.md](lan.md). Not Reticulum (that is 42671, `geogram_lanwatch`, listen
-  only) and not the internet.
+- `geogram_xprslan` — XPRS as UDP broadcast on the LAN, port 4242, the same
+  number XPRS answers on over TCP (`XPRS.md` §24.4). See [lan.md](lan.md). Not
+  Reticulum (that is UDP 42671, `geogram_lanwatch`, listen only) and not the
+  internet.
 
 ## Validating on the device
 

@@ -17,6 +17,8 @@ class _FakeBearer implements XprsBearer {
   @override
   final String name;
   @override
+  String get archiveBearer => name;
+  @override
   final bool shortRange;
   final List<String> sent = [];
   @override

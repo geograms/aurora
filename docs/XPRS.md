@@ -4058,6 +4058,21 @@ port it used, and it is treated exactly like the Reticulum lane: never shown
 as an air sighting, and archived only under the mailbox-declaration rule of
 section 36.3.
 
+**The same number carries the broadcast bearer, on UDP.** TCP needs an address,
+and the first station on a network knows nobody's. So `link:lan` (section 10.6)
+is UDP 4242, broadcast, one packet per datagram, verbatim and with no header of
+its own — a station joins by opening a socket and is found without being looked
+for. A packet is at most 250 bytes, so it always fits one datagram and is never
+fragmented; a datagram that does not parse as a packet is dropped.
+
+UDP 4242 and TCP 4242 are different sockets and never collide. Reticulum's own
+LAN discovery is a separate protocol on a separate port and is not this.
+
+Broadcast is heard by everyone at once, so relaying on it obeys section 13.2.1
+without exception: a station that did not compose the packet waits 200–1200 ms,
+and drops its copy if it hears the same section 5 identifier meanwhile. Its own
+packets go out immediately, with no `via:`.
+
 `until:` bounds the claim, and it should be short. A service list is a statement
 about equipment that is switched on, and equipment gets switched off.
 

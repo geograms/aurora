@@ -32,6 +32,10 @@ int      xl_test_aired_len;
 int      xl_test_air_count;
 uint32_t xl_test_random = 12345;
 
+/* The host harness is single-threaded; the lock is a device concern. */
+#define XL_TX_LOCK()   ((void)0)
+#define XL_TX_UNLOCK() ((void)0)
+
 static uint32_t xl_now_ms(void) { return xl_test_now_ms; }
 static uint32_t xl_random(void) { return xl_test_random; }
 static bool xl_air(const char *wire, int len)
@@ -63,6 +67,17 @@ static const char *TAG = "xprslan";
 #define XL_LOGD(fmt, ...) ESP_LOGD(TAG, fmt, ##__VA_ARGS__)
 
 static int s_fd = -1;
+
+/* One writer on the socket at a time.
+ *
+ * Several tasks air on this bearer: the station's own beacons and service
+ * announcements come from the relay task, a reply comes from whichever task
+ * heard the ask, and the bearer's own task drains the re-air queue. They share
+ * one socket, one already-aired ring and one counter, and none of the three
+ * survives two writers. */
+static SemaphoreHandle_t s_tx_mtx;
+#define XL_TX_LOCK()   do { if (s_tx_mtx) xSemaphoreTake(s_tx_mtx, portMAX_DELAY); } while (0)
+#define XL_TX_UNLOCK() do { if (s_tx_mtx) xSemaphoreGive(s_tx_mtx); } while (0)
 
 static uint32_t xl_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 static uint32_t xl_random(void) { return esp_random(); }
@@ -166,11 +181,14 @@ static int xl_pump(uint32_t now)
         if (!s_queue[i].used) continue;
         if ((int32_t)(now - s_queue[i].due_ms) < 0) continue;
         s_queue[i].used = false;
-        if (xl_air(s_queue[i].wire, s_queue[i].len)) {
+        XL_TX_LOCK();
+        bool ok = xl_air(s_queue[i].wire, s_queue[i].len);
+        if (ok) {
             xl_ring_add(s_aired, &s_aired_pos, s_queue[i].id, now);
             s_tx_count++;
-            sent++;
         }
+        XL_TX_UNLOCK();
+        if (ok) sent++;
     }
     return sent;
 }
@@ -281,11 +299,14 @@ bool xprslan_send(const char *wire, int len)
 
     uint32_t now = xl_now_ms();
     char id[XL_ID_LEN];
-    if (xprs_id_of(wire, len, id)) xl_ring_add(s_aired, &s_aired_pos, id, now);
+    bool have_id = xprs_id_of(wire, len, id);   /* a SHA-256: outside the lock */
 
-    if (!xl_air(wire, len)) return false;
-    s_tx_count++;
-    return true;
+    XL_TX_LOCK();
+    if (have_id) xl_ring_add(s_aired, &s_aired_pos, id, now);
+    bool ok = xl_air(wire, len);
+    if (ok) s_tx_count++;
+    XL_TX_UNLOCK();
+    return ok;
 }
 
 void xprslan_set_rx_cb(xprslan_rx_cb_t cb) { s_rx_cb = cb; }
@@ -389,6 +410,8 @@ esp_err_t xprslan_start(const char *callsign)
     }
 
     s_fd = fd;
+    if (!s_tx_mtx) s_tx_mtx = xSemaphoreCreateMutex();
+    if (!s_tx_mtx) { close(fd); s_fd = -1; return ESP_ERR_NO_MEM; }
     s_active = true;
     /* 5 KB. Every datagram costs two SHA-256 derivations (the identifier here,
      * and again when the index decides on it), a BLE re-air and a log line, all

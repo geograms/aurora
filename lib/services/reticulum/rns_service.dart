@@ -144,6 +144,12 @@ class RnsService {
         return null;
       }
     };
+    // And the other direction: a `t:identity` heard on any bearer teaches this
+    // map a key it would otherwise only learn from an announce or a wapp.
+    XprsIngest.onIdentity = (callsign, hex) {
+      recordCallsignPubkey(callsign, hex, onlyIfUnknown: true);
+      LogService.instance.add('XPRS: $callsign signs with ${hex.substring(0, 8)}…');
+    };
   }
   static final RnsService instance = RnsService._();
 
@@ -410,9 +416,16 @@ class RnsService {
   // pubkey beacons (social.identity). Drives the npub shown on Activity posts
   // and the profile screen.
   final Map<String, String> _callPub = {};
-  void recordCallsignPubkey(String callsign, String? key) {
+  /// [onlyIfUnknown] refuses to overwrite a binding we already hold. Used by
+  /// keys learned off an open bearer (`t:identity`, section 9.3), where anybody
+  /// can transmit a callsign that is not theirs: since the archive DROPS
+  /// packets that fail against the key it holds, letting the last speaker win
+  /// would be enough to make a station's genuine traffic look forged.
+  void recordCallsignPubkey(String callsign, String? key,
+      {bool onlyIfUnknown = false}) {
     final c = callsign.trim();
     if (c.isEmpty || key == null || key.isEmpty) return;
+    if (onlyIfUnknown && (_callPub[c]?.isNotEmpty ?? false)) return;
     final hex = FollowSet.toHex(key); // accepts hex / npub / base64url
     if (hex != null) {
       _callPub[c] = hex;
@@ -2356,9 +2369,13 @@ class RnsService {
     // when a station's callsign already labels an RNS node (one device, two
     // protocols); the dongle may still appear twice when its RNS announce
     // label ("tdongle-s3") differs from its XPRS callsign ("X3JS7Y") — two
-    // identities on the wire, honestly shown. A `service:` filter hides them
-    // (a beacon announces no services); `geogramOnly` keeps them (an XPRS
+    // identities on the wire, honestly shown. `geogramOnly` keeps them (an XPRS
     // station is geogram-speaking by definition).
+    //
+    // A `service:` filter used to hide every one of them, on the reasoning that
+    // a beacon announces no services. It does now: `t:service serve:index,…`
+    // (§24) is exactly how an indexer says what it is, so these stations are
+    // filtered on what they claim like anything else.
     if (includeXprs && !localOnly) {
       final mon = XprsMonitor.instance..sweep();
       final knownCalls = <String>{
@@ -2367,7 +2384,11 @@ class RnsService {
               .toUpperCase(),
       }..remove('');
       for (final s in mon.stations.values) {
-        if (service != null && service.isNotEmpty) break;
+        if (service != null &&
+            service.isNotEmpty &&
+            !s.services.contains(service)) {
+          continue;
+        }
         final call = s.callsign.toUpperCase();
         if (knownCalls.contains(call)) continue;
         if (q.isNotEmpty && !call.toLowerCase().contains(q)) continue;
@@ -2376,7 +2397,7 @@ class RnsService {
           'id': id,
           'label': call,
           'kind': 'xprs',
-          'services': const <String>[],
+          'services': s.services,
           'geogram': true,
           'hops': 1,
           // The bearer doubles as the via tag, so the scene colours the orb
@@ -2385,8 +2406,11 @@ class RnsService {
           'relayer': '',
           'meta': {
             'callsign': call,
-            'pubkey': '',
-            'role': '',
+            'pubkey': npubForCallsign(call) ?? '',
+            // The one word the panel reads as a role. An indexer says so in
+            // `serve:` (§36), and that is the whole difference between a
+            // station worth asking for history and a phone that walked past.
+            'role': s.services.contains('index') ? 'indexer' : '',
             'caps': const <String>[],
             'capacity': 0,
             'firstSeen': s.firstMs,
@@ -2394,6 +2418,9 @@ class RnsService {
             'bearer': s.bearer,
             'rssi': s.rssi,
             'packets': s.packets,
+            // What it archives (§36.9) and who it says it hears (§10.6.3).
+            if (s.count != null) 'count': s.count,
+            if (s.hears.isNotEmpty) 'hears': s.hears,
             if (s.peers != null) 'peers': s.peers,
             if (s.mail != null) 'mail': s.mail,
             if (s.uptime != null) 'uptime': s.uptime,

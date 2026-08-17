@@ -131,6 +131,54 @@ const Set<String> kXprsBearers = {
   'other',
 };
 
+/// What a station says it does for other stations (`docs/XPRS.md` section 24,
+/// `serve:`). A fixed set: a word outside it is dropped rather than shown,
+/// because `serve:` is read to decide who to ask for something, and a made-up
+/// word would be a promise nobody defined.
+const Set<String> kXprsServices = {
+  'relay',
+  'mailbox',
+  'internet',
+  'aprs',
+  'nostr',
+  'files',
+  'history',
+  'index',
+  'time',
+  'weather',
+  'wifi',
+  'other',
+};
+
+/// The `serve:` list of a packet, filtered to the words section 24 defines.
+/// Empty when the packet claims nothing.
+List<String> xprsServices(XprsPacket p) {
+  final raw = p['serve'];
+  if (raw == null || raw.isEmpty) return const [];
+  final out = <String>[];
+  for (final w in raw.split(',')) {
+    final s = w.trim().toLowerCase();
+    if (s.isNotEmpty && kXprsServices.contains(s) && !out.contains(s)) {
+      out.add(s);
+    }
+  }
+  return out;
+}
+
+/// The callsigns a station says it hears directly (section 10.6.3). Empty when
+/// it says none — which is not the same as `peers:0`, and the caller keeps the
+/// distinction.
+List<String> xprsHears(XprsPacket p) {
+  final raw = p['hears'];
+  if (raw == null || raw.isEmpty) return const [];
+  final out = <String>[];
+  for (final c in raw.split(',')) {
+    final s = c.trim().toUpperCase();
+    if (s.isNotEmpty && !out.contains(s)) out.add(s);
+  }
+  return out;
+}
+
 /// Build the neighbour half of a discovery beacon (`docs/XPRS.md` section
 /// 10.6.4).
 ///

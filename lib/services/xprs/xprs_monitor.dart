@@ -92,6 +92,25 @@ class XprsStation {
   /// `26h` / `38day`. A claim, not a measurement — shown as said.
   String? uptime;
   String? lifetime;
+
+  /// What it says it does for other stations (section 24, `serve:`). This is
+  /// how an indexer is told from a phone: `index` in here and nowhere else.
+  List<String> services = const [];
+
+  /// An indexer's `count:` — how many callsigns it is archiving (section 36.9).
+  int? count;
+
+  /// Who it says it hears directly (section 10.6.3). Finding our own callsign
+  /// in here is this station telling us, on the air, that it can hear us.
+  List<String> hears = const [];
+
+  /// The last time we heard this station with no `via:` — from its own
+  /// transmitter rather than through a relay.
+  ///
+  /// A relayed copy carries the originator in `f:` exactly like a direct one,
+  /// so without this every "who do I hear" list would quietly include stations
+  /// on the far side of a digipeater, which section 10.6.3 forbids.
+  int lastDirectMs = 0;
 }
 
 class XprsMonitor {
@@ -164,8 +183,34 @@ class XprsMonitor {
     if (p.has('mail')) st.mail = xprsMail(p);
     if (p.has('uptime')) st.uptime = p['uptime'];
     if (p.has('lifetime')) st.lifetime = p['lifetime'];
+    // `serve:`, `count:` and `hears:` follow the same rule: a beacon or a
+    // service advertisement states them, an ordinary message states neither,
+    // and a message must not erase what the advertisement said.
+    if (p.has('serve')) st.services = xprsServices(p);
+    if (p.has('count')) st.count = int.tryParse(p['count'] ?? '');
+    if (p.has('hears')) st.hears = xprsHears(p);
+    // No `via:` means this arrived from the sender's own transmitter.
+    if (!p.has('via')) st.lastDirectMs = now;
 
     revision++;
+  }
+
+  /// The callsigns this station can hear directly, most recent first — what
+  /// `hears:` is for (section 10.6.3).
+  ///
+  /// Directly heard only, so a station known only through a relay is absent;
+  /// and heard within [within], because a list is a claim about now. "Most
+  /// recent first" is this station's idea of relevant, which the format leaves
+  /// to the sender: a desktop on a wire has no signal or contact ratio to rank
+  /// by, so recency is the honest ordering.
+  List<String> directlyHeard({Duration within = staleAfter, int? nowMs}) {
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final fresh = _stations.values
+        .where((s) =>
+            s.lastDirectMs > 0 && now - s.lastDirectMs <= within.inMilliseconds)
+        .toList()
+      ..sort((a, b) => b.lastDirectMs.compareTo(a.lastDirectMs));
+    return fresh.map((s) => s.callsign).toList();
   }
 
   /// Drop stations that have gone quiet. Called before rendering.

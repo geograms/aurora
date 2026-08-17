@@ -56,4 +56,64 @@ void main() {
 
     XprsMonitor.instance.clear();
   });
+
+  test('a station that says serve:index reads as an indexer', () {
+    XprsMonitor.instance.clear();
+    // What the T-Dongle airs every 600 s (docs/device-tdongle.md).
+    final svc = XprsPacket.parse('t:service f:X3WWAJ '
+        'serve:index,history,mailbox count:212 ts:2026-08-17_15:00:00');
+    XprsMonitor.instance
+        .offer(svc!, bearer: 'lan', selfCallsign: 'X1TEST');
+
+    final node = (RnsService.instance.graphSnapshot(includeXprs: true)['nodes']
+            as List)
+        .cast<Map<String, dynamic>>()
+        .firstWhere((n) => n['id'] == 'xprs:X3WWAJ');
+    expect((node['services'] as List), containsAll(['index', 'history']));
+    expect((node['meta'] as Map)['role'], 'indexer',
+        reason: 'serve:index is the whole difference from a passing phone');
+    expect((node['meta'] as Map)['count'], 212);
+
+    // A service filter now SELECTS these stations instead of dropping them.
+    final indexers = (RnsService.instance
+            .graphSnapshot(includeXprs: true, service: 'index')['nodes'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(indexers.any((n) => n['id'] == 'xprs:X3WWAJ'), true);
+    final files = (RnsService.instance
+            .graphSnapshot(includeXprs: true, service: 'files')['nodes'] as List)
+        .cast<Map<String, dynamic>>();
+    expect(files.any((n) => n['id'] == 'xprs:X3WWAJ'), false,
+        reason: 'it never claimed files');
+
+    XprsMonitor.instance.clear();
+  });
+
+  test('hears: carries through to the snapshot, and a relayed copy does not '
+      'count as directly heard', () {
+    XprsMonitor.instance.clear();
+    final beacon = XprsPacket.parse(
+        't:observation f:X3WWAJ link:lan peers:3 hears:X1TEST,X1BOA3');
+    XprsMonitor.instance
+        .offer(beacon!, bearer: 'lan', selfCallsign: 'X1TEST');
+
+    final meta = ((RnsService.instance.graphSnapshot(includeXprs: true)['nodes']
+                as List)
+            .cast<Map<String, dynamic>>()
+            .firstWhere((n) => n['id'] == 'xprs:X3WWAJ')['meta'] as Map);
+    expect(meta['hears'], ['X1TEST', 'X1BOA3'],
+        reason: 'our own callsign in here is the station saying it hears us');
+    expect(meta['peers'], 3);
+
+    // A station known ONLY through a digipeater is not directly heard, so it
+    // must never enter our own hears: list (section 10.6.3).
+    final relayed =
+        XprsPacket.parse('t:observation f:X5FAR1 link:lan via:X3WWAJ');
+    XprsMonitor.instance
+        .offer(relayed!, bearer: 'lan', selfCallsign: 'X1TEST');
+    final direct = XprsMonitor.instance.directlyHeard();
+    expect(direct, contains('X3WWAJ'));
+    expect(direct, isNot(contains('X5FAR1')));
+
+    XprsMonitor.instance.clear();
+  });
 }

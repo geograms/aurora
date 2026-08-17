@@ -12,9 +12,9 @@
  * ── What this is not ────────────────────────────────────────────────────────
  *
  * Not Reticulum and not the internet. No links, no identities, no routing, no
- * gateway. `geogram_lanwatch` listens to Reticulum's LAN discovery on 42671 and
- * is untouched by this; this is a different socket, port and protocol that
- * happens to travel on the same wire.
+ * gateway. `geogram_lanwatch` listens to Reticulum's LAN discovery on UDP 42671
+ * and is untouched by this; that is a different socket and a different protocol
+ * that happens to travel on the same wire.
  *
  * ── The wire ────────────────────────────────────────────────────────────────
  *
@@ -51,8 +51,14 @@ typedef int esp_err_t;      /* the host harness has no ESP-IDF headers */
 extern "C" {
 #endif
 
-/** The XPRS LAN port. Deliberately not 42671, which is Reticulum's. */
-#define XPRSLAN_PORT          42672
+/**
+ * The XPRS LAN port — the same 4242 a station answers XPRS on over TCP (§24.4),
+ * here on UDP. Two different sockets that never collide, and one number to
+ * remember for "this is where XPRS is spoken".
+ *
+ * Reticulum's LAN discovery keeps UDP 42671, which is neither of these.
+ */
+#define XPRSLAN_PORT          4242
 
 /** Longest XPRS packet (docs/XPRS.md §4). */
 #define XPRSLAN_WIRE_MAX      250

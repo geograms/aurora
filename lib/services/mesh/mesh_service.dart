@@ -28,7 +28,10 @@ import '../preferences_service.dart';
 import '../xprs/xprs_archive.dart';
 import '../xprs/xprs_history_server.dart';
 import '../xprs/xprs_ingest.dart';
+import '../xprs/xprs_lan.dart';
+import '../xprs/xprs_monitor.dart';
 import '../xprs/xprs_packet.dart';
+import '../xprs/xprs_sig.dart';
 import '../xprs/xprs_vocab.dart';
 import 'mesh_beacon.dart';
 import 'mesh_custody.dart';
@@ -60,6 +63,7 @@ class MeshService {
   bool _canAdvertise = false;
   bool _running = false;
   Timer? _beaconTimer;
+  Timer? _lanBeaconTimer;
   Timer? _sweepTimer;
   Timer? _triggerTimer;
   bool _powered = false;
@@ -197,6 +201,20 @@ class MeshService {
           .startScan()
           .timeout(const Duration(seconds: 5), onTimeout: () {});
     } catch (_) {}
+
+    // The LAN bearer (docs/lan.md): UDP 4242, broadcast, and the only bearer a
+    // desktop has. Deliberately NOT gated on `canAdvertise`, which is a
+    // statement about the BLE radio — a machine that cannot beacon over
+    // Bluetooth is on the wire like everything else in the building.
+    unawaited(XprsLan.instance.start(selfCallsign: cs));
+    _lanBeaconTimer?.cancel();
+    // 300 s, matching the dongle's LAN cadence, first after 20 s — long enough
+    // for an interface to have an address worth broadcasting from.
+    _lanBeaconTimer = Timer(const Duration(seconds: 20), () {
+      _sendXprsLanBeacon();
+      _lanBeaconTimer =
+          Timer.periodic(const Duration(seconds: 300), (_) => _sendXprsLanBeacon());
+    });
 
     _beaconTimer?.cancel();
     // Adaptive cadence: a fixed 10 s tick decides whether the politeness
@@ -510,6 +528,70 @@ class MeshService {
       LogService.instance.add('Mesh: XPRS beacon tx failed: $e');
     }
   }
+
+  /// The same discovery beacon, on the wire in the building (`docs/lan.md`).
+  ///
+  /// ```
+  /// t:observation f:X1A67X link:lan peers:3 hears:X3WWAJ,X1BOA3 sig:<60 characters>
+  /// ```
+  ///
+  /// Separate from the Bluetooth one rather than a parameter on it, because
+  /// almost everything about it differs: `link:` names a different bearer, and
+  /// section 10.6.1 is explicit that a reading about one radio is not evidence
+  /// about another; the neighbours are the ones heard on the wire, not the mesh
+  /// table (which a desktop has nothing in); and the byte budget is the format's
+  /// own 250 rather than whatever the BLE controller will carry.
+  ///
+  /// **Signed**, which the Bluetooth beacon is not: signing is the default
+  /// (section 9.1) and only the advert ceiling argues against it. Here there is
+  /// room, and an unsigned beacon is a callsign anybody can write — an indexer
+  /// deciding whether to spend airtime on us has nothing else to go on.
+  void _sendXprsLanBeacon() {
+    if (!XprsLan.instance.up) return;
+    final self = (_table?.selfCallsign ?? '').trim();
+    if (self.isEmpty) return;
+
+    var envelope = XprsPacket.parse('t:observation f:$self link:lan');
+    if (envelope == null) return;
+
+    final held = MeshStore.instance.ready ? MeshStore.instance.pendingCount() : 0;
+    if (held > 0) envelope = envelope.with_('mail', '$held');
+
+    final upSec = DateTime.now().difference(_startedAt).inSeconds;
+    envelope = envelope.with_('uptime', xprsFmtDuration(upSec));
+    if (_lifeBaseSec >= 0) {
+      envelope =
+          envelope.with_('lifetime', xprsFmtDuration(_lifeBaseSec + upSec));
+    }
+    if ((PreferencesService.instanceSync?.xprsServeHistory ?? true) &&
+        XprsArchive.instance.ready) {
+      envelope = envelope.with_('serve', 'history');
+    }
+
+    // Leave room for the signature the fit cannot know about: ` sig:` plus 60
+    // base85 characters is 65 bytes, and a `hears:` list sized against the full
+    // 250 would push the signed packet over it.
+    final d = xprsProfileScalar();
+    final budget = XprsPacket.maxBytes - (d != null ? 65 : 0);
+    final fit = xprsNeighbourFit(
+        XprsMonitor.instance.directlyHeard(), envelope, budget);
+    var p = envelope.with_('peers', '${fit.peers}');
+    if (fit.hears.isNotEmpty) p = p.with_('hears', fit.hears.join(','));
+    if (d != null) p = xprsSign(p, d);
+
+    if (XprsLan.instance.send(p.encode())) {
+      _xprsLanBeaconsSent++;
+    } else {
+      _xprsLanBeaconsFailed++;
+    }
+  }
+
+  int _xprsLanBeaconsSent = 0;
+  int _xprsLanBeaconsFailed = 0;
+
+  /// XPRS beacons put on the LAN, and the ones the socket would not take.
+  int get xprsLanBeaconsSent => _xprsLanBeaconsSent;
+  int get xprsLanBeaconsFailed => _xprsLanBeaconsFailed;
 
   int _xprsBeaconsSent = 0;
   int _xprsBeaconsFailed = 0;

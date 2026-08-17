@@ -19,12 +19,25 @@ Aurora's Reticulum LAN discovery uses UDP 42671 and is a different protocol on a
 different socket. The ESP32 firmware listens to it separately
 (`geogram_lanwatch`) and nothing here changes that.
 
+Three sockets travel this wire, and it is worth being able to name them:
+
+| | |
+|---|---|
+| **UDP 4242** | this bearer — XPRS broadcast, everyone hears everyone |
+| **TCP 4242** | XPRS and Reticulum on one connection, told apart by the first byte ([XPRS.md](XPRS.md) section 24.4) |
+| **UDP 42671** | Reticulum's LAN discovery. Not XPRS, and not touched here |
+
 ## The wire
 
 ```
-UDP, broadcast to 255.255.255.255, port 42672
+UDP, broadcast to 255.255.255.255, port 4242
 one XPRS packet per datagram, verbatim, no header
 ```
+
+The port is the one XPRS already answers on over TCP (section 24.4). Broadcast
+needs it on UDP because TCP needs an address and the first station on a network
+knows nobody's; the two sockets never collide, so it is one number rather than
+two.
 
 There is nothing else to it. The packet is what was composed and signed
 (section 4), it arrives byte for byte, and a receiver decides what it is by

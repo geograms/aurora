@@ -246,6 +246,11 @@ static uint32_t xi_ts_to_epoch(const char *v, int vlen)
     return (uint32_t)(days * 86400L + h * 3600 + m * 60 + s);
 }
 
+uint32_t xprsindex_ts_to_epoch(const char *ts, int len)
+{
+    return xi_ts_to_epoch(ts, len);
+}
+
 static uint32_t xi_id_hash(const char id[XPRSIDX_ID_LEN])
 {
     uint32_t h = 2166136261u;
@@ -1125,6 +1130,27 @@ void xprsindex_queue_stats(xprsidx_t *st, uint32_t *out_waiting,
 {
     if (out_waiting) *out_waiting = st ? (uint32_t)st->q_count : 0;
     if (out_dropped) *out_dropped = st ? st->q_dropped : 0;
+}
+
+bool xprsindex_get(xprsidx_t *st, uint32_t index, xprsidx_rec_t *out)
+{
+    if (!st || !out) return false;
+    /* Under the lock like every other reader. `xi_read_rec` reaches through
+     * `active_fp` — the handle the writer task is appending with — and FatFs
+     * makes no promise about two tasks seeking one FILE*: without this, a read
+     * issued while a packet is being written returns a record that is half
+     * somebody else's seek, and moves the writer's file position under it. */
+    XI_LOCK(st);
+    bool ok = false;
+    if (index < st->next_index) {
+        xi_rec_t r;
+        if (xi_read_rec(st, index, &r)) {
+            xi_to_public(&r, out);
+            ok = true;
+        }
+    }
+    XI_UNLOCK(st);
+    return ok;
 }
 
 void xprsindex_stats(xprsidx_t *st, xprsidx_stats_t *out)

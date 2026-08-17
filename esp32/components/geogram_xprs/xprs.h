@@ -89,6 +89,16 @@ void xprs_id(const xprs_t *p, char id[XPRS_ID_LEN]);
 /* Identifier straight from wire form. Returns false when it does not parse. */
 bool xprs_id_of(const char *wire, int len, char id[XPRS_ID_LEN]);
 
+/* The exact text a signature covers (section 9.1): the packet with `sig:` and
+ * `via:` removed. The SAME text the section 5 identifier is derived from, which
+ * is not a coincidence — both have to survive relaying, and relaying only ever
+ * touches `via:`.
+ *
+ * A verifier has to rebuild this byte for byte, and two implementations
+ * disagreeing about it is the kind of bug that only shows up once both are
+ * deployed. Returns the length written, or -1 when it would not fit. */
+int xprs_signed_text(const xprs_t *p, char *out, int cap);
+
 /* ---- transport vocabulary (xprs_vocab.dart) ------------------------------ */
 
 /* Urgency levels, ordered lowest-first (section 13.5): the custody store

@@ -1098,5 +1098,80 @@
 "wire": "t:message f:X1QZ3N d:X1RD89 ts:2026-08-13_10:14:00 x:pQ4m9xT2vB8kR until:2026-08-20_00:00:00 sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
 "bytes": 157,
 "id": "96d56c"
+},
+{
+"wire": "t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg m:the antenna after the storm",
+"bytes": 133,
+"id": "e4fc98"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg size:240kB tag:radio m:the finished dipole, feed point centred",
+"bytes": 154,
+"id": "4d4685"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg size:240kB ph:qA7dTf2mWx9bK4pZcV0yLuJ3gRhN8sE5iDoQ6vXaB1M.xfl tag:radio sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS m:the finished dipole",
+"bytes": 250,
+"id": "42fd7e"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:qA7dTf2mWx9bK4pZcV0yLuJ3gRhN8sE5iDoQ6vXaB1M.xfl kind:folder count:34 size:210MB sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS m:Trip photos 2026",
+"bytes": 207,
+"id": "44a7e2"
+},
+{
+"wire": "t:request f:X1QZ3N ts:2026-08-08_14:26:40 q:have file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg",
+"bytes": 101,
+"id": "17d873"
+},
+{
+"wire": "t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:41 r:17d873 s:have have:full size:240kB",
+"bytes": 86,
+"id": "b4c29d"
+},
+{
+"wire": "t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:41 r:17d873 s:have have:412/900 size:58MB",
+"bytes": 88,
+"id": "bd0d4b"
+},
+{
+"wire": "t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:file file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+"bytes": 177,
+"id": "3a05ee"
+},
+{
+"wire": "t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:file file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg off:64kB sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+"bytes": 186,
+"id": "caddc1"
+},
+{
+"wire": "t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:put file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg size:2MB until:2026-09-08_00:00:00 sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+"bytes": 211,
+"id": "3148dd"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B b:iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8z9AAAAAdklEQVQ4y2P8z8BQ",
+"bytes": 168,
+"id": "21a057"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-08_14:26:40 n:1/3 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:300B b:iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8z9A",
+"bytes": 154,
+"id": "dea119"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-17_10:00:00 n:1/3 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B b:PtYgjmUhBel31iEl2hpChYgCfrL1spNxnyVmihA_2O76UMFxFkM_R5Kjp1vRt-1fjORS_6ilI8ihN5KXSc7Tvo_hBKqFYY_kv5ZJr3J1TWDtkwtDDb-xHKas1VOqg6YYZYn9ZhyiA4uo",
+"bytes": 250,
+"id": "86b048"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-17_10:00:00 n:2/3 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B b:RgnatmUdjAWtGSU8po-799NksnRH9ucAUsdMlHUvTCQCyEZDz_TddJ8HyS5SUkCnD8zRA9a9SkpXz9w3QlY7Zkuvqdt7s8Stqcbnr3yBdGBLEPH1qhT61qtc4xatws8phP9nhFyJfm5d",
+"bytes": 250,
+"id": "2604c5"
+},
+{
+"wire": "t:file f:X1QZ3N ts:2026-08-17_10:00:00 n:3/3 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS b:i4PzJ59FHz5r1pY4OjE2jBMptUsGr7CmY-uCu3ZR",
+"bytes": 215,
+"id": "d34bd0"
 }
 ]

@@ -363,6 +363,13 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `until` | `time` | when the sender expects the condition to end |
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
+| `name` | `label` | filename, when the extension is not enough (section 6.7.1) |
+| `ph` | `ref` | content hash of a file's piece list (section 6.7.2) |
+| `count` | `int` | how many files a folder listing holds (section 6.7.3) |
+| `b` | `b64` | a small file's bytes, inline (section 6.7.4) |
+| `ih` | `label` | BitTorrent infohash, 40 hexadecimal characters (section 6.7.5) |
+| `have` | `label` | what a station holds of a file: `full`, a bitfield, or a fraction (section 7.1) |
+| `off` | `qty` | byte offset a `cmd:file` transfer resumes from (section 25.2) |
 | `x` | `b64` | sealed body |
 | `sig` | `base85` | signature |
 | `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
@@ -432,7 +439,7 @@ The type is fixed by this document and is never transmitted.
 | `clock` | `HH:MM:SS`, a time of day in UTC | `20:00:00` |
 | `money` | an amount with an ISO 4217 code, optional leading `~` and `/` period, or one of `offers`, `swap`, `free` (section 22.2) | `~25EUR/day` |
 | `qty` | a number followed immediately by its unit (section 10.9) | `48km/h` |
-| `ref` | 64 lowercase hexadecimal characters, a dot, 1 to 8 lowercase alphanumerics | `9f2c...0e13.jpg` |
+| `ref` | 43 base64url characters (a SHA-256, no padding), a dot, 1 to 8 lowercase alphanumerics | `nyxKz...L4Q.jpg` |
 | `b64` | base64url, no padding | `pQ4m9xT2vB8kR` |
 | `bech32` | a bech32 string | `npub1qz3n7...` |
 | `base85` | 60 characters, base85, no space | |
@@ -566,10 +573,10 @@ Four rules, each covering a way this otherwise fails without anyone noticing.
 the thing that needed warning about:
 
 ```
-t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 cw:adult,nudity file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:not for the group chat
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 cw:adult,nudity file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg m:not for the group chat
 ```
 
-165 bytes.
+144 bytes.
 
 **It is repeated on every part** of a split message, not only the first. Parts
 arrive in any order (section 6.6), so a warning carried once is a warning the
@@ -949,7 +956,9 @@ t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, bu
 
 - Reassembly is keyed on `(f, ts)`. The parts of one message share a timestamp,
   so no identifier has to be transmitted to bind them.
-- Only `m:` is split.
+- Only `m:` is split — with one exception: a packet carrying inline file bytes
+  splits `b:` instead (section 6.7.4), and those parts are joined with nothing
+  rather than a space, because base64url has no spaces to split at.
 - Every field except `m:` and `n:` is repeated on each part, so a receiver can
   read the envelope of any one of them.
 - **A sender splits only at a space, and never inside a word.**
@@ -971,14 +980,21 @@ t:message f:X3RLY7 d:LISBOA ts:2026-08-08_14:26:40 n:3/3 m:and it is back up, bu
 
 ### 6.7 Files
 
-`file:` is the SHA-256 digest of the file contents as 64 lowercase hexadecimal
-characters, a dot, and 1 to 8 lowercase alphanumeric characters giving the type.
+`file:` is the SHA-256 digest of the file contents as 43 base64url characters
+(no padding), a dot, and 1 to 8 lowercase alphanumeric characters giving the
+type.
 
 ```
-t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:the antenna after the storm
+t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg m:the antenna after the storm
 ```
 
-154 bytes. The caption is an ordinary `m:` field.
+133 bytes. The caption is an ordinary `m:` field.
+
+base64url because the digest is the single most repeated expensive value in the
+format and 43 characters against 64 for hex is 21 bytes returned to every
+packet that carries one. A receiver also accepts the digest as 64 lowercase
+hexadecimal characters — the earlier form of this field — and treats the two as
+the same reference; a sender emits base64url.
 
 The hash identifies the file exactly, so any station holding those bytes can
 satisfy the reference and a receiver can verify what it obtained. The extension
@@ -988,7 +1004,12 @@ as an opaque download.
 
 How the bytes are transferred is outside this specification. A reference remains
 valid whether the file arrives over the same radio, over the internet, or on
-physical media.
+physical media. What THIS document defines is everything around the bytes: how
+a file is described (6.7.1), how a large one is verified in pieces and a folder
+of them is listed (6.7.2), how a whole folder is synchronised (6.7.3), how a
+small one rides the packets themselves (6.7.4), how anyone asks who holds one
+(section 7, `q:have`), and how one is fetched or deposited (section 25.2,
+`cmd:file` and `cmd:put`).
 
 ### 6.7.1 Saying what a file is
 
@@ -997,10 +1018,10 @@ packet that says what the bytes are, so somebody who does not already know can
 decide whether to want them:
 
 ```
-t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg size:240kB tag:radio m:the finished dipole, feed point centred
+t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg size:240kB tag:radio m:the finished dipole, feed point centred
 ```
 
-175 bytes. `m:` describes it, `tag:` files it under topics, and `size:` is a
+154 bytes. `m:` describes it, `tag:` files it under topics, and `size:` is a
 quantity with its unit like every other measurement in this format.
 
 **`size:` is the field that earns its bytes.** `cmd:file` (section 25.2) asks a
@@ -1008,6 +1029,24 @@ station to send the content, and on a bearer that owes seconds of silence per
 packet the difference between a 240 kB photograph and a 40 MB video is the
 difference between a fetch and a mistake. Knowing the size first is how a station
 declines politely instead of starting something it cannot finish.
+
+Two optional fields complete the description:
+
+- `ph:` — a `ref`: the content hash of the file's **piece list** (6.7.2), which
+  is itself an ordinary content-addressed file. Its presence says this file can
+  be verified piece by piece, which is what lets several stations serve parts
+  of it at once and a station holding half of it serve that half.
+- `name:` — the filename, 1 to 64 characters with no space (the value rule of
+  section 4). Optional because the extension already advises presentation and a
+  name costs bytes the packet may not have.
+
+```
+t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg size:240kB ph:qA7dTf2mWx9bK4pZcV0yLuJ3gRhN8sE5iDoQ6vXaB1M.xfl tag:radio sig:<60 characters> m:the finished dipole
+```
+
+250 bytes — a fully described, signed, piece-verifiable file sits exactly at
+the packet limit. Adding `name:` pushes it over, and that is fine: a `t:file`
+splits like any packet (section 6.6), and a description is not beacon traffic.
 
 A description packet is also the only thing that makes a file findable by
 **words**. `file:` alone can be looked up by somebody who already has the hash and
@@ -1017,6 +1056,128 @@ the dipole" is a question with an answer.
 `t:file` describes and never delivers. The bytes travel however they travel
 (above), and a description whose content nobody holds is a description of
 something lost -- worth keeping anyway, because it says what was lost.
+
+### 6.7.2 Listings: a folder's files, and a file's pieces
+
+One text format serves two needs, because a folder of files and a file's pieces
+are the same shape: a list of hashes with sizes. A **listing** is a UTF-8 text
+file of LF-terminated lines:
+
+```
+XFL1
+Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.gpx 18kB ridge track.gpx
+nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg 240kB dipole finished.jpg
+```
+
+The first line is the magic. Every other line reuses the grammar the packets
+already have: a reference (or a bare 43-character hash), a `qty` size, and —
+because names contain spaces — the name last, running to the end of the line,
+exactly the rule that puts `m:` last in a packet.
+
+- **A folder listing**: `ref size name` per line, lines sorted bytewise by
+  name. Sorting makes the listing deterministic: the same folder content always
+  produces the same listing bytes, therefore the same hash, therefore one
+  listing however many people publish it.
+- **A piece list**: `hash size` per line, no name, no extension on the hash, in
+  piece order — here the order IS the content. Every piece is `size:` long
+  except the last. Recommended piece sizes: 64 kB, 256 kB for files of 4 MB
+  and up, 1 MB for files of 64 MB and up. A 240 kB photograph's piece list is
+  four lines and about 200 bytes; a 4 GB video's is 4096 lines and about
+  200 kB — either way a small fraction of the file it verifies.
+
+A listing is itself an ordinary content-addressed file: described by a
+`t:file`, fetched with `cmd:file`, asked after with `q:have`, deposited with
+`cmd:put`, and verified against the reference that named it. Nothing new
+travels.
+
+**A station that verified pieces 0 to 411 of 900 holds pieces 0 to 411, may
+say so (section 7), and may serve them.** That is the rule that turns a crowd
+of partial downloads into a working swarm: nobody has to finish before being
+useful, and the most-copied pieces of a popular file are available from many
+stations at once.
+
+### 6.7.3 Syncing a folder
+
+A folder is published by describing its listing — the existing `t:file` with
+the reused `kind:` field, and nothing new:
+
+```
+t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:qA7dTf2mWx9bK4pZcV0yLuJ3gRhN8sE5iDoQ6vXaB1M.xfl kind:folder count:34 size:210MB sig:<60 characters> m:Trip photos 2026
+```
+
+207 bytes. `count:` says how many files, and `size:` is the folder's TOTAL
+payload — so a station knows what "everything" costs before fetching anything.
+
+The whole flow is vocabulary this document already has. Fetch the listing
+(`cmd:file` on the `.xfl` reference), read the names, sizes and hashes, then
+fetch any or all members (`cmd:file` per reference, `q:have` to find nearer
+holders first). Every member is verified against its own hash on arrival, so a
+folder assembled from six different stations is exactly the folder that was
+published.
+
+**Sync is snapshots.** A changed folder is a new listing with a new hash,
+announced with a new `t:file`. Files that did not change keep their hashes, so
+a receiver holding the previous snapshot diffs two listings line by line and
+fetches only what is new — incremental synchronisation with no mutation
+protocol, no version numbers and nothing to negotiate. The old listing remains
+a valid description of the old folder, which is what an archive wants anyway.
+
+### 6.7.4 A small file inline
+
+Below a certain size, describing a file costs more than sending it — the rule
+of section 36.2, "send whichever is smaller", applied to content. `b:` carries
+the file's bytes as base64url in the `t:file` that describes it:
+
+```
+t:file f:X1QZ3N ts:2026-08-08_14:26:40 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B b:iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8z9AAAAAdklEQVQ4y2P8z8BQ
+```
+
+A larger inline file splits per section 6.6 with one added rule: **`b:` splits
+like `m:`, but the parts are joined with nothing** — base64url contains no
+spaces, and a space would corrupt it. A 240-byte icon, signed, in three parts:
+
+```
+t:file f:X1QZ3N ts:2026-08-17_10:00:00 n:1/3 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B b:PtYgjmUhBel31iEl2hpChYgCfrL1spNxnyVmihA_2O76UMFxFkM_R5Kjp1vRt-1fjORS_6ilI8ihN5KXSc7Tvo_hBKqFYY_kv5ZJr3J1TWDtkwtDDb-xHKas1VOqg6YYZYn9ZhyiA4uo
+t:file f:X1QZ3N ts:2026-08-17_10:00:00 n:2/3 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B b:RgnatmUdjAWtGSU8po-799NksnRH9ucAUsdMlHUvTCQCyEZDz_TddJ8HyS5SUkCnD8zRA9a9SkpXz9w3QlY7Zkuvqdt7s8Stqcbnr3yBdGBLEPH1qhT61qtc4xatws8phP9nhFyJfm5d
+t:file f:X1QZ3N ts:2026-08-17_10:00:00 n:3/3 file:Uc3nRw8kFa5xPd1qGz7mYb0tJe6vHs2iLoA9XfCqK4E.png size:240B sig:<60 characters> b:i4PzJ59FHz5r1pY4OjE2jBMptUsGr7CmY-uCu3ZR
+```
+
+250, 250 and 215 bytes. Every field except `b:` and `n:` repeats on every
+part, so any single part says whose file, which file and how big. Reassembly
+is the section 6.6 procedure with the empty join: concatenate the `b:` values
+in `n:` order, decode, hash, compare against `file:`. There is no offset and
+no per-part checksum, because `n:` is the index and the whole-file hash is the
+only integrity that matters at this size.
+
+With these fields a part carries 140 characters of `b:` and the signed last
+part 75, so nine parts carry 1195 characters: **an inline file tops out at
+896 bytes.** Thumbnails, avatars, QR payloads, keys and configuration fit;
+anything larger travels as section 6.7 says. The two never mix — a file is
+inline or it is fetched, and a receiver that decodes `b:` checks it against
+`file:` and, on a match, holds the file like any other holder.
+
+The reason this lane exists is the bearer that has no other: on a LoRa-only
+network there is no bulk connection to move bytes over, and a packet is the
+only vehicle there is. 896 bytes is a real photograph thumbnail or a real
+public key, and either arriving over 40 km of nothing is worth nine packets.
+
+### 6.7.5 The BitTorrent bridge
+
+A file can additionally be offered to stock BitTorrent clients, and the trick
+is that nothing extra needs to be transmitted to arrange it. The torrent for a
+file is built **deterministically**: single file, named `<digest-hex>.<ext>`,
+piece length the power of two nearest `size/1024` clamped between 16 kB and
+4 MB, no private flag and no source field. Two stations that hold the same
+bytes therefore derive the same torrent and the same infohash independently —
+the swarm address is a pure function of the content.
+
+`ih:` (40 hexadecimal characters) carries that infohash when talking to
+something that cannot derive it — a link handed to somebody's ordinary
+torrent client. Between XPRS stations it is dead weight and is not sent.
+
+The SHA-256 remains the identity throughout. The infohash addresses a swarm;
+whatever the swarm delivers is verified against `file:` like bytes from any
+other source, and fails like them if it lies.
 
 ---
 
@@ -1032,6 +1193,7 @@ q:batt       send your battery level
 q:identity   send your public key
 q:sign       sign a receipt confirming you read this
 q:pong       reply to this reachability test
+q:have       say whether you hold the file named by file:
 ```
 
 Several are separated by commas. An unknown word is ignored, so `q:pos,bat,co2`
@@ -1082,6 +1244,36 @@ serve at all:
 t:receipt f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:40 s:no
 ```
 
+### 7.1 Who holds a file
+
+`q:have` with a `file:` reference asks who holds those bytes. Broadcast, it is
+the question a station asks the street before spending a fetch on somebody far
+away; directed, it checks one station before asking it to serve.
+
+```
+t:request f:X1QZ3N ts:2026-08-08_14:26:40 q:have file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg
+```
+
+101 bytes, identifier `17d873`. A holder answers, directed, with `have:` in one
+of three forms:
+
+```
+t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:41 r:17d873 s:have have:full size:240kB
+t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:26:41 r:17d873 s:have have:412/900 size:58MB
+```
+
+86 and 88 bytes. `have:full` is the whole file. A partial holder answers the
+piece bitfield as base64url, least significant bit first, **when it fits the
+packet** — up to roughly 1200 pieces — and the fraction `have:412/900` when it
+does not; the exact map travels with the transfer itself once one starts. A
+station that holds nothing stays silent: on a broadcast ask, a hundred "no"s
+would cost more than the answer is worth, and silence already says it
+(section 7).
+
+This is the radio's version of the claim a provider record makes on an
+internet overlay: the same "I hold it", scoped to whoever can actually hear
+the speaker — which for a fetch over the street is exactly the right scope.
+
 55 bytes.
 
 Any station may act on a receipt it overhears. A station holding a message for
@@ -1095,7 +1287,8 @@ attacker never held (section 13.7.1).
 ## 8. Reserved words
 
 `q:` and `s:` words assigned by this document: `ack`, `read`, `sign`, `pos`,
-`batt`, `identity`, `pong`, `no`. Reactions assigned for `add:` and `remove:`:
+`batt`, `identity`, `pong`, `have`, `no`. Command words assigned: `history`,
+`file`, `put`. Reactions assigned for `add:` and `remove:`:
 `like`, `repost`. All other words are reserved. A word beginning with `z` is private, as a
 key beginning with `z` is.
 
@@ -1258,10 +1451,10 @@ A townhall of callsigns is a spreadsheet. `file:` gives an identity a picture an
 `m:` a line of description, both optional and both signed with the rest:
 
 ```
-t:identity f:X1QZ3N ts:2026-08-08_14:26:40 nick:joao file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg sig:<60 characters> m:sailing the Algarve coast
+t:identity f:X1QZ3N ts:2026-08-08_14:26:40 nick:joao file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg sig:<60 characters> m:sailing the Algarve coast
 ```
 
-219 bytes. The picture is a **reference and not bytes** -- a content hash like
+198 bytes. The picture is a **reference and not bytes** -- a content hash like
 any other file in this format (section 6.7), fetched with `cmd:file` (section
 25.2) if the receiver wants it and ignored entirely if it does not. A station
 that never fetches an avatar has lost nothing but a picture.
@@ -1269,11 +1462,11 @@ that never fetches an avatar has lost nothing but a picture.
 **An identity announcement carries any subset of these fields, and a receiver
 keeps, for each field, the value from the newest verifiable announcement that
 carried it.** That rule is forced by arithmetic rather than chosen: the key
-binding and the decoration together come to 255 bytes, which does not fit.
+binding and the decoration together come to 262 bytes, which does not fit.
 
 ```
 181  t:identity f:X1QZ3N ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f nick:joao sig:<60 characters>
-219  t:identity f:X1QZ3N ts:2026-08-08_14:26:40 nick:joao file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg sig:<60 characters> m:sailing the Algarve coast
+198  t:identity f:X1QZ3N ts:2026-08-08_14:26:40 nick:joao file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg sig:<60 characters> m:sailing the Algarve coast
 ```
 
 The split turns out to be the right shape anyway. The key binding is small and
@@ -3278,10 +3471,10 @@ t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes n:2/3 m:The feed poin
 (section 6.7):
 
 ```
-t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg m:The finished dipole, feed point centred at last.
+t:blog f:X1QZ3N ts:2026-08-08_14:26:40 title:antenna-notes file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg m:The finished dipole, feed point centred at last.
 ```
 
-183 bytes, of which 73 are the file reference and 64 of those the digest itself. The post reads on its own and the image
+162 bytes, of which 52 are the file reference and 43 of those the digest itself. The post reads on its own and the image
 is fetched by whoever wants it and can.
 
 About 1500 characters is a generous budget once a title, a few tags and an image
@@ -3767,7 +3960,7 @@ t:service f:X3RLY7 pos:38.7810,-9.2043 serve:relay,mailbox ts:2026-08-08_14:26:4
 | `internet` | gateways to the internet |
 | `aprs` | gateways to APRS-IS |
 | `nostr` | runs a NOSTR relay |
-| `files` | hosts content-addressed files, and answers `cmd:file` (section 25.2) |
+| `files` | hosts content-addressed files: answers `q:have` (section 7.1) and `cmd:file`, and accepts `cmd:put` deposits within its budgets (section 25.2) |
 | `history` | keeps a spool of what it has heard, and re-airs it on `cmd:history` |
 | `time` | has a clock worth trusting, usually from GNSS |
 | `weather` | publishes observations |
@@ -3818,6 +4011,44 @@ behaviour, and never evidence of good faith**. A station that truthfully gateway
 to the internet may also log everything that passes. Encrypt what should not be
 read (section 9.2) and set `scope:` on what should not travel (section 13.11);
 neither depends on trusting the station that carries it.
+
+### 24.4 One port on an IP network
+
+**A station reachable over TCP listens on port 4242, and that one port speaks
+both Reticulum and XPRS.** 4242 is already the port Reticulum hubs answer on,
+so an operator opening a firewall for one has opened it for both, and a client
+guessing the port guesses right.
+
+The two are told apart by the first byte of the connection, and nothing else:
+
+- A Reticulum stream is HDLC-framed, and every frame begins with the flag
+  byte `0x7E`.
+- An XPRS connection is printable text, and a packet begins with `t:`
+  (section 4) — the first byte is `0x74`.
+
+A listener reads one byte and knows which protocol it has. A stock Reticulum
+client connecting to the port works untouched; an XPRS client sends packets as
+lines of text, one packet per line, and receives the same. Everything on such
+a connection is an ordinary packet — a `t:ping` is answered with a `t:pong`, a
+`cmd:history` with the replay of section 25.2 — so the socket adds no new
+vocabulary, only a wire.
+
+Two rules keep the demultiplexing honest, and they are load-bearing:
+
+- **XPRS on this port stays plain text, one packet per line.** No binary
+  framing, no envelope. The packet already has a size limit (250 bytes) and a
+  grammar (section 4); a line needs nothing more.
+- **Nothing that is not HDLC may ever begin with `0x7E`** on this port. A
+  future binary variant that starts with the flag byte breaks the one-byte
+  decision, so there will not be one.
+
+The bearer is decided by where the peer actually is, because a TCP socket does
+not say. A connection from a private or link-local address is the LAN it looks
+like: recorded under `lan`, visible on the air view, archived like any local
+bearer. A connection from a public address travelled the internet whatever
+port it used, and it is treated exactly like the Reticulum lane: never shown
+as an air sighting, and archived only under the mailbox-declaration rule of
+section 36.3.
 
 `until:` bounds the claim, and it should be short. A service list is a statement
 about equipment that is switched on, and equipment gets switched off.
@@ -3909,7 +4140,8 @@ key to offer.
 **`cmd:file` asks for the bytes behind a `file:` reference.**
 
 ```
-198  t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:file file:9f2c4e1a7b3d5f8092a6c4e7b1d3f5a8c2e4906b8d1f3a5c7e9b2d4f6a8c0e13.jpg sig:<60 characters>
+177  t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:file file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg sig:<60 characters>
+186  t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:file file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg off:64kB sig:<60 characters>
 ```
 
 Until now a `file:` reference could be shown and not resolved, which made every
@@ -3917,6 +4149,48 @@ photograph in the format decoration. The command says **what** is wanted and
 never how it should travel; a station advertising `serve:files` (section 24)
 answers, and which bearer carries the bytes is the transport's business and not
 this document's.
+
+`off:` resumes: send from that byte offset, because the first attempt died at
+64 kB and the 64 kB that arrived are verified against the piece list (6.7.2)
+or simply kept. A station that cannot resume ignores `off:` and sends from
+zero — the requester merely receives some bytes twice, and the file still
+verifies or still fails as a whole.
+
+The reply flow gives `cmd:file`'s codes their concrete meaning. `202` — I hold
+it and it fits my budget; the bytes then move on whatever bulk lane the pair's
+bearers offer (a GATT session beside the advert channel, a Reticulum resource,
+a fetch across the LAN — examples, not requirements), and `200` follows only
+after the REQUESTER's own hash check passed, making the final receipt a
+statement about content rather than about transmission. `500` — the transfer
+started and died. `404` — not held. `403` — refused, and a file too large for
+the station's budget is refused here with `m:` saying so, which is what
+`size:` on the description exists to prevent. `429` — over budget this hour,
+with alternates in `m:` when the station knows any (section 31.2).
+
+**`cmd:put` is the same exchange in reverse: I hold these bytes, take them.**
+
+```
+211  t:command f:X1QZ3N d:X3RLY7 ts:2026-08-08_14:26:40 cmd:put file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg size:2MB until:2026-09-08_00:00:00 sig:<60 characters>
+132  t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:29:02 r:3148dd code:200 sig:<60 characters>
+```
+
+The ask names the file and its cost up front — `size:` is mandatory here,
+because accepting bytes unseen is how a small station is filled by a stranger
+— and `until:` bounds the stay, the discipline of section 36.7: a deposit is a
+hold, not an archive. `202` means bring it, and the bytes travel exactly as a
+`cmd:file` answer does, in the other direction. The receiver verifies what
+arrived against `file:` and answers the signed `200` above: **a custody
+receipt for bytes**, section 13.7's receipt discipline applied to a file. A
+station already holding the file answers `200` immediately — the bytes exist,
+custody is real, and nothing needs to travel; a sender must treat that as
+success, not as an error. `403` and `429` refuse as they always do.
+
+Why deposit at all: the recipient is away, and the file's author will be too.
+A photograph left with the mailbox station a `t:mailbox` (section 13.12)
+names, or with any station advertising `serve:files`, is a file that arrives
+next week without either party being awake at the same time — store and
+forward for content, under the same quota rules as everything else a station
+carries.
 
 ### 25.2.1 What comes back
 
@@ -3981,6 +4255,49 @@ A station that keeps a spool says so with `serve:history` (section 24). What it
 keeps, for how long and for whom is its own to decide and to change: section 31.3
 says why this document sets no retention period, and section 31.2 what a station
 owes a stranger regardless.
+
+### 25.2.2 A file transfer, on the wire
+
+Illustrative, not normative: the packets below are this document's, the binary
+frames between them belong to the bearer (here BLE's session protocol,
+`docs/mesh.md`) and are shown ONCE so the division of labour is visible —
+XPRS asks and receipts, the bulk lane moves bytes, and neither does the
+other's job. X1QZ3N deposits a 240 kB photograph with X1RD89:
+
+```
+── advert channel (XPRS) ───────────────────────────────────────────────
+X1QZ3N→ t:command f:X1QZ3N d:X1RD89 ts:2026-08-17_12:00:00 cmd:put file:nYxKzGm4vT2pQ8dW5jR7cL0aFbNs9hUe3oXiC6EkM1w.jpg size:240kB sig:<60 characters>
+X1RD89→ t:result f:X1RD89 d:X1QZ3N ts:2026-08-17_12:00:03 r:a91f04 code:202 sig:<60 characters>
+
+── bulk lane (binary, one ATT write per frame; 4D 01 = the session magic) ──
+X1QZ3N→ 4D 01 20  FILE_OFFER   xfer=7, sha256 (32 bytes), size=240640,
+                               ttl, origin "X1QZ3N", target "X1RD89",
+                               ext "jpg", name "photo.jpg"
+X1RD89→ 4D 01 21  FILE_ACCEPT  xfer=7, offset=0, window=16
+X1QZ3N→ 4D 01 23  CHUNK        xfer=7, offset=0,   498 raw file bytes
+X1QZ3N→ 4D 01 23  CHUNK        xfer=7, offset=498, 498 raw file bytes
+        …16 chunks per credit window…
+X1RD89→ 4D 01 24  WIN_ACK      xfer=7, next=7968, window=16
+        …until offset reaches 240640…
+X1QZ3N→ 4D 01 25  FILE_DONE
+X1RD89→ 4D 01 26  FILE_OK      (receiver's own sha256 matched file:)
+
+── advert channel again ────────────────────────────────────────────────
+X1RD89→ t:result f:X1RD89 d:X1QZ3N ts:2026-08-17_12:02:31 r:a91f04 code:200 sig:<60 characters>
+```
+
+The portion of the file on the air is the CHUNK frame: a 3-byte envelope, the
+transfer id, the byte offset, then **raw file bytes, unencoded** — the packet
+grammar never touches them. A lost chunk costs one window, because the
+receiver's WIN_ACK names the next contiguous offset it wants and the sender
+rewinds to it. The final signed `code:200` is the only durable record: a
+custody receipt naming the command, issued only after the receiver hashed
+what it holds. `accept` at `offset == size` is how "I already have it" is
+said without moving a byte.
+
+The same two XPRS packets bracket the transfer whatever the bearer — a
+Reticulum resource, a LAN fetch, a swarm — with only the middle block
+changing, which is the point of keeping it out of this document.
 
 ### 25.3 Keeping it out of the conversation
 
@@ -5021,6 +5338,13 @@ packet **250 bytes**, on every transport.
 | `until` | `time` | when the sender expects the condition to end |
 | `m` | `text` | human-readable content, always last |
 | `file` | `ref` | content hash and type of a referenced file |
+| `name` | `label` | filename, when the extension is not enough (section 6.7.1) |
+| `ph` | `ref` | content hash of a file's piece list (section 6.7.2) |
+| `count` | `int` | how many files a folder listing holds (section 6.7.3) |
+| `b` | `b64` | a small file's bytes, inline (section 6.7.4) |
+| `ih` | `label` | BitTorrent infohash, 40 hexadecimal characters (section 6.7.5) |
+| `have` | `label` | what a station holds of a file: `full`, a bitfield, or a fraction (section 7.1) |
+| `off` | `qty` | byte offset a `cmd:file` transfer resumes from (section 25.2) |
 | `x` | `b64` | sealed body |
 | `sig` | `base85` | signature |
 | `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
@@ -5289,7 +5613,8 @@ private.
 ```
 t:command f:X1BOA3 d:X3RLY7 ts:... cmd:history since:... sig:...
 t:command f:X1BOA3 d:X3RLY7 ts:... cmd:history since:... until:... only:X5A3F2 sig:...
-t:command f:X1QZ3N d:X3RLY7 ts:... cmd:file file:9f2c4e1a...e13.jpg sig:...
+t:command f:X1QZ3N d:X3RLY7 ts:... cmd:file file:nYxKz...M1w.jpg [off:64kB] sig:...
+t:command f:X1QZ3N d:X3RLY7 ts:... cmd:put file:nYxKz...M1w.jpg size:2MB [until:...] sig:...
 ```
 
 Standard commands carry parameters in named keys, never `arg:`. The station
@@ -5314,10 +5639,22 @@ mention anyone, so a client must offer to mute.
 alone; deeper replies carry both, so a lost middle packet no longer orphans
 everything beneath it.
 
-`t:file` says what a file is: `file:` the hash, `size:` with its unit, `tag:`
-topics, `m:` the description. `size:` is what lets a station decline before
-starting a fetch it cannot finish, and the description is the only thing that
-makes a file findable by words rather than by hash.
+`t:file` says what a file is: `file:` the hash (43 base64url characters, a
+dot, the type), `size:` with its unit, `tag:` topics, `m:` the description,
+optionally `name:` the filename and `ph:` the piece list's own hash. `size:`
+is what lets a station decline before starting a fetch it cannot finish, and
+the description is the only thing that makes a file findable by words rather
+than by hash.
+
+Files, the whole flow (section 6.7): a listing file (`XFL1`, one `ref size
+name` line per file, sorted by name) is a folder; announce it with `t:file
+kind:folder count: size:`; fetch anything with `cmd:file` (resume with
+`off:`), find holders with `q:have` (`have:full`, a bitfield, or `412/900`),
+deposit with `cmd:put file: size: [until:]` and the signed `code:200` is the
+custody receipt. A file up to 896 bytes rides inline in `b:` over section 6.6
+parts, joined with nothing. Piece lists (`sha size` per line, piece order)
+let partial holders serve what they verified. The BitTorrent infohash is
+derived deterministically and never needs transmitting between stations.
 
 ### The radio itself
 
@@ -5586,7 +5923,9 @@ DHT stores pointers and never content, because a file is megabytes and a pointer
 is 176 bytes. A publication is at most 250 bytes. Pointer and content are the
 same order of size, so paying for a pointer *and then* a fetch costs more than
 handing over the thing itself. The rule is not "always send pointers"; it is
-"send whichever is smaller", and for XPRS that is the packet.
+"send whichever is smaller", and for XPRS that is the packet. The inline file
+lane (section 6.7.4) is the same rule applied once more: under ~900 bytes the
+content IS the smaller thing, and it rides the packets.
 
 **Everything a query needs is already in it.** `t:` the type, `f:` the author,
 `ts:` when it was composed, `pos:` where it is, `dest:` and `near:` the region
@@ -5721,7 +6060,7 @@ stations it knows. Its disk, its bandwidth, its decision (section 31.2).
 | Encryption and the sealed-body band rule | implemented |
 | Section 9.4.1, no self-generated callsign onto licensed spectrum | not implemented, and violated today: the ESP32 iGate computes an APRS-IS passcode for an `X3` callsign and states in `esp32/components/geogram_aprsis/aprsis.h` that no licence is needed for one |
 | Section 9.4.2, an issued callsign bound to a key by `t:identity` | not implemented; identity announcements are not built, and no user interface offers to enter a licensed callsign |
-| File references by content hash | implemented |
+| File references by content hash | **implemented**, in the base64url form this document now specifies (`MediaRef`); the older 64-hex form is still read |
 | Identity announcement | implemented |
 | `key:value` fields separated by spaces | **implemented** everywhere the device transmits: the beacon, carried mail, and the chat wapp since 0.4.38. The three-`0x1F`-field frame remains only as a fallback that is still read, and that chat still sends for its control frames |
 | `t:` packet type as the first field | **implemented**; chat's own routing (a callsign, a `#group`, `!` for a position, empty for in-range) is now expressed as `t:` plus `d:`, not inferred from one overloaded field |
@@ -5745,19 +6084,25 @@ stations it knows. Its disk, its bandwidth, its decision (section 31.2).
 | `scope:` | not implemented; every bearer currently forwards everything it can |
 | `lang:` | not implemented |
 | `nick:` and signed identity | not implemented; identity is announced unsigned today |
-| `t:mailbox` | not implemented; custody has no notion of a preferred carrier |
-| Several mailboxes with windows, and cancellation | not implemented |
+| `t:mailbox` | **partly implemented**: a receiving station records verified declarations naming it (windows and `remove:mailbox` included, `lib/services/xprs/xprs_archive.dart`) and uses them to gate what the internet lane may deposit in its spool; no station composes one yet, and custody still has no notion of a preferred carrier |
+| Several mailboxes with windows, and cancellation | **implemented on the receiving side** (see `t:mailbox` above); not composed |
 | `t:service` | not implemented; no station advertises what it does |
-| `t:command` and `t:result` | not implemented; nothing acts on a received packet |
-| `cmd:history`, backfill by replay | not implemented, and nothing equivalent exists: the APRS iGate mailbox holds only mail addressed to a callsign and is cleared on delivery (`docs/aprs.md`), so broadcast traffic missed while offline is gone |
-| `cmd:file`, fetching bytes by hash | not implemented as a command; the resolution ladder underneath it is built and works (Reticulum direct, DHT, LAN, I2P, BitTorrent -- `reticulum-dart/doc/file-sharing.md`), so this is an ask the format lacks rather than a transport it lacks |
-| `serve:history` | not implemented; no station keeps or advertises a spool |
+| `t:command` and `t:result` | **implemented** for `cmd:history`: the phone and desktop host answer a command addressed to them with signed results (`lib/services/xprs/xprs_history_server.dart`); no other command is acted on yet |
+| `cmd:history`, backfill by replay | **implemented**: every device keeps a spool by default (500 MB or a year, the owner's numbers per section 31.3) and re-airs the original packets newest first on request — `code:202`, the page, then `code:200` or `code:206` — metered per section 31.2 and paced for the advert channel |
+| `cmd:file`, fetching bytes by hash | **specified** (with `off:` resume and concrete reply codes, section 25.2), not implemented as a command; the resolution ladder underneath it is built and works (Reticulum direct, DHT, LAN, I2P, BitTorrent -- `reticulum-dart/doc/file-sharing.md`), so this is an ask the format lacked rather than a transport it lacks |
+| `cmd:put`, depositing bytes | **specified, not implemented** as a command; the machinery exists as the Reticulum deposit session (`FileDepositSession`) and the MSP bulk lane's accept-at-size handshake — what is missing is the XPRS ask in front of them |
+| `q:have` / `s:have`, who holds a file | **specified, not implemented**; the internet overlay's equivalent (signed DHT provider records) is live, the radio-side question is not asked yet |
+| Listings (`XFL1`), folders as snapshots | **specified, not implemented** in this format; the shipped folders lane keeps piece hashes as a headerless binary blob and syncs live folders by signed op-log — the XFL1 text listing is the packet-layer snapshot form |
+| Inline files in `b:` | **specified, not implemented**; nothing splits or reassembles `b:` yet |
+| Deterministic torrents, `ih:` derivable | **implemented** (`lib/services/torrent_service.dart` builds byte-identical torrents from content, so every holder derives one infohash) |
+| `serve:history` | **implemented**: the spool is on by default and the discovery beacon says so; turning the preference off drops the claim and the answers together |
+| Section 24.4, one port for Reticulum and XPRS | **implemented** on the TCP hub listener: port 4242 answers HDLC-framed Reticulum and line-oriented XPRS on one socket, told apart by the first byte |
 | Retention policy, and keeping by worth rather than by age | deliberately unspecified (section 31.3); the shipping custody store bounds itself at 100 MB or 7 days and evicts `ORDER BY urg, ts`, which is exactly the kind of local decision this format leaves alone |
-| Paged replies, `code:206` | not implemented; nothing serves a history request to page |
+| Paged replies, `code:206` | **implemented** by the history responder: twelve packets a page over the air, the probe row deciding 206 against 200, and the requester continuing by moving `until:` |
 | `t:poll` and `vote:` | not implemented; nothing puts a question or counts an answer |
 | `@CALLSIGN` mentions | not implemented; no wapp scans `m:` for them and nothing notifies on being named |
 | `root:` on a reply | not implemented; the chat wapp threads by parent pointer only (`docs/aprs-xt.md`), so a lost middle orphans the rest |
-| `t:file` and `size:` | not implemented as a packet; the equivalent exists as NOSTR kind-1063 metadata indexed in FTS5 (`reticulum-dart/doc/file-sharing.md`) |
+| `t:file` and `size:` (now also `name:`, `ph:`, `kind:folder`, `count:`) | not implemented as a packet; the equivalent exists as NOSTR kind-1063 metadata indexed in FTS5 (`reticulum-dart/doc/file-sharing.md`) |
 | `link:`, `busy:` and `txtime:` | not implemented; the Reticulum side tracks announce cadence and the LoRa drivers know the duty cycle, but nothing measures or publishes channel occupancy |
 | `hears:` | not implemented; `hal_rns_nodes` lists observed nodes but, per `docs/store-and-forward.md`, a hub replays its whole announce cache so the list is not "heard directly" |
 | `t:report` | not implemented; the chat wapp has moderation ops but no way for an ordinary station to flag anything |

@@ -523,6 +523,9 @@ esp_err_t aprsis_init(const char *callsign)
     if (!s_uplink_q) return ESP_ERR_NO_MEM;
 
     s_running = true;
+    /* 6 KB, measured rather than guessed: 4 KB overflowed. It parses APRS-IS
+     * lines, resolves DNS and runs a TLS-less socket, and the saving was not
+     * worth a reboot. */
     if (xTaskCreate(aprsis_task, "aprsis", 6144, NULL, 5, NULL) != pdPASS) {
         s_running = false;
         vQueueDelete(s_uplink_q);

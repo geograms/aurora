@@ -577,7 +577,10 @@ xprsidx_t *xprsindex_open(const char *dir)
      * task, while core 1 sits nearly idle. SD transactions are long and this is
      * the one job in the firmware with no reason to compete with a radio for
      * the same processor. */
-    if (xTaskCreatePinnedToCore(xi_writer_task, "xprsidx_wr", 3072, st, 2, NULL,
+    /* 4 KB: this task calls into FATFS and the SDMMC driver, which are not
+     * frugal with stack, and 3 KB overflowed under a burst of traffic — the
+     * dongle rebooted rather than dropped a record. */
+    if (xTaskCreatePinnedToCore(xi_writer_task, "xprsidx_wr", 4096, st, 2, NULL,
                                 1) != pdPASS) {
         XI_LOGW("writer task failed to start — nothing will reach the card");
         st->ready = false;

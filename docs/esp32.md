@@ -244,6 +244,27 @@ maintains the generated one at the project root and that is what the build uses.
 The fragment had asked for `MSYS_1=6` and no central role for who knows how
 long, and the build had 12 and central enabled.
 
+### Task stacks are heap, and these are the measured floors
+
+Every stack on this board comes out of the same ~15 KB, so they get trimmed —
+and trimming them past what the task actually does turns a memory problem into a
+reboot. Measured by overflowing them:
+
+| Task | Floor | What costs the stack |
+|---|---|---|
+| `xprsidx_wr` | 4096 | FATFS and the SDMMC driver; 3072 overflowed under a burst |
+| `xprslan` | 5120 | two SHA-256 derivations per datagram, a BLE re-air and a log line; 4096 overflowed |
+| `aprsis` | 6144 | line parsing, DNS, socket; 4096 overflowed |
+| `heartbeat` | 3072 | `ESP_LOG` with ten arguments is almost all of it; 2048 overflowed |
+
+**`ESP_LOG` is the most stack-hungry thing a small task does.** A diagnostic
+that crashes the board is worse than no diagnostic, and this one did, twice.
+
+A stack overflow here presents as a **reboot loop of a few tens of seconds** —
+which from the network looks exactly like a station that answers, then stops,
+then answers again. Check the console for `***ERROR*** A stack overflow in task`
+before believing anything about the network.
+
 ## Memory budget (no PSRAM)
 
 `CONFIG_SPIRAM` is **not** set on the T-Dongle, so everything comes out of

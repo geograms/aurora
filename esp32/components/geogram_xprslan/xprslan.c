@@ -381,9 +381,10 @@ esp_err_t xprslan_start(const char *callsign)
 
     s_fd = fd;
     s_active = true;
-    /* 4 KB: enough for the SHA-256 a beacon derives, and no more — the heap on
-     * this board is the scarce thing, not the stack. */
-    if (xTaskCreate(xprslan_task, "xprslan", 4096, NULL, 3, NULL) != pdPASS) {
+    /* 5 KB. Every datagram costs two SHA-256 derivations (the identifier here,
+     * and again when the index decides on it), a BLE re-air and a log line, all
+     * on this stack — 4 KB overflowed under a burst and took the board down. */
+    if (xTaskCreate(xprslan_task, "xprslan", 5120, NULL, 3, NULL) != pdPASS) {
         XL_LOGW("task create failed");
         close(fd);
         s_fd = -1;

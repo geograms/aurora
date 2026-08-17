@@ -986,6 +986,44 @@ static void kv4p_aprs_to_ble(const char *from, const char *to,
 #if BOARD_MODEL == MODEL_TDONGLE_S3
 /** Aurora APRS-over-BLE RX → rolling chat on the T-Dongle display.
  *  Decoded by ble_hello (the radio owner); we only format + push a line. */
+/*
+ * One line every 15 s, because silence is ambiguous on this board.
+ *
+ * It logs only NEW callsigns, its display dedup is an hour long and the WiFi
+ * reconnect goes quiet after ten attempts — so a healthy idle dongle and a
+ * wedged one look identical on the console. What cannot be seen from outside
+ * goes here, and `min` is the heap low-water mark since boot: a station that
+ * stops answering for a few seconds under load has usually dipped, and this is
+ * the only way to see a dip that has already recovered.
+ */
+static void tdongle_heartbeat_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(15000));
+
+        char ip[16] = "-";
+        if (geogram_wifi_get_status() == GEOGRAM_WIFI_STATUS_GOT_IP) {
+            geogram_wifi_get_ip(ip);
+        }
+        uint32_t qwait = 0, qdrop = 0;
+        xprsindex_queue_stats(s_xprs_index, &qwait, &qdrop);
+        xprsidx_stats_t xs;
+        xprsindex_stats(s_xprs_index, &xs);
+
+        ESP_LOGW(TAG, "alive %us ip=%s wifi=%d heap=%u min=%u big=%u "
+                      "recs=%u q=%u/%u lan=%d",
+                 (unsigned)(esp_timer_get_time() / 1000000ULL), ip,
+                 (int)geogram_wifi_get_status(),
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)esp_get_minimum_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                            MALLOC_CAP_8BIT),
+                 (unsigned)xs.count, (unsigned)qwait, (unsigned)qdrop,
+                 xprslan_is_active() ? xprslan_peer_count(600) : -1);
+    }
+}
+
 /* ---- when the card may run ---------------------------------------------- */
 
 /*
@@ -1666,6 +1704,12 @@ extern "C" void app_main(void)
                 } else {
                     ESP_LOGW(TAG, "XPRS LAN bearer failed to start");
                 }
+
+                // 3 KB. It only formats one line a quarter-minute, but ESP_LOG
+                // with ten arguments is most of that line's cost and 2 KB
+                // overflowed — the diagnostic must never be what crashes it.
+                xTaskCreatePinnedToCore(tdongle_heartbeat_task, "heartbeat",
+                                        3072, NULL, 1, NULL, 1);
 
                 // APRS-IS iGate: bridges APRS-IS <-> BLE once WiFi is up.
                 // Coordinates default undefined (no GPS) so only messages to

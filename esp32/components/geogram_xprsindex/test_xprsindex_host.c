@@ -324,6 +324,80 @@ static void test_torn_tail_still_answers(const char *dir)
     xprsindex_close(st);
 }
 
+/* ── authorship (XPRS.md §9.1) ───────────────────────────────────────────── */
+
+/* A verifier the test drives: X1GOOD signs for itself, X1EVIL does not, and
+ * nobody has ever heard of X1WHO. */
+static int fake_verify(const char *wire, int len, const char *from)
+{
+    (void)wire; (void)len;
+    if (strcmp(from, "X1GOOD") == 0) return 1;
+    if (strcmp(from, "X1EVIL") == 0) return -1;
+    return 0;
+}
+
+static bool collect_flags(const xprsidx_rec_t *rec, void *ctx)
+{
+    uint8_t *out = (uint8_t *)ctx;
+    if (strcmp(rec->from, "X1GOOD") == 0) out[0] = rec->flags;
+    if (strcmp(rec->from, "X1EVIL") == 0) out[1] = rec->flags;
+    if (strcmp(rec->from, "X1WHO")  == 0) out[2] = rec->flags;
+    if (strcmp(rec->from, "X1BARE") == 0) out[3] = rec->flags;
+    return true;
+}
+
+static void test_verifies_what_it_stores(const char *dir)
+{
+    rm_rf(dir);
+    xprsidx_t *st = xprsindex_open(dir);
+    CHECK(st != NULL, "open failed");
+    xprsindex_set_verifier(st, fake_verify);
+
+    CHECK(xprsindex_add(st, "t:status f:X1GOOD ts:2026-08-17_10:00:00 sig:aaa m:hello",
+                        56, -40, false, 1786000000), "signed+valid refused");
+    CHECK(xprsindex_add(st, "t:status f:X1WHO ts:2026-08-17_10:00:01 sig:bbb m:hello",
+                        55, -40, false, 1786000001), "signed+unknown refused");
+    CHECK(xprsindex_add(st, "t:status f:X1BARE ts:2026-08-17_10:00:02 m:hello",
+                        47, -40, false, 1786000002), "unsigned refused");
+    /* Accepted by add() — it is only a lie once the signature has been checked,
+     * and that happens a thread later. */
+    xprsindex_add(st, "t:status f:X1EVIL ts:2026-08-17_10:00:03 sig:ccc m:hello",
+                  56, -40, false, 1786000003);
+
+    uint8_t f[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    xprsidx_query_t q = { .type = -1, .limit = 50, .newest_first = false };
+    xprsindex_query(st, &q, collect_flags, f);
+
+    CHECK(f[0] != 0xFF, "the verified record was not stored");
+    CHECK(xprsidx_sig_of(f[0]) == XI_SIG_VERIFIED,
+          "a checked signature did not read as verified (flags %02x)", f[0]);
+    CHECK(f[1] == 0xFF, "a FORGED record was stored — it must be refused");
+    CHECK(xprsidx_sig_of(f[2]) == XI_SIG_UNVERIFIED,
+          "an author we hold no key for should be unverified, not a verdict");
+    CHECK(xprsidx_sig_of(f[3]) == XI_SIG_UNSIGNED,
+          "an unsigned packet is not the same as an unverified one");
+
+    xprsidx_stats_t stats;
+    xprsindex_stats(st, &stats);
+    CHECK(stats.verified == 1 && stats.unverified == 1 && stats.forged == 1,
+          "counters wrong: %u/%u/%u", (unsigned)stats.verified,
+          (unsigned)stats.unverified, (unsigned)stats.forged);
+    CHECK(stats.count == 3, "the forged record still counts (%u)",
+          (unsigned)stats.count);
+
+    /* With no verifier a station says the honest thing: it cannot tell. */
+    xprsindex_close(st);
+    rm_rf(dir);
+    st = xprsindex_open(dir);
+    xprsindex_add(st, "t:status f:X1GOOD ts:2026-08-17_10:00:00 sig:aaa m:hello",
+                  56, -40, false, 1786000000);
+    uint8_t g[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    xprsindex_query(st, &q, collect_flags, g);
+    CHECK(xprsidx_sig_of(g[0]) == XI_SIG_UNVERIFIED,
+          "without a verifier, a signature must not read as verified");
+    xprsindex_close(st);
+}
+
 /* ── the directory an indexer publishes (XPRS.md §36.9) ──────────────────── */
 
 static void test_directory(const char *dir)
@@ -386,6 +460,7 @@ int main(void)
     test_wire_is_kept_verbatim(dir);
     test_torn_tail_still_answers(dir);
     test_directory(dir);
+    test_verifies_what_it_stores(dir);
     rm_rf(dir);
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

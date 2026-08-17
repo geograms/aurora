@@ -180,6 +180,7 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi);
 static void igate_heard_add(const char *call, uint8_t bearer);
 static int  xprs_hears_render(uint8_t bearer, char *out, int cap, int *total);
 static bool xprs_verify_sig(const xprs_t *p, const uint8_t pub[32]);
+static int  xprs_peer_key_count(void);
 static void xprs_identity_heard(const xprs_t *p);
 static void xprs_hist_accept(const char *wire, int len, const xprs_t *p,
                              uint8_t bearer);
@@ -1032,13 +1033,18 @@ typedef struct { char *buf; size_t size, len; bool first, full; } xq_ctx_t;
 static bool xq_emit(const xprsidx_rec_t *r, void *vctx)
 {
     xq_ctx_t *c = (xq_ctx_t *)vctx;
-    size_t room = (c->len + 96 < c->size) ? c->size - c->len - 96 : 0;
+    size_t room = (c->len + 128 < c->size) ? c->size - c->len - 128 : 0;
     if (!room) { c->full = true; return false; }
+    /* `sig` is the reader's whole basis for believing `from` (§9.1): a name is
+     * only worth as much as the signature under it, and "unverified" is a
+     * different statement from "unsigned". */
+    static const char *sig_name[] = { "unsigned", "unverified", "verified" };
     int n = snprintf(c->buf + c->len, room,
         "%s{\"i\":%u,\"ts\":%u,\"rssi\":%d,\"type\":\"%s\",\"from\":\"%s\","
-        "\"mail\":%s,\"wire\":\"",
+        "\"sig\":\"%s\",\"mail\":%s,\"wire\":\"",
         c->first ? "" : ",", (unsigned)r->index, (unsigned)r->ts, (int)r->rssi,
         xprsidx_type_name(r->type), r->from,
+        sig_name[xprsidx_sig_of(r->flags)],
         (r->flags & XI_F_MAIL) ? "true" : "false");
     if (n < 0 || (size_t)n >= room) { c->full = true; return false; }
     size_t len = c->len + (size_t)n;
@@ -1207,6 +1213,13 @@ static void heartbeat_task(void *arg)
                  rns_tcp_is_up() ? "" : "(down) ",
                  rns_tcp_current_hub(), (unsigned)hrx, (unsigned)htx,
                  (unsigned)hconn, (unsigned)hdrop);
+        /* Authorship, since boot: what this indexer could stand behind, what it
+         * merely kept, and what it refused (§9.1). A `forged` that climbs is
+         * either somebody lying or a key binding that went wrong — both worth
+         * seeing without asking the device anything. */
+        ESP_LOGW(TAG, "sig ok=%u unverified=%u forged=%u keys=%d",
+                 (unsigned)xs.verified, (unsigned)xs.unverified,
+                 (unsigned)xs.forged, xprs_peer_key_count());
         ESP_LOGW(TAG, "alive %us heap=%u min=%u big=%u recs=%u q=%u/%u lan=%d",
                  (unsigned)(esp_timer_get_time() / 1000000ULL),
                  (unsigned)esp_get_free_heap_size(),
@@ -1503,9 +1516,17 @@ static int xprs_lan_beacon(char *out, int cap)
 /* Callsign → signing key, learned from the `t:identity` packets other stations
  * air (section 9.3). Small on purpose: this exists to tell a station we have
  * met from a stranger when spending airtime, not to be a directory. */
-#define XPRS_PEERKEYS_MAX        4
+#define XPRS_PEERKEYS_MAX       16
 static struct { char call[10]; uint8_t pub[32]; } s_peer_keys[XPRS_PEERKEYS_MAX];
-static int s_peer_keys_n;
+
+/* Append-only, and the count is published LAST. The receive tasks add entries
+ * and the index's writer task reads them while verifying, with no lock between
+ * them: that is safe only because an entry is finished before it is counted, so
+ * a reader either does not see a slot at all or sees it whole. Nothing ever
+ * rewrites or removes one. */
+static volatile int s_peer_keys_n;
+
+static int xprs_peer_key_count(void) { return s_peer_keys_n; }
 
 static const uint8_t *xprs_peer_key(const char *call)
 {
@@ -1524,12 +1545,12 @@ static const uint8_t *xprs_peer_key(const char *call)
 static void xprs_peer_key_learn(const char *call, const uint8_t pub[32])
 {
     if (!call || !call[0] || xprs_peer_key(call)) return;
-    if (s_peer_keys_n >= XPRS_PEERKEYS_MAX) return;
-    strncpy(s_peer_keys[s_peer_keys_n].call, call,
-            sizeof s_peer_keys[0].call - 1);
-    s_peer_keys[s_peer_keys_n].call[sizeof s_peer_keys[0].call - 1] = 0;
-    memcpy(s_peer_keys[s_peer_keys_n].pub, pub, 32);
-    s_peer_keys_n++;
+    int n = s_peer_keys_n;
+    if (n >= XPRS_PEERKEYS_MAX) return;
+    strncpy(s_peer_keys[n].call, call, sizeof s_peer_keys[0].call - 1);
+    s_peer_keys[n].call[sizeof s_peer_keys[0].call - 1] = 0;
+    memcpy(s_peer_keys[n].pub, pub, 32);
+    s_peer_keys_n = n + 1;              /* published last: see the note above */
     ESP_LOGI(TAG, "XPRS: learned %s signs with %02x%02x%02x%02x...",
              call, pub[0], pub[1], pub[2], pub[3]);
 }
@@ -1577,6 +1598,63 @@ static bool xprs_verify_sig(const xprs_t *p, const uint8_t pub[32])
     uint8_t digest[32];
     sha256((const uint8_t *)canon, (size_t)n, digest);
     return xprssig_verify(digest, sig, pub);
+}
+
+/*
+ * What the index calls to decide whether a stored packet is really from who it
+ * says (XPRS.md section 9.1). Runs on the store's writer task — core 1, one
+ * packet before it is written — never on the thread that heard it.
+ *
+ * Three answers, and the middle one matters: a station whose key we have never
+ * heard is UNKNOWN, not a liar. Only a signature that fails against a key we
+ * actually hold is evidence of anything.
+ */
+static int xprs_verify_for_index(const char *wire, int len, const char *from)
+{
+    const uint8_t *key = xprs_peer_key(from);
+    if (!key) return 0;                    /* no key: cannot tell, and says so */
+    xprs_t p;
+    if (!xprs_parse(wire, len, &p)) return 0;
+    return xprs_verify_sig(&p, key) ? 1 : -1;
+}
+
+/* Every `t:identity` this station ever stored is a callsign→key binding it can
+ * have back for the cost of reading them (section 9.3). Without this the table
+ * is empty at every boot, and the first ten minutes of traffic from stations we
+ * have known for weeks reads as unverifiable.
+ *
+ * Boot only, and on the task that opens the store — the radios are not up yet,
+ * so this is the one moment when reading the card costs nobody anything. */
+static bool xprs_key_from_identity(const xprsidx_rec_t *rec, void *ctx)
+{
+    (void)ctx;
+    xprs_t p;
+    if (xprs_parse(rec->wire, rec->len, &p)) xprs_identity_heard(&p);
+    return s_peer_keys_n < XPRS_PEERKEYS_MAX;
+}
+
+/* Set when the store opens, acted on by the relay task's first tick.
+ *
+ * NOT done where the store is opened. `app_main` has a 3584-byte stack and
+ * checking a signature is an mbedtls_ecp_muladd, which wants several kilobytes
+ * of its own: doing it there overflowed the main task and put the dongle in a
+ * reboot loop — which over the network is indistinguishable from a flaky link,
+ * exactly as docs/esp32.md warns. The relay task has 8 KB and lives on core 1,
+ * so it does this once, on its first pass, before the radios are busy. */
+static volatile bool s_keys_reload_due;
+
+static void xprs_keys_reload(void)
+{
+    if (!s_xprs_index) return;
+    xprsidx_query_t q = {
+        .type = XI_T_IDENTITY,
+        .asker = s_aprs_call,
+        .limit = XPRS_PEERKEYS_MAX * 2,    /* the newest may repeat a station */
+        .newest_first = true,
+    };
+    xprsindex_query(s_xprs_index, &q, xprs_key_from_identity, NULL);
+    ESP_LOGI(TAG, "XPRS: %d signing key%s known from stored identities",
+             s_peer_keys_n, s_peer_keys_n == 1 ? "" : "s");
 }
 
 /*
@@ -2242,6 +2320,13 @@ static void relay_task(void *arg)
              * and re-judge it later. */
             xprs_identity_air();
             xprs_service_air();
+        }
+
+        /* Once, early: read our stored identities back into the key table, on
+         * a task with the stack for the curve work that verifying them takes. */
+        if (s_keys_reload_due) {
+            s_keys_reload_due = false;
+            xprs_keys_reload();
         }
 
         /* One packet of a cmd:history replay per tick — 1500 ms between
@@ -3249,6 +3334,11 @@ void app_main(void)
             xprsindex_stats(s_xprs_index, &xs);
             ESP_LOGI(TAG, "XPRS indexer ready — %u records, epoch %c, %u segments",
                      (unsigned)xs.count, xs.epoch, (unsigned)xs.segments);
+            /* Judge everything from here on (§9.1). The keys to judge WITH are
+             * fetched by the relay task on its first tick — see the note on
+             * s_keys_reload_due; doing it here overflowed the main task. */
+            xprsindex_set_verifier(s_xprs_index, xprs_verify_for_index);
+            s_keys_reload_due = true;
         } else {
             ESP_LOGW(TAG, "XPRS indexer unavailable — packets relayed, none kept");
             s_xprs_index = NULL;

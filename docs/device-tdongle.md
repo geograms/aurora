@@ -9,9 +9,9 @@ for the firmware; this is the operator's page for the device.
 | | |
 |---|---|
 | Board | LilyGo T-Dongle-S3 (ESP32-S3, USB-A stick) |
-| Firmware | `esp32/`, env `tdongle_s3` (`pio run -e tdongle_s3`) |
+| Firmware | `esp32/rns_ble5/` (`pio run` inside that directory). The older `esp32/` env `tdongle_s3` is the legacy-BLE APRS build and is no longer what ships here |
 | Radios | WiFi 2.4 GHz (STA + SoftAP) and Bluetooth LE — **one antenna, shared** |
-| Bluetooth | **legacy advertising only**, 31-byte payloads. Extended advertising is the separate `rns_ble5` firmware |
+| Bluetooth | **BLE5 extended advertising**, one AD structure up to 254 B. A legacy connectable advert is kept on a second instance for GATT |
 | Storage | microSD under the USB-A cap, FAT, mounted at `/sdcard` |
 | Display | ST7735 160×80 |
 | Memory | no PSRAM. ~15 KB of free heap in normal operation |
@@ -29,8 +29,10 @@ reaches every machine on the WiFi through it, and the other way round.
 
 **An APRS iGate**, which is a separate job on separate paths and is not XPRS.
 
-It is **not** a router, not a Reticulum node, and not an authority: it verifies
-nothing and signs nothing (see the limits below).
+It is **not** a router. It signs what it says and checks what it keeps, but it
+is not an authority: a `verified` here means the signature matched a key this
+device happened to learn off the air, which is a smaller claim than it sounds
+(see the limits below).
 
 ## Bearers
 
@@ -66,7 +68,11 @@ device presence only and is a different protocol.
 | §36.9 `serve:index` announcement | every 10 minutes on BLE5 and the LAN: `t:service f:<call> serve:index,history,mailbox count:<n>` — how a station discovers this indexer exists at all |
 | §36.9 XDIR1 directory | who it archives, one `call ts` line per station, sorted; served at `GET /api/xprs/dir` |
 | §36.9 content never crosses | it archives only what it hears on its own bearers; it imports nothing from another indexer |
+| §25.2 `cmd:history` | **it answers over the air**, on the bearer the ask arrived on: `t:result code:202`, the stored packets verbatim with the author's own signature, then `code:200` — or `206` when more is held, `404` for an empty window, `429` over budget. Paced one packet per 1.5 s, one replay at a time, and metered per asker (6/hour known, 2/hour stranger, 12/hour globally). `only:` matches a callsign anywhere in a packet, including inside `hears:` (§36.6), which is how "where can X be reached" is asked |
+| §11.6 `ping`/`pong` | answers a `t:ping` addressed to it (or to nobody) with a signed `t:pong` carrying the signal it arrived with. Rate limited: one per caller per minute, one globally per 5 s |
 | §9.1 signatures | **it signs** everything it originates — identity, service announcements, beacons, pongs — with the 48-byte short-Schnorr over secp256k1 that `sig:` carries as 60 base85 characters |
+| §9.1 verifying | **it checks what it keeps.** Every signed packet is verified against the author's key one step before it is written — on the store's writer task, core 1, never where the packet was heard. A record is stored `verified` or `unverified` (no key for that author: not a verdict), and a signature that FAILS against a key it holds is **refused, not stored** — an indexer that kept a forgery would hand it on later under the name it impersonates. `GET /api/xprs` reports the verdict per record; the console heartbeat reports `sig ok=/unverified=/forged=` |
+| callsign→key | learned from the `t:identity` packets it hears (§9.3), first speaker wins, up to 16 stations. Reloaded at boot from the identities already on the card, so a station known for weeks is not unverifiable for the first ten minutes after a restart |
 | §9.3 `t:identity` | announced every 10 minutes: `t:identity f:<call> ts:… k:npub1… sig:…`, self-signed. A receiver stores the callsign→key binding and can then verify everything else this station says |
 | §3 callsign binding | the callsign IS derived from the npub, so a receiver re-derives it and sees that name and key belong together. A station carrying an older auto-derived callsign migrates once |
 | Identity | the station's **NOSTR key** (`geogram_nostr`): secp256k1, npub, NVS, and the callsign derivation — one key for the callsign, the signature and the identity packet |
@@ -84,17 +90,14 @@ index that does not know it.
 
 | Missing | What that means for you |
 |---|---|
-| **No signature checking** | `sig:` is noted as present (a record flag) and never verified. Nothing this device serves is proof of anything; verify against the author's key at the far end |
-| **No signing** | it holds no key and originates only its own unsigned beacon |
+| **A key is only as good as where it came from** | bindings are learned from unauthenticated `t:identity` packets, first speaker wins. A station that speaks a callsign before its owner does owns that callsign here until reboot. `verified` means "matches the key we associate with this name", not "is who they say" — the far end should still check against a key it trusts |
+| **Only 16 stations** | past that the table is full and everything else reads `unverified`. Old records are never re-judged, so what was stored before a key was known stays unverified |
 | **No decryption** | `x:` sealed bodies pass through and are stored opaque, which is the intended behaviour, but the device cannot read or check them |
 | **No `scope:` enforcement** | `scope:local` is not inspected before re-airing. In practice nothing here gateways XPRS to the internet, so a `local` packet does not escape — but that is the topology, not a check |
-| **No `cmd:history` responder** | asking this station to replay a window does nothing. Aurora implements that; the dongle answers over HTTP/GATT instead |
 | **It does not push to other indexers** | §36.3 is a publisher choosing indexers and pushing to them with a per-indexer cursor. This device indexes only what it happens to overhear |
 | **No indexer↔indexer sync** | it never gossips its store to a peer |
-| **No XPRS `ping` responder** | it will not answer `t:ping` |
 | **Mail is held, not delivered** | mail is stored and kept private, but the device does not announce it, does not appear in a `hold:` list, and does not release it on a verified receipt |
 | **No eviction** | the store grows until the card is full. At 320 B a record a 32 GB card is a very long time, but nothing deletes anything yet |
-| **It verifies nothing** | it signs, but does not check the signatures on packets it receives, so it cannot mark a sender verified or forged, and does not store the callsign→key bindings it hears |
 | **The directory is not a content-addressed file** | §36.9 has it named by `file:<ref>.xdir` in the announcement and fetched with `cmd:file`. There is no file transfer here yet, so the same bytes are served over HTTP instead |
 | **No `m:try` redirect, no peer directories** | a miss is simply a miss; it neither names peers that hold a callsign nor fetches anybody else's directory |
 | **Not a §36.8 gateway** | it does not release sealed mail to a station whose observation lists the recipient in `hears:` — mail is held and served only to a matching asker |

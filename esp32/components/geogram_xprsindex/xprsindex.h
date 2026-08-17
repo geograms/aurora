@@ -97,6 +97,42 @@ int xprsidx_type_code(const char *name);
 #define XI_F_MAIL      0x01   /* carries d: — held, never served to others */
 #define XI_F_OUTGOING  0x02   /* this station originated or relayed it */
 #define XI_F_SIGNED    0x04   /* carried sig: */
+#define XI_F_VERIFIED  0x08   /* the signature checked out against a known key */
+
+/**
+ * How a record's authorship should be presented (XPRS.md section 9.1). Derived
+ * from the flags rather than stored twice.
+ *
+ * There is no FORGED value because a forged record is never written: a
+ * signature that fails against a key we hold is the one thing on this bearer
+ * that is evidence of a lie, and keeping it would mean serving it to somebody
+ * later under the author's name.
+ */
+typedef enum {
+    XI_SIG_UNSIGNED = 0,   /* no sig: — common and legitimate */
+    XI_SIG_UNVERIFIED,     /* signed, but we hold no key for the author */
+    XI_SIG_VERIFIED,       /* signed, and it checks out */
+} xprsidx_sig_t;
+
+static inline xprsidx_sig_t xprsidx_sig_of(uint8_t flags)
+{
+    if (!(flags & XI_F_SIGNED)) return XI_SIG_UNSIGNED;
+    return (flags & XI_F_VERIFIED) ? XI_SIG_VERIFIED : XI_SIG_UNVERIFIED;
+}
+
+/**
+ * Check one packet's `sig:` (XPRS.md section 9.1).
+ *
+ * @return >0 verified, 0 cannot tell (no key for this author), <0 forged.
+ *
+ * The store calls this on its OWN writer task, never on the thread that heard
+ * the packet: a verify is a secp256k1 point multiplication, and this board has
+ * a long history of what happens when work like that lands on the processor the
+ * radios are using. Anything the callback needs must therefore be safe to touch
+ * from that task.
+ */
+typedef int (*xprsidx_verify_cb_t)(const char *wire, int len, const char *from);
+
 
 /** One record as a query hands it back. */
 typedef struct {
@@ -136,6 +172,8 @@ typedef struct {
     uint64_t total_bytes;   /* card */
     uint64_t free_bytes;
     char     epoch;
+    /* Authorship, since boot. `forged` counts records refused, not stored. */
+    uint32_t verified, unverified, forged;
 } xprsidx_stats_t;
 
 /** Return false to stop the query early. */
@@ -149,6 +187,12 @@ typedef struct xprsidx_s xprsidx_t;
  * or short. NULL when there is no card or no memory.
  */
 xprsidx_t *xprsindex_open(const char *dir);
+
+/**
+ * Install the verifier. NULL (the default) means every signed record is stored
+ * unverified, which is what a station with no keys can honestly say.
+ */
+void xprsindex_set_verifier(xprsidx_t *st, xprsidx_verify_cb_t cb);
 void       xprsindex_close(xprsidx_t *st);
 bool       xprsindex_ready(const xprsidx_t *st);
 

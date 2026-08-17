@@ -158,6 +158,8 @@ struct xprsidx_s {
     uint32_t dedup[XI_DEDUP_RING];
     int      dedup_pos;
     xprsidx_gate_fn gate;           /* "the radio is idle" — may be NULL */
+    xprsidx_verify_cb_t verify;     /* section 9.1, run on the writer task */
+    uint32_t verified, unverified, forged;
     volatile bool paused;           /* a reader owns the card right now */
     xi_rec_t queue[XI_QUEUE_LEN];   /* decided, not yet on the card */
     int      q_head, q_count;
@@ -582,10 +584,13 @@ xprsidx_t *xprsindex_open(const char *dir)
      * task, while core 1 sits nearly idle. SD transactions are long and this is
      * the one job in the firmware with no reason to compete with a radio for
      * the same processor. */
-    /* 4 KB: this task calls into FATFS and the SDMMC driver, which are not
-     * frugal with stack, and 3 KB overflowed under a burst of traffic — the
-     * dongle rebooted rather than dropped a record. */
-    if (xTaskCreatePinnedToCore(xi_writer_task, "xprsidx_wr", 4096, st, 2, NULL,
+    /* 8 KB. FATFS and the SDMMC driver are not frugal with stack and 3 KB
+     * overflowed under a burst of traffic — the dongle rebooted rather than
+     * dropped a record — which is where the old 4 KB came from. It now also
+     * verifies a signature before each write, and mbedtls_ecp_muladd on
+     * secp256k1 wants several kilobytes of its own; a stack overflow here
+     * presents as a reboot loop, so this is sized generously on purpose. */
+    if (xTaskCreatePinnedToCore(xi_writer_task, "xprsidx_wr", 8192, st, 2, NULL,
                                 1) != pdPASS) {
         XI_LOGW("writer task failed to start — nothing will reach the card");
         st->ready = false;
@@ -619,11 +624,46 @@ char xprsindex_epoch(const xprsidx_t *st) { return st ? st->epoch : '?'; }
 
 /* ── Add ────────────────────────────────────────────────────────────────── */
 
+/*
+ * Decide what a record's signature says, one packet before it becomes
+ * permanent (XPRS.md section 9.1). Returns false when it must not be stored.
+ *
+ * Called with the lock held, and NEVER from the thread that heard the packet:
+ * a verify is a secp256k1 point multiplication, and on the device this runs on
+ * the writer task, pinned to core 1, for the same reason the writes do.
+ *
+ * A FORGED record is dropped. It is the one thing on an open bearer that is
+ * evidence of a lie, and an indexer that kept it would hand it to somebody
+ * later under the name of the station it impersonates.
+ */
+static bool xi_judge_rec(xprsidx_t *st, xi_rec_t *r)
+{
+    if (!(r->flags & XI_F_SIGNED) || !st->verify) return true;
+    int v = st->verify(r->wire, r->len, r->from);
+    if (v > 0) {
+        r->flags |= XI_F_VERIFIED;
+        st->verified++;
+        return true;
+    }
+    if (v < 0) {
+        st->forged++;
+        st->count--;                 /* it was counted when it was accepted */
+        XI_LOGW("refused a forged packet in the name of %s", r->from);
+        return false;
+    }
+    st->unverified++;
+    return true;
+}
+
 /* Hand a finished record to the writer. Called with the lock held. */
 static bool xi_queue_rec(xprsidx_t *st, const xi_rec_t *r)
 {
 #ifdef XPRSIDX_HOST_TEST
-    return xi_write_rec_fwd(st, r);      /* the host has no task: write it now */
+    /* The host has no writer task, so the judgement happens here instead — the
+     * same call, one thread earlier. */
+    xi_rec_t judged = *r;
+    if (!xi_judge_rec(st, &judged)) return false;
+    return xi_write_rec_fwd(st, &judged);
 #else
     if (st->q_count >= XI_QUEUE_LEN) {
         /* The card is slower than the air. Losing the newest is better than
@@ -991,8 +1031,14 @@ static void xi_writer_task(void *arg)
             xi_rec_t rec = st->queue[st->q_head];
             st->q_head = (st->q_head + 1) % XI_QUEUE_LEN;
             st->q_count--;
-            xi_write_rec(st, &rec);
-            n++;
+
+            /* The queue exists to move work off the thread that heard the
+             * packet; judging authorship is more of the same work, and the
+             * record is about to be written by this task anyway. */
+            if (xi_judge_rec(st, &rec)) {
+                xi_write_rec(st, &rec);
+                n++;
+            }
             XI_UNLOCK(st);
         }
         if (n) {
@@ -1153,6 +1199,14 @@ bool xprsindex_get(xprsidx_t *st, uint32_t index, xprsidx_rec_t *out)
     return ok;
 }
 
+void xprsindex_set_verifier(xprsidx_t *st, xprsidx_verify_cb_t cb)
+{
+    if (!st) return;
+    XI_LOCK(st);
+    st->verify = cb;
+    XI_UNLOCK(st);
+}
+
 void xprsindex_stats(xprsidx_t *st, xprsidx_stats_t *out)
 {
     if (!out) return;
@@ -1164,6 +1218,9 @@ void xprsindex_stats(xprsidx_t *st, xprsidx_stats_t *out)
     out->epoch        = st->epoch;
     out->total_bytes  = xi_card_total(st->dir);
     out->free_bytes   = xi_card_free(st->dir);
+    out->verified     = st->verified;
+    out->unverified   = st->unverified;
+    out->forged       = st->forged;
 }
 
 #ifndef XPRSIDX_HOST_TEST

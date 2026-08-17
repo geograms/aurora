@@ -13,6 +13,17 @@
 #include "xprsindex.h"
 
 static int g_fail = 0;
+/* The store converts ts: to epoch internally; the test needs the same number. */
+static uint32_t xi_expect_ts(const char *str)
+{
+    int Y,M,D,h,m,sec;
+    if (sscanf(str, "%4d-%2d-%2d_%2d:%2d:%2d", &Y,&M,&D,&h,&m,&sec) != 6) return 0;
+    static const int cum[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
+    long days = (long)(Y - 1970) * 365 + ((Y - 1969) / 4) + cum[M - 1] + (D - 1);
+    if (M > 2 && ((Y % 4 == 0 && Y % 100 != 0) || Y % 400 == 0)) days++;
+    return (uint32_t)(days * 86400L + h * 3600 + m * 60 + sec);
+}
+
 static int g_checks = 0;
 
 #define CHECK(cond, ...) do {                                              \
@@ -313,6 +324,55 @@ static void test_torn_tail_still_answers(const char *dir)
     xprsindex_close(st);
 }
 
+/* ── the directory an indexer publishes (XPRS.md §36.9) ──────────────────── */
+
+static void test_directory(const char *dir)
+{
+    rm_rf(dir);
+    xprsidx_t *st = xprsindex_open(dir);
+
+    /* Two stations, one heard twice, plus a piece of mail — whose ADDRESSEE
+     * must not appear. A directory says who this indexer archives; naming the
+     * recipient would publish the envelope §36.7 keeps. */
+    const char *feed[] = {
+        "t:warning f:X3RLY7 kind:fire sev:danger ts:2026-08-10_09:00:00",
+        "t:info f:X3RLY7 ts:2026-08-14_09:00:00 m:later",
+        "t:blog f:X1BOA3 ts:2026-08-12_09:00:00 m:hello",
+        "t:message f:X1QZ3N d:X1SECRET ts:2026-08-13_09:00:00 x:pQ4m9",
+    };
+    for (size_t i = 0; i < sizeof feed / sizeof feed[0]; i++) {
+        xprsindex_add(st, feed[i], (int)strlen(feed[i]), -60, false, 0);
+    }
+
+    xprsidx_dir_entry_t e[8];
+    int n = xprsindex_directory(st, e, 8);
+    CHECK(n == 3, "listed %d stations, wanted 3", n);
+    if (n == 3) {
+        CHECK(strcmp(e[0].call, "X1BOA3") == 0, "not sorted: first is %s", e[0].call);
+        CHECK(strcmp(e[1].call, "X1QZ3N") == 0, "second is %s", e[1].call);
+        CHECK(strcmp(e[2].call, "X3RLY7") == 0, "third is %s", e[2].call);
+        CHECK(e[2].last_ts == xi_expect_ts("2026-08-14_09:00:00"),
+              "kept the older timestamp for a station heard twice");
+    }
+    for (int i = 0; i < n; i++) {
+        CHECK(strcmp(e[i].call, "X1SECRET") != 0,
+              "a mail addressee was published in the directory");
+    }
+
+    char text[512];
+    int len = xprsindex_dir_render(e, n, text, sizeof text);
+    CHECK(len > 0, "render refused");
+    CHECK(strncmp(text, "XDIR1\n", 6) == 0, "no XDIR1 header");
+    CHECK(strstr(text, "X3RLY7 2026-08-14_09:00:00") != NULL,
+          "line missing or misformatted:\n%s", text);
+
+    /* A directory that does not fit is truncated, never overrun. */
+    char tiny[16];
+    CHECK(xprsindex_dir_render(e, n, tiny, sizeof tiny) == -1,
+          "rendered into a buffer too small for it");
+    xprsindex_close(st);
+}
+
 int main(void)
 {
     const char *dir = "/tmp/xprsidx_test";
@@ -325,6 +385,7 @@ int main(void)
     test_survives_a_lost_index(dir);
     test_wire_is_kept_verbatim(dir);
     test_torn_tail_still_answers(dir);
+    test_directory(dir);
     rm_rf(dir);
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

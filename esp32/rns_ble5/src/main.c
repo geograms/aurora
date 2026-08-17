@@ -112,6 +112,18 @@ static const struct { const char *host; uint16_t port; } k_rns_hubs[] = {
 };
 #endif
 
+/* How often this station says it is an indexer, and how many callsigns its
+ * directory may list. 64 is a dongle's worth: an indexer archiving more than
+ * that has outgrown this hardware. */
+#define XPRS_SERVICE_EVERY_SEC 600
+#define XPRS_SERVICE_FIRST_SEC  30
+#define XPRS_DIR_MAX           32
+
+/* One directory buffer for the whole firmware. Both users run on tasks that
+ * take the index lock, and a second copy is 640 bytes this board does not have
+ * — heap here is measured in single-digit kilobytes. */
+static xprsidx_dir_entry_t s_dir[XPRS_DIR_MAX];
+
 #define SUBTYPE_XPRS 0x58   /* XPRS text packet ('X') — docs/ble5.md §2 */
 
 #define RNS_PKT_ANNOUNCE 0x01
@@ -1071,6 +1083,30 @@ static esp_err_t api_xprs_get(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /api/xprs/dir — the XDIR1 listing of §36.9, as text.
+ *
+ * §36.9 has it fetched as a content-addressed file named in the service
+ * announcement; this station has no file transfer yet, so it serves the same
+ * bytes over HTTP. The format is the one a peer expects, which is the part
+ * that has to be right. */
+static esp_err_t api_xprs_dir_get(httpd_req_t *req)
+{
+    int n = xprsindex_directory(s_xprs_index, s_dir, XPRS_DIR_MAX);
+
+    char *buf = malloc(1536);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    int len = xprsindex_dir_render(s_dir, n, buf, 1536);
+    if (len < 0) len = (int)strlen(buf);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, len);
+    free(buf);
+    return ESP_OK;
+}
+
 static void api_start(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
@@ -1086,7 +1122,10 @@ static void api_start(void)
     static const httpd_uri_t u = { .uri = "/api/xprs", .method = HTTP_GET,
                                    .handler = api_xprs_get, .user_ctx = NULL };
     httpd_register_uri_handler(srv, &u);
-    ESP_LOGI(TAG, "HTTP API up: GET /api/xprs");
+    static const httpd_uri_t ud = { .uri = "/api/xprs/dir", .method = HTTP_GET,
+                                    .handler = api_xprs_dir_get, .user_ctx = NULL };
+    httpd_register_uri_handler(srv, &ud);
+    ESP_LOGI(TAG, "HTTP API up: GET /api/xprs, /api/xprs/dir");
 }
 
 static void heartbeat_task(void *arg)
@@ -1185,6 +1224,50 @@ static void xprs_heard_on_lan(const char *id, const char *wire, int len)
     xprs_t hp;
     if (!xprs_parse(wire, len, &hp) || xprs_via_count(&hp) == 0) return;
     relay_cancel((uint32_t)strtoul(id, NULL, 16));
+}
+
+/* ── announcing that this station is an indexer (XPRS.md §36.9) ─────────── */
+
+/* How often the service announcement goes out, and how many callsigns the
+ * directory may list. 64 is a dongle's worth: an indexer with more archived
+ * stations than that has outgrown this hardware. */
+
+static uint32_t s_last_service;
+
+/* `serve:index` is how a station discovers an indexer at all (§36.9): heard in
+ * a beacon or a t:service on the air, or passed on verbatim by another
+ * indexer. Until this went out, the dongle archived everything it heard and
+ * answered questions faithfully, and nothing on the network had any way to
+ * learn it existed.
+ *
+ * count: is the number of callsigns archived — §36.9 puts it in the
+ * announcement so a peer knows the size of a directory before fetching it.
+ *
+ * NOT signed: this station holds no XPRS key (§37 says it transmits unsigned).
+ * §36.9 expects a signed announcement, so a peer is entitled to ignore this
+ * one; it is still what makes the station discoverable to the stations in
+ * range, and signing is the next thing this needs.
+ */
+static void xprs_service_air(void)
+{
+    if (!s_xprs_index || !s_aprs_call[0]) return;
+
+    int n = xprsindex_directory(s_xprs_index, s_dir, XPRS_DIR_MAX);
+
+    char wire[XPRS_MAX_WIRE + 1];
+    char ts[24];
+    xprs_time_field(ts, sizeof ts);
+    int len = snprintf(wire, sizeof wire,
+                       "t:service f:%s serve:index,history,mailbox count:%d %s",
+                       s_aprs_call, n, ts);
+    if (len <= 0 || len > XPRS_MAX_WIRE) return;
+
+    xprs_air(wire, len, SUBTYPE_XPRS);
+    xprslan_send(wire, len);
+    if (s_xprs_index) {
+        xprsindex_add(s_xprs_index, wire, len, 0, true, (uint32_t)time(NULL));
+    }
+    ESP_LOGI(TAG, "announced serve:index — %d callsigns archived", n);
 }
 
 /* This station, on the bearer it is describing (§10.6). Built on the bearer's
@@ -1494,6 +1577,17 @@ static void relay_task(void *arg)
         /* A hub learns nothing about a station that has not spoken since it
          * connected, so a fresh socket asks for an announce here — on the task
          * that owns the signing buffers. */
+        /* Say we are an indexer, on both bearers. The first goes out shortly
+         * after boot rather than a full period later: a station that has just
+         * come up is exactly the one its neighbours have not heard of. */
+        bool service_due = (s_last_service == 0)
+                               ? (t >= XPRS_SERVICE_FIRST_SEC)
+                               : (t - s_last_service >= XPRS_SERVICE_EVERY_SEC);
+        if (service_due) {
+            s_last_service = t;
+            xprs_service_air();
+        }
+
         if (s_hub_announce_pending) {
             s_hub_announce_pending = false;
             announce("tdongle-s3 online", 17);

@@ -1020,6 +1020,90 @@ size_t xprsindex_query(xprsidx_t *st, const xprsidx_query_t *q,
     return n;
 }
 
+/* ── The directory (XPRS.md §36.9) ──────────────────────────────────────── */
+
+/* Insertion sort by callsign, keeping the newest ts per station. The list is
+ * small — an indexer with more archived callsigns than this has outgrown a
+ * dongle — and staying sorted as we go is what lets a peer diff two
+ * directories by reading them straight through. */
+static void xi_dir_put(xprsidx_dir_entry_t *out, int *n, int max,
+                       const char *call, uint32_t ts)
+{
+    if (!call || !call[0]) return;
+    int i = 0;
+    for (; i < *n; i++) {
+        int cmp = strcmp(out[i].call, call);
+        if (cmp == 0) {
+            if (ts > out[i].last_ts) out[i].last_ts = ts;   /* keep the newest */
+            return;
+        }
+        if (cmp > 0) break;                                  /* insert here */
+    }
+    if (*n >= max) return;               /* full: the tail is simply not listed */
+    for (int k = *n; k > i; k--) out[k] = out[k - 1];
+    snprintf(out[i].call, sizeof out[i].call, "%s", call);
+    out[i].last_ts = ts;
+    (*n)++;
+}
+
+int xprsindex_directory(xprsidx_t *st, xprsidx_dir_entry_t *out, int max)
+{
+    if (!st || !st->ready || !out || max <= 0) return 0;
+    XI_LOCK(st);
+    xi_sync(st);
+
+    int n = 0;
+    xi_rec_t r;
+    for (uint32_t i = 0; i < st->next_index; i++) {
+        if (!xi_read_rec(st, i, &r)) continue;
+        /* Mail is listed by its SENDER only. Naming the addressee would tell a
+         * peer who receives mail here, which is the envelope §36.7 keeps. */
+        xi_dir_put(out, &n, max, r.from, r.ts);
+    }
+    XI_UNLOCK(st);
+    return n;
+}
+
+int xprsindex_dir_render(const xprsidx_dir_entry_t *entries, int n,
+                         char *out, size_t cap)
+{
+    if (!out || cap < 8) return -1;
+    size_t len = 0;
+    int w = snprintf(out, cap, "XDIR1\n");
+    if (w < 0 || (size_t)w >= cap) return -1;
+    len = (size_t)w;
+    for (int i = 0; i < n && entries; i++) {
+        /* `call ts` — the two value types the format already has (§4.3), so a
+         * reader needs no new parser for a directory. */
+        char ts[24] = "-";
+        if (entries[i].last_ts) {
+            uint32_t t = entries[i].last_ts;
+            uint32_t days = t / 86400u, rem = t % 86400u, y = 1970, d = days;
+            for (;;) {
+                uint32_t l = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 366 : 365;
+                if (d < l) break;
+                d -= l; y++;
+            }
+            static const int cum[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
+            bool leap = ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0);
+            int mon = 11;
+            for (int m = 0; m < 12; m++) {
+                int start = cum[m] + ((leap && m >= 2) ? 1 : 0);
+                if ((int)d < start) { mon = m - 1; break; }
+            }
+            int mstart = cum[mon] + ((leap && mon >= 2) ? 1 : 0);
+            snprintf(ts, sizeof ts, "%04u-%02u-%02u_%02u:%02u:%02u",
+                     (unsigned)y, (unsigned)(mon + 1), (unsigned)(d - mstart + 1),
+                     (unsigned)(rem / 3600), (unsigned)((rem / 60) % 60),
+                     (unsigned)(rem % 60));
+        }
+        w = snprintf(out + len, cap - len, "%s %s\n", entries[i].call, ts);
+        if (w < 0 || (size_t)w >= cap - len) return -1;
+        len += (size_t)w;
+    }
+    return (int)len;
+}
+
 void xprsindex_set_gate(xprsidx_t *st, xprsidx_gate_fn gate)
 {
     if (st) st->gate = gate;

@@ -205,6 +205,37 @@ void xprsindex_set_gate(xprsidx_t *st, xprsidx_gate_fn gate);
  */
 void xprsindex_pause_writes(xprsidx_t *st, bool paused);
 
+/* ── The directory an indexer publishes (XPRS.md §36.9) ─────────────────── */
+
+/** One archived station: its callsign and when this indexer last heard it. */
+typedef struct {
+    char     call[XPRSIDX_CALL_LEN];
+    uint32_t last_ts;                 /* the packet's own ts:, epoch seconds */
+} xprsidx_dir_entry_t;
+
+/**
+ * @brief Who this indexer archives, for the XDIR1 listing of §36.9.
+ *
+ * Sorted by callsign, one entry per station, with the most recent time it was
+ * heard — which is exactly what a peer indexer needs to decide whether to ask
+ * us about a callsign, and nothing more. **Content never travels between
+ * indexers; only this does.**
+ *
+ * Walks the store, so it is not free: an indexer publishes a directory on a
+ * cadence, it does not rebuild one per question.
+ *
+ * @return entries written (<= @p max).
+ */
+int xprsindex_directory(xprsidx_t *st, xprsidx_dir_entry_t *out, int max);
+
+/**
+ * @brief Render entries as the XDIR1 text of §36.9 — a header line, then
+ *        `call ts` per station, sorted.
+ * @return bytes written, excluding the NUL, or -1 if it would not fit.
+ */
+int xprsindex_dir_render(const xprsidx_dir_entry_t *entries, int n,
+                         char *out, size_t cap);
+
 /** Records waiting in RAM, and how many were dropped because it filled. */
 void xprsindex_queue_stats(xprsidx_t *st, uint32_t *out_waiting,
                            uint32_t *out_dropped);

@@ -1742,7 +1742,8 @@ Everyone in range reads a meeting near 38.7,-9.1 between two stations.
 Holders of the passphrase read who, which pier, and where to ten metres.
 
 Two properties are deliberate and worth stating. The bars leak the LENGTH
-of a secret -- that is the FOIA look doing its job -- and an author who
+of a secret -- that is the redacted-document look doing its job -- and
+an author who
 must hide length pads inside the parentheses before marking. And a
 redacted packet degrades honestly: a receiver that has never heard of
 `xr:` skips it (section 4) and still shows the bars and the coarse fields,

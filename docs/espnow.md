@@ -197,7 +197,22 @@ Ruled out by measurement, so do not re-test these first:
   an explicit `esp_now_mod_peer` channel are both re-asserted after every move,
   and neither changed the result
 
-What has not been tried: whether the station is off-channel scanning for the
-access point it was told to leave (`esp_wifi_scan_stop`, and confirming the
-driver is not reconnecting on its own), and whether a channel the AP is not on
-behaves differently from channel 6 specifically.
+- **not an off-channel scan** -- `esp_wifi_scan_stop()` is called on the way out
+  and returned "no scan to stop" every single time, and the drift guard that
+  re-reads the channel on every tick while away has never once reported the
+  radio somewhere else. The station is genuinely parked on the working channel
+  for the whole window and still hears nothing.
+- **not channel 6 in particular** -- the same run aimed at channel 11 met 1 time
+  in 5, which is channel 6's rate. It is not local interference on one channel.
+
+One thing IS known to break the return leg, and is in the code as a warning:
+`esp_wifi_scan_stop()` must not be called on the way home. `esp_wifi_connect()`
+starts a scan, and stopping it strands the station on the working channel --
+measured as "back on the calling channel" while the heartbeat still said `ch=6`.
+
+What has not been tried: a pair of boards doing this with NOTHING else running
+(no iGate, no hub, no BLE, no SD), to establish whether two ESP-NOW stations can
+hold a manually-set channel at all on this silicon, or whether the coexistence
+scheduler on a board carrying Bluetooth is the thing that never yields receive
+time once the station is not associated. That is the experiment this needs next,
+and it wants a stripped firmware rather than another change to this one.

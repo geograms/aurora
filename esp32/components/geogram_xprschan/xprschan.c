@@ -124,6 +124,8 @@ static uint32_t s_invite_tries;
 #ifdef XPRSCHAN_HOST_TEST
 
 static void xc_set_lr(bool on) { xc_test_lr = on; }
+static void xc_keep_channel(uint8_t channel) { (void)channel; }
+
 static void xc_go(uint8_t channel, bool lr)
 {
     if (s_ops.hold_reconnect) s_ops.hold_reconnect(true);
@@ -200,6 +202,24 @@ static void xc_hold_the_radio_awake(uint8_t channel)
     }
 }
 
+/* Are we still where we think we are?
+ *
+ * Stopping the scan once, at the moment of the move, only helps if the driver
+ * never starts another -- and a disconnected station keeps looking for its
+ * network. This runs while we are away and puts the radio back when it has
+ * drifted, which is also the only way anybody finds out that it did.
+ */
+static void xc_keep_channel(uint8_t channel)
+{
+    uint8_t now_ch = 0;
+    wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_get_channel(&now_ch, &sec) != ESP_OK) return;
+    if (now_ch == channel) return;
+    XC_LOGW("drifted to channel %u -- going back to %u", now_ch, channel);
+    esp_wifi_scan_stop();
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+}
+
 static void xc_go(uint8_t channel, bool lr)
 {
     wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
@@ -239,15 +259,35 @@ static void xc_go(uint8_t channel, bool lr)
     esp_err_t e = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     if (e != ESP_OK) XC_LOGW("set_channel(%u): %s", channel,
                               esp_err_to_name(e));
-    /* Read it back rather than trust the call. The driver quietly restoring the
-     * access point's channel is the exact failure this path exists to avoid,
-     * and it does not announce itself. */
+    /* And STOP LOOKING FOR THE ACCESS POINT.
+     *
+     * A station that has just been disconnected hunts for its network, and a
+     * scan hops every channel in turn -- so the radio spends most of its time
+     * somewhere other than where esp_wifi_get_channel() says it is, which is
+     * exactly the shape of the fault: both boards reporting channel 6, both
+     * drivers reporting frames sent, neither hearing a byte from the other.
+     * ESP_ERR_WIFI_STATE here simply means there was no scan to stop.
+     *
+     * OUTBOUND ONLY. On the way home a scan is not the problem, it is the
+     * mechanism: esp_wifi_connect() starts one, and stopping it leaves the
+     * station on the working channel for good. Measured doing exactly that --
+     * "back on the calling channel" while the heartbeat still said ch=6. */
+    esp_err_t st = esp_wifi_scan_stop();
+    if (st == ESP_OK) XC_LOGW("a scan was running -- stopped it");
+    else if (st != ESP_ERR_WIFI_STATE && st != ESP_ERR_WIFI_NOT_STARTED)
+        XC_LOGW("scan_stop: %s", esp_err_to_name(st));
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);   /* a scan moved it */
+
+    xc_hold_the_radio_awake(channel);
+
+    /* Read it back rather than trust the calls, and read it LAST -- the driver
+     * quietly restoring the access point's channel is the exact failure this
+     * path exists to avoid, and it does not announce itself. */
     uint8_t actual = 0;
     wifi_second_chan_t back = WIFI_SECOND_CHAN_NONE;
     esp_wifi_get_channel(&actual, &back);
     if (actual != channel)
         XC_LOGW("asked for channel %u but the radio says %u", channel, actual);
-    xc_hold_the_radio_awake(channel);
     XC_LOGW("moved to channel %u (radio says %u)%s — deaf to the commons until "
             "we return", channel, actual, lr ? " on the long-range PHY" : "");
 }
@@ -732,6 +772,7 @@ void xprschan_tick(void)
 
     if (s_state == XC_IDLE) return;
     uint32_t now = s_ops.now_ms();
+    if (s_moved) xc_keep_channel(s_channel);
 
     if (s_state == XC_INVITED) {
         /* Nobody answered on the commons. Nothing moved, so nothing to undo —

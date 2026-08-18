@@ -746,10 +746,24 @@ is otherwise unaffected.
 ## 5. Message identifiers
 
 **Every packet has an identifier, and it is never transmitted.** Both ends
-compute it from the packet itself:
+compute it from the packet itself, byte for byte:
+
+1. Take the packet as transmitted: the UTF-8 bytes on the wire.
+2. Remove the `sig:` field and the `via:` field where present. Removal means
+   deleting the key, its value, and the ONE space before the key, leaving
+   every other byte untouched. Both fields sit before `m:` (which is last and
+   swallows everything after it), fields are separated by single spaces, and
+   `t:` is always first -- so the removal is a plain byte deletion and the
+   result reads as if neither field had been written.
+3. Compute SHA-256 over the remaining bytes.
+4. The identifier is the first 6 characters of the digest in lowercase hex.
+
+To reply to a packet, compute its identifier this way and put it in `r:`.
+Verifiable at a shell:
 
 ```
-id = first 6 hex characters of sha256(the packet, with sig: and via: removed)
+$ echo -n 't:message f:X1QZ3N ts:2026-08-08_14:26:40 m:OK' | sha256sum
+ca5413...        ->  id ca5413
 ```
 
 Nothing announces its own identifier. A packet already carries who sent it and
@@ -760,12 +774,17 @@ The timestamp is what makes this work. Hashing content alone would give every
 network:
 
 ```
-X1QZ3N  2026-08-08_14:26:40  OK   ->  06900a
-X1QZ3N  2026-08-08_14:27:22  OK   ->  2c6755
-X1RD89  2026-08-08_14:26:40  OK   ->  03d7dc
+t:message f:X1QZ3N ts:2026-08-08_14:26:40 m:OK   ->  ca5413
+t:message f:X1QZ3N ts:2026-08-08_14:27:22 m:OK   ->  08ba5f
+t:message f:X1RD89 ts:2026-08-08_14:26:40 m:OK   ->  25f96d
 ```
 
 Sender, second and text together are unique in practice.
+
+A split message is the one place to be careful: every PART has its own
+identifier, and the message's identifier is computed from the reassembled
+packet as section 6.6 describes -- `n:` removed, the `m:` values joined. A
+reply names the reassembled identifier, never a part's.
 
 Two fields are excluded and both for the same reason: they change while a
 packet is in flight. Signing must not alter the identifier of what was signed,

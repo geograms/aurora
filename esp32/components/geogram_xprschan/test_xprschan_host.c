@@ -271,6 +271,14 @@ static void test_the_invitation_is_repeated_while_waiting(void)
     int tries = aired_with("t:channel");
     CHECK(tries >= 3, "only %d invitations in three retry periods", tries);
 
+    /* And our key goes with every one of them. §23.7 is followed only when the
+     * signature verifies, so an invitee that missed the identity ignores the
+     * invitation AND every retry -- one lost packet costing the whole attempt,
+     * measured as seven "not signed by a key we hold" on the far board while
+     * this one recorded "no answer". */
+    CHECK(identity_airings >= tries,
+          "%d identity airings for %d invitations", identity_airings, tries);
+
     /* Same bytes, so the same §5 identifier — an answer naming the first still
      * names the last, which is the whole reason a retry is safe. */
     for (int i = 0; i < aired_n; i++) {
@@ -570,6 +578,66 @@ static void test_bluetooth_is_untouched_when_nobody_moves(void)
     CHECK(bt_running, "Bluetooth left off");
 }
 
+/* Section 23.7 step 5: "when it ends -- or until: passes, whichever is first --
+ * EVERYONE returns to the calling channel." Everyone means the invitee too, and
+ * the invitee here has no clock: `no_clock` returns 0, exactly like the M5Stack.
+ *
+ * It can still work the window out, because the invitation carries its own `ts:`
+ * next to the `until:`, and the difference between them is a duration rather
+ * than a time. Before this, a clockless station could read neither and fell back
+ * to XC_DEFAULT_AWAY_MS -- staying on the working channel long after the inviter
+ * had gone home, deaf to the commons and to the next invitation. Two of ten
+ * attempts died that way. */
+static void test_a_clockless_invitee_keeps_the_inviters_window(void)
+{
+    reset();
+    /* Sent at 16:00:00, good until 16:00:20 -- twenty seconds, stated by a
+     * packet, readable by a station that does not know what year it is. */
+    char inv[XPRS_MAX_WIRE + 1];
+    snprintf(inv, sizeof inv,
+             "t:channel f:%s d:%s link:espnow ch:6 until:2026-08-17_16:00:20 "
+             "q:ack ts:2026-08-17_16:00:00 sig:%.60s", PEER, SELF, FAKE_SIG);
+    hear(inv);
+    xprschan_tick();
+    CHECK(xc_test_channel == 6, "did not move");
+
+    /* Still there just before the twenty seconds are up... */
+    advance(18000);
+    CHECK(xc_test_channel == 6, "left after 18s of a 20s window");
+    /* ...and home not long after, rather than at the 30-second default. */
+    advance(4000);
+    CHECK(xprschan_state() == XC_IDLE, "still away past the inviter's window");
+    CHECK(xc_test_channel == 0, "on channel %u", xc_test_channel);
+}
+
+static void test_an_invitation_with_no_until_falls_back(void)
+{
+    reset();
+    char inv[XPRS_MAX_WIRE + 1];
+    invite_us(inv, sizeof inv, NULL);      /* no until: at all */
+    hear(inv);
+    xprschan_tick();
+    advance(XC_DEFAULT_AWAY_MS - 3000);
+    CHECK(xc_test_channel == 6, "left early with nothing to go on");
+    advance(5000);
+    CHECK(xprschan_state() == XC_IDLE, "never came home");
+}
+
+/* And the ceiling still is not negotiable, however generous the arithmetic. */
+static void test_a_long_window_is_still_capped(void)
+{
+    reset();
+    char inv[XPRS_MAX_WIRE + 1];
+    snprintf(inv, sizeof inv,
+             "t:channel f:%s d:%s link:espnow ch:6 until:2026-08-17_16:05:00 "
+             "q:ack ts:2026-08-17_16:00:00 sig:%.60s", PEER, SELF, FAKE_SIG);
+    hear(inv);                              /* five minutes, says the packet */
+    xprschan_tick();
+    advance(XC_MAX_AWAY_MS + 2000);
+    CHECK(xprschan_state() == XC_IDLE, "a packet talked us into staying away");
+    CHECK(xc_test_channel == 0, "on channel %u", xc_test_channel);
+}
+
 int main(void)
 {
     printf("xprschan host tests (XPRS.md section 23.7)\n");
@@ -593,6 +661,9 @@ int main(void)
     test_abort_comes_home_from_the_working_channel();
     test_bluetooth_goes_off_before_we_leave_and_on_after();
     test_bluetooth_is_untouched_when_nobody_moves();
+    test_a_clockless_invitee_keeps_the_inviters_window();
+    test_an_invitation_with_no_until_falls_back();
+    test_a_long_window_is_still_capped();
 
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

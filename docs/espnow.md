@@ -241,13 +241,28 @@ was about, the inviter sitting alone on the working channel -- **did not happen
 once**, and the step-4 proof now arrives 0.49 to 0.88 seconds after the move,
 where it used to take one to five seconds when it arrived at all.
 
-Both losses were `no answer` on the commons, from the invitee still being away
-on the working channel of the PREVIOUS attempt: a station with no clock cannot
-read `until:` and falls back to XC_DEFAULT_AWAY_MS, so it stays longer than the
-inviter asked for and is deaf to the next invitation. That is correct section
-23.7 behaviour rather than a fault -- a station in an exchange is unavailable --
-but it is why back-to-back attempts against the same peer lose some, and it is
-the next thing worth fixing if the rate needs to be higher.
+The losses were `no answer` on the commons, and two further faults came out of
+chasing them.
+
+**The invitee stayed too long.** Section 23.7 step 5 says everyone returns when
+the exchange ends or `until:` passes, but `until:` is an absolute time and the
+M5Stack has no clock, so it fell back to XC_DEFAULT_AWAY_MS and sat on the
+working channel long after the inviter had gone home -- deaf to the commons and
+to the next invitation. The invitation carries its own `ts:` as well, and
+`until: - ts:` is a DURATION: two fields of one packet, subtracted, no clock
+involved. Asked for twelve seconds, the clockless board now says
+`moving to channel 6 for 12000ms` where it used to say 30000, and the pair comes
+home within about two seconds of each other with the invitee a touch first --
+which is the right way round, because its window starts when it SENDS the
+acceptance and the inviter's when it HEARS it.
+
+**One lost identity packet cost a whole attempt.** Section 23.7 is followed only
+when the signature verifies, so an invitee that missed the sender's `t:identity`
+ignores the invitation -- and ignores all the retries too, for the same reason,
+silently. The identity was aired once and the invitation up to seven times:
+measured as seven consecutive "not signed by a key we hold" on the far board
+while this one recorded "no answer". They are one small packet each and they now
+travel together on every attempt. That count is zero across the runs since.
 
 Two options were considered and not taken. Refusing the move (`s:no`, which
 section 23.7 already allows) costs nothing but gives up the feature on exactly

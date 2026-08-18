@@ -610,17 +610,35 @@ static bool xc_on_invite(const xprs_t *p, const char *wire, int len)
         return true;
     }
 
-    /* How long we are willing to be away. `until:` may shorten this; nothing
-     * can lengthen it past XC_MAX_AWAY_MS. */
-    uint32_t away = XC_DEFAULT_AWAY_MS;
-    char until[32];
-    uint32_t now_epoch = s_ops.epoch ? s_ops.epoch() : 0;
-    if (now_epoch && xprs_get_str(p, "until", until, sizeof until)) {
+    /* How long we are willing to be away -- and §23.7 step 5 says EVERYONE
+     * returns when the exchange ends or `until:` passes, so the two stations
+     * have to arrive at the same answer or the pair does not come home together.
+     *
+     * `until:` is an absolute time, which a station with no clock cannot read.
+     * That is how this ended up defaulting to XC_DEFAULT_AWAY_MS and staying on
+     * the working channel long after the inviter had gone home, deaf to the
+     * commons and to the next invitation -- measured, and it cost two of ten
+     * attempts.
+     *
+     * But the invitation states its own `ts:` as well, and `until: - ts:` is a
+     * DURATION: two fields of the same packet, subtracted. No clock is involved,
+     * so a station without one gets exactly the window the inviter asked for.
+     * The invitee's clock starts when it SENDS the acceptance and the inviter's
+     * when it HEARS it, so equal durations bring the invitee home a moment
+     * first, which is the right way round.
+     *
+     * Only the ceiling is non-negotiable: nothing on the wire can keep this
+     * station away longer than XC_MAX_AWAY_MS. */
+    uint32_t away = XC_DEFAULT_AWAY_MS;         /* nothing said: our own guess */
+    char until[32], sent[32];
+    if (xprs_get_str(p, "until", until, sizeof until)) {
         uint32_t u = xc_ts_epoch(until);
-        if (u > now_epoch) {
-            uint32_t want = (u - now_epoch) * 1000u;
-            if (want < away) away = want;
-        }
+        /* The invitation's own timestamp first -- it needs no clock. Fall back
+         * to ours only when the inviter dated the deadline but not the packet. */
+        uint32_t base = 0;
+        if (xprs_get_str(p, "ts", sent, sizeof sent)) base = xc_ts_epoch(sent);
+        if (!base && s_ops.epoch) base = s_ops.epoch();
+        if (base && u > base) away = (u - base) * 1000u;
     }
     if (away > XC_MAX_AWAY_MS) away = XC_MAX_AWAY_MS;
 
@@ -807,6 +825,18 @@ void xprschan_tick(void)
             (int32_t)(now - (s_invite_last_ms + XC_INVITE_RETRY_MS)) > 0) {
             s_invite_last_ms = now;
             s_invite_tries++;
+            /* The identity goes with EVERY attempt, not just the first.
+             *
+             * §23.7 is followed only when the signature verifies, so an invitee
+             * that never received our key ignores the invitation -- and it will
+             * ignore all the retries too, for the same reason, silently. The
+             * identity was aired once and the invitation seven times, so one
+             * lost identity packet cost the whole attempt: measured as seven
+             * consecutive "not signed by a key we hold" on the far board while
+             * this one recorded "no answer". They are one packet each and they
+             * travel together. */
+            if (s_ops.announce_identity) s_ops.announce_identity();
+            if (s_ops.settle) s_ops.settle(300);
             if (!s_ops.air(s_invite_wire, s_invite_len)) {
                 XC_LOGW("the bearer refused invitation attempt %u",
                          (unsigned)s_invite_tries);

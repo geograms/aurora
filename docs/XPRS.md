@@ -1271,6 +1271,7 @@ q:identity   send your public key
 q:sign       sign a receipt confirming you read this
 q:pong       reply to this reachability test
 q:have       say whether you hold the file named by file:
+q:state      send your device state: state:, level:, target: (section 25.7)
 ```
 
 Several are separated by commas. An unknown word is ignored, so `q:pos,bat,co2`
@@ -1364,8 +1365,8 @@ attacker never held (section 13.7.1).
 ## 8. Reserved words
 
 `q:` and `s:` words assigned by this document: `ack`, `read`, `sign`, `pos`,
-`batt`, `identity`, `pong`, `have`, `no`. Command words assigned: `history`,
-`file`, `put`. Reactions assigned for `add:` and `remove:`:
+`batt`, `identity`, `pong`, `have`, `state`, `no`. Command words assigned:
+`history`, `file`, `put`, `set`, `interpret`. Reactions assigned for `add:` and `remove:`:
 `like`, `repost`. All other words are reserved. A word beginning with `z` is private, as a
 key beginning with `z` is.
 
@@ -2168,6 +2169,9 @@ t:observation f:X1BOA3 pos:38.6902,-9.4012 wave:1.8m seatemp:18.4C type:boat ts:
 | `lifetime` | `qty` | how long the station has run in total, across every restart | duration |
 | `odometer` | `qty` | distance travelled over the station's service life | distance |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
+| `state` | `enum` | a device's principal condition, from the closed list in section 25.7 | |
+| `level` | `qty` | how far, when a condition is partial (section 25.7) | proportion |
+| `target` | `qty` | the setpoint a device holds a reading at (section 25.7) | |
 
 Radiation readings -- ionizing and electromagnetic -- are their own family,
 section 10.5.1.
@@ -4963,6 +4967,104 @@ what it produces onto the same fixed set of commands a `cmd:` would have named,
 and apply the same permission test. An interpreter that can emit any action at
 all has made the allow-list decorative.
 
+### 25.7 Devices: a shared vocabulary for acting on things
+
+A command word is agreed between two stations (section 25), and between two
+stations that is enough: `cmd:door-open` works because both ends chose it.
+It stops working the moment the devices belong to strangers -- a lamp cannot
+be operated by a visiting phone that has never heard the lamp-owner's word
+for "on". The home-automation industry spent a decade arriving at this
+lesson, and its answer (Matter is the current name for it) is not a wire
+format worth importing but a vocabulary worth compressing: devices
+interoperate when the words for acting on them are few, fixed and shared.
+This section is that vocabulary in XPRS grammar.
+
+**`cmd:set` asks a device to make a state true**, and carries its parameters
+in the keys of this document, never in `arg:` (the rule of section 25.2):
+
+```
+132  t:command f:X1A67X d:X1LAMP ts:2026-08-19_18:30:00 cmd:set state:on sig:<60 characters>
+142  t:command f:X1A67X d:X1LAMP ts:2026-08-19_18:30:00 cmd:set state:on level:40% sig:<60 characters>
+136  t:command f:X1A67X d:X1DOOR ts:2026-08-19_18:30:00 cmd:set state:locked sig:<60 characters>
+134  t:command f:X1A67X d:X1HEAT ts:2026-08-19_18:30:00 cmd:set target:21C sig:<60 characters>
+```
+
+Three keys carry the whole model:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `state` | `enum` | the device's principal condition, from the closed list below |
+| `level` | `qty`, proportion | how far, when a condition is partial: a dimmer, a valve, a volume |
+| `target` | `qty` | the setpoint a device holds a reading at, in the reading's own unit |
+
+`state:` takes a word from a **closed list this document owns**:
+
+| Word | Device class | May be commanded |
+|---|---|---|
+| `on`, `off` | switch, light, pump, relay | yes |
+| `open`, `closed` | contact, valve, gate, cover | yes |
+| `locked`, `unlocked` | lock | yes |
+| `motion`, `clear` | occupancy sensor | no, report only |
+| `pressed` | button, doorbell | no, report only |
+
+Closed, exactly because of who must agree on it: two strangers' devices, made
+in different years by people who never met. An operator inventing a word here
+would be back at `cmd:door-open`. A device asked for a state it does not have
+-- `state:disco`, or `state:pressed`, which is a thing that happens and not a
+thing that is made true -- answers `code:400`. New words need this document to
+change, which is the cost of the only list everybody holds.
+
+`level:` accompanies a state rather than implying one: `cmd:set state:on
+level:40%` says both, and a report says both back. `target:` is the setpoint
+counterpart of a measurement key -- `temp:` (section 10.3) reports what IS,
+`target:` what the device is asked to hold:
+
+```
+76   t:observation f:X1HEAT temp:19.5C target:21C batt:64% ts:2026-08-19_18:30:00
+```
+
+**The result states what IS, not what was asked.** The keys of the command
+come back carrying the condition the device actually reached, and the
+`code:` table of section 25.1 needs nothing added:
+
+```
+151  t:result f:X1LAMP d:X1A67X ts:2026-08-19_18:30:05 r:1cc8af code:200 state:on level:40% sig:<60 characters>
+```
+
+**Reading a device is the existing request**, with one new word (section 7):
+
+```
+58   t:request f:X1A67X d:X1DOOR ts:2026-08-19_18:30:00 q:state
+84   t:observation f:X1DOOR d:X1A67X state:locked batt:82% ts:2026-08-19_18:30:00 s:state
+```
+
+**And a sensor that has something to say just observes**, unsolicited, the
+way every observation in section 10 already travels -- a doorbell press is
+`state:pressed` with the owner in `d:`:
+
+```
+44   t:observation f:X1DOOR state:closed batt:82%
+68   t:observation f:X1BELL d:X1A67X state:pressed ts:2026-08-19_18:30:00
+```
+
+**Section 25.4 is not optional here, and a lock is the reason it is written
+the way it is.** The network is open; anyone in radio range can air a packet.
+So: a `cmd:set` that is unsigned or fails verification is discarded, never
+answered. A verified signer must still be on the allow-list the device's
+owner holds, or the answer is `code:403`:
+
+```
+138  t:command f:X1RD89 d:X1DOOR ts:2026-08-19_18:30:00 cmd:set state:unlocked sig:<60 characters>
+156  t:result f:X1DOOR d:X1RD89 ts:2026-08-19_18:30:05 r:498c72 code:403 sig:<60 characters> m:not on the allow list
+```
+
+The 300-second window and the derived-identifier idempotency of section 25.4
+are what keep a recorded `state:unlocked` from opening the door tomorrow,
+and carriers drop commands rather than park them (section 25.4), because
+later is what an act must never be. A report is different: `state:pressed`
+from an unsigned doorbell is a claim like any observation, weighed like one
+(section 10.5), and acted on by a person rather than a mechanism.
+
 ---
 
 ## 26. Closed groups
@@ -5947,6 +6049,9 @@ packet **250 bytes**, on every transport.
 | `lifetime` | `qty` | how long the station has run in total, across every restart | duration |
 | `odometer` | `qty` | distance travelled over the station's service life | distance |
 | `type` | `enum` | what the station is or is riding on, from the set in section 14.2 | |
+| `state` | `enum` | a device's principal condition, from the closed list in section 25.7 | |
+| `level` | `qty` | how far, when a condition is partial (section 25.7) | proportion |
+| `target` | `qty` | the setpoint a device holds a reading at (section 25.7) | |
 
 ### Radiation (section 10.5.1)
 
@@ -6013,7 +6118,8 @@ dot, never a trailing dot. Trailing zeros are significant.
 
 `q:` asks and `s:` answers with the same words, several separated by commas.
 
-Assigned: `ack`, `read`, `sign`, `pos`, `batt`, `identity`, `pong`, `no`.
+Assigned: `ack`, `read`, `sign`, `pos`, `batt`, `identity`, `pong`, `have`,
+`state`, `no`.
 
 `s:no` means the request will not be served at all. A partial answer names only
 what it satisfied.
@@ -6145,6 +6251,11 @@ names the reassembled packet rather than any part. Must be signed, expires after
 otherwise, never carried, never shown as a message. Authentication is not
 authorisation -- the allow-list is the bot's.
 
+`cmd:set` makes a device state true (section 25.7): `state:` from the closed
+list `on off open closed locked unlocked` (`motion clear pressed` are report
+only), `level:` for the partial degree, `target:` for a setpoint. The result
+echoes what IS. Unsigned is discarded; signed and unknown is `403`.
+
 `t:service` advertises what a station does: `relay` `mailbox` `internet` `aprs`
 `nostr` `files` `time` `weather` `wifi` `other`. Physical goods are `t:offer`,
 not this. A claim about capability, never evidence of good faith.
@@ -6165,8 +6276,9 @@ private.
 ```
 t:command f:X1BOA3 d:X3RLY7 ts:... cmd:history since:... sig:...
 t:command f:X1BOA3 d:X3RLY7 ts:... cmd:history since:... until:... only:X5A3F2 sig:...
-t:command f:X1QZ3N d:X3RLY7 ts:... cmd:file file:nYxKz...M1w.jpg [off:64kB] sig:...
-t:command f:X1QZ3N d:X3RLY7 ts:... cmd:put file:nYxKz...M1w.jpg size:2MB [until:...] sig:...
+t:command f:X1QZ3N d:X3RLY7 ts:... cmd:file file:nYxKz...M1w.jpg sig:...
+t:command f:X1QZ3N d:X3RLY7 ts:... cmd:file file:nYxKz...M1w.jpg off:64kB sig:...
+t:command f:X1QZ3N d:X3RLY7 ts:... cmd:put file:nYxKz...M1w.jpg size:2MB until:... sig:...
 ```
 
 Standard commands carry parameters in named keys, never `arg:`. The station

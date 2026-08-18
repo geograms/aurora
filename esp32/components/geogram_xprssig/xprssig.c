@@ -30,6 +30,30 @@ static bool xs_sc_valid(const uint8_t d[32]);
 static void xs_sha256(const uint8_t *in, size_t len, uint8_t out[32]);
 static void xs_random(uint8_t *out, size_t len);
 
+/*
+ * The tagged-hash domain strings, XPRS.md section 9.1.2.
+ *
+ * These were `APRX/nonce` and `APRX/challenge` while the protocol was still
+ * called APRX. The name is part of the hash, so the rename is a wire change:
+ * a signature made under one pair does not verify under the other, in either
+ * direction.
+ *
+ * Signing uses the XPRS strings only. VERIFYING tries the XPRS challenge first
+ * and falls back to the APRX one, because a signature that fails to verify is
+ * not merely unbadged in this system -- the archive drops forged packets at
+ * flush and the courier drops forged carried mail, so a hard cut would discard
+ * every signed thing already stored rather than leave it in doubt. The fallback
+ * comes out once nothing signed under the old strings remains.
+ */
+#define XS_TAG_NONCE          "XPRS/nonce"
+#define XS_TAG_CHALLENGE      "XPRS/challenge"
+#define XS_TAG_CHALLENGE_OLD  "APRX/challenge"
+
+#ifdef XPRSSIG_HOST_TEST
+/* Set by the test to reproduce section 9.1.2's worked example. */
+bool xprssig_test_zero_aux;
+#endif
+
 #ifdef XPRSSIG_HOST_TEST
 
 #include <openssl/sha.h>
@@ -316,9 +340,16 @@ bool xprssig_sign(const uint8_t digest[32], const uint8_t priv[XPRSSIG_KEY_LEN],
 
     uint8_t aux[32];
     xs_random(aux, sizeof aux);
+#ifdef XPRSSIG_HOST_TEST
+    /* The specification's worked example (section 9.1.2) fixes aux to 32 zero
+     * bytes so every intermediate value is reproducible. Nothing but the test
+     * can reach this, and a signature is no weaker for it: aux only has to be
+     * unpredictable, and on the device it comes from esp_fill_random. */
+    if (xprssig_test_zero_aux) memset(aux, 0, sizeof aux);
+#endif
 
     uint8_t k[32];
-    xs_tagged("APRX/nonce", dp, 32, digest, 32, aux, 32, k);
+    xs_tagged(XS_TAG_NONCE, dp, 32, digest, 32, aux, 32, k);
     /* k is used mod n by the multiply; a zero k would be fatal and is
      * astronomically unlikely, but costs one comparison to exclude. */
     if (!xs_sc_valid(k)) {
@@ -330,7 +361,7 @@ bool xprssig_sign(const uint8_t digest[32], const uint8_t priv[XPRSSIG_KEY_LEN],
     if (!xs_mul_g_add_p(k, NULL, NULL, rx, NULL)) return false;
 
     uint8_t e32[32];
-    xs_tagged("APRX/challenge", rx, 32, px, 32, digest, 32, e32);
+    xs_tagged(XS_TAG_CHALLENGE, rx, 32, px, 32, digest, 32, e32);
     /* The challenge is TRUNCATED to 16 bytes — that is where the signature's
      * size comes from — so the scalar arithmetic uses it zero-extended. */
     uint8_t e[32] = {0};
@@ -362,9 +393,22 @@ bool xprssig_verify(const uint8_t digest[32], const uint8_t sig[XPRSSIG_LEN],
     if (!xs_mul_g_add_p(s, neg_e, pub_x, rx, NULL)) return false;
 
     uint8_t e2[32];
-    xs_tagged("APRX/challenge", rx, 32, pub_x, 32, digest, 32, e2);
+    xs_tagged(XS_TAG_CHALLENGE, rx, 32, pub_x, 32, digest, 32, e2);
 
     uint8_t diff = 0;
+    for (int i = 0; i < 16; i++) diff |= (uint8_t)(sig[i] ^ e2[i]);
+    if (diff == 0) return true;
+
+    /* The transition window (see XS_TAG_CHALLENGE).
+     *
+     * R' is already computed and does not depend on the tag, so trying the old
+     * domain string costs two SHA-256 rounds and no curve arithmetic. Without
+     * it every signature made before the rename reads as FORGED, and forged is
+     * not merely unbadged here: the archive drops forged packets at flush and
+     * the courier drops forged carried mail. Old data would be discarded, not
+     * doubted. */
+    xs_tagged(XS_TAG_CHALLENGE_OLD, rx, 32, pub_x, 32, digest, 32, e2);
+    diff = 0;
     for (int i = 0; i < 16; i++) diff |= (uint8_t)(sig[i] ^ e2[i]);
     return diff == 0;
 }

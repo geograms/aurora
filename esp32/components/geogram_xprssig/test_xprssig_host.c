@@ -33,6 +33,26 @@ static const char *V_SIGB85 = "#QF1LeJbl4ol[zOa[KR[UG&_-z+<HN2N*6.!VB?k@hp.Y/A(1
 static const char *V_B85IN  = "00010203fafbfcfd";
 static const char *V_B85OUT = "009c6#UQi&";
 
+/* ── the specification's own worked example (XPRS.md section 9.1.2) ─────── */
+/*
+ * The vectors above came from the other implementation, which is a good check
+ * that two codebases agree and no check at all that either matches the
+ * document. This one is the document: aux fixed to 32 zero bytes so every
+ * intermediate is reproducible, and the toy key d = 7 (never sign with a toy
+ * key). It is what caught the tagged-hash domain strings still saying APRX
+ * after the protocol was renamed -- two implementations agreeing with each
+ * other and with nothing else.
+ */
+static const char *W_CANON = "t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 "
+                             "m:net starts in ten minutes";
+static const char *W_M     = "39922745225b987201d0a253ed152b99712088ba6c578a41bdfc670594a3c553";
+static const char *W_PX    = "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc";
+static const char *W_SIG   = "b40348c6defc8e1ae6dfca7635513e3b"
+                             "e052dd3b72c2aab12db5d39d047de1816f15f396a402ea9d2d3407bde0dd5df8";
+static const char *W_B85   = "V<-(s&U-xL(hjs8hbML0<8nw[A)a<YeW+5_1BYlWzX.)fQYP&LeI[ZC<n4Yl";
+
+extern bool xprssig_test_zero_aux;
+
 static size_t unhex(const char *h, uint8_t *out, size_t cap)
 {
     size_t n = 0;
@@ -60,6 +80,11 @@ static void test_public_key_matches_dart(void)
     CHECK(memcmp(got, want, 32) == 0, "x-only public key differs from Dart's");
 }
 
+/* This vector was produced under the OLD tagged-hash strings (APRX/...), so it
+ * now travels the transition fallback in xprssig_verify rather than the primary
+ * path. Keeping it is the point: it is the standing check that signatures made
+ * before the rename still verify, and the day the fallback is removed this test
+ * is what fails and says which data is about to be discarded. */
 static void test_verifies_dart_signature(void)
 {
     uint8_t digest[32], sig[48], pub[32];
@@ -145,6 +170,41 @@ static void test_base85(void)
           "encoded a length that is not a multiple of four");
 }
 
+static void test_the_specifications_worked_example(void)
+{
+    /* d = 7, big-endian in 32 bytes. */
+    uint8_t d[32] = {0};
+    d[31] = 7;
+
+    uint8_t m[32];
+    SHA256((const uint8_t *)W_CANON, strlen(W_CANON), m);
+    uint8_t want_m[32];
+    unhex(W_M, want_m, sizeof want_m);
+    CHECK(memcmp(m, want_m, 32) == 0, "the canonical text does not hash to m");
+
+    uint8_t px[32], want_px[32];
+    CHECK(xprssig_public_key(d, px), "no public key for d=7");
+    unhex(W_PX, want_px, sizeof want_px);
+    CHECK(memcmp(px, want_px, 32) == 0, "px does not match the document");
+
+    xprssig_test_zero_aux = true;
+    uint8_t sig[XPRSSIG_LEN], want_sig[XPRSSIG_LEN];
+    CHECK(xprssig_sign(m, d, sig), "signing failed");
+    xprssig_test_zero_aux = false;
+    unhex(W_SIG, want_sig, sizeof want_sig);
+    CHECK(memcmp(sig, want_sig, XPRSSIG_LEN) == 0,
+          "the signature does not reproduce the document's -- check the tagged"
+          " hash domain strings (XPRS/nonce, XPRS/challenge)");
+
+    char b85[XPRSSIG_B85_LEN + 1];
+    CHECK(xprssig_b85_encode(want_sig, sizeof want_sig, b85, sizeof b85)
+              == XPRSSIG_B85_LEN, "encode length");
+    CHECK(strcmp(b85, W_B85) == 0, "base85 differs:\n  got  %s\n  want %s",
+          b85, W_B85);
+
+    CHECK(xprssig_verify(m, want_sig, want_px), "cannot verify the document");
+}
+
 int main(void)
 {
     printf("xprssig host tests (signature from reticulum-dart)\n");
@@ -154,6 +214,7 @@ int main(void)
     test_our_signature_verifies();
     test_rejects_what_it_should();
     test_base85();
+    test_the_specifications_worked_example();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

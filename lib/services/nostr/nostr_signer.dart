@@ -17,7 +17,7 @@
  * What a signer CANNOT do, and why the app still holds a key:
  *
  *   A signer signs NOSTR events and does NIP-04. It cannot produce the 48-byte
- *   truncated Schnorr the chat wapp puts on every frame (AprxSign.sign), nor the
+ *   truncated Schnorr the chat wapp puts on every frame (XprsCrypto.sign), nor the
  *   custom ECDH+AES envelope Circles uses, nor hand raw scalar material to the
  *   coin wallet. Those keep using a locally-generated DEVICE key, which the
  *   signer cross-certifies once. See the plan (docs/plan-nostr-signer.md) and
@@ -26,7 +26,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:reticulum/reticulum.dart' show NostrEvent, NostrCrypto, AprxSign;
+import 'package:reticulum/reticulum.dart' show NostrEvent, NostrCrypto, XprsCrypto;
 
 /// Why a signature did not happen. Callers must distinguish these: a REFUSAL is
 /// the user saying no and must be shown; UNAVAILABLE is "not now" and belongs in
@@ -129,7 +129,7 @@ class LocalSigner implements NostrSigner {
 
   @override
   Future<String> nip04Encrypt(String peerPubHex, String plaintext) async {
-    final out = AprxSign.nip04Encrypt(
+    final out = XprsCrypto.nip04Encrypt(
       scalarFromHex(privHex),
       bytesFromHex(peerPubHex),
       Uint8List.fromList(utf8.encode(plaintext)),
@@ -143,7 +143,7 @@ class LocalSigner implements NostrSigner {
 
   @override
   Future<String> nip04Decrypt(String peerPubHex, String ciphertext) async {
-    final out = AprxSign.nip04Decrypt(
+    final out = XprsCrypto.nip04Decrypt(
       scalarFromHex(privHex),
       bytesFromHex(peerPubHex),
       ciphertext,
@@ -170,7 +170,7 @@ class LocalSigner implements NostrSigner {
 
 // ── Hex helpers ─────────────────────────────────────────────────────────────
 //
-// AprxSign takes the private key as a BigInt scalar and the peer key as x-only
+// XprsCrypto takes the private key as a BigInt scalar and the peer key as x-only
 // bytes. Both conversions are duplicated in rns_service (_scalarFromHex,
 // _hexToBytes) and wapp_engine; they live here too so a signer implementation is
 // self-contained rather than reaching into a service.

@@ -2,7 +2,7 @@
  * BitTorrent sharing for the media archive (Files wapp, DESIGN.md §6).
  *
  * Every archive entry can be seeded into the public BitTorrent swarm, and a
- * file referenced by an APRX token can be fetched from the swarm when its
+ * file referenced by an XPRS token can be fetched from the swarm when its
  * infohash is known (learned from announcements — see MediaArchive.sources).
  *
  * Torrents are constructed DETERMINISTICALLY so that any station holding the
@@ -41,7 +41,7 @@ import 'log_service.dart';
 /// One live torrent (seed or fetch) for the status UI.
 class TorrentEntry {
   final String infoHash; // 40-char hex
-  final String token; // APRX token ('' until a fetch completes)
+  final String token; // XPRS token ('' until a fetch completes)
   final bool seeding;
   final TorrentTask task;
   TorrentEntry(this.infoHash, this.token, this.seeding, this.task);

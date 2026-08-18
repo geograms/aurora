@@ -50,7 +50,7 @@ The `to` field encodes the routing, mirroring APRS semantics:
 | `?MAIL` / `?IGATE` | store‑and‑forward control (see [aprs.md](aprs.md) §4) |
 
 Messages larger than one advert are chunked (`0x50` = data chunk, `0x51` =
-scan‑response chunk) and reassembled by the receiver. The same APRX payload
+scan‑response chunk) and reassembled by the receiver. The same XPRS payload
 markers (`+<mid>`, `<mid>:like`, `~<sig>`, `ENC1:`, `file:…`) ride inside `text`
 exactly as on APRS‑IS — see [chat.md](chat.md).
 

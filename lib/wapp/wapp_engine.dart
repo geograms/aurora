@@ -38,7 +38,7 @@ import '../util/media_archive.dart';
 import '../util/media_ref.dart';
 import '../util/nostr_nip19.dart';
 import '../util/nostr_crypto.dart';
-import '../util/aprx_sign.dart';
+import '../util/xprs_crypto.dart';
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:hex/hex.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -476,14 +476,14 @@ class WappEngine {
     return base64Url.encode(bytes).replaceAll('=', '');
   }
 
-  /// Sign [msg] with the active profile's key (APRX short-Schnorr). Returns the
+  /// Sign [msg] with the active profile's key (XPRS short-Schnorr). Returns the
   /// base85 signature string, or '' if no key. The private key never leaves here.
   String _signMessage(Uint8List msg) {
     final d = _profilePrivScalar();
     if (d == null) return '';
     try {
       final m = Uint8List.fromList(sha256.convert(msg).bytes);
-      return AprxSign.b85encode(AprxSign.sign(m, d));
+      return XprsCrypto.b85encode(XprsCrypto.sign(m, d));
     } catch (_) {
       return '';
     }
@@ -494,12 +494,12 @@ class WappEngine {
   bool _verifyMessage(String pubB64, Uint8List msg, String sigStr) {
     try {
       final pub = _b64urlDecode(pubB64);
-      final sig = AprxSign.b85decode(sigStr);
+      final sig = XprsCrypto.b85decode(sigStr);
       if (sig == null || sig.length != 48 || pub == null || pub.length != 32) {
         return false;
       }
       final m = Uint8List.fromList(sha256.convert(msg).bytes);
-      return AprxSign.verify(m, sig, pub);
+      return XprsCrypto.verify(m, sig, pub);
     } catch (_) {
       return false;
     }
@@ -574,7 +574,7 @@ class WappEngine {
     }
   }
 
-  /// AES-256-CBC with PKCS7 padding (matches AprxSign's scheme). [iv] is 16 bytes.
+  /// AES-256-CBC with PKCS7 padding (matches XprsCrypto's scheme). [iv] is 16 bytes.
   Uint8List _aesCbc(bool encrypt, Uint8List key, Uint8List iv, Uint8List data) {
     final c = pc.PaddedBlockCipherImpl(
         pc.PKCS7Padding(), pc.CBCBlockCipher(pc.AESEngine()));
@@ -662,7 +662,7 @@ class WappEngine {
           final d = _profilePrivScalar();
           final pub = _b64urlDecode(_readStr(pubPtr, pubLen));
           if (d == null || pub == null || pub.length != 32) return 0;
-          final blob = AprxSign.encryptFor(d, pub, _readBytes(msgPtr, msgLen));
+          final blob = XprsCrypto.encryptFor(d, pub, _readBytes(msgPtr, msgLen));
           if (blob == null) return 0;
           return _writeStr(outPtr, outCap, base64Url.encode(blob).replaceAll('=', ''));
         } catch (_) {
@@ -684,7 +684,7 @@ class WappEngine {
           final pub = _b64urlDecode(_readStr(pubPtr, pubLen));
           final blob = _b64urlDecode(_readStr(blobPtr, blobLen));
           if (d == null || pub == null || pub.length != 32 || blob == null) return 0;
-          final pt = AprxSign.decryptFrom(d, pub, blob);
+          final pt = XprsCrypto.decryptFrom(d, pub, blob);
           if (pt == null) return 0;
           return _writeBytes(outPtr, outCap, pt);
         } catch (_) {

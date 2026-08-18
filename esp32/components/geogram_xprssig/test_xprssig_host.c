@@ -27,9 +27,9 @@ static const char *V_TEXT   = "t:service f:X3JS7Y serve:index,history,mailbox co
 static const char *V_SCALAR = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 static const char *V_DIGEST = "8c012bc0f0f3919ab65e7867c5b394194d1eed28c593b1ccd456ec8532650a07";
 static const char *V_PUBX   = "4646ae5047316b4230d0086c8acec687f00b1cd9d1dc634f6cb358ac0a9a8fff";
-static const char *V_SIG    = "fad545192d362ec74b79a6c621ea8169afce898c6f45ddf3080bd258d29108a7"
-                              "fca82021d4ecc12aa033e53715176bf3";
-static const char *V_SIGB85 = "#QF1LeJbl4ol[zOa[KR[UG&_-z+<HN2N*6.!VB?k@hp.Y/A(13PFLW?6^gVS";
+static const char *V_SIG    = "3b09196bc9df9dce35f837dfc90d2ea42432274aedd128b21733174728bc5b01"
+                              "b56af1ac8b424a7873cc2902b10b1b76";
+static const char *V_SIGB85 = "i,^!u+(@Vmhtxb*+QG(_bR?-t[A[t*7C^>;d7<+=WqblkI+y3XBiD6mU[RH%";
 static const char *V_B85IN  = "00010203fafbfcfd";
 static const char *V_B85OUT = "009c6#UQi&";
 
@@ -39,9 +39,9 @@ static const char *V_B85OUT = "009c6#UQi&";
  * that two codebases agree and no check at all that either matches the
  * document. This one is the document: aux fixed to 32 zero bytes so every
  * intermediate is reproducible, and the toy key d = 7 (never sign with a toy
- * key). It is what caught the tagged-hash domain strings still saying APRX
- * after the protocol was renamed -- two implementations agreeing with each
- * other and with nothing else.
+ * key). It is what caught both implementations still using the pre-rename
+ * tagged-hash domain strings: they agreed with each other and with nothing
+ * else, which is exactly what a cross-implementation vector cannot detect.
  */
 static const char *W_CANON = "t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 "
                              "m:net starts in ten minutes";
@@ -80,11 +80,10 @@ static void test_public_key_matches_dart(void)
     CHECK(memcmp(got, want, 32) == 0, "x-only public key differs from Dart's");
 }
 
-/* This vector was produced under the OLD tagged-hash strings (APRX/...), so it
- * now travels the transition fallback in xprssig_verify rather than the primary
- * path. Keeping it is the point: it is the standing check that signatures made
- * before the rename still verify, and the day the fallback is removed this test
- * is what fails and says which data is about to be discarded. */
+/* Cross-implementation agreement: a signature the Dart signer produced, checked
+ * here. Regenerate with `dart run tool/gen_sig_vectors.dart` in reticulum-dart
+ * if either side's scheme changes -- the vectors are not hand-written and the
+ * generator prints them in this order. */
 static void test_verifies_dart_signature(void)
 {
     uint8_t digest[32], sig[48], pub[32];
@@ -205,6 +204,33 @@ static void test_the_specifications_worked_example(void)
     CHECK(xprssig_verify(m, want_sig, want_px), "cannot verify the document");
 }
 
+/* The tags are hashed into the challenge, so they are as much a part of the
+ * wire format as the curve is. This verifier briefly tried the pre-rename
+ * challenge string after the current one, so that already-signed data kept
+ * validating; that fallback has been removed and this stands in its place.
+ *
+ * The vector is a real signature made under the old strings. Nothing produced
+ * that way verifies any more -- and here that means DISCARDED, not merely
+ * unbadged: the archive drops forged packets at flush and the courier drops
+ * forged carried mail. */
+static void test_a_pre_rename_signature_no_longer_verifies(void)
+{
+    static const char *OLD_DIGEST =
+        "8c012bc0f0f3919ab65e7867c5b394194d1eed28c593b1ccd456ec8532650a07";
+    static const char *OLD_PUBX =
+        "4646ae5047316b4230d0086c8acec687f00b1cd9d1dc634f6cb358ac0a9a8fff";
+    static const char *OLD_SIG =
+        "fad545192d362ec74b79a6c621ea8169afce898c6f45ddf3080bd258d29108a7"
+        "fca82021d4ecc12aa033e53715176bf3";
+
+    uint8_t digest[32], sig[XPRSSIG_LEN], pub[32];
+    unhex(OLD_DIGEST, digest, sizeof digest);
+    unhex(OLD_SIG, sig, sizeof sig);
+    unhex(OLD_PUBX, pub, sizeof pub);
+    CHECK(!xprssig_verify(digest, sig, pub),
+          "a fallback to a second challenge string has come back");
+}
+
 int main(void)
 {
     printf("xprssig host tests (signature from reticulum-dart)\n");
@@ -215,6 +241,7 @@ int main(void)
     test_rejects_what_it_should();
     test_base85();
     test_the_specifications_worked_example();
+    test_a_pre_rename_signature_no_longer_verifies();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

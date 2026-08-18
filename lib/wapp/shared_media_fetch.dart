@@ -1,5 +1,5 @@
 /*
- * Shared-media auto-fetch — incoming-chat side of APRX media references.
+ * Shared-media auto-fetch — incoming-chat side of XPRS media references.
  *
  * A share message carries only two short, location-independent tokens:
  *   - `file:<sha256>.<ext>`  the content hash (what the file is + verification)

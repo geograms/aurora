@@ -53,7 +53,7 @@ void main() {
   });
 
   group('MediaRef.classify', () {
-    test('images (incl. gif per APRX §16.3 — animated natively)', () {
+    test('images (incl. gif per XPRS section 16.3 -- animated natively)', () {
       for (final e in ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']) {
         expect(MediaRef.classify(e), MediaKind.image, reason: e);
       }

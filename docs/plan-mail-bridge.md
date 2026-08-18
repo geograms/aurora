@@ -143,7 +143,7 @@ X-Geogram-Rmid: <envelope id>
   verified/forged badge. The transport path — Gmail, mailing-list forwarders,
   any number of hops — becomes irrelevant to authorship. Domain DKIM remains
   a gateway-local spam formality.
-- **Precedent in-tree**: the APRX `~sig` scheme already does short-Schnorr
+- **Precedent in-tree**: the XPRS `~sig` scheme already does short-Schnorr
   signing host-side with the same badge semantics; this is the same idea with
   DKIM canonicalization instead of APRS framing.
 

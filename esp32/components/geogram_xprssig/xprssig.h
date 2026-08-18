@@ -15,7 +15,7 @@
  * callsign, so nothing about identity changes.
  *
  * Not interoperable with BIP-340 verifiers, by construction. The reference is
- * `reticulum-dart/lib/src/util/aprx_sign.dart`, and the host harness verifies
+ * `reticulum-dart/lib/src/util/xprs_crypto.dart`, and the host harness verifies
  * signatures that implementation produced.
  *
  * ── What is signed ──────────────────────────────────────────────────────────

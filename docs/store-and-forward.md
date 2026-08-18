@@ -88,7 +88,7 @@ identifier at the stated (capped) urgency, refuses `scope:local` at admission,
 releases on `?ACK <id>` and on `t:receipt … r:<id> s:ack`, re-airs with itself
 appended to `via:`, answers `t:ping` with a rate-limited `t:pong rssi:`, and
 airs its own `t:observation … link:ble mail:N` beacon on `0x58`. It transmits
-unsigned (`sig:` is APRX short-Schnorr over secp256k1, which TweetNaCl/mbedtls
+unsigned (`sig:` is XPRS short-Schnorr over secp256k1, which TweetNaCl/mbedtls
 do not provide) and dates packets `epoch:<boots>.<uptime>` per XPRS.md §10.7,
 holding no wall clock.
 

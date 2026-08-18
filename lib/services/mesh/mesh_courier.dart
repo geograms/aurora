@@ -51,7 +51,7 @@ import 'package:hex/hex.dart';
 import 'package:crypto/crypto.dart' show sha256;
 
 import '../../connections/bluetooth/ble_service.dart';
-import '../../util/aprx_sign.dart';
+import '../../util/xprs_crypto.dart';
 import '../../util/nostr_crypto.dart';
 import '../log_service.dart';
 import '../../profile/profile_service.dart';
@@ -205,7 +205,7 @@ class MeshCourier {
       final d = _privScalar();
       final pubHex = NostrCrypto.decodeNpub(npub);
       if (d == null || pubHex.isEmpty) return text;
-      final blob = AprxSign.encryptFor(
+      final blob = XprsCrypto.encryptFor(
           d, Uint8List.fromList(HEX.decode(pubHex)), utf8.encode(text));
       if (blob == null) return text;
       return 'ENC1:${base64Url.encode(blob).replaceAll('=', '')}';
@@ -264,11 +264,11 @@ class MeshCourier {
   bool _verify(String npub, String from, String core, String sigStr) {
     try {
       final pubHex = NostrCrypto.decodeNpub(npub);
-      final sig = AprxSign.b85decode(sigStr);
+      final sig = XprsCrypto.b85decode(sigStr);
       if (pubHex.isEmpty || sig == null || sig.length != 48) return false;
       final m = Uint8List.fromList(
           sha256.convert(utf8.encode('$from|$core')).bytes);
-      return AprxSign.verify(
+      return XprsCrypto.verify(
           m, sig, Uint8List.fromList(HEX.decode(pubHex)));
     } catch (_) {
       return false;
@@ -505,7 +505,7 @@ class MeshCourier {
       if (d == null || pubHex.isEmpty) return null;
       final pad = (4 - blobB64.length % 4) % 4;
       final blob = base64Url.decode(blobB64 + ('=' * pad));
-      final pt = AprxSign.decryptFrom(
+      final pt = XprsCrypto.decryptFrom(
           d, Uint8List.fromList(HEX.decode(pubHex)), blob);
       if (pt == null) return null;
       return utf8.decode(pt);

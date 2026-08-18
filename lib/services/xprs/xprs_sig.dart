@@ -8,7 +8,7 @@
 /// which is not a coincidence: both have to survive relaying, and relaying only
 /// ever touches `via:`.
 ///
-/// The crypto is [AprxSign], unchanged. Its 48-byte short-Schnorr signature
+/// The crypto is [XprsCrypto], unchanged. Its 48-byte short-Schnorr signature
 /// encodes to exactly 60 base85 characters, which is what the XPRS `base85`
 /// value type is (section 4.3) — so this file is a shim over a primitive that
 /// already shipped, not a new implementation.
@@ -20,7 +20,7 @@ import 'dart:typed_data';
 import 'package:hex/hex.dart';
 
 import '../../profile/profile_service.dart';
-import '../../util/aprx_sign.dart';
+import '../../util/xprs_crypto.dart';
 import '../../util/nostr_crypto.dart';
 import 'xprs_id.dart';
 import 'xprs_packet.dart';
@@ -56,7 +56,7 @@ Uint8List xprsSignedDigest(XprsPacket p) =>
 /// `sig:` is inserted before `m:` when the packet has one, because `m:` must
 /// stay last (section 4) — [XprsPacket.with_] already does that.
 XprsPacket xprsSign(XprsPacket p, BigInt d) =>
-    p.with_('sig', AprxSign.b85encode(AprxSign.sign(xprsSignedDigest(p), d)));
+    p.with_('sig', XprsCrypto.b85encode(XprsCrypto.sign(xprsSignedDigest(p), d)));
 
 /// The private scalar XPRS signs with: the active profile's nsec, decoded.
 ///
@@ -87,10 +87,10 @@ XprsSigState xprsVerify(XprsPacket p, Uint8List? pubXonly) {
   if (s == null) return XprsSigState.unsigned;
   if (pubXonly == null) return XprsSigState.unverified;
 
-  final sig = AprxSign.b85decode(s);
+  final sig = XprsCrypto.b85decode(s);
   if (sig == null || sig.length != 48) return XprsSigState.forged;
 
-  return AprxSign.verify(xprsSignedDigest(p), sig, pubXonly)
+  return XprsCrypto.verify(xprsSignedDigest(p), sig, pubXonly)
       ? XprsSigState.verified
       : XprsSigState.forged;
 }

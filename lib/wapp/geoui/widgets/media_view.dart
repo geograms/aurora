@@ -1,4 +1,4 @@
-/* Aurora · GeoUI media widgets (APRX.md §16 media references)
+/* Aurora · GeoUI media widgets (XPRS.md section 16 media references)
  *
  * Reusable, wapp-agnostic rendering for `file:<sha256>.<ext>` tokens:
  *
@@ -16,7 +16,7 @@
  * Any wapp using the generic chat widgets gets these for free — the host
  * spots the tokens in message text (media_ref.dart) and renders them here.
  * No transport: an unknown hash renders as a chip stating the media is not
- * in the local archive (fetching is future work, APRX §16.5).
+ * in the local archive (fetching is future work, XPRS section 16.5).
  */
 
 import 'dart:async';

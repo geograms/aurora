@@ -1,4 +1,4 @@
-# Plan — third-party NOSTR signers (Amber, bunker), and the APRX phase-out
+# Plan — third-party NOSTR signers (Amber, bunker), and the XPRS-crypto phase-out
 
 > Status: approved (2026-07-13), implementing. The seam (`NostrSigner` +
 > `LocalSigner`) has landed; nothing else is wired up yet.
@@ -22,8 +22,8 @@ APRS frame.
 
 | Was | Why it existed | Now |
 |---|---|---|
-| `hal_identity_sign` — APRX **48-byte truncated Schnorr** over raw bytes (`aprx_sign.dart:76`). chat ×4, circles ×3 | An APRS frame had no room for a real signature | **Deleted.** Chat messages become signed NOSTR events (standard 64-byte Schnorr). |
-| `hal_encrypt` / `hal_decrypt` — **custom ECDH + AES-256-CBC** (`aprx_sign.dart:216`). chat ×3, circles ×4 | Same: a bespoke envelope small enough for APRS | **Deleted.** Circles epoch envelopes and chat DMs become **NIP-44**; the legacy kind-4 inbox stays NIP-04. |
+| `hal_identity_sign` — XPRS **48-byte truncated Schnorr** over raw bytes (`xprs_crypto.dart`). chat ×4, circles ×3 | An APRS frame had no room for a real signature | **Deleted.** Chat messages become signed NOSTR events (standard 64-byte Schnorr). |
+| `hal_encrypt` / `hal_decrypt` — **custom ECDH + AES-256-CBC** (`xprs_crypto.dart`). chat ×3, circles ×4 | Same: a bespoke envelope small enough for APRS | **Deleted.** Circles epoch envelopes and chat DMs become **NIP-44**; the legacy kind-4 inbox stays NIP-04. |
 
 With APRS gone, the size argument goes with it — 64 bytes against 48, on a
 transport (Reticulum) where that is nothing. Chat has been RNS-primary since
@@ -142,11 +142,11 @@ Each ships independently, in this order:
 3. **circles** — `hal_encrypt`/`hal_decrypt` → **NIP-44** on the epoch-key
    envelopes; drop `hal_identity_sign`. A wire-format change, but circles are
    private groups: the blast radius is only members, who all update together.
-4. **chat** — drop the APRX `~sig` and the `ENC1:` envelope; messages become signed
+4. **chat** — drop the XPRS `~sig` and the `ENC1:` envelope; messages become signed
    NOSTR events + NIP-44. **Last, and the one with real fallout:** other geogram
    devices already speak that wire format. Old builds will show the new messages as
    *unverified* (not forged), and old `ENC1:` history must still open — so
-   `AprxSign.decryptFrom` stays on the **read** path for one release, and the UI
+   `XprsCrypto.decryptFrom` stays on the **read** path for one release, and the UI
    says what is happening.
 
 ## 8. Onboarding
@@ -183,7 +183,7 @@ the signer for one signature — which doubles as proof it really holds the key.
 | `lib/wapp/wapp_engine.dart` | HAL v2; **delete** `hal_identity_sign` / `hal_encrypt` / `hal_decrypt` |
 | `lib/wapp/coin/*` | its own generated wallet key |
 | `wapps/{social,messages,circles,chat}/main.c`, `wapps/hal/geogram_wasm_hal.h` | the four migrations |
-| `reticulum-dart/.../aprx_sign.dart` | verify/decrypt only, then delete (its `nip04*` helpers stay — they are real NIP-04) |
+| `reticulum-dart/.../xprs_crypto.dart` | verify/decrypt only, then delete (its `nip04*` helpers stay — they are real NIP-04) |
 
 ## 10. Verification
 

@@ -102,7 +102,7 @@ import '../../util/nostr_nip19.dart';
 import '../../util/nostr_event.dart';
 import '../../util/nostr_imeta.dart';
 import '../../util/npd.dart';
-import '../../util/aprx_sign.dart';
+import '../../util/xprs_crypto.dart';
 import 'lxmf/lxmf.dart'
     show kLxmfApp, kLxmfDeliveryAspects, kLxmfPropagationAspects;
 import 'lxmf/lxmf_message.dart';
@@ -6881,7 +6881,7 @@ class RnsService {
     final rpub = _b64urlToBytes(recipientNpubB64);
     if (rpub == null || rpub.length != 32) return null;
     final recipientPubHex = _hex(rpub);
-    final content = AprxSign.nip04Encrypt(
+    final content = XprsCrypto.nip04Encrypt(
       _scalarFromHex(privHex),
       rpub,
       utf8.encode(plaintext),
@@ -6981,7 +6981,7 @@ class RnsService {
       if (!ev.verify()) continue;
       final authorX = _hexToBytes(ev.pubkey);
       if (authorX == null || authorX.length != 32) continue;
-      final pt = AprxSign.nip04Decrypt(d, authorX, ev.content);
+      final pt = XprsCrypto.nip04Decrypt(d, authorX, ev.content);
       if (pt == null) continue;
       var mid = '';
       for (final t in ev.tags) {
@@ -8369,7 +8369,7 @@ class RnsService {
     }
     final rpub = _hexToBytes(recipientHex);
     if (rpub == null || rpub.length != 32) return null;
-    final content = AprxSign.nip04Encrypt(
+    final content = XprsCrypto.nip04Encrypt(
       _scalarFromHex(priv),
       rpub,
       utf8.encode(text),
@@ -8401,7 +8401,7 @@ class RnsService {
     if (priv == null) return null;
     final authorX = _hexToBytes(senderHex);
     if (authorX == null || authorX.length != 32) return null;
-    final pt = AprxSign.nip04Decrypt(_scalarFromHex(priv), authorX, content);
+    final pt = XprsCrypto.nip04Decrypt(_scalarFromHex(priv), authorX, content);
     if (pt == null) return null;
     try {
       return utf8.decode(pt);

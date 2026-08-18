@@ -33,21 +33,19 @@ static void xs_random(uint8_t *out, size_t len);
 /*
  * The tagged-hash domain strings, XPRS.md section 9.1.2.
  *
- * These were `APRX/nonce` and `APRX/challenge` while the protocol was still
- * called APRX. The name is part of the hash, so the rename is a wire change:
- * a signature made under one pair does not verify under the other, in either
- * direction.
+ * The tag is hashed into the challenge, so these two strings are as much a part
+ * of the wire format as the curve is. A verifier using different ones agrees
+ * with nobody.
  *
- * Signing uses the XPRS strings only. VERIFYING tries the XPRS challenge first
- * and falls back to the APRX one, because a signature that fails to verify is
- * not merely unbadged in this system -- the archive drops forged packets at
- * flush and the courier drops forged carried mail, so a hard cut would discard
- * every signed thing already stored rather than leave it in doubt. The fallback
- * comes out once nothing signed under the old strings remains.
+ * There were briefly two more, from before the protocol was renamed, and this
+ * verifier tried the old challenge string after the current one so that
+ * already-signed data kept validating. That transition is over. What it cost is
+ * worth stating, because it is not the usual "shows as unverified": the archive
+ * drops forged packets at flush and the courier drops forged carried mail, so
+ * every signature made under the old strings was DISCARDED rather than doubted.
  */
 #define XS_TAG_NONCE          "XPRS/nonce"
 #define XS_TAG_CHALLENGE      "XPRS/challenge"
-#define XS_TAG_CHALLENGE_OLD  "APRX/challenge"
 
 #ifdef XPRSSIG_HOST_TEST
 /* Set by the test to reproduce section 9.1.2's worked example. */
@@ -396,19 +394,6 @@ bool xprssig_verify(const uint8_t digest[32], const uint8_t sig[XPRSSIG_LEN],
     xs_tagged(XS_TAG_CHALLENGE, rx, 32, pub_x, 32, digest, 32, e2);
 
     uint8_t diff = 0;
-    for (int i = 0; i < 16; i++) diff |= (uint8_t)(sig[i] ^ e2[i]);
-    if (diff == 0) return true;
-
-    /* The transition window (see XS_TAG_CHALLENGE).
-     *
-     * R' is already computed and does not depend on the tag, so trying the old
-     * domain string costs two SHA-256 rounds and no curve arithmetic. Without
-     * it every signature made before the rename reads as FORGED, and forged is
-     * not merely unbadged here: the archive drops forged packets at flush and
-     * the courier drops forged carried mail. Old data would be discarded, not
-     * doubted. */
-    xs_tagged(XS_TAG_CHALLENGE_OLD, rx, 32, pub_x, 32, digest, 32, e2);
-    diff = 0;
     for (int i = 0; i < 16; i++) diff |= (uint8_t)(sig[i] ^ e2[i]);
     return diff == 0;
 }

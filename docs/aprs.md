@@ -52,7 +52,7 @@ Builders:
 
 Long messages are split at word boundaries into ≤`max_len` chunks and sent as
 lines `0,1,2,…` (`aprs_send_*_multi`), reassembled on the receive side. The
-APRX message conventions (the `+<mid>`, `<mid>:like`, `~<sig>`, `ENC1:` markers
+XPRS message conventions (the `+<mid>`, `<mid>:like`, `~<sig>`, `ENC1:` markers
 in the payload) are layered on top of this — see [aprs-xt.md](aprs-xt.md).
 
 ### Path‑parameterised builders

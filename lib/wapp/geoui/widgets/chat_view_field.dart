@@ -309,7 +309,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
   static Color _onBubbleFg(bool outgoing, int incomingAlpha) =>
       Colors.white.withAlpha(outgoing ? 235 : incomingAlpha);
 
-  /// Signature verdict badge (APRX). verified=green, forged=red,
+  /// Signature verdict badge (XPRS). verified=green, forged=red,
   /// unverified=grey (signed but sender key unknown). Nothing for unsigned.
   /// On the blue outgoing bubble those hues are unreadable, so verified and
   /// unverified go white and forged goes pale pink — still a warning, but legible.
@@ -348,7 +348,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
     );
   }
 
-  /// Lock badge (APRX): the message was end-to-end encrypted to/from this peer.
+  /// Lock badge (XPRS): the message was end-to-end encrypted to/from this peer.
   Widget _encBadge(Map<String, dynamic> m) {
     if (m['enc'] != true) return const SizedBox.shrink();
     // A private (Reticulum-only) message is labelled "private" by _privBadge —
@@ -817,7 +817,7 @@ class _ChatViewFieldState extends State<ChatViewField> {
     final outgoing = (m['dir']?.toString() ?? 'in') == 'out';
     final from = m['from']?.toString() ?? '';
     final text = m['text']?.toString() ?? '';
-    // APRX §16 media references: render each `file:<sha256>.<ext>` token as a
+    // XPRS section 16 media references: render each `file:<sha256>.<ext>` token as a
     // tappable thumbnail and drop the raw token from the visible text.
     final mediaRefs = MediaRef.findAll(text);
     // Auto-fetch any referenced media we don't hold yet, using the ih:/pa: hints

@@ -143,3 +143,61 @@ mistake `esp32.md` measured at 1 of 96 pings, in the worst available place.
 bearer, because a second task is 5 KB of a heap that has been down to hundreds
 of bytes. If no task has claimed that job, `xprsnow_start()` says so as an error
 rather than letting a silent failure be discovered in the field.
+
+## `sent=` is not `tx=`
+
+`esp_now_send()` returns once the frame is queued, not once the radio has
+finished with it, so `tx` only ever counted what this station *decided* to say.
+`esp_now_register_send_cb` counts what actually left, and both heartbeats now
+print `sent=<done>/<issued> fail=<n>`. `xprsnow_settle()` waits on the same
+counters, which is what §23.7 uses instead of the 120 ms delay it used to guess
+with — retuning the radio out from under an untransmitted acceptance is a real
+failure and it looked exactly like the far side not answering.
+
+The failure that made this necessary: every `esp_now_send()` on the dongle
+returned `ESP_ERR_ESPNOW_NO_MEM` for four minutes while `tx=0`, and the log said
+nothing, because that branch was `ESP_LOGD`. **A refused transmission is now
+`ESP_LOGW`, including a full driver queue.** See `esp32.md` — the cause was
+heap, and one of the things eating it was this bearer's own receive queue.
+
+## Watching a rendezvous: `xprsnow_set_trace()`
+
+Between "the radio never heard it" and "it was heard and refused" no counter can
+tell you which, because a frame can be lost before anything counts it: the
+callback's `xprs_looks_like` byte test, a full queue, a parse that fails. With
+the trace on, every drained frame prints its length, RSSI and first 56 bytes,
+and the frames that never reached the queue print as a change:
+
+    heard 107 bytes at -55 dBm: t:receipt f:X3LTSH d:X3WWAJ r:012c52 s:ack
+    radio delivered 8 frame(s) (+1), 0 not XPRS (+0), 0 dropped by a full queue (+0)
+
+`geogram_xprschan` switches it on for the length of an exchange and off again;
+it is a line per packet and is not meant to be left on.
+
+## Open: the pair goes deaf on the working channel
+
+Not solved, and recorded here so the next attempt starts from the measurement
+rather than from the beginning.
+
+After both stations move to channel 6, **each reports itself on channel 6, each
+driver reports its frames sent, and neither receives a single byte from the
+other** — deaf in both directions at once, for the whole 15-second window. The
+same exchange aimed at channel 1 (the access point's own channel, so no real
+retune happens) meets 2 times in 3. So the retune is the dominant fault and
+something smaller is intermittent even without it.
+
+Ruled out by measurement, so do not re-test these first:
+
+- **not the acceptance being lost** — it arrives on the commons every time, and
+  the inviter moves on it
+- **not the disassociation being slow** — `let go of the access point in 0ms`,
+  and the channel is read back from the driver after setting it (`radio says 6`)
+- **not heap or a refused send** — `sent=n/n fail=0` throughout
+- **not power save or the peer's channel** — `esp_wifi_set_ps(WIFI_PS_NONE)` and
+  an explicit `esp_now_mod_peer` channel are both re-asserted after every move,
+  and neither changed the result
+
+What has not been tried: whether the station is off-channel scanning for the
+access point it was told to leave (`esp_wifi_scan_stop`, and confirming the
+driver is not reconnecting on its own), and whether a channel the AP is not on
+behaves differently from channel 6 specifically.

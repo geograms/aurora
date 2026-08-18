@@ -68,13 +68,42 @@ extern "C" {
 /** Default stay when there is no usable clock to read `until:` against. */
 #define XC_DEFAULT_AWAY_MS   30000u
 
-/** How long the inviter waits alone before concluding nobody came (step 6). */
-#define XC_PROOF_WAIT_MS     8000u
+/**
+ * How long the inviter waits alone before concluding nobody came (step 6).
+ *
+ * Eight seconds was too tight to be a judgement about the far side. Both
+ * stations reach the working channel by their own route, and the inviter's
+ * route includes letting go of an access point on a schedule the WiFi driver
+ * owns — measured, the proof arrived between one and five seconds after the
+ * move when it arrived at all, so eight seconds was declaring absence on a
+ * margin of three. Fifteen is comfortably inside XC_MAX_AWAY_MS and costs
+ * nothing when the far side is prompt, because hearing the proof ends the wait
+ * immediately.
+ */
+#define XC_PROOF_WAIT_MS     15000u
 
 /** How often the invitee repeats its step-4 proof on the working channel.
  *  Once is not enough: both stations arrive by their own route and neither
  *  controls when the other is listening. */
 #define XC_ANNOUNCE_EVERY_MS 1000u
+
+/** The hurried cadence for the first moments on the working channel, and how
+ *  long it lasts. The two stations do not arrive together — the inviter has an
+ *  access point to let go of first — so a second of silence right after
+ *  arriving is the most expensive second of the whole exchange. */
+#define XC_ANNOUNCE_FAST_MS  300u
+#define XC_ARRIVAL_HURRY_MS  6000u
+
+/**
+ * How often the inviter re-airs the SAME invitation while waiting (step 1).
+ *
+ * A single packet asking somebody to leave the commons either lands or the
+ * whole exchange is over, and measured it landed about one time in four. The
+ * bytes are identical every time, so the §5 identifier is too and an answer's
+ * `r:` still names something we recognise — a repeat costs one small packet and
+ * buys another independent chance at a moment when the far side is listening.
+ */
+#define XC_INVITE_RETRY_MS   2000u
 
 typedef enum {
     XC_IDLE = 0,
@@ -112,6 +141,20 @@ typedef struct {
     /** Is this station willing to leave the commons at all? An indexer that is
      *  somebody's only uplink may reasonably answer no. */
     bool (*may_move)(void);
+    /** Block until the bearer has actually transmitted everything handed to it.
+     *
+     * Airing is asynchronous on every bearer worth having, and this component
+     * retunes the radio — so "sent" has to be a fact and not a delay somebody
+     * guessed. False means the bearer is stuck, which is worth logging but not
+     * worth abandoning the exchange over. NULL when the bearer cannot say. */
+    bool (*settle)(uint32_t timeout_ms);
+    /** Ask the bearer to log every packet it hears, for the duration.
+     *
+     * The rendezvous is the one place where "the radio never heard it" and "it
+     * was heard and refused" look identical from every counter this component
+     * owns, and they need opposite fixes. On while an exchange is in hand, off
+     * the rest of the time. NULL when the bearer has nothing to say. */
+    void (*trace)(bool on);
     /** The channel is ours and the far side has proved it is here. */
     void (*on_working)(const char *peer, uint8_t channel, bool lr);
     /** Back on the calling channel, for whatever reason. */

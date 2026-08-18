@@ -47,7 +47,14 @@ esp_err_t sdcard_init(void)
     // Mount configuration
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,     // Auto-format if unformatted
-        .max_files = 3,                     // keep heap use modest (BLE+httpd coexist)
+        // Five, not three. The XPRS index alone caches three handles that stay
+        // open for the life of the board — the segment it appends to, the one a
+        // reader is walking, and the tail — so three was the budget exactly
+        // spent, and every other fopen() on the card failed with
+        // "vfs_fat: open: no free file descriptors": the directory listing, the
+        // key store, the mesh mail. Two spare handles cost about a kilobyte and
+        // are what the rest of the firmware works from.
+        .max_files = 5,
         .allocation_unit_size = 16 * 1024   // 16KB allocation unit
     };
 

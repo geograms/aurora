@@ -579,6 +579,13 @@ static void relay_remember(uint32_t hash)
     s_rdedup_cnt++;
 }
 
+static volatile bool s_relay_may_run;   /* set by on_sync() */
+/* Loops the relay task has completed. Printed in the heartbeat: a task that
+ * dies, never starts, or blocks forever is otherwise invisible from outside,
+ * and this one carries the beacons, the announcements, the history replay and
+ * the section 23.7 clock. A number that stops climbing is the whole symptom. */
+static volatile uint32_t s_relay_ticks;
+
 /* re-air queue: full BLE AD buffers with a TTL, round-robin aired by relay_task */
 #define RELAY_MAX     8
 #define RELAY_TTL_SEC 30
@@ -1230,18 +1237,28 @@ static void heartbeat_task(void *arg)
          * nowhere to put. A dropped frame was invisible here while the M5Stack
          * printed the same counter all along. */
         uint32_t nrx = 0, ntx = 0, ncan = 0, ndrop = 0;
+        uint32_t nissued = 0, ndone = 0, nfail = 0;
         xprsnow_stats(&nrx, &ntx, &ncan, &ndrop);
-        ESP_LOGW(TAG, "espnow ch=%u rx=%u tx=%u cancel=%u drop=%u peers=%d",
+        /* `tx` is what this station decided to say; `sent` is what the radio
+         * finished with. A gap between them is a driver still holding frames,
+         * and it is the difference between an acceptance that was sent and one
+         * that was merely handed over before the channel changed under it. */
+        xprsnow_tx_stats(&nissued, &ndone, &nfail);
+        ESP_LOGW(TAG, "espnow ch=%u rx=%u tx=%u cancel=%u drop=%u sent=%u/%u "
+                      "fail=%u peers=%d",
                  xprsnow_channel(), (unsigned)nrx, (unsigned)ntx,
-                 (unsigned)ncan, (unsigned)ndrop, xprsnow_peer_count(600));
-        ESP_LOGW(TAG, "alive %us heap=%u min=%u big=%u recs=%u q=%u/%u lan=%d",
+                 (unsigned)ncan, (unsigned)ndrop, (unsigned)ndone,
+                 (unsigned)nissued, (unsigned)nfail, xprsnow_peer_count(600));
+        ESP_LOGW(TAG, "alive %us heap=%u min=%u big=%u recs=%u q=%u/%u lan=%d "
+                      "relay=%u",
                  (unsigned)(esp_timer_get_time() / 1000000ULL),
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)esp_get_minimum_free_heap_size(),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
                                                             MALLOC_CAP_8BIT),
                  (unsigned)xs.count, (unsigned)qwait, (unsigned)qdrop,
-                 xprslan_is_active() ? xprslan_peer_count(600) : -1);
+                 xprslan_is_active() ? xprslan_peer_count(600) : -1,
+                 (unsigned)s_relay_ticks);
     }
 }
 
@@ -1611,6 +1628,8 @@ static const xc_ops_t k_chan_ops = {
     .hold_reconnect = geogram_wifi_hold_reconnect,
     .announce_identity = xprs_identity_air,
     .may_move = xc_may_move,
+    .settle = xprsnow_settle,
+    .trace = xprsnow_set_trace,
     .on_working = xc_on_working,
     .on_home = xc_on_home,
 };
@@ -2411,6 +2430,9 @@ static void relay_task(void *arg)
 {
     (void)arg;
     static uint8_t pick[256];
+    /* Created first, run last. The stack comes out of a heap nobody has touched
+     * yet; the work waits for on_sync() to say the BLE host is up. */
+    while (!s_relay_may_run) vTaskDelay(pdMS_TO_TICKS(50));
     announce("tdongle-s3 online", 17);   /* configures instance 0 + first announce */
     uint32_t last_own = now_sec();
     uint32_t last_sweep = now_sec();
@@ -2419,6 +2441,7 @@ static void relay_task(void *arg)
     int own_rot = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1500));
+        s_relay_ticks++;
         uint32_t t = now_sec();
         gatt_mesh_tick();   /* MSP session timeouts (politeness/stall) */
 
@@ -2762,12 +2785,10 @@ static void on_sync(void)
      * cost an afternoon: no relay task means no beacons, no service
      * announcements and no replay, while every other task carried on and the
      * board looked healthy from the outside. */
-    if (xTaskCreatePinnedToCore(relay_task, "rns_relay", 8192, NULL, 5, NULL, 1)
-        != pdPASS) {
-        ESP_LOGE(TAG, "relay task did NOT start (heap %u) - this station will "
-                      "not beacon, announce or answer",
-                 (unsigned)esp_get_free_heap_size());
-    }
+    /* The task itself was claimed in app_main, when there was still a heap to
+     * claim it from. All that happens here is releasing it: it owns ext-adv
+     * instance 0, so it must not touch the radio before the host has synced. */
+    s_relay_may_run = true;
 }
 
 static void on_reset(int reason) { ESP_LOGW(TAG, "nimble reset, reason=%d", reason); }
@@ -3421,8 +3442,46 @@ static void console_task(void *arg)
     }
 }
 
+/* Free heap after each subsystem comes up.
+ *
+ * The board reached the point where esp_now_send() returned ESP_ERR_ESPNOW_NO_MEM
+ * on every call and the BLE controller could not allocate advert data — with
+ * about eight kilobytes free seventeen seconds after boot. That is not a leak
+ * and no amount of watching the radio explains it; it needs the one measurement
+ * nothing here was taking. */
+static void heap_mark(const char *stage)
+{
+    ESP_LOGW(TAG, "heap after %-12s free=%u big=%u", stage,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                        MALLOC_CAP_8BIT));
+}
+
 void app_main(void)
 {
+    heap_mark("boot");
+
+    /* THE RELAY TASK'S STACK, CLAIMED FIRST.
+     *
+     * This is eight kilobytes in one piece, and it used to be asked for from
+     * on_sync() — after WiFi, NimBLE, the SD card, the HTTP server and the
+     * Reticulum hub had each taken their share. Measured there: 15,308 bytes
+     * free but the largest block only 7,680, so the creation failed, and the
+     * station ran on with no beacons, no service announcements, no history
+     * replay and no section 23.7 tick while every other task carried on and
+     * the board looked healthy. One boot line was the only sign.
+     *
+     * Here the heap is untouched (172 KB in one block) and it cannot fail for
+     * want of room. The task blocks on s_relay_may_run until the BLE host has
+     * synced, because it owns extended-advertising instance 0. */
+    if (xTaskCreatePinnedToCore(relay_task, "rns_relay", 8192, NULL, 5, NULL, 1)
+        != pdPASS) {
+        ESP_LOGE(TAG, "relay task did NOT start (heap %u, largest block %u) - "
+                      "this station will not beacon, announce or answer",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
     /* model_init() initialises NVS + the ST7735 LCD. */
     if (model_init() != ESP_OK) {
         ESP_LOGW(TAG, "model_init failed (no display?)");
@@ -3431,10 +3490,12 @@ void app_main(void)
     }
 
     s_relay_mtx = xSemaphoreCreateMutex();
+    heap_mark("before nimble_init");
     if (nimble_port_init() != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed");
         return;
     }
+    heap_mark("before identity");
     identity_init();
 
     /* Boot epoch counter (XPRS.md §10.7): a clockless station dates its
@@ -3455,17 +3516,21 @@ void app_main(void)
     }
 
     /* Start the dashboard UI task (owns all LVGL calls). */
+    heap_mark("before ui_task");
     s_ui_q = xQueueCreate(12, sizeof(ui_msg_t));
     xTaskCreate(ui_task, "ui", 4096, NULL, 4, NULL);
 
     /* WiFi STA + APRS-IS iGate, started BEFORE the BLE host runs so the uplink
      * queue exists for the first frames heard during the WiFi connect window. */
+    heap_mark("before igate");
     igate_start();
 
     /* Street mesh: identity from the iGate callsign (NVS). SD card (if present)
      * persists parked store-and-forward mail across reboots; RAM-only without. */
+    heap_mark("before blemesh");
     blemesh_table_init(s_aprs_call[0] ? s_aprs_call : "TDONGLE");
     const char *scf_path = NULL;
+    heap_mark("before sdcard");
     if (sdcard_init() == ESP_OK && sdcard_is_mounted()) {
         mkdir("/sdcard/mesh", 0775);
         scf_path = "/sdcard/mesh/pending.bin";
@@ -3500,6 +3565,7 @@ void app_main(void)
 
     /* XPRS on the LAN (docs/lan.md): broadcast to and from everyone on this
      * network, on its own UDP port. Not Reticulum and not the internet. */
+    heap_mark("before xprslan");
     if (xprslan_start(s_aprs_call[0] ? s_aprs_call : "TDONGLE") == ESP_OK) {
         xprslan_set_rx_cb(xprs_from_lan);
         xprslan_set_heard_cb(xprs_heard_on_lan);
@@ -3516,6 +3582,7 @@ void app_main(void)
      * It rides whatever channel the station is on, so two devices only hear
      * each other when they are on the same one. Nothing reports otherwise: the
      * symptom is a peer count that stays at zero. */
+    heap_mark("before xprsnow");
     if (xprsnow_start(s_aprs_call[0] ? s_aprs_call : "TDONGLE") == ESP_OK) {
         xprsnow_set_rx_cb(xprs_from_now);
         xprsnow_set_heard_cb(xprs_heard_on_now);
@@ -3523,6 +3590,7 @@ void app_main(void)
         xprschan_init(s_aprs_call[0] ? s_aprs_call : "TDONGLE", &k_chan_ops);
     }
 
+    heap_mark("before httpd");
     api_start();
     /* The Reticulum interface. One socket to one hub: the station is then
      * reachable from anywhere on the network rather than only from the room it
@@ -3541,6 +3609,7 @@ void app_main(void)
         rns_tcp_add_hub(k_rns_hubs[i].host, k_rns_hubs[i].port);
     }
 #endif
+    heap_mark("before rns_tcp");
     if (rns_tcp_start(NULL, 0) != ESP_OK) {
         ESP_LOGW(TAG, "Reticulum interface failed to start");
     }
@@ -3551,7 +3620,9 @@ void app_main(void)
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
+    heap_mark("before gatt_mesh");
     gatt_mesh_svcs_init();   /* GATT service table before the host starts */
+    heap_mark("before nimble_host");
     nimble_port_freertos_init(host_task);
 
     ESP_LOGI(TAG, "RNS-BLE5 full node + repeater + UI + APRS-IS iGate up");

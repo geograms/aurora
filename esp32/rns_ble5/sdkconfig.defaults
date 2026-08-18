@@ -50,3 +50,34 @@ CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=2
 # on a TTL; the same fixed-address phone must surface every time). The
 # controller dedup filter suppresses a fixed address after ONE report.
 CONFIG_BT_CTRL_BLE_SCAN_DUPL=n
+
+# ── Heap headroom ──────────────────────────────────────────────────────────
+# This board runs the BLE controller, the NimBLE host, WiFi STA, an APRS-IS
+# iGate, a Reticulum hub, an HTTP server, an SD-backed XPRS index and three XPRS
+# bearers at once, and it finished boot with about eight kilobytes free and a
+# largest block of 7,680. That is under the 8,192 the relay task's stack asks
+# for, so the task that carries the beacons, the service announcements, the
+# history replay and the section 23.7 clock silently failed to start — measured,
+# with one boot line as the only evidence.
+#
+# The stack is now claimed first (see app_main), which makes THAT allocation
+# certain; these settings are what pays for it. Every number below is a buffer
+# count, so the cost is peak burst capacity rather than throughput, and the
+# Reticulum links here are latency-bound rather than window-bound.
+
+# WiFi receive/transmit buffers. Static ones are ~1.6 KB each and permanent;
+# dynamic ones are a ceiling on what the driver may take while busy.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+
+# Sixteen listening sockets and sixteen raw PCBs are far more than this station
+# opens: one hub connection, one HTTP server, one UDP bearer, one APRS-IS link.
+CONFIG_LWIP_MAX_LISTENING_TCP=8
+CONFIG_LWIP_MAX_ACTIVE_TCP=8
+CONFIG_LWIP_MAX_UDP_PCBS=8
+CONFIG_LWIP_MAX_RAW_PCBS=4
+
+# One connection at a time (CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1), so eight ACL
+# buffers of 255 bytes is a queue depth nothing here reaches.
+CONFIG_BT_NIMBLE_ACL_BUF_COUNT=5

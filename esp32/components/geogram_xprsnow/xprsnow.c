@@ -43,6 +43,19 @@ static SemaphoreHandle_t s_tx_mtx;
 static xprsnow_rx_cb_t   s_rx_cb;
 static uint32_t          s_dropped;
 static bool              s_started;
+static bool              s_trace;
+
+/* The driver's own accounting, which is the only place "it went out" lives.
+ * `issued` rises where we hand a frame over; `done` and `failed` rise in the
+ * send callback, which runs on the WiFi task — so both sides are one writer
+ * each and a plain volatile is enough to compare them. */
+static volatile uint32_t s_tx_issued;
+static volatile uint32_t s_tx_done;
+static volatile uint32_t s_tx_failed;
+
+/* Every frame the radio delivered, and how many of those were not XPRS. */
+static volatile uint32_t s_frames;
+static volatile uint32_t s_notxprs;
 
 /* ── The radio ──────────────────────────────────────────────────────────── */
 
@@ -56,17 +69,39 @@ static bool nw_air(void *ctx, const char *wire, int len)
     (void)ctx;
     if (!s_started || len <= 0 || len > XPRSNOW_WIRE_MAX) return false;
     esp_err_t err = esp_now_send(k_broadcast, (const uint8_t *)wire, (size_t)len);
-    if (err == ESP_OK) return true;
-    if (err == ESP_ERR_ESPNOW_NO_MEM) {
-        /* The driver's own send queue is full. Espressif's advice is to wait a
-         * moment rather than push harder; the packet is dropped and the next
-         * beacon or re-air will carry the news instead. */
-        ESP_LOGD(TAG, "send queue full — dropping this one");
-        return false;
-    }
-    ESP_LOGW(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
+    if (err == ESP_OK) { s_tx_issued++; return true; }
+    /* Loud, including the full queue. This was ESP_LOGD and therefore invisible,
+     * and an invitation that never left the board looked from every log on the
+     * device exactly like an invitation nobody answered. */
+    ESP_LOGW(TAG, "esp_now_send(%d bytes) failed: %s", len,
+             esp_err_to_name(err));
     return false;
 }
+
+/* Also the WiFi task. Two counters and nothing else. */
+static void nw_send_cb(const uint8_t *mac, esp_now_send_status_t status)
+{
+    (void)mac;
+    if (status != ESP_NOW_SEND_SUCCESS) s_tx_failed++;
+    s_tx_done++;
+}
+
+bool xprsnow_settle(uint32_t timeout_ms)
+{
+    if (!s_started) return false;
+    uint32_t start = nw_now_ms();
+    while (s_tx_done != s_tx_issued) {
+        if (nw_now_ms() - start >= timeout_ms) {
+            ESP_LOGW(TAG, "%u frame(s) still in the driver after %ums",
+                     (unsigned)(s_tx_issued - s_tx_done), (unsigned)timeout_ms);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return true;
+}
+
+void xprsnow_set_trace(bool on) { s_trace = on; }
 
 /*
  * IN THE WIFI TASK, ON CORE 0. Copy and get out.
@@ -79,7 +114,11 @@ static void nw_recv_cb(const esp_now_recv_info_t *info, const uint8_t *data,
                        int len)
 {
     if (!info || !data || len <= 0 || len > XPRSNOW_WIRE_MAX) return;
-    if (!xprs_looks_like(data, len)) return;   /* a cheap byte test, no hashing */
+    /* Counted BEFORE the byte test, because "the radio heard nothing" and "the
+     * radio heard something that was not ours" are different faults and every
+     * counter downstream of here conflates them. */
+    s_frames++;
+    if (!xprs_looks_like(data, len)) { s_notxprs++; return; }
 
     nw_frame_t f;
     memcpy(f.wire, data, (size_t)len);
@@ -101,9 +140,32 @@ static void nw_drain(void *ctx)
     if (!s_rxq) return;
     nw_frame_t f;
     while (xQueueReceive(s_rxq, &f, 0) == pdTRUE) {
+        if (s_trace) {
+            /* On the bearer task, not the WiFi task, and only while something
+             * is asking. 56 bytes reaches past t:/f:/d:/r: on every packet the
+             * choreography uses, which is all this needs to identify. */
+            ESP_LOGW(TAG, "heard %d bytes at %d dBm: %.56s", f.len, f.rssi,
+                     f.wire);
+        }
         uint64_t peer = 0;
         for (int i = 0; i < 6; i++) peer = (peer << 8) | f.mac[i];
         xb_on_wire(&s_now, f.wire, f.len, peer, f.rssi);
+    }
+    if (s_trace) {
+        /* The frames that never reached the queue at all. Reported as a change,
+         * because a total tells you nothing about the window you are watching. */
+        static uint32_t seen_frames, seen_notxprs, seen_dropped;
+        if (s_frames != seen_frames || s_notxprs != seen_notxprs ||
+            s_dropped != seen_dropped) {
+            ESP_LOGW(TAG, "radio delivered %u frame(s) (+%u), %u not XPRS (+%u), "
+                          "%u dropped by a full queue (+%u)",
+                     (unsigned)s_frames, (unsigned)(s_frames - seen_frames),
+                     (unsigned)s_notxprs, (unsigned)(s_notxprs - seen_notxprs),
+                     (unsigned)s_dropped, (unsigned)(s_dropped - seen_dropped));
+            seen_frames = s_frames;
+            seen_notxprs = s_notxprs;
+            seen_dropped = s_dropped;
+        }
     }
 }
 
@@ -165,6 +227,13 @@ void xprsnow_stats(uint32_t *rx, uint32_t *tx, uint32_t *cancelled,
     if (dropped) *dropped = s_dropped;
 }
 
+void xprsnow_tx_stats(uint32_t *issued, uint32_t *done, uint32_t *failed)
+{
+    if (issued) *issued = s_tx_issued;
+    if (done)   *done   = s_tx_done;
+    if (failed) *failed = s_tx_failed;
+}
+
 esp_err_t xprsnow_start(const char *callsign)
 {
     if (s_started) return ESP_OK;
@@ -200,6 +269,7 @@ esp_err_t xprsnow_start(const char *callsign)
     }
 
     esp_now_register_recv_cb(nw_recv_cb);
+    esp_now_register_send_cb(nw_send_cb);
 
     /* A station that modem-sleeps misses ESP-NOW frames while it is asleep.
      * This costs power and takes a share of the airtime back from Bluetooth,
@@ -230,6 +300,7 @@ void xprsnow_stop(void)
     if (!s_started) return;
     xb_stop(&s_now);
     esp_now_unregister_recv_cb();
+    esp_now_unregister_send_cb();
     esp_now_deinit();
     s_started = false;
 }

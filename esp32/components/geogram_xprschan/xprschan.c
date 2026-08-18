@@ -15,15 +15,46 @@
 #include <stdlib.h>
 #include <time.h>
 
+#ifdef XPRSCHAN_HOST_TEST
+
+/* Everything except the radio compiles on the host, on the same terms as
+ * geogram_xprslan: the test owns the clock, supplies `air` through the ops, and
+ * the three functions that retune hardware become counters. Every bug this file
+ * has had so far was found by flashing two boards and watching, which is a slow
+ * way to learn that a state machine took a branch. */
+#define XC_LOGI(...) ((void)0)
+#define XC_LOGW(...) ((void)0)
+
+/* Not a sleep: the harness is single-threaded, so a delay is time passing. */
+uint32_t xc_test_now_ms;
+uint32_t xc_test_slept_ms;
+static void xc_delay_ms(uint32_t ms) { xc_test_now_ms += ms; xc_test_slept_ms += ms; }
+
+/* What the radio was asked to do. */
+uint8_t  xc_test_channel;      /* where we are, 0 until something moves us */
+bool     xc_test_lr;
+int      xc_test_moves;
+int      xc_test_homes;
+int      xc_test_reconnect_held;
+
+#else /* on the device */
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_now.h"
 
-static const char *TAG = "xprschan";
+#define XC_LOGI(...) ESP_LOGI(TAG, __VA_ARGS__)
+#define XC_LOGW(...) ESP_LOGW(TAG, __VA_ARGS__)
+
+static void xc_delay_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
 static const uint8_t k_broadcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+#endif
+
+static const char *TAG __attribute__((unused)) = "xprschan";
 
 /* `YYYY-MM-DD_hh:mm:ss` (§4.3) as epoch seconds, or 0. Small enough to keep
  * here rather than depend on the index for one field. */
@@ -54,18 +85,61 @@ static uint32_t s_invite_stale_ms;          /* step 2: how long we wait */
 static uint32_t s_away_ms;                  /* how long we will stay once moved */
 static uint32_t s_proof_by_ms;              /* inviter: nobody came (step 6) */
 static bool     s_proved;                   /* step 4 has been heard */
+/* The radio is ACTUALLY on the working channel — not merely decided to be.
+ *
+ * The decision is taken where the acceptance is heard and performed a tick
+ * later, and the invitee keeps repeating that acceptance on the commons in the
+ * meantime. Without this the inviter counted one of those commons repeats as
+ * step 4 and declared the channel proved while still sitting on channel 1 —
+ * measured, and the proof is worthless there: the whole point of step 4 is that
+ * hearing it HERE is what cannot be faked from anywhere else. */
+static bool     s_moved;
 
 /* Home, so we can go back to it. */
-static uint8_t  s_home_channel;
-static bool     s_was_associated;
+static uint8_t  s_home_channel __attribute__((unused));
+static bool     s_was_associated __attribute__((unused));
 
 /* The acceptance we sent, kept verbatim: step 4 re-airs THE SAME packet, same
  * signature, same identifier. A fresh one would prove nothing — anybody can
  * compose a packet; only the party that committed can repeat that one. */
 static char     s_accept_wire[XPRS_MAX_WIRE + 1];
 static int      s_accept_len;
+/* Which invitation that acceptance answers. An inviter that heard nothing re-airs
+ * the same invitation, and the invitee must recognise it as the one it already
+ * said yes to — otherwise it answers `s:no busy`, which the inviter reads as a
+ * refusal and abandons an exchange that was going fine. */
+static char     s_accept_r[XPRS_ID_LEN];
+static uint32_t s_accept_aired;    /* airings the bearer took */
+static uint32_t s_accept_lost;     /* airings it refused */
+
+/* The invitation we sent, kept verbatim for the same reason: identical bytes
+ * mean an identical §5 identifier, so an answer's `r:` still names it. */
+static char     s_invite_wire[XPRS_MAX_WIRE + 1];
+static int      s_invite_len;
+static uint32_t s_invite_last_ms;
+static uint32_t s_invite_tries;
 
 /* ── The radio ──────────────────────────────────────────────────────────── */
+
+#ifdef XPRSCHAN_HOST_TEST
+
+static void xc_set_lr(bool on) { xc_test_lr = on; }
+static void xc_go(uint8_t channel, bool lr)
+{
+    if (s_ops.hold_reconnect) s_ops.hold_reconnect(true);
+    if (lr) xc_set_lr(true);
+    xc_test_channel = channel;
+    xc_test_moves++;
+}
+static void xc_come_home(void)
+{
+    if (s_lr) xc_set_lr(false);
+    if (s_ops.hold_reconnect) s_ops.hold_reconnect(false);
+    xc_test_channel = 0;
+    xc_test_homes++;
+}
+
+#else
 
 static void xc_set_lr(bool on)
 {
@@ -73,7 +147,7 @@ static void xc_set_lr(bool on)
     if (on) bitmap |= WIFI_PROTOCOL_LR;
     esp_err_t e = esp_wifi_set_protocol(WIFI_IF_STA, bitmap);
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "set_protocol(%s) failed: %s", on ? "with LR" : "plain",
+        XC_LOGW("set_protocol(%s) failed: %s", on ? "with LR" : "plain",
                  esp_err_to_name(e));
         return;
     }
@@ -94,7 +168,35 @@ static void xc_set_lr(bool on)
     };
     e = esp_now_set_peer_rate_config(k_broadcast, &rc);
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "rate config refused: %s", esp_err_to_name(e));
+        XC_LOGW("rate config refused: %s", esp_err_to_name(e));
+    }
+}
+
+/* Two things the driver is entitled to change under us when the station stops
+ * being associated, and both of them make this bearer silently deaf.
+ *
+ * Power save: a station that sleeps misses ESP-NOW frames — Espressif's own
+ * example says so — and WIFI_PS_NONE was set once, at boot, while associated.
+ * Leaving the access point is exactly the event that may restore the default.
+ *
+ * The peer channel: the broadcast peer is registered with channel 0, meaning
+ * "wherever the station is". That is the right answer while associated and an
+ * ambiguous one immediately after a manual retune, so name the channel.
+ *
+ * Measured before this existed: both boards reported themselves on channel 6,
+ * the invitee's driver reported 21 frames sent, and neither board received a
+ * single byte from the other for fourteen seconds — deaf in both directions at
+ * once, which is not something one board's timing can cause.
+ */
+static void xc_hold_the_radio_awake(uint8_t channel)
+{
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_now_peer_info_t peer;
+    if (esp_now_get_peer(k_broadcast, &peer) == ESP_OK) {
+        peer.channel = channel;          /* 0 on the way home: follow the station */
+        esp_err_t e = esp_now_mod_peer(&peer);
+        if (e != ESP_OK) XC_LOGW("peer channel %u refused: %s", channel,
+                                 esp_err_to_name(e));
     }
 }
 
@@ -118,18 +220,36 @@ static void xc_go(uint8_t channel, bool lr)
          * driver restores the access point's home channel underneath us, and
          * the move silently never happens. Measured: "moved to channel 6"
          * followed 70 ms later by "connected ... channel 1". */
-        for (int i = 0; i < 30; i++) {          /* up to ~600 ms */
-            wifi_ap_record_t ap;
-            if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) break;
-            vTaskDelay(pdMS_TO_TICKS(20));
+        /* Up to two seconds, not six hundred milliseconds. Six hundred was a
+         * guess, and the cost of guessing short is being deaf on a channel we
+         * believe we are on: measured, the far side's proof took between one
+         * and five seconds to be heard after the move, and one attempt in four
+         * never heard it inside the eight-second window at all. That is what a
+         * station looks like when it arrives late to its own rendezvous. */
+        int waited = 0;
+        for (; waited < 100; waited++) {        /* up to ~2 s */
+            wifi_ap_record_t ap2;
+            if (esp_wifi_sta_get_ap_info(&ap2) != ESP_OK) break;
+            xc_delay_ms(20);
         }
+        if (waited >= 100) XC_LOGW("still associated after 2s — the move may not take");
+        else               XC_LOGI("let go of the access point in %dms", waited * 20);
     }
     if (lr) xc_set_lr(true);
     esp_err_t e = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-    if (e != ESP_OK) ESP_LOGW(TAG, "set_channel(%u): %s", channel,
+    if (e != ESP_OK) XC_LOGW("set_channel(%u): %s", channel,
                               esp_err_to_name(e));
-    ESP_LOGW(TAG, "moved to channel %u%s — deaf to the commons until we return",
-             channel, lr ? " on the long-range PHY" : "");
+    /* Read it back rather than trust the call. The driver quietly restoring the
+     * access point's channel is the exact failure this path exists to avoid,
+     * and it does not announce itself. */
+    uint8_t actual = 0;
+    wifi_second_chan_t back = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&actual, &back);
+    if (actual != channel)
+        XC_LOGW("asked for channel %u but the radio says %u", channel, actual);
+    xc_hold_the_radio_awake(channel);
+    XC_LOGW("moved to channel %u (radio says %u)%s — deaf to the commons until "
+            "we return", channel, actual, lr ? " on the long-range PHY" : "");
 }
 
 static void xc_come_home(void)
@@ -143,8 +263,11 @@ static void xc_come_home(void)
     } else if (s_home_channel) {
         esp_wifi_set_channel(s_home_channel, WIFI_SECOND_CHAN_NONE);
     }
-    ESP_LOGW(TAG, "back on the calling channel");
+    xc_hold_the_radio_awake(0);   /* 0: follow the station again */
+    XC_LOGW("back on the calling channel");
 }
+
+#endif /* XPRSCHAN_HOST_TEST */
 
 /* ── Composing ──────────────────────────────────────────────────────────── */
 
@@ -157,20 +280,54 @@ static bool xc_air_signed(char *wire, int len)
 
 /* ── Going home, one place ──────────────────────────────────────────────── */
 
-static void xc_finish(const char *why, bool worked)
+static void xc_finish(const char *why __attribute__((unused)), bool worked)
 {
     if (s_state == XC_WORKING) xc_come_home();
-    ESP_LOGI(TAG, "exchange with %s ended: %s", s_peer[0] ? s_peer : "nobody",
+    XC_LOGI("exchange with %s ended: %s", s_peer[0] ? s_peer : "nobody",
              why);
+    /* What the attempt cost, whichever side we were. The invitation count is
+     * the honest measure of how hard the commons was to reach — an exchange
+     * that took six tries and one that took one both end with the same line
+     * otherwise. */
+    if (s_inviter) {
+        XC_LOGI("  invitation aired %u time(s)", (unsigned)s_invite_tries);
+    } else if (s_accept_aired || s_accept_lost) {
+        XC_LOGI("  acceptance aired %u time(s), %u refused by the bearer",
+                 (unsigned)s_accept_aired, (unsigned)s_accept_lost);
+    }
+    if (s_ops.trace) s_ops.trace(false);
     char peer[10];
     snprintf(peer, sizeof peer, "%s", s_peer);
     s_state = XC_IDLE;
     s_peer[0] = 0;
     s_invite_id[0] = 0;
     s_accept_len = 0;
+    s_accept_r[0] = 0;
+    s_accept_aired = 0;
+    s_accept_lost = 0;
+    s_invite_len = 0;
+    s_invite_tries = 0;
     s_proved = false;
+    s_moved = false;
     s_lr = false;
     if (s_ops.on_home) s_ops.on_home(peer, worked);
+}
+
+/* One airing of the acceptance, counted either way.
+ *
+ * The bearer's answer was thrown away everywhere this used to be written, so a
+ * refused send — a full driver queue is the ordinary cause — was indistinguish-
+ * able from a send that went out and was not heard. Those need opposite fixes. */
+static void xc_air_accept(const char *when __attribute__((unused)))
+{
+    if (s_accept_len <= 0 || !s_ops.air) return;
+    if (s_ops.air(s_accept_wire, s_accept_len)) {
+        s_accept_aired++;
+    } else {
+        s_accept_lost++;
+        XC_LOGW("the bearer refused the acceptance (%s) — %u refused now",
+                 when, (unsigned)s_accept_lost);
+    }
 }
 
 void xprschan_abort(const char *why) { if (s_state != XC_IDLE) xc_finish(why, false); }
@@ -184,6 +341,21 @@ void xprschan_abort(const char *why) { if (s_state != XC_IDLE) xc_finish(why, fa
  * queue — so nothing was emptying that queue during the exact window the far
  * side's step-4 proof arrives in. The decision is made where the packet is
  * heard; the blocking is done on the ticking task. */
+static uint32_t s_arrived_ms;     /* invitee: when we reached the channel */
+
+/* How long to wait before saying it again.
+ *
+ * The two stations do not arrive together — the inviter has an access point to
+ * let go of first — so the seconds right after arriving are the ones where a
+ * repeat is most likely to be the first thing the other end hears, and the
+ * ones where a second of silence is most expensive. Quick at first, then the
+ * ordinary cadence for the rest of the stay. */
+static uint32_t xc_announce_gap(uint32_t now)
+{
+    return ((uint32_t)(now - s_arrived_ms) < XC_ARRIVAL_HURRY_MS)
+               ? XC_ANNOUNCE_FAST_MS : XC_ANNOUNCE_EVERY_MS;
+}
+
 static bool    s_want_move;
 static uint32_t s_announce_ms;    /* invitee: when step 4 last went out */
 static uint8_t s_move_channel;
@@ -202,7 +374,7 @@ bool xprschan_invite(const char *peer, uint8_t channel, uint32_t seconds,
     if (s_state != XC_IDLE || s_want_invite || !peer || !peer[0] || !channel)
         return false;
     if (s_ops.may_move && !s_ops.may_move()) {
-        ESP_LOGW(TAG, "not inviting: this station does not leave the commons");
+        XC_LOGW("not inviting: this station does not leave the commons");
         return false;
     }
     snprintf(s_want_peer, sizeof s_want_peer, "%s", peer);
@@ -244,19 +416,44 @@ static bool xc_do_invite(const char *peer, uint8_t channel, uint32_t seconds,
      * has not heard it yet. */
     if (s_ops.announce_identity) {
         s_ops.announce_identity();
-        vTaskDelay(pdMS_TO_TICKS(150));
+        xc_delay_ms(150);
     }
 
     char wire[XPRS_MAX_WIRE + 1];
     int n = snprintf(wire, sizeof wire,
                      "t:channel f:%s d:%s link:espnow ch:%u%s q:ack %s",
                      s_call, peer, channel, until, ts);
-    if (n <= 0 || n > XPRS_MAX_WIRE) return false;
+    if (n <= 0 || n > XPRS_MAX_WIRE) {
+        XC_LOGW("the invitation does not fit in a packet (%d bytes)", n);
+        return false;
+    }
     if (s_ops.sign) n = s_ops.sign(wire, n, (int)sizeof wire);
 
     /* The identifier of what we actually aired is what an answer must name. */
-    if (!xprs_id_of(wire, n, s_invite_id)) return false;
-    if (!s_ops.air(wire, n)) return false;
+    if (!xprs_id_of(wire, n, s_invite_id)) {
+        XC_LOGW("cannot derive an identifier for the invitation");
+        return false;
+    }
+
+    /* From here until the exchange ends, every packet the bearer hears is
+     * logged. This is the window where a missing answer has to be told apart
+     * from an answer that arrived and was refused, and no counter can do it. */
+    if (s_ops.trace) s_ops.trace(true);
+
+    /* Let the identity clear the radio before the invitation follows it. The
+     * two used to go out 150 ms apart and the answer landed on top of the
+     * second one; a station cannot hear while it talks. */
+    if (s_ops.settle) s_ops.settle(300);
+
+    if (!s_ops.air(wire, n)) {
+        XC_LOGW("the bearer refused the invitation (%d bytes)", n);
+        if (s_ops.trace) s_ops.trace(false);
+        return false;
+    }
+    memcpy(s_invite_wire, wire, (size_t)n);
+    s_invite_len = n;
+    s_invite_tries = 1;
+    s_invite_last_ms = s_ops.now_ms();
 
     snprintf(s_peer, sizeof s_peer, "%s", peer);
     s_channel = channel;
@@ -267,7 +464,8 @@ static bool xc_do_invite(const char *peer, uint8_t channel, uint32_t seconds,
     s_invite_stale_ms = s_ops.now_ms() + XC_INVITE_FRESH_MS;
     s_proof_by_ms = 0;
     s_proved = false;
-    ESP_LOGI(TAG, "invited %s to channel %u%s (%s) — waiting on the commons",
+    s_moved = false;
+    XC_LOGI("invited %s to channel %u%s (%s) — waiting on the commons",
              peer, channel, lr ? " LR" : "", s_invite_id);
     return true;
 }
@@ -287,7 +485,7 @@ static bool xc_on_invite(const xprs_t *p, const char *wire, int len)
      * a station we hold no key for is a stranger asking us to leave the shared
      * channel, and there is nothing to weigh that against. */
     if (!s_ops.verified || !s_ops.verified(p)) {
-        ESP_LOGW(TAG, "ignoring an invitation from %s: not signed by a key we "
+        XC_LOGW("ignoring an invitation from %s: not signed by a key we "
                       "hold", from);
         return true;
     }
@@ -295,6 +493,20 @@ static bool xc_on_invite(const xprs_t *p, const char *wire, int len)
     char reply[XPRS_MAX_WIRE + 1];
     char id[XPRS_ID_LEN];
     xprs_id(p, id);
+
+    /* The same invitation again, from the station we already said yes to.
+     *
+     * The inviter re-airs it when it has heard no answer, so a repeat means our
+     * acceptance did not arrive — the one thing worth doing about it is sending
+     * that acceptance again, verbatim. It must NOT be answered `s:no busy`,
+     * which is what the willing test below would produce now that we are no
+     * longer XC_IDLE: the inviter reads `s:no` as a refusal and ends an exchange
+     * that was only slow. And it must not move us a second time. */
+    if (s_accept_len > 0 && s_accept_r[0] && strcmp(id, s_accept_r) == 0) {
+        XC_LOGI("%s is still asking — saying yes again", from);
+        xc_air_accept("answering a repeated invitation");
+        return true;
+    }
 
     bool ours = xprs_get_str(p, "link", link, sizeof link) &&
                 strcmp(link, "espnow") == 0 &&
@@ -324,7 +536,25 @@ static bool xc_on_invite(const xprs_t *p, const char *wire, int len)
     if (n <= 0) return true;
     if (s_ops.sign) n = s_ops.sign(s_accept_wire, n, (int)sizeof s_accept_wire);
     s_accept_len = n;
-    if (!s_ops.air(s_accept_wire, n)) return true;
+    snprintf(s_accept_r, sizeof s_accept_r, "%s", id);
+    s_accept_aired = 0;
+    s_accept_lost = 0;
+    if (s_ops.trace) s_ops.trace(true);
+    /* Aired here, on whatever task heard the invitation — and NOT settled here,
+     * because that task is the one draining the receive queue and blocking it
+     * loses the packets arriving meanwhile. The airings that wait for the radio
+     * are the ones the tick performs. */
+    xc_air_accept("the commitment");
+    if (s_accept_aired == 0) {
+        /* Nothing was committed, so forget it entirely — leaving the identifier
+         * behind would make the inviter's next attempt look like a repeat of an
+         * acceptance we never sent, and we would answer it while staying home
+         * as the inviter moved. */
+        s_accept_len = 0;
+        s_accept_r[0] = 0;
+        if (s_ops.trace) s_ops.trace(false);
+        return true;
+    }
 
     /* How long we are willing to be away. `until:` may shorten this; nothing
      * can lengthen it past XC_MAX_AWAY_MS. */
@@ -357,7 +587,7 @@ static bool xc_on_invite(const xprs_t *p, const char *wire, int len)
     s_move_channel = s_channel;
     s_move_lr = s_lr;
     s_want_move = true;
-    ESP_LOGI(TAG, "accepted %s: moving to channel %u for %ums", from,
+    XC_LOGI("accepted %s: moving to channel %u for %ums", from,
              s_channel, (unsigned)away);
     return true;
 }
@@ -367,7 +597,7 @@ static bool xc_on_receipt(const xprs_t *p, const char *wire, int len)
 {
     char r[XPRS_ID_LEN], from[10], st[8];
     if (!xprs_get_str(p, "r", r, sizeof r)) {
-        ESP_LOGW(TAG, "a receipt with no r: — nothing to match it to");
+        XC_LOGW("a receipt with no r: — nothing to match it to");
         return false;
     }
     if (!s_invite_id[0]) return false;         /* not ours to answer */
@@ -375,7 +605,7 @@ static bool xc_on_receipt(const xprs_t *p, const char *wire, int len)
         /* Loud, not debug. A mismatch here is the difference between "nobody
          * answered" and "somebody answered and we did not recognise our own
          * invitation", and those need completely different fixes. */
-        ESP_LOGW(TAG, "a receipt names %s, but our invitation was %s", r,
+        XC_LOGW("a receipt names %s, but our invitation was %s", r,
                  s_invite_id);
         return false;
     }
@@ -387,7 +617,7 @@ static bool xc_on_receipt(const xprs_t *p, const char *wire, int len)
      * particular, and acting on it is how a station ends up alone on a channel
      * somebody else named. */
     if (!s_ops.verified || !s_ops.verified(p)) {
-        ESP_LOGW(TAG, "ignoring an answer from %s: not signed by a key we hold",
+        XC_LOGW("ignoring an answer from %s: not signed by a key we hold",
                  from);
         return true;
     }
@@ -409,21 +639,22 @@ static bool xc_on_receipt(const xprs_t *p, const char *wire, int len)
         uint32_t t = s_ops.now_ms();
         s_deadline_ms = t + s_away_ms;      /* the clock starts on the decision */
         s_proof_by_ms = t + XC_PROOF_WAIT_MS;
-        ESP_LOGI(TAG, "%s accepted — moved, now waiting for them to prove they "
+        XC_LOGI("%s accepted — moved, now waiting for them to prove they "
                       "are here", from);
         return true;
     }
 
-    if (s_state == XC_WORKING && !s_proved && !strcasecmp(from, s_peer)) {
+    if (s_state == XC_WORKING && !s_proved && s_moved &&
+        !strcasecmp(from, s_peer)) {
         /* Step 4, heard on the working channel: the same signed packet, which
          * only the station that committed could repeat. Now the work may run. */
         (void)wire; (void)len;
         s_proved = true;
-        ESP_LOGI(TAG, "%s is here — the channel is ours", from);
+        XC_LOGI("%s is here — the channel is ours", from);
         if (s_ops.on_working) s_ops.on_working(s_peer, s_channel, s_lr);
         return true;
     }
-    ESP_LOGW(TAG, "an ack from %s arrived in state %d — nothing to do with it",
+    XC_LOGW("an ack from %s arrived in state %d — nothing to do with it",
              from, (int)s_state);
     return false;
 }
@@ -447,7 +678,7 @@ void xprschan_tick(void)
         s_want_invite = false;
         if (!xc_do_invite(s_want_peer, s_want_channel, s_want_seconds,
                           s_want_lr)) {
-            ESP_LOGW(TAG, "could not air the invitation to %s", s_want_peer);
+            XC_LOGW("could not air the invitation to %s", s_want_peer);
         }
     }
     /* The blocking half of a move, on the task that can afford to block. */
@@ -469,17 +700,31 @@ void xprschan_tick(void)
          * acceptance to the new channel where nobody was listening yet. */
         if (!s_inviter && s_accept_len > 0) {
             for (int i = 0; i < 2; i++) {
-                vTaskDelay(pdMS_TO_TICKS(120));
-                s_ops.air(s_accept_wire, s_accept_len);
+                /* Spread, not burst. Three airings inside a third of a second
+                 * are three attempts at THE SAME MOMENT, and the moment is the
+                 * problem: the answer is due while the inviter is still busy
+                 * with the two frames it just sent. Roughly half a second
+                 * apart, varied by the tick's own phase so two stations doing
+                 * this at once do not stay in step, samples genuinely different
+                 * conditions. The inviter waits XC_PROOF_WAIT_MS for the proof,
+                 * so arriving later costs nothing. */
+                uint32_t gap = 350u + (s_ops.now_ms() % 300u);
+                xc_delay_ms(gap);
+                xc_air_accept("before the move");
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(120));
+        /* And do not retune until the radio is actually finished. This was a
+         * 120 ms guess, and when it was wrong the acceptance travelled to the
+         * new channel where nobody was listening yet. */
+        if (s_ops.settle) s_ops.settle(500);
+        else xc_delay_ms(120);
         xc_go(s_move_channel, s_move_lr);
+        s_moved = true;
         if (!s_inviter) {
             /* Step 4: the same packet again, here. The first airing committed;
              * this one locates. Repeated below until the exchange ends. */
-            s_ops.air(s_accept_wire, s_accept_len);
-            s_announce_ms = s_ops.now_ms();
+            xc_air_accept("step 4, on the working channel");
+            s_announce_ms = s_arrived_ms = s_ops.now_ms();
             s_proved = true;
             if (s_ops.on_working) s_ops.on_working(s_peer, s_channel, s_lr);
         }
@@ -491,7 +736,27 @@ void xprschan_tick(void)
     if (s_state == XC_INVITED) {
         /* Nobody answered on the commons. Nothing moved, so nothing to undo —
          * §23.7 step 2: silence ends the matter with everyone still here. */
-        if ((int32_t)(now - s_invite_stale_ms) > 0) xc_finish("no answer", false);
+        if ((int32_t)(now - s_invite_stale_ms) > 0) {
+            xc_finish("no answer", false);
+            return;
+        }
+        /* Ask again, with the same bytes.
+         *
+         * "Nobody answered" and "the one packet that carried the question was
+         * not heard" are the same silence from here, and on this bearer they
+         * were mostly the second. The identifier does not change, so an answer
+         * to any of these airings still names an invitation we recognise, and
+         * the invitee re-airs the acceptance it already sent rather than
+         * treating a repeat as a fresh invitation it is too busy for. */
+        if (s_invite_len > 0 &&
+            (int32_t)(now - (s_invite_last_ms + XC_INVITE_RETRY_MS)) > 0) {
+            s_invite_last_ms = now;
+            s_invite_tries++;
+            if (!s_ops.air(s_invite_wire, s_invite_len)) {
+                XC_LOGW("the bearer refused invitation attempt %u",
+                         (unsigned)s_invite_tries);
+            }
+        }
         return;
     }
 
@@ -508,9 +773,9 @@ void xprschan_tick(void)
      *
      * The same signed bytes every time, so it stays the proof it was. */
     if (!s_inviter && s_proved && s_accept_len > 0 &&
-        (int32_t)(now - (s_announce_ms + XC_ANNOUNCE_EVERY_MS)) > 0) {
+        (int32_t)(now - (s_announce_ms + xc_announce_gap(now))) > 0) {
         s_announce_ms = now;
-        s_ops.air(s_accept_wire, s_accept_len);
+        xc_air_accept("step 4, repeated");
     }
 
     /* Step 6: alone on the working channel. No error packet — the party that

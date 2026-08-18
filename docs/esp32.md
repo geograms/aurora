@@ -259,6 +259,48 @@ look like memory:
 | HTTP accepts TCP and never answers | the handler's 2–3 KB response `malloc` fails |
 | `APRS-IS iGate init failed: ESP_FAIL` at boot | nothing left to start it with |
 | a reboot every ~14 s | a task stack overflowed |
+| `esp_now_send` returns `ESP_ERR_ESPNOW_NO_MEM` for every packet | the driver cannot get a send buffer |
+| `BLE_INIT: Malloc failed` + `ext_adv_set_data rc=519` | the same, on the other radio |
+| the station beacons never, answers nothing, and otherwise looks fine | a task never started — see below |
+
+**Create the big task stacks first.** `relay_task` asks for 8 KB in one piece.
+It used to be created from `on_sync()`, which runs after WiFi, NimBLE, the SD
+card, the HTTP server and the Reticulum hub have each taken their share: 15,308
+bytes free but the largest block only **7,680**, so `xTaskCreatePinnedToCore`
+returned `pdFAIL` and the station ran on with no beacons, no service
+announcements, no `cmd:history` replay and no §23.7 clock, while every other
+task carried on and the heartbeat looked healthy. One `ESP_LOGE` at boot was the
+entire evidence, and it scrolled past.
+
+It is now claimed at the top of `app_main()`, where the heap is untouched
+(172 KB in one block), and blocks on a flag until `on_sync()` releases it. The
+heartbeat prints `relay=<loops>` so a task that stops is visible without
+reading a boot log. **Check the return of every `xTaskCreate`, and prefer
+claiming a large stack early over hoping it fits later.**
+
+Measured heap by boot stage on the T-Dongle-S3 (`heap_mark()` in `main.c`), which
+is how the above was found and the first thing to re-run when it recurs:
+
+| after | free | largest block |
+|---|---|---|
+| boot | 234,244 | 172,032 |
+| `model_init` (NVS + LCD) | 205,096 | 139,264 |
+| `nimble_port_init` | 158,136 | 94,208 |
+| `igate_start` (WiFi STA + lwip) | 90,952 | 31,744 |
+| `sdcard_init` | 59,224 | 31,744 |
+| the three XPRS bearers | 48,648 | 31,744 |
+| `api_start` (httpd) | 39,792 | 31,744 |
+| `rns_tcp_start` | 27,128 | 18,432 |
+
+WiFi (62 KB), NimBLE (47 KB) and the SD card (32 KB) are the three that matter;
+everything else is noise beside them. Steady state after association is around
+13 KB, so **there is no room for a new 8 KB anything** — take it at boot or
+reclaim first (`sdkconfig` buffer counts) and measure again.
+
+A queue is heap too. `XPRSNOW_RX_QUEUE` was widened from 4 to 16 to stop
+drops — 264 bytes an entry, so four kilobytes out of the eight the board had —
+and ESP-NOW then refused every transmission for want of a buffer while the drop
+counter it was widened to protect sat at zero throughout.
 
 BLE is the reason there is nothing left. Measured on the T-Dongle:
 

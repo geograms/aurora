@@ -67,10 +67,16 @@ extern "C" {
  * socket timeout, a SHA-256 per packet, signature checks, and SD writes behind
  * a lock the index writer holds across two fsyncs — a stall of several hundred
  * milliseconds is ordinary, and everything arriving during one was lost while
- * nothing on the dongle printed the counter. Sixteen frames is about four
- * kilobytes and covers a stall an order of magnitude longer.
+ * nothing on the dongle printed the counter.
+ *
+ * Sixteen was too many, and expensively so. This queue is heap, 264 bytes an
+ * entry, on a board that finishes booting with about eight kilobytes free — so
+ * the four kilobytes spent here came out of the allocation esp_now_send() needs,
+ * and the bearer answered ESP_ERR_ESPNOW_NO_MEM to every transmission while the
+ * drop counter it was widened to protect sat at zero throughout. Eight is twice
+ * the original and costs half as much.
  */
-#define XPRSNOW_RX_QUEUE   16
+#define XPRSNOW_RX_QUEUE   8
 
 /**
  * @brief One packet heard on ESP-NOW.
@@ -108,6 +114,31 @@ void xprsnow_set_beacon(xprsnow_beacon_cb_t cb, uint32_t interval_sec,
 /** Air one packet of OUR OWN, now, with no `via:` — it has taken no hops. */
 bool xprsnow_send(const char *wire, int len);
 
+/**
+ * @brief Wait until every frame handed to the driver has actually left.
+ *
+ * `esp_now_send` is asynchronous: it returns once the frame is queued, not once
+ * the radio has finished with it. Everything that needed to know "has it gone
+ * yet" used to guess with a 120 ms delay, which is either too long or — the
+ * expensive case — too short, and the §23.7 move retuned the radio out from
+ * under an acceptance that had not been transmitted.
+ *
+ * The send callback makes it a fact instead. Returns false on timeout, which
+ * means the driver is genuinely stuck rather than merely slow.
+ */
+bool xprsnow_settle(uint32_t timeout_ms);
+
+/**
+ * @brief Log every frame this bearer drains, with RSSI and the first bytes.
+ *
+ * For the windows where the question is "did the radio hear it at all" and no
+ * counter can answer, because the packet may be lost before anything counts it:
+ * the callback's cheap byte test, a full queue, a parse that fails. On for the
+ * duration of a rendezvous, off the rest of the time — this is a per-packet log
+ * line and it is not free.
+ */
+void xprsnow_set_trace(bool on);
+
 /** Offer a packet heard on another bearer for re-airing here (§13.2.1). */
 void xprsnow_offer(const char *wire, int len);
 
@@ -120,6 +151,13 @@ uint8_t xprsnow_channel(void);
 /** @param dropped frames the receive callback had nowhere to put. */
 void xprsnow_stats(uint32_t *rx, uint32_t *tx, uint32_t *cancelled,
                    uint32_t *dropped);
+
+/**
+ * @param issued frames handed to the driver
+ * @param done   frames the driver reported finished with, either way
+ * @param failed of those, the ones it could not transmit
+ */
+void xprsnow_tx_stats(uint32_t *issued, uint32_t *done, uint32_t *failed);
 
 #ifdef __cplusplus
 }

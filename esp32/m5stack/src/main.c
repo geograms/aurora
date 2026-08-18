@@ -226,6 +226,8 @@ static const xc_ops_t k_chan_ops = {
     .hold_reconnect = NULL,      /* handled in the event handler above */
     .announce_identity = air_identity,
     .may_move = may_move,
+    .settle = xprsnow_settle,
+    .trace = xprsnow_set_trace,
     .on_working = on_working,
     .on_home = on_home,
 };
@@ -260,13 +262,20 @@ static void status_task(void *arg)
         if (n % 30) continue;                     /* the rest every 15 s */
 
         uint32_t rx = 0, tx = 0, cancelled = 0, dropped = 0;
+        uint32_t issued = 0, done = 0, failed = 0;
         xprsnow_stats(&rx, &tx, &cancelled, &dropped);
+        /* `tx` counts what this station decided to say; `done`/`fail` count what
+         * the radio actually did with it. They were the same number until the
+         * send callback existed, and the difference is where a rendezvous that
+         * "sent" its acceptance and was not heard shows up. */
+        xprsnow_tx_stats(&issued, &done, &failed);
         ESP_LOGW(TAG, "alive %us heap=%u call=%s ch=%u espnow rx=%u tx=%u "
-                      "cancel=%u drop=%u peers=%d heard=%u",
+                      "cancel=%u drop=%u sent=%u/%u fail=%u peers=%d heard=%u",
                  (unsigned)(esp_timer_get_time() / 1000000ULL),
                  (unsigned)esp_get_free_heap_size(), s_call,
                  xprsnow_channel(), (unsigned)rx, (unsigned)tx,
                  (unsigned)cancelled, (unsigned)dropped,
+                 (unsigned)done, (unsigned)issued, (unsigned)failed,
                  xprsnow_peer_count(600), (unsigned)s_heard_count);
     }
 }

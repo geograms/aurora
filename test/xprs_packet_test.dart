@@ -8,6 +8,12 @@
 // that it agrees with the specification, and with a second implementation
 // written in another language. That is the only kind of agreement that matters
 // for a wire format.
+//
+// The AUTHORITATIVE corpus lives in the spec's own repository
+// (github.com/xprs-dev/spec, xprs_corpus.json); this file is the consumed
+// copy. On a machine that has the spec repo checked out beside this one, the
+// drift test below fails if the two ever differ — CI, which clones only this
+// repo, skips it.
 
 import 'dart:convert';
 import 'dart:io';
@@ -28,6 +34,18 @@ void main() {
 
     test('the corpus is actually there', () {
       expect(corpus.length, greaterThan(150));
+    });
+
+    test('the consumed copy matches the authoritative one, when present', () {
+      final official = File('../../xprs/spec/xprs_corpus.json');
+      if (!official.existsSync()) {
+        markTestSkipped('spec repo not checked out beside this one');
+        return;
+      }
+      expect(File('test/xprs_corpus.json').readAsStringSync(),
+          official.readAsStringSync(),
+          reason: 'test/xprs_corpus.json has drifted from the spec repo — '
+              'update both together');
     });
 
     test('every packet in the document parses', () {

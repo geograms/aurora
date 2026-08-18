@@ -16,8 +16,8 @@ XPRS is APRS carried forward: not an alternative for unlicensed bands, but
 the whole design rebuilt with what three decades of running the original
 taught. APRS proved that a small text packet, heard by everyone and repeated
 by volunteers, is enough to build a live map of who is where, doing what,
-needing what. XPRS keeps that idea whole and rebuilds everything around it
-that the decades showed to be a limit rather than a choice:
+needing what. XPRS keeps that idea whole and rebuilds the parts that
+three decades of use showed to be limits:
 
 - **Identity was asserted, never proven.** Any station could transmit any
   callsign. XPRS signs packets with a key the station holds, so authorship is
@@ -48,7 +48,7 @@ WiFi and on the internet, with identity derived from a keypair generated on
 the device; licensed operators keep their callsigns and their bands, and the
 two meet under APRS rules where they meet (sections 9.4 and 33).
 
-And the format itself is the lesson APRS taught most expensively. APRS
+The format itself follows the most expensive lesson APRS taught. APRS
 accumulated its encodings one field at a time: four incompatible position
 formats, weather as fixed-width digits inside a position report, telemetry
 whose units arrive in separate messages, and a mixture of feet, knots, miles
@@ -79,8 +79,8 @@ The table is descriptive, not a licence scheme: a phone in a pocket is a
 station, a relay when it repeats, a carrier when it holds, a gateway the
 moment it has both a radio and the internet. What a station DOES for others
 it advertises with `serve:` (section 24), and what it is obliged to do is
-nothing (section 31.3) -- every role here is volunteered, bounded by its
-operator's budgets, and honest about both.
+nothing (section 31.3) -- every role here is volunteered and bounded by its
+operator's budgets.
 
 ---
 
@@ -925,7 +925,7 @@ differs is whether naming it means anything:
 | `reaction`, `receipt`, `request`, `challenge`, `response`, `identity`, `mailbox`, `command`, `result`, `moderate`, `report`, `ping`, `pong` | no | no |
 
 A weather observation, a warning, a blog post, an offer and a channel
-announcement can all be replied to and reacted to. That is the point of deriving
+announcement can all be replied to and reacted to. That is what deriving
 an identifier for every packet rather than only for those carrying a message.
 
 **A call for help takes replies and never reactions.** Answering an `sos` is
@@ -1814,7 +1814,7 @@ whoever is deciding whether to route through it or nominate it a mailbox.
 t:observation f:X3RLY7 link:ble peers:4 mail:3 uptime:26h lifetime:38day
 ```
 
-72 bytes. `uptime` resets to zero at every restart, which is the point: a
+72 bytes. `uptime` resets to zero at every restart, on purpose: a
 station that reboots hourly cannot claim otherwise for long. `lifetime` is
 **accumulated service time** -- the sum of every period the station has been
 running since it first kept records -- so it survives restarts and needs no
@@ -2612,9 +2612,9 @@ home the same way the message came.
 | `sign` | a person acknowledged it | **required** |
 
 **An `s:sign` receipt without a valid `sig:` is not a signed receipt.** A receiver
-discards it rather than showing it as one, because the whole point of the state
-is the signature, and a state that can be claimed without proof is worth less
-than no state at all.
+discards it rather than showing it as one: the state exists because of the
+signature, and a state that can be claimed without proof is worth less than
+no state at all.
 
 A signed receipt can be replayed by anyone who heard it, and that is harmless: it
 names one message and says one thing, so a second copy asserts exactly what the
@@ -2971,7 +2971,7 @@ must not act on it.**
 This is the one packet in the format where forgery pays directly. Anyone who can
 publish `t:mailbox f:X1QZ3N hold:<attacker>` collects that station's incoming
 mail from every polite sender, and the sender believes it delivered. Signing is
-the default everywhere (section 9.1) and here it is the whole point: an unsigned
+the default everywhere (section 9.1) and here it is the reason the rule exists: an unsigned
 mailbox declaration is a request to misroute somebody's mail, and it should be
 ignored rather than displayed.
 
@@ -3016,7 +3016,7 @@ t:mailbox f:X1BOA3 ts:2026-08-20_09:00:00 r:46b4ba remove:mailbox sig:<60 charac
 
 130 bytes. `r:46b4ba` is the identifier of the marina declaration and
 `remove:mailbox` says what is being withdrawn. The other two are untouched, which
-is the point of cancelling one rather than replacing all of them.
+is why a cancellation names one instead of replacing all of them.
 
 A cancellation must be signed like the declaration it cancels. An unsigned one is
 a request to stop delivering somebody's mail, which is an attack rather than an
@@ -4051,8 +4051,8 @@ tuned to. Implementations follow this sequence and expect it of each other:
    ON the working channel: the same signed packet, the same identifier, and
    hearing it there is the proof it cannot fake from anywhere else -- the
    party is tuned, present, and ready. The station with the bulk to transmit
-   sends nothing until it hears this. Same packet twice is deliberate: the
-   first airing commits, the second locates, and no new word was needed.
+   sends nothing until it hears this. The same packet serves twice: the
+   first airing commits, the second locates.
 5. **Work, then give the channel back.** The exchange runs (section 25.2.2's
    middle block); when it ends -- or `until:` passes, whichever is first --
    everyone returns to the calling channel. A transfer the working channel
@@ -4254,7 +4254,7 @@ t:result f:X3RLY7 d:X1QZ3N ts:2026-08-08_14:29:12 r:747ae8 code:200 sig:<60 char
 
 132 bytes each: accepted at 14:26:40, done at 14:29:12. `code:202` says the
 command arrived and is being worked on; `code:200` says it finished. A sender
-that hears nothing knows the command did not arrive, which is the whole point of
+that hears nothing knows the command did not arrive, which is what makes
 answering before the work is done.
 
 **Any number of results may name one command**, and a late one needs no new
@@ -4467,7 +4467,7 @@ said without moving a byte.
 
 The same two XPRS packets bracket the transfer whatever the bearer -- a
 Reticulum resource, a LAN fetch, a swarm -- with only the middle block
-changing, which is the point of keeping it out of this document. When the
+changing, which is why it stays out of this document. When the
 lane is not obvious from where the pair already is, one of them proposes it
 with a working-channel invitation (section 23.7) and the other agrees or
 declines before a byte moves.
@@ -5068,7 +5068,7 @@ Every station counts the votes it has actually heard, and no two stations on a
 radio network have heard the same set. A poll that closed an hour ago is still
 gaining votes on the far side of a relay that has just come back up.
 
-That is not a defect to be engineered away; it is what counting on a lossy
+There is no engineering that away; it is what counting on a lossy
 broadcast medium means. What follows from it:
 
 - **Show the count as what it is** -- votes heard, not votes cast. A client that
@@ -5289,7 +5289,7 @@ anything at all. A hosting station and the software it runs decide what to keep,
 for how long, and for whom -- and change that decision whenever storage,
 battery, bandwidth or interest changes.
 
-That is not an omission. The stations on this network are a dongle with a
+The omission is deliberate. The stations on this network are a dongle with a
 microSD card, a phone that is someone's only computer, and a home server with a
 spare terabyte. Any number this document picked would be an overstatement for
 the first and an insult to the third, and it would be wrong again the day
@@ -6229,7 +6229,7 @@ for the network to work.
 is put in a pocket, the screen goes off and the radio with it. If delivery
 depended on that phone still being reachable when the recipient next wakes up,
 most messages between people who are not simultaneously awake would never
-arrive. That is the whole reason store-and-forward exists (section 13.3), and an
+arrive. Store-and-forward exists for exactly this (section 13.3), and an
 indexer is the best carrier on the network for it: always on, addressable, and
 chosen deliberately.
 
@@ -6268,7 +6268,7 @@ who it hears, and a sender found the gateway. This section is the return leg
 -- how mail deposited at an indexer reaches a station that has never touched
 the internet and never will.
 
-The tension is real and must be stated before it is resolved. Section 36.7
+Section 36.7
 says mail is never offered to a third party, and a gateway asking for
 somebody else's mail IS a third party. Section 13.12 solves it only for
 stations that declared a mailbox -- and a solar tracker on a ridge has had no
@@ -6305,16 +6305,14 @@ the same path:
 The receipt is signed by the recipient, so the indexer verifies it and
 releases its held copy (section 36.7), the gateway archives its own, and the
 sender -- three networks away -- knows the tracker on the ridge has the
-message. Nothing in the chain trusted the gateway with anything but
-ciphertext and effort. This is APRS's iGate rebuilt with the trust turned
-the right way around: the iGate proved useful by what it heard and carried,
-never by what it could read.
+message. The gateway was trusted with nothing but ciphertext and effort:
+an iGate useful for what it hears and carries, with no need to read what
+it moves.
 
 ### 36.9 Indexers among themselves
 
-**An indexer never accepts content from another indexer.** This is the rule
-that keeps a federation of archives from becoming one pool of spam, and it is
-stated as a danger before it is stated as a design. A peer's archive is that
+**An indexer never accepts content from another indexer.** This rule keeps
+a federation of archives from becoming one pool of spam. A peer's archive is that
 peer's admission decisions -- which callsigns its operator chose to keep, under
 which quotas -- and bulk-importing it imports every decision the other
 operator got wrong, at zero cost to whoever got them made. Content enters an
@@ -6371,10 +6369,9 @@ section 25.2.1 defined for `429`, extended to the miss. The reader asks the
 named peer directly; the first indexer never proxies, because proxying is
 how content crosses the line this section drew.
 
-The shape that falls out is the point: the network's memory is a federation
-of small archives, each vouching only for what its operator chose to keep,
-joined by directories that say who keeps what. No indexer holds the network;
-every indexer can point across it.
+The result is a federation of small archives, each vouching only for what
+its operator chose to keep, joined by directories that say who keeps what.
+No indexer holds the whole network, and any indexer can point across it.
 
 ---
 

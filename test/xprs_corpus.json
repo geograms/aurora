@@ -1228,5 +1228,10 @@
 "wire": "t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:V<-(s&U-xL(hjs8hbML0<8nw[A)a<YeW+5_1BYlWzX.)fQYP&LeI[ZC<n4Yl m:net starts in ten minutes",
 "bytes": 143,
 "id": "399227"
+},
+{
+"wire": "t:message f:X1QZ3N d:X1RD89 pos:38.7,-9.1 ts:2026-08-18_17:00:00 xr:AAECAwQFBgcICQoL5trPILdiT2M3VS-WaNXxfc-ho_rPVqMZHfa4NXFjFA m:meet ███ at █████",
+"bytes": 162,
+"id": "e7f5d0"
 }
 ]

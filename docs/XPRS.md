@@ -425,6 +425,7 @@ a message may contain spaces, colons, URLs and any punctuation.
 | `have` | `label` | what a station holds of a file: `full`, a bitfield, or a fraction (section 7.1) |
 | `off` | `qty` | byte offset a `cmd:file` transfer resumes from (section 25.2) |
 | `x` | `b64` | sealed body |
+| `xr` | `b64` | hidden parts of a redacted packet (section 9.2.1) |
 | `sig` | `base85` | signature |
 | `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
 
@@ -1662,6 +1663,93 @@ station can route the packet, identify the recipient and release a carried copy
 on the matching receipt, without reading the content.
 
 A later cipher suite takes a new key rather than changing this one.
+
+### 9.2.1 Hiding parts of a message
+
+`x:` seals a whole body. This section hides PARTS of one, the way a released
+government document does: the reader sees bars where the secrets sit, how
+long they are and where, and everything around them stays readable. Those
+with the passphrase recover the hidden parts; everyone else still gets a
+useful message.
+
+The author marks each secret in double parentheses -- in the text or inside
+any field's value:
+
+```
+m:meet ((Max)) at ((pier2))
+pos:38.7((223)),-9.1((393))
+```
+
+What goes on the wire differs by where the secret sits, and the difference
+is forced by the grammar:
+
+- **In `m:`**, each marked span becomes a run of the block character
+  `█` (U+2588), one per hidden character: `m:meet ███ at █████`. Length and
+  position stay visible. A bar costs 3 bytes in UTF-8, which the author is
+  paying for the look.
+- **In any other field**, there are no bars, because a bar inside a value
+  would fail its type (section 4.3) and a keyless receiver would skip the
+  field entirely -- losing even the coarse reading. The marked content is
+  instead DELETED from the wire value, which must remain valid for its
+  type. That is the accuracy dial: the wire carries `pos:38.7,-9.1`, good
+  to about ten kilometres and readable by everyone; the passphrase recovers
+  `pos:38.7223,-9.1393`, good to about ten metres.
+
+The hidden parts travel in `xr:`, built like this:
+
+1. The plaintext is `->` followed by the hidden pieces, one per line. When
+   `m:` shows N bar runs, the FIRST N lines fill those runs in reading
+   order; every line after them has the form `key=value` and replaces that
+   field's wire value whole. The order rule keeps the framing unambiguous:
+   a hidden text containing `=` cannot be mistaken for a field line,
+   because the run count is already known from `m:`.
+2. The key is derived slowly and salted:
+   `key = first 16 bytes of PBKDF2-HMAC-SHA256(passphrase, "xprs-xr" || nonce, 100000 iterations)`.
+   The nonce is fresh per packet, so a fresh derivation is paid per message
+   even by someone who knows the passphrase -- a fraction of a second for
+   the reader, ruin at scale for a harvester or a brute-forcer. This is why
+   there is one profile and no strength levels: the derivation is the
+   strength, and it costs everyone the same per message.
+3. The cipher is AES-128-CTR: 12-byte random nonce, 32-bit big-endian block
+   counter starting at zero.
+4. `xr:` = base64url, no padding, of nonce || ciphertext. Fourteen bytes of
+   fixed overhead plus the secrets.
+
+Decryption succeeds when the plaintext starts with `->`. That sentinel
+detects the RIGHT KEY and nothing else; tampering is the signature's job,
+because `sig:` covers `m:` with its bars and `xr:` like every other field.
+A packet whose signature verifies but whose decryption yields garbage was
+not forged -- the passphrase was wrong.
+
+**The default passphrase is `################`** (sixteen number signs),
+and the spec is plain about what it buys: obfuscation, not secrecy. Anyone
+can decrypt it -- but each message still costs the full derivation, which
+is what keeps a bot from harvesting a thousand redacted email addresses
+for free. A secret that matters takes a real passphrase, and releasing a
+passphrase later is an ordinary message or file, needing nothing new.
+
+A worked packet, with the nonce fixed to `000102030405060708090a0b` so
+every value reproduces (a real sender draws it randomly). Author input as
+above; hidden pieces `Max`, `pier2`, and the full position; plaintext
+`->Max`, `pier2`, `pos=38.7223,-9.1393` on three lines; derived key
+`e7d6ef612e71fb09fd65dc71efd832c7`:
+
+```
+162  t:message f:X1QZ3N d:X1RD89 pos:38.7,-9.1 ts:2026-08-18_17:00:00 xr:AAECAwQFBgcICQoL5trPILdiT2M3VS-WaNXxfc-ho_rPVqMZHfa4NXFjFA m:meet ███ at █████
+```
+
+Everyone in range reads a meeting near 38.7,-9.1 between two stations.
+Holders of the passphrase read who, which pier, and where to ten metres.
+
+Two properties are deliberate and worth stating. The bars leak the LENGTH
+of a secret -- that is the FOIA look doing its job -- and an author who
+must hide length pads inside the parentheses before marking. And a
+redacted packet degrades honestly: a receiver that has never heard of
+`xr:` skips it (section 4) and still shows the bars and the coarse fields,
+which is the whole point of hiding parts instead of the whole.
+
+Text larger than a packet is a file (section 6.7) and redacts the same
+way; nothing new travels.
 
 ### 9.3 Identity
 
@@ -5743,6 +5831,7 @@ packet **250 bytes**, on every transport.
 | `have` | `label` | what a station holds of a file: `full`, a bitfield, or a fraction (section 7.1) |
 | `off` | `qty` | byte offset a `cmd:file` transfer resumes from (section 25.2) |
 | `x` | `b64` | sealed body |
+| `xr` | `b64` | hidden parts of a redacted packet (section 9.2.1) |
 | `sig` | `base85` | signature |
 | `k` | `bech32` | public key, in `t:identity` and `t:challenge` |
 
@@ -6620,6 +6709,7 @@ No indexer holds the whole network, and any indexer can point across it.
 | Section 36.6, `only:` matching inside list fields | **partly implemented**: the shipped history responder matches `only:` against author and addressee (`xprs_archive.dart` query); `hears:`/`hold:`/`via:`/`grant:` containment is not searched yet |
 | Section 36.8, sealed-mail release to a hearing gateway | **specified, not implemented**; the nearest live relatives are the chat iGate mailbox (mail pulled from APRS-IS by an in-range station) and MeshStore custody, neither of which is driven by a published `hears:` claim |
 | Section 36.9, `serve:index` and the XDIR1 directory exchange | **specified, not implemented**; the philosophy already ships for files -- `pointer_sync.dart` gossips signed ADDRESSES between file-indexers and re-verifies on merge, never copying content -- but no station publishes a callsign directory or answers a miss with `m:try` |
+| Section 9.2.1, redacted packets (`xr:`) | **specified, not implemented**; the sealed-body `x:` machinery is live, the partial-redaction profile is not -- no composer parses `((...))` and nothing derives the slow key yet |
 | Section 23.7, working-channel invitations | **specified, not implemented** as packets; the dance itself ships in binary for one pair of bearers -- the WiFi-Direct negotiation (BLE subtype `0x57` ADVERT/REQ/OFFER, `docs/ble5.md`) coordinates exactly this move from the shared advert channel to a private fast lane -- and 23.7 is that handshake generalised to every bearer, in text, signed |
 | Section 3.1, one person on several devices | **specified, not implemented.** Nothing numbers a device today: a station wears its bare callsign, and the chat wapp matches `d:` against that alone. The pieces the rule needs are already on the air -- a beacon carries `f:` and `lx:`, so a device can see a sibling and tell it apart -- but no code adopts a suffix, prefers the conventional number for its `type:`, or refuses a command addressed to a person |
 | Section 13.7.1, receipts signed by default | **specified, not implemented.** Signing exists (section 9.1) and receipts do not use it yet, which leaves the forged-`s:ack` deletion described there open on any station that honours the section 7 carrier release. The Reticulum side is not exposed to it -- its acknowledgement is a link, not an XPRS packet -- but an XPRS-native carrier would be |

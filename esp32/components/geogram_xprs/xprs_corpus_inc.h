@@ -246,4 +246,5 @@ static const corpus_t g_corpus[] = {
   { "t:receipt f:X1RD89 d:X1QZ3N r:72fe2f s:ack sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS", 107, "f5f36b" },
   { "t:receipt f:X1RD89 d:X1QZ3N r:d8b7be s:no sig:SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS m:no espnow hardware", 127, "92f1c3" },
   { "t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:V<-(s&U-xL(hjs8hbML0<8nw[A)a<YeW+5_1BYlWzX.)fQYP&LeI[ZC<n4Yl m:net starts in ten minutes", 143, "399227" },
+  { "t:message f:X1QZ3N d:X1RD89 pos:38.7,-9.1 ts:2026-08-18_17:00:00 xr:AAECAwQFBgcICQoL5trPILdiT2M3VS-WaNXxfc-ho_rPVqMZHfa4NXFjFA m:meet \342\226\210\342\226\210\342\226\210 at \342\226\210\342\226\210\342\226\210\342\226\210\342\226\210", 162, "e7f5d0" },
 };

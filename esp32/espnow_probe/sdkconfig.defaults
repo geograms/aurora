@@ -1,0 +1,12 @@
+# The T-Dongle-S3 brings out no UART pins: its only console is the native
+# USB-JTAG. Without this the logs still arrive (the S3 enables USB-JTAG as a
+# SECONDARY console by default) but stdin does not, so the board prints and
+# never listens -- and the whole point of this firmware is being driven by hand.
+#
+# On the M5Stack this symbol does not exist (an original ESP32 has no USB-JTAG),
+# it is ignored, and the console stays on UART0.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# between WiFi and BLE. This is the mechanism under suspicion, so it must be
+# configured the way the dongle configures it.
+

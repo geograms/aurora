@@ -174,45 +174,76 @@ and the frames that never reached the queue print as a change:
 `geogram_xprschan` switches it on for the length of an exchange and off again;
 it is a line per packet and is not meant to be left on.
 
-## Open: the pair goes deaf on the working channel
+## SOLVED: the BLE controller takes the radio from an unassociated station
 
-Not solved, and recorded here so the next attempt starts from the measurement
-rather than from the beginning.
+The pair went deaf whenever they moved to a working channel, and six causes had
+already been ruled out on the real firmware. `esp32/espnow_probe` settled it:
+two boards, ESP-NOW, and nothing else, driven by hand over serial so one
+variable changes at a time.
 
-After both stations move to channel 6, **each reports itself on channel 6, each
-driver reports its frames sent, and neither receives a single byte from the
-other** -- deaf in both directions at once, for the whole 15-second window. The
-same exchange aimed at channel 1 (the access point's own channel, so no real
-retune happens) meets 2 times in 3. So the retune is the dominant fault and
-something smaller is intermittent even without it.
+| BLE controller | station | dongle rx |
+|---|---|---|
+| absent (no-BT build) | never associated, ch 1 | 20 of 20 |
+| absent | never associated, ch 6 | 25 of 25 |
+| absent | join, leave, then ch 6 | 38 of 38 |
+| up, scanning | never associated, ch 6 | **1 of 36** |
+| up, scan cancelled | never associated, ch 6 | **0 of 30** |
+| up, `coex wifi` preference | never associated, ch 6 | **0 of 30** |
+| up, idle | **associated**, ch 1 | 24 of 24 |
+| stopped and deinited | never associated, ch 6 | 25 of 25 |
 
-Ruled out by measurement, so do not re-test these first:
+**With the BLE controller running, a WiFi station that is not associated
+receives nothing.** Transmission is untouched throughout -- the far board heard
+36 of 36 frames from a station whose own receive count was zero, which is why
+this looked for so long like the other end going quiet.
 
-- **not the acceptance being lost** -- it arrives on the commons every time, and
-  the inviter moves on it
-- **not the disassociation being slow** -- `let go of the access point in 0ms`,
-  and the channel is read back from the driver after setting it (`radio says 6`)
-- **not heap or a refused send** -- `sent=n/n fail=0` throughout
-- **not power save or the peer's channel** -- `esp_wifi_set_ps(WIFI_PS_NONE)` and
-  an explicit `esp_now_mod_peer` channel are both re-asserted after every move,
-  and neither changed the result
+Everything else follows from it:
 
-- **not an off-channel scan** -- `esp_wifi_scan_stop()` is called on the way out
-  and returned "no scan to stop" every single time, and the drift guard that
-  re-reads the channel on every tick while away has never once reported the
-  radio somewhere else. The station is genuinely parked on the working channel
-  for the whole window and still hears nothing.
-- **not channel 6 in particular** -- the same run aimed at channel 11 met 1 time
-  in 5, which is channel 6's rate. It is not local interference on one channel.
+- the calling channel works because the station is ASSOCIATED there. Association
+  is what keeps the WiFi side scheduled: it has beacons it may not miss. Leave
+  the access point and the coexistence scheduler has no reason to reserve
+  anything, and hands the radio to Bluetooth.
+- section 23.7 requires leaving the access point. That is the whole move.
+- the failure is one-sided. The M5Stack runs no Bluetooth and held up fine; the
+  dongle carries a controller and went deaf. It only looked symmetric because
+  the inviter sends nothing while it waits for the step-4 proof, so the M5Stack
+  having nothing to receive was correct behaviour, not a second fault.
+- it is not the scan. Cancelling the scan does not give the radio back. The
+  controller merely being up is enough.
+- `esp_coex_preference_set(ESP_COEX_PREFER_WIFI)` does not change it either.
 
-One thing IS known to break the return leg, and is in the code as a warning:
-`esp_wifi_scan_stop()` must not be called on the way home. `esp_wifi_connect()`
-starts a scan, and stopping it strands the station on the working channel --
-measured as "back on the calling channel" while the heartbeat still said `ch=6`.
+The only thing measured to restore reception is taking the controller all the
+way down (`nimble_port_stop()` then `nimble_port_deinit()`), which recovers it
+immediately and completely.
 
-What has not been tried: a pair of boards doing this with NOTHING else running
-(no iGate, no hub, no BLE, no SD), to establish whether two ESP-NOW stations can
-hold a manually-set channel at all on this silicon, or whether the coexistence
-scheduler on a board carrying Bluetooth is the thing that never yields receive
-time once the station is not associated. That is the experiment this needs next,
-and it wants a stripped firmware rather than another change to this one.
+### What this means for section 23.7 on this hardware
+
+A station carrying a BLE controller cannot leave its access point and still
+hear anybody. Three honest options, none free:
+
+1. **Stop Bluetooth for the away window** and start it again on return. Measured
+   to work. It costs the whole BLE mesh plane for the length of the exchange,
+   and re-initialising NimBLE is not instant.
+2. **Do not move.** section 23.7 already lets an invitee answer `s:no`, and an
+   indexer that is somebody's only uplink is exactly the station that should.
+   The rule becomes: a station with Bluetooth running does not accept a channel
+   invitation, and the pair uses what they already share.
+3. **Never disassociate** -- only ever meet on the access point's own channel,
+   which is not a move at all and buys nothing.
+
+Option 2 is the one that costs nothing and is already in the specification.
+Option 1 is worth measuring properly before it is offered to anybody.
+
+### The probe
+
+`esp32/espnow_probe`, two environments, same source:
+
+    ~/.platformio/penv/bin/pio run -e tdongle -t upload
+    ~/.platformio/penv/bin/pio run -e m5stack -t upload
+
+Console: `ch <n>`, `join`, `leave`, `rate <ms>`, `reset`, `state`,
+`ble on|off|kill`, `coex wifi|bt|balance`. Both boards print the same counter
+line, so any claim about one of them can be checked against the other. Open each
+serial port ONCE and leave it open -- a shell redirect to the M5Stack's CP2104
+asserts DTR and reboots the board, which invalidated a whole run before it was
+noticed.

@@ -55,3 +55,4 @@ archive/
 # private key — must never be committed)
 updates-host/
 esp32/m5stack/src/wifi_secrets.h
+esp32/espnow_probe/src/wifi_secrets.h

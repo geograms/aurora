@@ -1,0 +1,20 @@
+# Dongle only. The M5Stack is an original ESP32 and enabling Bluetooth there
+# boot-loops it on "assert failed: s_prepare_reserved_regions" -- and it does not
+# need Bluetooth anyway: the dongle is the board whose rendezvous fails, and the
+# board that carries a BLE controller in the real firmware.
+#
+# Compiled in, NOT started. `ble on` is step 4 of the sequence in main.c.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+# Peripheral stays on because NimBLE does not link without it (the security
+# manager's crypto is compiled behind it), and because it is what rns_ble5
+# builds -- the load under test should match the firmware under suspicion.
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+
+# Software coexistence, the same as the real firmware: one radio time-shared
+# between WiFi and BLE. This is the mechanism under suspicion, so it must be
+# configured the way the dongle configures it.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y

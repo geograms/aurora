@@ -13,6 +13,8 @@ import 'dart:typed_data';
 import '../connections/bluetooth/ble5_bus.dart';
 import 'xprs/xprs_archive.dart';
 import 'xprs/xprs_ingest.dart';
+import 'xprs/xprs_lan.dart';
+import 'xprs/xprs_publisher.dart';
 import 'xprs/xprs_packet.dart';
 import 'xprs/xprs_sig.dart';
 import 'xprs/xprs_vocab.dart';
@@ -992,7 +994,21 @@ class RemoteApiService {
             'xprs-ask', Ble5Subtype.xprs,
             Uint8List.fromList(utf8.encode(p.encode())),
             ttl: const Duration(seconds: 60));
-        return _json(res, {'ok': aired, 'wire': p.encode()});
+        // The LAN lane too: an indexer on the bench (an ESP32 on this
+        // network) hears UDP 4242, not our BLE adverts.
+        final lanAired = XprsLan.instance.send(p.encode());
+        return _json(res, {'ok': aired || lanAired, 'wire': p.encode()});
+      }
+      // Declare this station's favorite indexers (XPRS 13.12): persists the
+      // hold list and airs the signed t:mailbox on every bearer now.
+      if (req.method == 'POST' && path == '/api/xprs/mailbox') {
+        final data = await _body(req);
+        final hold = (data['hold'] ?? '').toString().trim();
+        PreferencesService.instanceSync?.xprsMailboxHold = hold;
+        final report = hold.isEmpty
+            ? const <String, String>{}
+            : await XprsPublisher.instance.publishMailboxDecl(hold);
+        return _json(res, {'ok': report.isNotEmpty, 'hold': hold, ...report});
       }
       if (req.method == 'GET' && path == '/api/ble/status') {
         return _json(res, BleService.instance.gattStatus());

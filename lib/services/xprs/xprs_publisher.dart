@@ -216,6 +216,55 @@ class XprsPublisher {
     return report;
   }
 
+  /// Publish this station's `t:mailbox hold:` declaration (section 13.12):
+  /// the stations mail for us should be left with, in preference order.
+  /// MUST be signed -- a forged declaration steals mail, so with no signing
+  /// key nothing is aired and the log says why. Returns per-bearer outcomes.
+  Future<Map<String, String>> publishMailboxDecl(String holdCsv) async {
+    final call =
+        (ProfileService.instance.activeProfile?.callsign ?? '').trim();
+    final hold = holdCsv
+        .split(',')
+        .map((c) => c.trim().toUpperCase())
+        .where((c) => c.isNotEmpty)
+        .join(',');
+    if (call.isEmpty || hold.isEmpty) return const {};
+
+    final now = DateTime.now().toUtc();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final ts = '${now.year}-${two(now.month)}-${two(now.day)}_'
+        '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
+
+    var p = XprsPacket.parse(
+        't:mailbox f:${call.toUpperCase()} ts:$ts hold:$hold');
+    if (p == null || !p.fits) return const {};
+    final d = xprsProfileScalar();
+    if (d == null) {
+      LogService.instance.add(
+          'XPRS: mailbox declaration NOT aired — no signing key, and an '
+          'unsigned one must be ignored (13.12)');
+      return const {};
+    }
+    p = xprsSign(p, d);
+    final wire = p.encode();
+
+    final report = <String, String>{};
+    String? carriedBy;
+    for (final b in bearers) {
+      if (!await b.active) {
+        report[b.name] = 'inactive';
+        continue;
+      }
+      final ok = await b.send(wire, part: 1);
+      report[b.name] = ok ? 'sent' : 'refused';
+      if (ok) carriedBy ??= b.archiveBearer;
+    }
+    if (carriedBy != null) XprsIngest.own(wire, bearer: carriedBy);
+    LogService.instance.add('XPRS: mailbox hold:$hold — '
+        '${report.entries.map((e) => "${e.key}:${e.value}").join(", ")}');
+    return report;
+  }
+
   /// Test seam: exactly the wires [publishStatus] would air for [head] and
   /// [body], with [signingKey] standing in for the profile key (a unit test
   /// has no profile).

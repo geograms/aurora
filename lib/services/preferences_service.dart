@@ -284,6 +284,12 @@ class PreferencesService {
   int get xprsArchiveMaxDays => _prefs.getInt('xprs.archiveMaxDays') ?? 365;
   set xprsArchiveMaxDays(int v) => _prefs.setInt('xprs.archiveMaxDays', v);
 
+  /// Favorite indexers: callsigns (in preference order) this station
+  /// declares as its mailboxes with a signed `t:mailbox hold:` (XPRS 13.12).
+  /// Empty = no declaration is aired.
+  String get xprsMailboxHold => _prefs.getString('xprs.mailboxHold') ?? '';
+  set xprsMailboxHold(String v) => _prefs.setString('xprs.mailboxHold', v);
+
   bool get xprsServeHistory => _prefs.getBool('xprs.serveHistory') ?? true;
   Future<void> setXprsServeHistory(bool v) async {
     await _prefs.setBool('xprs.serveHistory', v);

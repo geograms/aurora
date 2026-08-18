@@ -148,6 +148,22 @@ typedef struct {
      * guessed. False means the bearer is stuck, which is worth logging but not
      * worth abandoning the exchange over. NULL when the bearer cannot say. */
     bool (*settle)(uint32_t timeout_ms);
+    /** Put this station's Bluetooth on or off the air.
+     *
+     * NOT an optimisation, and not optional on ESP32. Measured with one
+     * variable at a time (esp32/espnow_probe, and the table in docs/espnow.md):
+     * with the BLE controller running, a WiFi station that is NOT ASSOCIATED
+     * receives nothing at all, while transmitting perfectly. Cancelling the
+     * scan does not give the radio back and neither does the coexistence
+     * preference; only taking the controller down does. An associated station
+     * with the same controller up is fine, because association is what keeps
+     * the WiFi side scheduled -- it has beacons it may not miss.
+     *
+     * Moving to a working channel means leaving the access point, so for the
+     * length of the move this station cannot also be a Bluetooth station. The
+     * absence is bounded by the same local deadline that guarantees the return.
+     * NULL on a station with no Bluetooth to lose. */
+    void (*bluetooth)(bool on);
     /** Ask the bearer to log every packet it hears, for the duration.
      *
      * The rendezvous is the one place where "the radio never heard it" and "it

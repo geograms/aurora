@@ -54,6 +54,22 @@ static int  identity_airings;
 static int  working_calls, home_calls;
 static bool last_worked;
 static int  settle_calls, trace_on, trace_off;
+/* A log of the order things happened in, because for the radio calls the order
+ * IS the correctness: Bluetooth has to be off BEFORE the station stops being
+ * associated, and back on only after it is on its way home. */
+static char order[16][24];
+static int  order_n;
+static void note(const char *what)
+{
+    if (order_n < 16) snprintf(order[order_n++], 24, "%s", what);
+}
+static int order_index(const char *what)
+{
+    for (int i = 0; i < order_n; i++) if (strcmp(order[i], what) == 0) return i;
+    return -1;
+}
+static int  bt_on_calls, bt_off_calls;
+static bool bt_running = true;
 
 /* A signature this test can make and check without a curve: sixty characters,
  * which is exactly what §9.1 puts on the wire, so lengths and the `sig:`-before-
@@ -101,7 +117,17 @@ static bool fake_air(const char *wire, int len)
 static uint32_t fake_now(void)   { return xc_test_now_ms; }
 static uint32_t no_clock(void)   { return 0; }
 static void fake_time(char *out, int cap) { snprintf(out, (size_t)cap, "epoch:12"); }
-static void fake_hold(bool hold) { reconnect_held += hold ? 1 : -1; }
+static void fake_hold(bool hold)
+{
+    reconnect_held += hold ? 1 : -1;
+    note(hold ? "hold" : "release");
+}
+static void fake_bluetooth(bool on)
+{
+    bt_running = on;
+    if (on) bt_on_calls++; else bt_off_calls++;
+    note(on ? "bt_on" : "bt_off");
+}
 static void fake_identity(void)  { identity_airings++; }
 static bool fake_may_move(void)  { return willing; }
 static bool fake_settle(uint32_t ms) { (void)ms; settle_calls++; return true; }
@@ -126,6 +152,7 @@ static const xc_ops_t k_ops = {
     .announce_identity = fake_identity,
     .may_move = fake_may_move,
     .settle = fake_settle,
+    .bluetooth = fake_bluetooth,
     .trace = fake_trace,
     .on_working = fake_working,
     .on_home = fake_home,
@@ -144,6 +171,8 @@ static void reset(void)
     reconnect_held = identity_airings = 0;
     working_calls = home_calls = 0;
     settle_calls = trace_on = trace_off = 0;
+    order_n = bt_on_calls = bt_off_calls = 0;
+    bt_running = true;
     last_worked = false;
     xprschan_init(SELF, &k_ops);
 }
@@ -499,6 +528,48 @@ static void test_abort_comes_home_from_the_working_channel(void)
     CHECK(reconnect_held == 0, "the reconnect hold was not released");
 }
 
+/* The fault this whole component tripped over for a week, pinned.
+ *
+ * On ESP32 a running BLE controller costs an UNASSOCIATED station every
+ * incoming frame -- measured one variable at a time in esp32/espnow_probe. So
+ * Bluetooth must go off before the station lets go of the access point, and
+ * come back only on the way home. An implementation that merely calls both at
+ * some point in the move would pass a naive test and still be deaf. */
+static void test_bluetooth_goes_off_before_we_leave_and_on_after(void)
+{
+    reset();
+    char inv[XPRS_MAX_WIRE + 1];
+    invite_us(inv, sizeof inv, NULL);
+    hear(inv);
+    xprschan_tick();
+    CHECK(xc_test_channel == 6, "did not move");
+    CHECK(bt_off_calls == 1, "Bluetooth switched off %d times", bt_off_calls);
+    CHECK(!bt_running, "still on the air while away");
+    CHECK(order_index("bt_off") >= 0 && order_index("hold") >= 0 &&
+          order_index("bt_off") < order_index("hold"),
+          "Bluetooth went off after the station let go of the access point");
+
+    advance(XC_MAX_AWAY_MS + 2000);
+    CHECK(xprschan_state() == XC_IDLE, "never came home");
+    CHECK(bt_on_calls == 1, "Bluetooth switched on %d times", bt_on_calls);
+    CHECK(bt_running, "came home without Bluetooth");
+    CHECK(order_index("release") < order_index("bt_on"),
+          "Bluetooth came back before the reconnect was released");
+}
+
+/* And the exchange that never happens must not cost the station its Bluetooth:
+ * an invitation nobody answers moves nothing, so nothing may be switched off. */
+static void test_bluetooth_is_untouched_when_nobody_moves(void)
+{
+    reset();
+    xprschan_invite(PEER, 6, 30, false);
+    xprschan_tick();
+    advance(XC_INVITE_FRESH_MS + 1000);
+    CHECK(xprschan_state() == XC_IDLE, "still waiting");
+    CHECK(bt_off_calls == 0, "took Bluetooth down for an exchange that never was");
+    CHECK(bt_running, "Bluetooth left off");
+}
+
 int main(void)
 {
     printf("xprschan host tests (XPRS.md section 23.7)\n");
@@ -520,6 +591,8 @@ int main(void)
     test_a_bearer_that_refuses_leaves_nothing_behind();
     test_the_stay_is_bounded_whatever_until_says();
     test_abort_comes_home_from_the_working_channel();
+    test_bluetooth_goes_off_before_we_leave_and_on_after();
+    test_bluetooth_is_untouched_when_nobody_moves();
 
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;

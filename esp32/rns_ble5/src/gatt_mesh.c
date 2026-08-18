@@ -761,7 +761,11 @@ static const struct ble_gatt_svc_def s_svcs[] = {
 
 void gatt_mesh_svcs_init(void)
 {
-    s_lock = xSemaphoreCreateMutex();
+    /* Called again every time the BLE stack is brought back up after section
+     * 23.7 takes it down for a working-channel exchange, so the mutex is made
+     * once and the service table re-registered each time (NimBLE forgets it
+     * across nimble_port_deinit). */
+    if (!s_lock) s_lock = xSemaphoreCreateMutex();
     ble_svc_gap_init();
     ble_svc_gatt_init();
     int rc = ble_gatts_count_cfg(s_svcs);

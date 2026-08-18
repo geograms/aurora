@@ -126,8 +126,13 @@ static uint32_t s_invite_tries;
 static void xc_set_lr(bool on) { xc_test_lr = on; }
 static void xc_keep_channel(uint8_t channel) { (void)channel; }
 
+/* The fake radio mirrors the real one's ORDER, not just its effects. Bluetooth
+ * before the station lets go of the access point on the way out, and after the
+ * reconnect is released on the way back -- that ordering is the fix for the
+ * fault measured in esp32/espnow_probe, so it is the thing worth testing. */
 static void xc_go(uint8_t channel, bool lr)
 {
+    if (s_ops.bluetooth) s_ops.bluetooth(false);
     if (s_ops.hold_reconnect) s_ops.hold_reconnect(true);
     if (lr) xc_set_lr(true);
     xc_test_channel = channel;
@@ -139,6 +144,7 @@ static void xc_come_home(void)
     if (s_ops.hold_reconnect) s_ops.hold_reconnect(false);
     xc_test_channel = 0;
     xc_test_homes++;
+    if (s_ops.bluetooth) s_ops.bluetooth(true);
 }
 
 #else
@@ -231,6 +237,11 @@ static void xc_go(uint8_t channel, bool lr)
     /* Leaving the access point is the point, not an accident: on this channel
      * we are deaf to it and to everything it carries. §23.7 calls that ordinary
      * absence, and it is only ordinary because we come back. */
+    /* Bluetooth goes first, and it goes before the disassociation rather than
+     * after: the moment this station stops being associated is the moment a
+     * running BLE controller costs it every incoming frame. */
+    if (s_ops.bluetooth) s_ops.bluetooth(false);
+
     /* Say so BEFORE disconnecting, or the reconnect fires on the way out. */
     if (s_ops.hold_reconnect) s_ops.hold_reconnect(true);
     if (s_was_associated) {
@@ -304,6 +315,9 @@ static void xc_come_home(void)
         esp_wifi_set_channel(s_home_channel, WIFI_SECOND_CHAN_NONE);
     }
     xc_hold_the_radio_awake(0);   /* 0: follow the station again */
+    /* And Bluetooth last, after the station is on its way back to the access
+     * point -- the order that took it off the air, reversed. */
+    if (s_ops.bluetooth) s_ops.bluetooth(true);
     XC_LOGW("back on the calling channel");
 }
 

@@ -420,6 +420,24 @@ static void identity_init(void)
 /* ---- transmit (signed announce as a BLE5 extended advertisement) -------- */
 static bool s_adv_configured = false;
 
+/* Is the NimBLE host running?
+ *
+ * Section 23.7 takes it down for the length of a working-channel exchange, and
+ * the reason is measured rather than defensive: with the BLE controller up, a
+ * WiFi station that is not associated receives NOTHING (esp32/espnow_probe, and
+ * the table in docs/espnow.md). Moving to a working channel means leaving the
+ * access point, so the two cannot both happen.
+ *
+ * While it is false, every path that would touch NimBLE must return instead of
+ * calling into a host that is not there. */
+static volatile bool s_ble_up;
+static void host_task(void *param);
+/* Section 23.7 asks for these through the ops in k_chan_ops, which is composed
+ * long before the NimBLE glue is defined. */
+static void ble_stack_down(void);
+static void ble_stack_up(void);
+static void xc_bluetooth(bool on) { if (on) ble_stack_up(); else ble_stack_down(); }
+
 /* Big buffers kept static (off-stack); announce() is only ever called from the
  * single announce task, so this is safe. */
 static uint8_t s_signed[DST_HASH_LEN + KEYSIZE + NAME_HASH_LEN + RANDOM_HASH_LEN + 128];
@@ -430,6 +448,7 @@ static uint8_t s_ad[256];
  * then stop+set_data+start). Used by both our own announce and the repeater. */
 static void air_raw_ad(const uint8_t *ad, int n)
 {
+    if (!s_ble_up) return;      /* away on a working channel; see s_ble_up */
     struct os_mbuf *om = ble_hs_mbuf_from_flat(ad, n);
     if (!om) { ESP_LOGW(TAG, "mbuf alloc failed"); return; }
     if (!s_adv_configured) {
@@ -1630,6 +1649,7 @@ static const xc_ops_t k_chan_ops = {
     .may_move = xc_may_move,
     .settle = xprsnow_settle,
     .trace = xprsnow_set_trace,
+    .bluetooth = xc_bluetooth,
     .on_working = xc_on_working,
     .on_home = xc_on_home,
 };
@@ -2793,6 +2813,56 @@ static void on_sync(void)
 
 static void on_reset(int reason) { ESP_LOGW(TAG, "nimble reset, reason=%d", reason); }
 
+/*
+ * Take Bluetooth off the air for the length of a section 23.7 exchange, and put
+ * it back afterwards.
+ *
+ * This is not a power optimisation and it is not optional. Measured on
+ * esp32/espnow_probe, one variable at a time: with the BLE controller running,
+ * a WiFi station that is NOT ASSOCIATED receives nothing at all -- while
+ * transmitting perfectly, which is why it read for so long as the far side
+ * going quiet. Cancelling the scan does not give the radio back; only taking
+ * the controller down does. An associated station with the same controller up
+ * is fine, because association is what keeps the WiFi side scheduled: it has
+ * beacons it may not miss.
+ *
+ * Moving to a working channel means leaving the access point. So for the length
+ * of the move this station is not a Bluetooth station, and the mesh treats that
+ * as the ordinary absence section 23.7 already describes -- bounded by the same
+ * local deadline that guarantees the return, because a station that fails to
+ * come back does not lose a bearer, it loses all of them.
+ */
+static void ble_stack_down(void)
+{
+    if (!s_ble_up) return;
+    s_ble_up = false;               /* first: stop anyone else airing into it */
+    ble_gap_disc_cancel();
+    if (s_adv_configured) ble_gap_ext_adv_stop(0);
+    int rc = nimble_port_stop();
+    if (rc != 0) ESP_LOGW(TAG, "nimble_port_stop rc=%d", rc);
+    nimble_port_deinit();
+    s_adv_configured = false;       /* the instance is gone with the host */
+    ESP_LOGW(TAG, "Bluetooth off for the exchange, heap %u",
+             (unsigned)esp_get_free_heap_size());
+}
+
+static void ble_stack_up(void)
+{
+    if (s_ble_up) return;
+    if (nimble_port_init() != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init failed on the way back -- this station "
+                      "has lost Bluetooth until it reboots");
+        return;
+    }
+    ble_hs_cfg.sync_cb = on_sync;   /* re-arms the scan and the presence advert */
+    ble_hs_cfg.reset_cb = on_reset;
+    gatt_mesh_svcs_init();          /* the table does not survive a deinit */
+    nimble_port_freertos_init(host_task);
+    s_ble_up = true;
+    ESP_LOGW(TAG, "Bluetooth back, heap %u",
+             (unsigned)esp_get_free_heap_size());
+}
+
 static void host_task(void *param)
 {
     (void)param;
@@ -3622,6 +3692,7 @@ void app_main(void)
     ble_hs_cfg.reset_cb = on_reset;
     heap_mark("before gatt_mesh");
     gatt_mesh_svcs_init();   /* GATT service table before the host starts */
+    s_ble_up = true;
     heap_mark("before nimble_host");
     nimble_port_freertos_init(host_task);
 

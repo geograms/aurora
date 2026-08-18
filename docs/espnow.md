@@ -216,23 +216,43 @@ The only thing measured to restore reception is taking the controller all the
 way down (`nimble_port_stop()` then `nimble_port_deinit()`), which recovers it
 immediately and completely.
 
-### What this means for section 23.7 on this hardware
+### What was done about it
 
-A station carrying a BLE controller cannot leave its access point and still
-hear anybody. Three honest options, none free:
+Bluetooth goes off the air for the length of the exchange, and comes back on the
+way home. Stopping a radio for an operation that needs the other one is ordinary,
+and the absence is bounded by the same local deadline that already guarantees
+the station returns at all.
 
-1. **Stop Bluetooth for the away window** and start it again on return. Measured
-   to work. It costs the whole BLE mesh plane for the length of the exchange,
-   and re-initialising NimBLE is not instant.
-2. **Do not move.** section 23.7 already lets an invitee answer `s:no`, and an
-   indexer that is somebody's only uplink is exactly the station that should.
-   The rule becomes: a station with Bluetooth running does not accept a channel
-   invitation, and the pair uses what they already share.
-3. **Never disassociate** -- only ever meet on the access point's own channel,
-   which is not a move at all and buys nothing.
+The order matters and is what the host test pins: the controller goes down
+BEFORE the station lets go of the access point, because the moment it stops
+being associated is the moment a running controller costs it every incoming
+frame; and it comes back only after the reconnect has been released.
 
-Option 2 is the one that costs nothing and is already in the specification.
-Option 1 is worth measuring properly before it is offered to anybody.
+    invited X3LTSH to channel 6 (9f7dcc) -- waiting on the commons
+    Bluetooth off for the exchange, heap 65468
+    moved to channel 6 (radio says 6) -- deaf to the commons until we return
+    working channel 6 with X3LTSH        <- 0.68 s after the move
+    Bluetooth back, heap 14936
+    exchange with X3LTSH ended: time is up
+
+Ten consecutive attempts: **8 met**. Before this, the same ten-attempt run gave
+one to three. More to the point, `nobody came` -- the failure this whole thread
+was about, the inviter sitting alone on the working channel -- **did not happen
+once**, and the step-4 proof now arrives 0.49 to 0.88 seconds after the move,
+where it used to take one to five seconds when it arrived at all.
+
+Both losses were `no answer` on the commons, from the invitee still being away
+on the working channel of the PREVIOUS attempt: a station with no clock cannot
+read `until:` and falls back to XC_DEFAULT_AWAY_MS, so it stays longer than the
+inviter asked for and is deaf to the next invitation. That is correct section
+23.7 behaviour rather than a fault -- a station in an exchange is unavailable --
+but it is why back-to-back attempts against the same peer lose some, and it is
+the next thing worth fixing if the rate needs to be higher.
+
+Two options were considered and not taken. Refusing the move (`s:no`, which
+section 23.7 already allows) costs nothing but gives up the feature on exactly
+the stations that have the most to say. Never leaving the access point is not a
+move at all.
 
 ### The probe
 

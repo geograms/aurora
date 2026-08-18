@@ -123,11 +123,8 @@ static void on_espnow(const char *wire, int len, const uint8_t mac[6], int rssi)
         char type[16];
         xprs_type(&p, type, sizeof type);
         if (strcmp(type, "identity") == 0) identity_heard(&p);
-        /* §23.7 lives on this bearer, because the working channel is an ESP-NOW
-         * channel and an answer aired anywhere else would strand the far side. */
-        if (strcmp(type, "channel") == 0 || strcmp(type, "receipt") == 0) {
-            if (xprschan_on_packet(&p, wire, len)) return;
-        }
+        /* §23.7 is handled in heard_espnow(), not here — see the note there. */
+        if (strcmp(type, "channel") == 0 || strcmp(type, "receipt") == 0) return;
     }
     ESP_LOGI(TAG, "espnow %02x:%02x:%02x:%02x:%02x:%02x %4d dBm %3dB  %s",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], rssi, len, wire);
@@ -135,6 +132,23 @@ static void on_espnow(const char *wire, int len, const uint8_t mac[6], int rssi)
      * under the ordinary relay rules (the bearer refuses when we are already in
      * via: or the hop budget is spent). */
     xprslan_offer(wire, len);
+}
+
+/* Every hearing on ESP-NOW, duplicates included.
+ *
+ * §23.7's step 4 is the same signed acceptance aired a second time on the
+ * working channel, and the ordinary receive path drops a packet whose
+ * identifier it has already heard. This callback is the one that does not. */
+static void heard_espnow(const char *id, const char *wire, int len)
+{
+    (void)id;
+    xprs_t p;
+    if (!xprs_parse(wire, len, &p)) return;
+    char type[16];
+    xprs_type(&p, type, sizeof type);
+    if (strcmp(type, "channel") == 0 || strcmp(type, "receipt") == 0) {
+        xprschan_on_packet(&p, wire, len);
+    }
 }
 
 static void on_lan(const char *wire, int len, uint32_t ip)
@@ -350,6 +364,7 @@ void app_main(void)
 
     if (xprsnow_start(s_call) == ESP_OK) {
         xprsnow_set_rx_cb(on_espnow);
+        xprsnow_set_heard_cb(heard_espnow);
         /* Faster than the dongle's 300 s: this board exists to be measured, and
          * a minute between beacons is a long time to watch a serial console. */
         xprsnow_set_beacon(espnow_beacon, 60, 5);

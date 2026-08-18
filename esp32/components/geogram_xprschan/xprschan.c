@@ -177,6 +177,18 @@ void xprschan_abort(const char *why) { if (s_state != XC_IDLE) xc_finish(why, fa
 
 /* ── Step 1: invite ─────────────────────────────────────────────────────── */
 
+/* A move that has been decided but not yet performed.
+ *
+ * xc_go() disconnects and waits up to 600 ms for the driver to let go of the
+ * access point, and it used to do that on the task that drains the receive
+ * queue — so nothing was emptying that queue during the exact window the far
+ * side's step-4 proof arrives in. The decision is made where the packet is
+ * heard; the blocking is done on the ticking task. */
+static bool    s_want_move;
+static uint32_t s_announce_ms;    /* invitee: when step 4 last went out */
+static uint8_t s_move_channel;
+static bool    s_move_lr;
+
 /* What was asked for, waiting for a task with the stack to sign it. */
 static bool     s_want_invite;
 static char     s_want_peer[10];
@@ -335,26 +347,18 @@ static bool xc_on_invite(const xprs_t *p, const char *wire, int len)
                                    * §23.7 grows a word for it */
     s_inviter = false;
     s_state = XC_WORKING;
+    s_proved = false;
     s_deadline_ms = s_ops.now_ms() + away;
 
-    /* Step 3: on SENDING the acceptance, the invitee tunes and follows.
-     *
-     * SENDING means the frame has left, not that the call returned.
-     * esp_now_send() is asynchronous, so tuning immediately carries the
-     * acceptance to the NEW channel, where nobody is listening yet — the
-     * inviter waits out its whole invitation and reports "no answer", which is
-     * exactly what it did. Give the radio a moment to actually put it on the
-     * commons before leaving. */
-    vTaskDelay(pdMS_TO_TICKS(120));
-    xc_go(s_channel, s_lr);
-
-    /* Step 4: the same packet again, here. The first airing committed; this one
-     * locates. The far side sends nothing until it hears it. */
-    s_ops.air(s_accept_wire, s_accept_len);
-    s_proved = true;
-    ESP_LOGI(TAG, "accepted %s: on channel %u for %ums", from, s_channel,
-             (unsigned)away);
-    if (s_ops.on_working) s_ops.on_working(s_peer, s_channel, s_lr);
+    /* Step 3: on SENDING the acceptance, the invitee tunes and follows — but
+     * not from here. Both the settle the send needs and the disconnect wait the
+     * move needs are hundreds of milliseconds, and this runs on the task that
+     * empties the receive queue. Hand it to the tick. */
+    s_move_channel = s_channel;
+    s_move_lr = s_lr;
+    s_want_move = true;
+    ESP_LOGI(TAG, "accepted %s: moving to channel %u for %ums", from,
+             s_channel, (unsigned)away);
     return true;
 }
 
@@ -362,8 +366,19 @@ static bool xc_on_invite(const xprs_t *p, const char *wire, int len)
 static bool xc_on_receipt(const xprs_t *p, const char *wire, int len)
 {
     char r[XPRS_ID_LEN], from[10], st[8];
-    if (!xprs_get_str(p, "r", r, sizeof r)) return false;
-    if (!s_invite_id[0] || strcmp(r, s_invite_id) != 0) return false;
+    if (!xprs_get_str(p, "r", r, sizeof r)) {
+        ESP_LOGW(TAG, "a receipt with no r: — nothing to match it to");
+        return false;
+    }
+    if (!s_invite_id[0]) return false;         /* not ours to answer */
+    if (strcmp(r, s_invite_id) != 0) {
+        /* Loud, not debug. A mismatch here is the difference between "nobody
+         * answered" and "somebody answered and we did not recognise our own
+         * invitation", and those need completely different fixes. */
+        ESP_LOGW(TAG, "a receipt names %s, but our invitation was %s", r,
+                 s_invite_id);
+        return false;
+    }
     if (!xprs_get_str(p, "f", from, sizeof from)) return false;
     if (!xprs_get_str(p, "s", st, sizeof st)) return false;
 
@@ -388,16 +403,18 @@ static bool xc_on_receipt(const xprs_t *p, const char *wire, int len)
          * does NOT start sending — that waits for step 4. */
         s_state = XC_WORKING;
         s_proved = false;
-        xc_go(s_channel, s_lr);
+        s_move_channel = s_channel;
+        s_move_lr = s_lr;
+        s_want_move = true;                 /* performed on the ticking task */
         uint32_t t = s_ops.now_ms();
-        s_deadline_ms = t + s_away_ms;      /* the clock starts on the move */
+        s_deadline_ms = t + s_away_ms;      /* the clock starts on the decision */
         s_proof_by_ms = t + XC_PROOF_WAIT_MS;
         ESP_LOGI(TAG, "%s accepted — moved, now waiting for them to prove they "
                       "are here", from);
         return true;
     }
 
-    if (s_state == XC_WORKING && !s_proved && !strcmp(from, s_peer)) {
+    if (s_state == XC_WORKING && !s_proved && !strcasecmp(from, s_peer)) {
         /* Step 4, heard on the working channel: the same signed packet, which
          * only the station that committed could repeat. Now the work may run. */
         (void)wire; (void)len;
@@ -406,6 +423,8 @@ static bool xc_on_receipt(const xprs_t *p, const char *wire, int len)
         if (s_ops.on_working) s_ops.on_working(s_peer, s_channel, s_lr);
         return true;
     }
+    ESP_LOGW(TAG, "an ack from %s arrived in state %d — nothing to do with it",
+             from, (int)s_state);
     return false;
 }
 
@@ -431,6 +450,41 @@ void xprschan_tick(void)
             ESP_LOGW(TAG, "could not air the invitation to %s", s_want_peer);
         }
     }
+    /* The blocking half of a move, on the task that can afford to block. */
+    if (s_want_move) {
+        s_want_move = false;
+        /* Say it more than once before leaving.
+         *
+         * The acceptance is the commitment (§23.7 step 2) and it was aired
+         * exactly once, into a channel the inviter shares with its own
+         * transmissions — a station cannot hear while it talks, and a single
+         * unacknowledged packet is a thin thing to build a rendezvous on.
+         * Measured: the exchange completed some attempts and died at step 2 on
+         * others, with nothing wrong but timing. Three airings on the commons,
+         * then the move; step 3 says the invitee moves on SENDING, and sending
+         * it three times is still sending it.
+         *
+         * Also lets the frame actually leave before the radio moves under it —
+         * esp_now_send() is asynchronous, and tuning too early carried the
+         * acceptance to the new channel where nobody was listening yet. */
+        if (!s_inviter && s_accept_len > 0) {
+            for (int i = 0; i < 2; i++) {
+                vTaskDelay(pdMS_TO_TICKS(120));
+                s_ops.air(s_accept_wire, s_accept_len);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(120));
+        xc_go(s_move_channel, s_move_lr);
+        if (!s_inviter) {
+            /* Step 4: the same packet again, here. The first airing committed;
+             * this one locates. Repeated below until the exchange ends. */
+            s_ops.air(s_accept_wire, s_accept_len);
+            s_announce_ms = s_ops.now_ms();
+            s_proved = true;
+            if (s_ops.on_working) s_ops.on_working(s_peer, s_channel, s_lr);
+        }
+    }
+
     if (s_state == XC_IDLE) return;
     uint32_t now = s_ops.now_ms();
 
@@ -439,6 +493,24 @@ void xprschan_tick(void)
          * §23.7 step 2: silence ends the matter with everyone still here. */
         if ((int32_t)(now - s_invite_stale_ms) > 0) xc_finish("no answer", false);
         return;
+    }
+
+    /* Step 4, repeated.
+     *
+     * Both stations reach the working channel by their own route, and each
+     * route takes hundreds of milliseconds it does not control — a disconnect
+     * the driver completes when it feels like it, then a channel switch. Airing
+     * the proof once means airing it into whatever moment the other station
+     * happens to be in, and if that moment is mid-switch the exchange is over
+     * before it began. §23.7 says the invitee re-airs its acceptance and does
+     * not say once; the station with the bulk "sends nothing until it hears
+     * this", so saying it until somebody does is the reading that works.
+     *
+     * The same signed bytes every time, so it stays the proof it was. */
+    if (!s_inviter && s_proved && s_accept_len > 0 &&
+        (int32_t)(now - (s_announce_ms + XC_ANNOUNCE_EVERY_MS)) > 0) {
+        s_announce_ms = now;
+        s_ops.air(s_accept_wire, s_accept_len);
     }
 
     /* Step 6: alone on the working channel. No error packet — the party that

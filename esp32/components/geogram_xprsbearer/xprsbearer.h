@@ -139,7 +139,7 @@ typedef struct {
     xb_heard_cb_t  heard_cb;
     xb_beacon_cb_t beacon_cb;
     uint32_t     beacon_every_ms, beacon_due_ms;
-    uint32_t     rx_count, tx_count, cancelled;
+    uint32_t     rx_count, tx_count, cancelled, dupes;
 } xb_t;
 
 /** Bring a bearer up. @p call is this station, used for `via:` when relaying. */

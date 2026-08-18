@@ -177,7 +177,17 @@ void xb_on_wire(xb_t *b, const char *wire, int len, uint64_t peer, int rssi)
      * throws away. */
     if (b->heard_cb) b->heard_cb(id, wire, len);
 
-    if (xb_ring_has(b->heard, id, now)) return;   /* the bearer repeats itself */
+    if (xb_ring_has(b->heard, id, now)) {
+        /* Say so, rate-limited. Silent duplicate-suppression hid a real bug:
+         * §23.7's step 4 re-airs the SAME packet deliberately, and it died here
+         * without a word for as long as it took to read the code. */
+        b->dupes++;
+        if (b->dupes == 1 || (b->dupes % 32) == 0) {
+            XB_LOGI("%s: %s heard again — swallowed (%u so far)",
+                    b->ops.name ? b->ops.name : "?", id, (unsigned)b->dupes);
+        }
+        return;
+    }
     xb_ring_add(b->heard, &b->heard_pos, id, now);
 
     if (b->rx_cb) b->rx_cb(wire, len, peer, rssi);

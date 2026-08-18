@@ -1225,6 +1225,15 @@ static void heartbeat_task(void *arg)
         ESP_LOGW(TAG, "sig ok=%u unverified=%u forged=%u keys=%d",
                  (unsigned)xs.verified, (unsigned)xs.unverified,
                  (unsigned)xs.forged, xprs_peer_key_count());
+        /* The bearer had no voice at all on this board: rx, tx, the §13.2.1
+         * cancels and — the one that mattered — frames the receive callback had
+         * nowhere to put. A dropped frame was invisible here while the M5Stack
+         * printed the same counter all along. */
+        uint32_t nrx = 0, ntx = 0, ncan = 0, ndrop = 0;
+        xprsnow_stats(&nrx, &ntx, &ncan, &ndrop);
+        ESP_LOGW(TAG, "espnow ch=%u rx=%u tx=%u cancel=%u drop=%u peers=%d",
+                 xprsnow_channel(), (unsigned)nrx, (unsigned)ntx,
+                 (unsigned)ncan, (unsigned)ndrop, xprsnow_peer_count(600));
         ESP_LOGW(TAG, "alive %us heap=%u min=%u big=%u recs=%u q=%u/%u lan=%d",
                  (unsigned)(esp_timer_get_time() / 1000000ULL),
                  (unsigned)esp_get_free_heap_size(),
@@ -1271,14 +1280,11 @@ static void xprs_from_bearer(const char *wire, int len, int rssi,
                 xprs_hist_accept(wire, len, &hp, bearer);
             } else if (strcmp(type, "identity") == 0) {
                 xprs_identity_heard(&hp);
-            } else if (bearer == XPRS_BEARER_NOW &&
-                       (strcmp(type, "channel") == 0 ||
-                        strcmp(type, "receipt") == 0)) {
-                /* §23.7 only on ESP-NOW: the working channel IS an ESP-NOW
-                 * channel, and answering an invitation on a bearer the peer
-                 * cannot hear would strand them. */
-                xprschan_on_packet(&hp, wire, len);
             }
+            /* §23.7 is NOT dispatched here. It lives on the heard callback,
+             * which sees the duplicate airing step 4 depends on — see
+             * xprs_heard_on_now. Dispatching from both would hand the state
+             * machine the first airing twice. */
         }
     }
 
@@ -1371,11 +1377,27 @@ static void xprs_heard_on_lan(const char *id, const char *wire, int len)
 }
 
 /* The same for ESP-NOW: a copy somebody already relayed there means our
- * Bluetooth copy is redundant. */
+ * Bluetooth copy is redundant.
+ *
+ * This callback also carries §23.7, and it has to. The receive path proper
+ * swallows a packet whose identifier it has already heard, and §23.7's step 4
+ * is the SAME signed acceptance aired a second time on the working channel —
+ * "the first airing commits, the second locates". That repeat is exactly what
+ * the dedup ring exists to throw away, and exactly what this callback exists to
+ * preserve: it fires for every hearing, duplicates included. */
 static void xprs_heard_on_now(const char *id, const char *wire, int len)
 {
     xprs_t hp;
-    if (!xprs_parse(wire, len, &hp) || xprs_via_count(&hp) == 0) return;
+    if (!xprs_parse(wire, len, &hp)) return;
+
+    char type[16];
+    xprs_type(&hp, type, sizeof type);
+    if (strcmp(type, "channel") == 0 || strcmp(type, "receipt") == 0) {
+        xprschan_on_packet(&hp, wire, len);
+        /* fall through: a receipt is still ordinary traffic to everything else */
+    }
+
+    if (xprs_via_count(&hp) == 0) return;
     relay_cancel((uint32_t)strtoul(id, NULL, 16));
 }
 

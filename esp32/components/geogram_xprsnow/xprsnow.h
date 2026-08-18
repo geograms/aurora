@@ -60,10 +60,17 @@ extern "C" {
 /** Longest XPRS packet, and exactly one ESP-NOW frame. */
 #define XPRSNOW_WIRE_MAX   250
 
-/** Frames the receive callback may hold before the bearer task drains them.
- *  Four is a burst; a fifth is dropped and counted rather than made to wait in
- *  the WiFi task. */
-#define XPRSNOW_RX_QUEUE   4
+/**
+ * Frames the receive callback may hold before the bearer task drains them.
+ *
+ * Four was not enough. The drain shares a task with the LAN bearer's 100 ms
+ * socket timeout, a SHA-256 per packet, signature checks, and SD writes behind
+ * a lock the index writer holds across two fsyncs — a stall of several hundred
+ * milliseconds is ordinary, and everything arriving during one was lost while
+ * nothing on the dongle printed the counter. Sixteen frames is about four
+ * kilobytes and covers a stall an order of magnitude longer.
+ */
+#define XPRSNOW_RX_QUEUE   16
 
 /**
  * @brief One packet heard on ESP-NOW.

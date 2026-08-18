@@ -63,13 +63,18 @@ extern "C" {
 #define XC_INVITE_FRESH_MS   20000u
 
 /** The longest a station will ever be away, whatever `until:` claims. */
-#define XC_MAX_AWAY_MS       120000u
+#define XC_MAX_AWAY_MS       45000u
 
 /** Default stay when there is no usable clock to read `until:` against. */
 #define XC_DEFAULT_AWAY_MS   30000u
 
 /** How long the inviter waits alone before concluding nobody came (step 6). */
 #define XC_PROOF_WAIT_MS     8000u
+
+/** How often the invitee repeats its step-4 proof on the working channel.
+ *  Once is not enough: both stations arrive by their own route and neither
+ *  controls when the other is listening. */
+#define XC_ANNOUNCE_EVERY_MS 1000u
 
 typedef enum {
     XC_IDLE = 0,

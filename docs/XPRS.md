@@ -1446,6 +1446,148 @@ part, which is what a long message already does. Where neither is possible --
 a single measurement that fills the packet by itself -- the sender may go
 unsigned, and that is the case the "unsigned" state above exists to describe.
 
+### 9.1.2 Computing the signature
+
+The scheme is a short Schnorr signature over secp256k1 in the classic (e, s)
+form: the challenge travels truncated to 16 bytes and the scalar in full, 48
+bytes together, the smallest a secp256k1 signature can be. It uses the same
+key that stands behind the station's callsign (section 3), and it is NOT
+interoperable with BIP-340 verifiers -- the truncated-challenge form trades
+that away for 16 bytes a packet gets back.
+
+Two helpers, then the algorithm.
+
+**Tagged hash** (the BIP-340 construction): `H_tag(msg) = sha256(sha256(tag)
+|| sha256(tag) || msg)`, with the tag as UTF-8 text.
+
+**Base85**: 4 bytes become 5 characters, Z85-style. The value `v` of each
+big-endian 4-byte group is written as five digits base 85, most significant
+first, using this 85-character alphabet (chosen to exclude the space and the
+APRS-reserved `{`, `|`, `~`):
+
+```
+0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-+=^!/*?&<>()[]%$#@,;_
+```
+
+48 bytes therefore encode to exactly 60 characters, which is what the `sig:`
+value is.
+
+**To sign**, with private scalar `d`, curve order `n` and generator `G`:
+
+1. `m = sha256(canonical text)` -- the packet with `sig:` and `via:` removed,
+   exactly as section 5 removes them. `m` is also the digest the identifier
+   truncates, so one canonical form serves both.
+2. Use the x-only key convention: if `d*G` has an odd y coordinate, replace
+   `d` with `n - d`. Let `px` be the 32-byte x coordinate of the public
+   point.
+3. Draw 32 random bytes `aux`, and derive the nonce
+   `k = H_APRX/nonce(d || m || aux) mod n` (d as 32 bytes big-endian; if the
+   result is zero, use one).
+4. `R = k*G`; let `rx` be its 32-byte x coordinate.
+5. `e = first 16 bytes of H_APRX/challenge(rx || px || m)`.
+6. `s = (k + e*d) mod n`, with `e` read as a big-endian integer.
+7. The signature is `e || s`, 48 bytes; base85-encode it and place it in
+   `sig:`, which `with`-inserts before `m:` so the message stays last.
+
+**To verify**, split the 60 characters back into `e` (16 bytes) and `s` (32):
+reject `s >= n`; lift `px` to the even-y point `P`; compute
+`R' = s*G - e*P`; recompute step 5 over the x coordinate of `R'`; the
+signature is valid when the 16 bytes match. The verifier never needs the
+signer's y coordinate or the nonce -- `s*G - e*P` reconstructs `R` because
+`s = k + e*d`.
+
+Because `aux` is random, signing the same packet twice produces two different
+signatures and both verify. A worked example with `aux` FIXED to 32 zero
+bytes so every value is reproducible, using the toy key `d = 7` (never sign
+with a toy key):
+
+```
+canonical  t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
+m          39922745225b987201d0a253ed152b99712088ba6c578a41bdfc670594a3c553
+px         5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc
+k          4c01f3db6d16cb3341eb16ad3664c9d0dce314aa9ccec81f8496c15fe0f0ea9a
+rx         e072fe190474f8314740c63a4d1c77300957c799f67ee9ee0585cdeeb1865471
+e          9a759a34984648709ed7a778b69bd3f1
+s          4c01f3db6d16cb3341eb16ad3664c9d5161a4c1ac6bac333dc7c55acdf33b631
+sig (48B)  9a759a34984648709ed7a778b69bd3f14c01f3db6d16cb3341eb16ad3664c9d5161a4c1ac6bac333dc7c55acdf33b631
+```
+
+Which yields the signed packet -- note `m` above is the digest whose first six
+characters are the identifier `399227` of section 6.3:
+
+```
+143  t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:NSU5QM$,R^P4x)=WWU=ooAB=tz5gqJlf*q?hE,#W78*>=-(65z?>Ab6&.RX# m:net starts in ten minutes
+```
+
+The signing function in C++, with the curve and hash primitives taken from
+the reader's own library (libsecp256k1, OpenSSL or equivalent -- the shapes
+are stated in the comments):
+
+```cpp
+// APRX short-Schnorr sign over secp256k1 (XPRS 9.1.2).
+// Assumed primitives:
+//   void sha256(uint8_t out[32], const uint8_t* data, size_t len);
+//   bignum arithmetic mod n (curve order) and EC ops:
+//     Point ec_mul_g(const Big& k);          // k * G
+//     Big   point_x(const Point& p);         // x coordinate
+//     bool  point_y_odd(const Point& p);
+//     Big   big_from_be(const uint8_t* b, size_t len);
+//     void  big_to_be32(const Big& v, uint8_t out[32]);
+
+static void tagged_hash(uint8_t out[32], const char* tag,
+                        const uint8_t* msg, size_t len) {
+    uint8_t th[32];
+    sha256(th, (const uint8_t*)tag, strlen(tag));
+    std::vector<uint8_t> buf;
+    buf.insert(buf.end(), th, th + 32);
+    buf.insert(buf.end(), th, th + 32);
+    buf.insert(buf.end(), msg, msg + len);
+    sha256(out, buf.data(), buf.size());
+}
+
+// canonical: the packet text with sig: and via: removed (XPRS section 5).
+// d: private scalar. aux: 32 fresh random bytes. out_sig: 60 chars + NUL.
+void xprs_sign(const std::string& canonical, Big d,
+               const uint8_t aux[32], char out_sig[61]) {
+    static const char* B85 =
+        "0123456789abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-+=^!/*?&<>()[]%$#@,;_";
+    const Big n = curve_order();
+
+    uint8_t m[32];
+    sha256(m, (const uint8_t*)canonical.data(), canonical.size());
+
+    Point P = ec_mul_g(d);                        // x-only key convention
+    if (point_y_odd(P)) { d = n - d; P = ec_mul_g(d); }
+    uint8_t px[32];  big_to_be32(point_x(P), px);
+
+    uint8_t nb[96];                               // d || m || aux
+    big_to_be32(d, nb); memcpy(nb + 32, m, 32); memcpy(nb + 64, aux, 32);
+    uint8_t kh[32];  tagged_hash(kh, "APRX/nonce", nb, 96);
+    Big k = big_from_be(kh, 32) % n;
+    if (k == 0) k = 1;
+
+    uint8_t rx[32];  big_to_be32(point_x(ec_mul_g(k)), rx);
+
+    uint8_t cb[96];                               // rx || px || m
+    memcpy(cb, rx, 32); memcpy(cb + 32, px, 32); memcpy(cb + 64, m, 32);
+    uint8_t e16[32]; tagged_hash(e16, "APRX/challenge", cb, 96);
+
+    Big e = big_from_be(e16, 16);                 // first 16 bytes only
+    Big s = (k + e * d) % n;
+
+    uint8_t sig[48];                              // e(16) || s(32)
+    memcpy(sig, e16, 16); big_to_be32(s, sig + 16);
+
+    for (int i = 0; i < 48; i += 4) {             // base85, 4 bytes -> 5 chars
+        uint32_t v = (uint32_t(sig[i]) << 24) | (uint32_t(sig[i+1]) << 16) |
+                     (uint32_t(sig[i+2]) << 8) | uint32_t(sig[i+3]);
+        for (int j = 4; j >= 0; --j) { out_sig[(i/4)*5 + j] = B85[v % 85]; v /= 85; }
+    }
+    out_sig[60] = 0;
+}
+```
+
 ### 9.2 Encryption
 
 `x:` carries the sealed body and replaces `m:`.

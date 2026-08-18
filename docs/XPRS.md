@@ -1588,6 +1588,67 @@ void xprs_sign(const std::string& canonical, Big d,
 }
 ```
 
+And verification, with two more primitives from the same library --
+`ec_add(a, b)` for point addition and `lift_x(x)` returning the even-y curve
+point for a 32-byte x coordinate (null when x is not on the curve):
+
+```cpp
+// Verify a sig: value (XPRS 9.1.2). canonical: the packet text with sig:
+// and via: removed. sig85: the 60-character value. px: the signer's 32-byte
+// x-only public key. Returns true only for a valid signature.
+bool xprs_verify(const std::string& canonical, const char sig85[60],
+                 const uint8_t px[32]) {
+    static const char* B85 =
+        "0123456789abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-+=^!/*?&<>()[]%$#@,;_";
+    const Big n = curve_order();
+
+    uint8_t sig[48];                              // base85 decode, 5 -> 4
+    for (int i = 0; i < 60; i += 5) {
+        uint64_t v = 0;
+        for (int j = 0; j < 5; ++j) {
+            const char* d = strchr(B85, sig85[i + j]);
+            if (!d) return false;                 // not in the alphabet
+            v = v * 85 + (d - B85);
+        }
+        if (v > 0xFFFFFFFFull) return false;      // overfull group
+        sig[(i/5)*4 + 0] = (v >> 24) & 0xff;
+        sig[(i/5)*4 + 1] = (v >> 16) & 0xff;
+        sig[(i/5)*4 + 2] = (v >>  8) & 0xff;
+        sig[(i/5)*4 + 3] =  v        & 0xff;
+    }
+
+    Big e = big_from_be(sig, 16);                 // e(16) || s(32)
+    Big s = big_from_be(sig + 16, 32);
+    if (s >= n) return false;
+
+    uint8_t m[32];
+    sha256(m, (const uint8_t*)canonical.data(), canonical.size());
+
+    Point P = lift_x(px);                         // even-y point for px
+    if (P.is_null()) return false;
+
+    // R' = s*G - e*P, computed as s*G + (n - e)*P.
+    Point Rp = ec_add(ec_mul_g(s), ec_mul(P, n - e));
+    if (Rp.is_infinity()) return false;
+    uint8_t rx[32];  big_to_be32(point_x(Rp), rx);
+
+    uint8_t cb[96];                               // rx || px || m
+    memcpy(cb, rx, 32); memcpy(cb + 32, px, 32); memcpy(cb + 64, m, 32);
+    uint8_t e2[32];  tagged_hash(e2, "APRX/challenge", cb, 96);
+
+    uint8_t diff = 0;                             // constant-time compare
+    for (int i = 0; i < 16; ++i) diff |= sig[i] ^ e2[i];
+    return diff == 0;
+}
+```
+
+The reconstruction works because `s = k + e*d`, so `s*G - e*P` is
+`k*G + e*d*G - e*d*G = R`; a verifier never needs the nonce or the signer's
+y coordinate. The three failure modes before the math -- a character outside
+the alphabet, an overfull base85 group, `s >= n` -- are rejected first so a
+corrupted or hostile value never reaches the curve.
+
 ### 9.2 Encryption
 
 `x:` carries the sealed body and replaces `m:`.

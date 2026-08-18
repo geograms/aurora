@@ -12,23 +12,75 @@ Status: DRAFT 10. Section 36 states which parts are implemented.
 
 ## 1. Purpose
 
-APRS is a proven network, and an XPRS station meeting APRS infrastructure
-operates under APRS rules (section 20). APRS has two prerequisites: amateur
-spectrum, and a callsign issued by a radio authority. Both are correct for a
-licensed service, and both exclude everyone without a licence.
+XPRS is APRS carried forward: not an alternative for unlicensed bands, but
+the whole design rebuilt with what three decades of running the original
+taught. APRS proved that a small text packet, heard by everyone and repeated
+by volunteers, is enough to build a live map of who is where, doing what,
+needing what. XPRS keeps that idea whole and rebuilds everything around it
+that the decades showed to be a limit rather than a choice:
 
-XPRS applies the same design to Bluetooth and LoRa in the ISM bands, WiFi, and
-the internet, with identity derived from a keypair generated on the device.
+- **Identity was asserted, never proven.** Any station could transmit any
+  callsign. XPRS signs packets with a key the station holds, so authorship is
+  checkable (section 9) — and a licensed callsign can be bound to a key and
+  proven live on air (section 18).
+- **Delivery was hope.** A packet missed was a packet gone. XPRS adds custody
+  — stations carry mail for the absent and hand it over with signed receipts
+  (section 13) — and history, so a station away for four days asks for the
+  days it missed (section 25.2).
+- **The internet side was one central system.** APRS-IS sees every packet,
+  and everyone depends on it. XPRS replaces it with indexers each station
+  CHOOSES, federated by directories rather than by copying each other's
+  traffic (section 36) — no indexer holds the network, every indexer can
+  point across it.
+- **Content stopped at 67 characters.** XPRS carries files of any size by
+  content hash — described, found, fetched in pieces, or inline when tiny
+  (section 6.7) — with the packet layer never carrying a byte it cannot
+  afford.
+- **One band, one plan.** XPRS is bearer-neutral: LoRa, Bluetooth, WiFi,
+  HF/VHF/UHF, wired networks and the internet, each governed by its own
+  airtime arithmetic (section 31), with a documented way for a pair to move
+  their long business off the shared channel (section 23.7).
 
-APRS accumulated its data formats one field at a time over three decades. The
-result is four incompatible position encodings, weather carried as fixed-width
-fields inside a position report, telemetry whose units are defined in separate
-messages that must be received beforehand, and a mixture of feet, knots, miles
+The prerequisites changed too. APRS requires amateur spectrum and an issued
+callsign — correct for a licensed service, and excluding everyone without a
+licence. XPRS runs the same design on Bluetooth and LoRa in the ISM bands, on
+WiFi and on the internet, with identity derived from a keypair generated on
+the device; licensed operators keep their callsigns and their bands, and the
+two meet under APRS rules where they meet (sections 9.4 and 33).
+
+And the format itself is the lesson APRS taught most expensively. APRS
+accumulated its encodings one field at a time: four incompatible position
+formats, weather as fixed-width digits inside a position report, telemetry
+whose units arrive in separate messages, and a mixture of feet, knots, miles
 per hour, Fahrenheit, hundredths of an inch and tenths of a millibar. Each
-addition was constrained by a packet that was already full and by a format with
-nowhere left to put a new field.
+addition was constrained by a packet that was already full. XPRS is one
+syntax, readable on sight, with room to grow (section 2).
 
-XPRS is one syntax, readable on sight, with room to grow.
+### 1.1 The actors
+
+The same words recur through this document, and each names a ROLE — one
+station is usually several of them at once, and every one of them is
+somebody's ordinary device rather than appointed infrastructure.
+
+| Actor | What it is | Where |
+|---|---|---|
+| **operator** | the person; holds the key their stations sign with, answers for what they transmit | 3, 9 |
+| **station** | one device speaking XPRS under a callsign; an operator's phone, tracker and desktop are stations sharing a base callsign | 3.1 |
+| **relay** (APRS: digipeater) | repeats a packet on the medium it heard it, within the hop budget, appending itself to `via:` | 13.1–13.2 |
+| **carrier** | holds a message in custody for a station that is absent, and hands it over — with a signed receipt — when it can | 13.3–13.7 |
+| **mailbox** | a station a recipient DECLARED as where to leave their mail (`t:mailbox hold:`), or one volunteering (`serve:mailbox`) | 13.12, 24.2 |
+| **gateway** (APRS: iGate) | republishes packets onto something that is not XPRS — an indexer, APRS-IS, the internet — under the scope rules, and publishes who it hears so the absent stay reachable | 13.11.3, 36.1, 36.8 |
+| **history server** | keeps a spool of what it heard and re-airs it on request (`serve:history`, `cmd:history`) | 24, 25.2, 31.3 |
+| **file server** | holds content-addressed files and serves them by hash (`serve:files`, `cmd:file`, `q:have`) | 6.7, 24 |
+| **indexer** | archives the publications of depositors its operator chose, answers queries about them, holds mail, and federates with other indexers by directory — never by content | 36 |
+| **group** | an address several stations read — a name, not a boundary, and not a station | 6.3, 26 |
+
+The table is descriptive, not a licence scheme: a phone in a pocket is a
+station, a relay when it repeats, a carrier when it holds, a gateway the
+moment it has both a radio and the internet. What a station DOES for others
+it advertises with `serve:` (section 24), and what it is obliged to do is
+nothing (section 31.3) — every role here is volunteered, bounded by its
+operator's budgets, and honest about both.
 
 ---
 

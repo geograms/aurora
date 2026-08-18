@@ -357,14 +357,38 @@ static void start_mesh_mode(void)
 
 #if BOARD_MODEL == MODEL_TDONGLE_S3
 
-/* Operator's home WiFi — used only when no captive-portal/console credentials
+/* Operator's home WiFi -- used only when no captive-portal/console credentials
  * are saved in NVS. Lets the iGate reach APRS-IS out of the box. Override at
- * runtime via the captive portal or the `wifi_connect` console command. */
+ * runtime via the captive portal or the `wifi_connect` console command.
+ *
+ * THE CREDENTIALS ARE NOT IN THIS FILE. They were, and a real network's SSID
+ * and password sat in a public repository as a result. Copy
+ * `wifi_secrets.h.example` to `wifi_secrets.h` and fill it in; that filename is
+ * gitignored, and it is the same file the m5stack and espnow_probe projects
+ * already use, so one copy serves all three.
+ *
+ * Without it the defaults are empty and the station simply waits for the
+ * captive portal, which is the correct behaviour for anyone who is not the
+ * operator of this particular dongle. */
+#if defined(__has_include)
+#  if __has_include("wifi_secrets.h")
+#    include "wifi_secrets.h"
+#  endif
+#endif
+
 #ifndef TDONGLE_DEFAULT_WIFI_SSID
-#define TDONGLE_DEFAULT_WIFI_SSID "---___---"
+#  ifdef WIFI_SSID
+#    define TDONGLE_DEFAULT_WIFI_SSID WIFI_SSID
+#  else
+#    define TDONGLE_DEFAULT_WIFI_SSID ""
+#  endif
 #endif
 #ifndef TDONGLE_DEFAULT_WIFI_PASS
-#define TDONGLE_DEFAULT_WIFI_PASS "vodafone"
+#  ifdef WIFI_PASS
+#    define TDONGLE_DEFAULT_WIFI_PASS WIFI_PASS
+#  else
+#    define TDONGLE_DEFAULT_WIFI_PASS ""
+#  endif
 #endif
 
 /* Two independent SD archives: text messages and automated position beacons. */

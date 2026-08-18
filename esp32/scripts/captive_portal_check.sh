@@ -3,7 +3,9 @@ set -euo pipefail
 
 IFACE="${1:-wlp0s20f3}"
 AP_SSID="${2:-geogram}"
-DEFAULT_HOME_SSID="---___---"
+# The operator's home network, if they have set one. Not hardcoded: this used
+# to carry a real SSID into a public repository.
+DEFAULT_HOME_SSID="${HOME_SSID:-}"
 HOME_SSID="${3:-${DEFAULT_HOME_SSID}}"
 AP_IP="${4:-192.168.4.1}"
 CONNECT_WAIT="${CONNECT_WAIT:-25}"

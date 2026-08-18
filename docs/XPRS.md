@@ -1481,10 +1481,10 @@ value is.
    `d` with `n - d`. Let `px` be the 32-byte x coordinate of the public
    point.
 3. Draw 32 random bytes `aux`, and derive the nonce
-   `k = H_APRX/nonce(d || m || aux) mod n` (d as 32 bytes big-endian; if the
+   `k = H_XPRS/nonce(d || m || aux) mod n` (d as 32 bytes big-endian; if the
    result is zero, use one).
 4. `R = k*G`; let `rx` be its 32-byte x coordinate.
-5. `e = first 16 bytes of H_APRX/challenge(rx || px || m)`.
+5. `e = first 16 bytes of H_XPRS/challenge(rx || px || m)`.
 6. `s = (k + e*d) mod n`, with `e` read as a big-endian integer.
 7. The signature is `e || s`, 48 bytes; base85-encode it and place it in
    `sig:`, which `with`-inserts before `m:` so the message stays last.
@@ -1505,18 +1505,18 @@ with a toy key):
 canonical  t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 m:net starts in ten minutes
 m          39922745225b987201d0a253ed152b99712088ba6c578a41bdfc670594a3c553
 px         5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc
-k          4c01f3db6d16cb3341eb16ad3664c9d0dce314aa9ccec81f8496c15fe0f0ea9a
-rx         e072fe190474f8314740c63a4d1c77300957c799f67ee9ee0585cdeeb1865471
-e          9a759a34984648709ed7a778b69bd3f1
-s          4c01f3db6d16cb3341eb16ad3664c9d5161a4c1ac6bac333dc7c55acdf33b631
-sig (48B)  9a759a34984648709ed7a778b69bd3f14c01f3db6d16cb3341eb16ad3664c9d5161a4c1ac6bac333dc7c55acdf33b631
+k          e052dd3b72c2aab12db5d39d047de17c82fef6268b1b07e0dd157e826ba4aa5b
+rx         f3552a7235ef03791e8469f3bf55f041f21a9afcd65675301bdc11d8f95d9ea8
+e          b40348c6defc8e1ae6dfca7635513e3b
+s          e052dd3b72c2aab12db5d39d047de1816f15f396a402ea9d2d3407bde0dd5df8
+sig (48B)  b40348c6defc8e1ae6dfca7635513e3be052dd3b72c2aab12db5d39d047de1816f15f396a402ea9d2d3407bde0dd5df8
 ```
 
 Which yields the signed packet -- note `m` above is the digest whose first six
 characters are the identifier `399227` of section 6.3:
 
 ```
-143  t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:NSU5QM$,R^P4x)=WWU=ooAB=tz5gqJlf*q?hE,#W78*>=-(65z?>Ab6&.RX# m:net starts in ten minutes
+143  t:message f:X1QZ3N d:LISBOA ts:2026-08-08_14:26:40 sig:V<-(s&U-xL(hjs8hbML0<8nw[A)a<YeW+5_1BYlWzX.)fQYP&LeI[ZC<n4Yl m:net starts in ten minutes
 ```
 
 The signing function in C++, with the curve and hash primitives taken from
@@ -1524,7 +1524,7 @@ the reader's own library (libsecp256k1, OpenSSL or equivalent -- the shapes
 are stated in the comments):
 
 ```cpp
-// APRX short-Schnorr sign over secp256k1 (XPRS 9.1.2).
+// XPRS short-Schnorr sign over secp256k1 (section 9.1.2).
 // Assumed primitives:
 //   void sha256(uint8_t out[32], const uint8_t* data, size_t len);
 //   bignum arithmetic mod n (curve order) and EC ops:
@@ -1563,7 +1563,7 @@ void xprs_sign(const std::string& canonical, Big d,
 
     uint8_t nb[96];                               // d || m || aux
     big_to_be32(d, nb); memcpy(nb + 32, m, 32); memcpy(nb + 64, aux, 32);
-    uint8_t kh[32];  tagged_hash(kh, "APRX/nonce", nb, 96);
+    uint8_t kh[32];  tagged_hash(kh, "XPRS/nonce", nb, 96);
     Big k = big_from_be(kh, 32) % n;
     if (k == 0) k = 1;
 
@@ -1571,7 +1571,7 @@ void xprs_sign(const std::string& canonical, Big d,
 
     uint8_t cb[96];                               // rx || px || m
     memcpy(cb, rx, 32); memcpy(cb + 32, px, 32); memcpy(cb + 64, m, 32);
-    uint8_t e16[32]; tagged_hash(e16, "APRX/challenge", cb, 96);
+    uint8_t e16[32]; tagged_hash(e16, "XPRS/challenge", cb, 96);
 
     Big e = big_from_be(e16, 16);                 // first 16 bytes only
     Big s = (k + e * d) % n;
@@ -1635,7 +1635,7 @@ bool xprs_verify(const std::string& canonical, const char sig85[60],
 
     uint8_t cb[96];                               // rx || px || m
     memcpy(cb, rx, 32); memcpy(cb + 32, px, 32); memcpy(cb + 64, m, 32);
-    uint8_t e2[32];  tagged_hash(e2, "APRX/challenge", cb, 96);
+    uint8_t e2[32];  tagged_hash(e2, "XPRS/challenge", cb, 96);
 
     uint8_t diff = 0;                             // constant-time compare
     for (int i = 0; i < 16; ++i) diff |= sig[i] ^ e2[i];

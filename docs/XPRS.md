@@ -3,8 +3,10 @@
 Protocol specification.
 
 XPRS carries position, movement, weather, telemetry and messages between
-stations over licence-free spectrum and the internet. It occupies the same role
-as APRS and requires no amateur licence.
+stations over licence-free spectrum, amateur bands and the internet. It
+extends and modernizes APRS. No licence is needed on licence-free spectrum;
+on amateur bands it operates under amateur rules -- plain text, a
+government-issued callsign, no ciphertext (sections 9.4 and 33).
 
 Status: DRAFT 10. Section 36 states which parts are implemented.
 

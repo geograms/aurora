@@ -68,6 +68,8 @@
 #include "xprsindex.h"
 #include "xprslan.h"
 #include "xprsnow.h"
+#include "xprsid.h"
+#include "xprschan.h"
 #include "rns_tcp.h"
 #include "xprssig.h"
 #include "bech32.h"
@@ -182,6 +184,7 @@ static void handle_aprs(const uint8_t *payload, int len, int rssi);
 static void igate_heard_add(const char *call, uint8_t bearer);
 static int  xprs_hears_render(uint8_t bearer, char *out, int cap, int *total);
 static bool xprs_verify_sig(const xprs_t *p, const uint8_t pub[32]);
+static const uint8_t *xprs_peer_key(const char *call);
 static int  xprs_peer_key_count(void);
 static void xprs_identity_heard(const xprs_t *p);
 static void xprs_hist_accept(const char *wire, int len, const xprs_t *p,
@@ -1268,6 +1271,13 @@ static void xprs_from_bearer(const char *wire, int len, int rssi,
                 xprs_hist_accept(wire, len, &hp, bearer);
             } else if (strcmp(type, "identity") == 0) {
                 xprs_identity_heard(&hp);
+            } else if (bearer == XPRS_BEARER_NOW &&
+                       (strcmp(type, "channel") == 0 ||
+                        strcmp(type, "receipt") == 0)) {
+                /* §23.7 only on ESP-NOW: the working channel IS an ESP-NOW
+                 * channel, and answering an invitation on a bearer the peer
+                 * cannot hear would strand them. */
+                xprschan_on_packet(&hp, wire, len);
             }
         }
     }
@@ -1382,35 +1392,9 @@ static void xprs_heard_on_now(const char *id, const char *wire, int len)
 static int xprs_sign_wire(char *wire, int len, int cap)
 {
     if (!s_xprs_can_sign || len <= 0) return len;
-    if (len + 5 + XPRSSIG_B85_LEN >= cap) return len;   /* §9.1.1: no room */
-
-    uint8_t digest[32];
-    sha256((const uint8_t *)wire, (size_t)len, digest);
-
     const nostr_keys_t *keys = xprs_keys();
     if (!keys) return len;
-    uint8_t sig[XPRSSIG_LEN];
-    if (!xprssig_sign(digest, keys->private_key, sig)) return len;
-
-    char b85[XPRSSIG_B85_LEN + 1];
-    if (xprssig_b85_encode(sig, sizeof sig, b85, sizeof b85) != XPRSSIG_B85_LEN) {
-        return len;
-    }
-
-    char *m = strstr(wire, " m:");
-    if (m) {
-        /* Insert before the message, keeping m: last. */
-        int head = (int)(m - wire);
-        char tail[XPRS_MAX_WIRE + 1];
-        int taillen = len - head;
-        if (taillen < 0 || taillen > (int)sizeof tail - 1) return len;
-        memcpy(tail, m, (size_t)taillen);
-        tail[taillen] = 0;
-        int n = snprintf(wire + head, (size_t)(cap - head), " sig:%s%s", b85, tail);
-        return (n > 0) ? head + n : len;
-    }
-    int n = snprintf(wire + len, (size_t)(cap - len), " sig:%s", b85);
-    return (n > 0) ? len + n : len;
+    return xprsid_sign(wire, len, cap, keys->private_key);
 }
 
 /*
@@ -1440,6 +1424,8 @@ static void xprs_identity_air(void)
 
     xprs_air(wire, len, SUBTYPE_XPRS);
     xprslan_send(wire, len);
+    xprsnow_send(wire, len);   /* §9.3 on every bearer: a peer that cannot
+                                * learn our key cannot check anything we say */
     if (s_xprs_index) {
         xprsindex_add(s_xprs_index, wire, len, 0, true, (uint32_t)time(NULL));
     }
@@ -1485,6 +1471,7 @@ static void xprs_service_air(void)
 
     xprs_air(wire, len, SUBTYPE_XPRS);
     xprslan_send(wire, len);
+    xprsnow_send(wire, len);
     if (s_xprs_index) {
         xprsindex_add(s_xprs_index, wire, len, 0, true, (uint32_t)time(NULL));
     }
@@ -1549,6 +1536,62 @@ static int xprs_now_beacon(char *out, int cap)
     if (n <= 0 || n >= cap) return 0;
     return xprs_sign_wire(out, n, cap);
 }
+
+/* ---- meeting on a working channel (XPRS.md §23.7) ------------------------ */
+
+/* Only a station whose signature we can CHECK gets to take this one off the
+ * shared channel. §23.7 refuses an unsigned invitation for exactly this reason;
+ * a station we hold no key for is no better placed to be believed. */
+static bool xc_verified(const xprs_t *p)
+{
+    char from[10];
+    if (!xprs_get_str(p, "f", from, sizeof from)) return false;
+    const uint8_t *key = xprs_peer_key(from);
+    return key && xprs_verify_sig(p, key);
+}
+
+static uint32_t xc_now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+static uint32_t xc_epoch(void)
+{
+    time_t t = time(NULL);
+    return (t > 1750000000) ? (uint32_t)t : 0;
+}
+
+/* This station gateways for other people, so leaving is a real cost — but it is
+ * bounded, it only ever happens for a peer we can verify, and coming back is
+ * enforced by a local clock the invitation cannot touch. */
+static bool xc_may_move(void) { return true; }
+
+static void xc_on_working(const char *peer, uint8_t channel, bool lr)
+{
+    ESP_LOGW(TAG, "working channel %u with %s%s — the iGate and the hub are "
+                  "out of reach until we return", channel, peer,
+             lr ? " on the long-range PHY" : "");
+}
+
+static void xc_on_home(const char *peer, bool worked)
+{
+    ESP_LOGW(TAG, "home again after %s (%s)", peer[0] ? peer : "nobody",
+             worked ? "the pair met" : "nothing happened");
+}
+
+static const xc_ops_t k_chan_ops = {
+    .sign = xprs_sign_wire,
+    .verified = xc_verified,
+    .air = xprsnow_send,
+    .now_ms = xc_now_ms,
+    .time_field = xprs_time_field,
+    .epoch = xc_epoch,
+    .hold_reconnect = geogram_wifi_hold_reconnect,
+    .announce_identity = xprs_identity_air,
+    .may_move = xc_may_move,
+    .on_working = xc_on_working,
+    .on_home = xc_on_home,
+};
 
 /* ---- serving cmd:history (XPRS.md sections 25.2.1 and 36) ---------------- */
 
@@ -1648,21 +1691,7 @@ static void xprs_identity_heard(const xprs_t *p)
  * airtime wants one answer, and "not proven" is the same as "no". */
 static bool xprs_verify_sig(const xprs_t *p, const uint8_t pub[32])
 {
-    char b85[XPRSSIG_B85_LEN + 1];
-    if (!xprs_get_str(p, "sig", b85, sizeof b85)) return false;
-    if (strlen(b85) != XPRSSIG_B85_LEN) return false;
-
-    uint8_t sig[XPRSSIG_LEN];
-    if (xprssig_b85_decode(b85, XPRSSIG_B85_LEN, sig, sizeof sig) != XPRSSIG_LEN)
-        return false;
-
-    char canon[XPRS_MAX_WIRE + 1];
-    int n = xprs_signed_text(p, canon, sizeof canon);
-    if (n <= 0) return false;
-
-    uint8_t digest[32];
-    sha256((const uint8_t *)canon, (size_t)n, digest);
-    return xprssig_verify(digest, sig, pub);
+    return xprsid_verify(p, pub);
 }
 
 /*
@@ -2401,6 +2430,10 @@ static void relay_task(void *arg)
          * this loop already runs at. */
         xprs_hist_pump();
 
+        /* §23.7's deadline. Cheap, and the one thing that guarantees a station
+         * that moved comes back. */
+        xprschan_tick();
+
         if (s_hub_announce_pending) {
             s_hub_announce_pending = false;
             announce("tdongle-s3 online", 17);
@@ -3104,6 +3137,25 @@ static void console_recv_begin(const char *path);
 
 static void console_handle(char *line)
 {
+    if (strncmp(line, "chan ", 5) == 0) {
+        /* chan <peer> <channel> [seconds] [lr] — §23.7 step 1. */
+        char peer[10] = {0};
+        int ch = 0, secs = 20, lr = 0;
+        char lrs[8] = {0};
+        int got = sscanf(line + 5, "%9s %d %d %7s", peer, &ch, &secs, lrs);
+        if (got >= 2) {
+            lr = (strcmp(lrs, "lr") == 0);
+            printf("inviting %s to channel %d for %ds%s\n", peer, ch, secs,
+                   lr ? " on the long-range PHY" : "");
+            if (!xprschan_invite(peer, (uint8_t)ch, (uint32_t)secs, lr)) {
+                printf("refused: busy, or this station will not move\n");
+            }
+        } else {
+            printf("usage: chan <peer> <channel> [seconds] [lr]\n");
+        }
+        return;
+    }
+    if (strcmp(line, "unchan") == 0) { xprschan_abort("asked to"); return; }
     if (strcmp(line, "status") == 0) {
         printf("callsign=%s mesh=%d neigh=%d routes=%d scf=%d sd=%d "
                "disc=%lu last_rx=%lus ago epoch=%u.%u\n",
@@ -3446,6 +3498,7 @@ void app_main(void)
         xprsnow_set_rx_cb(xprs_from_now);
         xprsnow_set_heard_cb(xprs_heard_on_now);
         xprsnow_set_beacon(xprs_now_beacon, 300, 25);
+        xprschan_init(s_aprs_call[0] ? s_aprs_call : "TDONGLE", &k_chan_ops);
     }
 
     api_start();

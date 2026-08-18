@@ -37,6 +37,10 @@
 #include "xprs.h"
 #include "xprsnow.h"
 #include "xprslan.h"
+#include "xprsid.h"
+#include "xprschan.h"
+#include "nostr_keys.h"
+#include "bech32.h"
 
 #include "wifi_secrets.h"   /* gitignored; see wifi_secrets.h.example */
 
@@ -58,6 +62,55 @@ static void derive_callsign(void)
     s_call[6] = 0;
 }
 
+/* ── Signing, and whose word we take ────────────────────────────────────── */
+
+/* One key per station we have heard a t:identity from (§9.3), first speaker
+ * wins. Small: this exists so §23.7 has somebody it can believe, not to be a
+ * directory. */
+#define PEERKEYS_MAX 4
+static struct { char call[10]; uint8_t pub[32]; } s_peers[PEERKEYS_MAX];
+static int s_peers_n;
+
+static const uint8_t *peer_key(const char *call)
+{
+    for (int i = 0; i < s_peers_n; i++) {
+        if (strcasecmp(s_peers[i].call, call) == 0) return s_peers[i].pub;
+    }
+    return NULL;
+}
+
+/* Verified against the very key it publishes: a station claiming a key must
+ * show it holds it, and the packet is signed with it. */
+static void identity_heard(const xprs_t *p)
+{
+    char call[10], npub[80];
+    if (!xprs_get_str(p, "f", call, sizeof call)) return;
+    if (!xprs_get_str(p, "k", npub, sizeof npub)) return;
+    if (strncmp(npub, "npub1", 5) != 0 || peer_key(call)) return;
+    if (s_peers_n >= PEERKEYS_MAX) return;
+
+    char hrp[8];
+    uint8_t data[64];
+    size_t dlen = sizeof data;
+    if (bech32_decode(npub, hrp, data, &dlen) != ESP_OK) return;
+    if (dlen != 32 || strcmp(hrp, "npub") != 0) return;
+    if (!xprsid_verify(p, data)) {
+        ESP_LOGW(TAG, "%s does not sign for the key it published", call);
+        return;
+    }
+    snprintf(s_peers[s_peers_n].call, sizeof s_peers[0].call, "%s", call);
+    memcpy(s_peers[s_peers_n].pub, data, 32);
+    s_peers_n++;
+    ESP_LOGI(TAG, "learned %s signs with %02x%02x%02x%02x...", call,
+             data[0], data[1], data[2], data[3]);
+}
+
+static int sign_wire(char *wire, int len, int cap)
+{
+    const nostr_keys_t *k = nostr_keys_get();
+    return k ? xprsid_sign(wire, len, cap, k->private_key) : len;
+}
+
 /* ── What we hear ───────────────────────────────────────────────────────── */
 
 static uint32_t s_heard_count;
@@ -65,6 +118,17 @@ static uint32_t s_heard_count;
 static void on_espnow(const char *wire, int len, const uint8_t mac[6], int rssi)
 {
     s_heard_count++;
+    xprs_t p;
+    if (xprs_parse(wire, len, &p)) {
+        char type[16];
+        xprs_type(&p, type, sizeof type);
+        if (strcmp(type, "identity") == 0) identity_heard(&p);
+        /* §23.7 lives on this bearer, because the working channel is an ESP-NOW
+         * channel and an answer aired anywhere else would strand the far side. */
+        if (strcmp(type, "channel") == 0 || strcmp(type, "receipt") == 0) {
+            if (xprschan_on_packet(&p, wire, len)) return;
+        }
+    }
     ESP_LOGI(TAG, "espnow %02x:%02x:%02x:%02x:%02x:%02x %4d dBm %3dB  %s",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], rssi, len, wire);
     /* A station with two bearers is a bridge: what arrived here goes out there,
@@ -101,13 +165,86 @@ static int lan_beacon(char *out, int cap)
                     s_call, xprslan_peer_count(600));
 }
 
+/* ── Meeting on a working channel (§23.7) ───────────────────────────────── */
+
+/* No SNTP on this board, so most of the time there is no wall clock and
+ * `epoch:<boot>.<uptime>` is the honest thing to send (§4.3). The deadline that
+ * brings us home is local milliseconds either way. */
+static void time_field(char *out, int cap)
+{
+    snprintf(out, cap, "epoch:0.%u",
+             (unsigned)(esp_timer_get_time() / 1000000ULL));
+}
+
+static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+static uint32_t no_clock(void) { return 0; }
+
+static bool verified(const xprs_t *p)
+{
+    char from[10];
+    if (!xprs_get_str(p, "f", from, sizeof from)) return false;
+    const uint8_t *k = peer_key(from);
+    return k && xprsid_verify(p, k);
+}
+
+static bool may_move(void) { return true; }   /* this board gateways nothing */
+static void air_identity(void);               /* defined below, used by the ops */
+
+static void on_working(const char *peer, uint8_t channel, bool lr)
+{
+    ESP_LOGW(TAG, "on channel %u with %s%s", channel, peer,
+             lr ? " (long range)" : "");
+}
+
+static void on_home(const char *peer, bool worked)
+{
+    ESP_LOGW(TAG, "home again after %s (%s)", peer[0] ? peer : "nobody",
+             worked ? "the pair met" : "nothing happened");
+}
+
+static const xc_ops_t k_chan_ops = {
+    .sign = sign_wire,
+    .verified = verified,
+    .air = xprsnow_send,
+    .now_ms = now_ms,
+    .time_field = time_field,
+    .epoch = no_clock,
+    .hold_reconnect = NULL,      /* handled in the event handler above */
+    .announce_identity = air_identity,
+    .may_move = may_move,
+    .on_working = on_working,
+    .on_home = on_home,
+};
+
+/* §9.3: publish the key, or nobody can check a thing we say — including the
+ * acceptance §23.7 leans on. */
+static void air_identity(void)
+{
+    const char *npub = nostr_keys_get_npub();
+    if (!npub || !npub[0]) return;
+    char wire[XPRS_MAX_WIRE + 1], ts[24];
+    time_field(ts, sizeof ts);
+    int n = snprintf(wire, sizeof wire, "t:identity f:%s %s k:%s",
+                     s_call, ts, npub);
+    if (n <= 0 || n > XPRS_MAX_WIRE) return;
+    n = sign_wire(wire, n, (int)sizeof wire);
+    xprsnow_send(wire, n);
+}
+
 /* ── Status, every 15 s, the same shape the dongle prints ───────────────── */
 
 static void status_task(void *arg)
 {
     (void)arg;
+    int n = 0;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(15000));
+        vTaskDelay(pdMS_TO_TICKS(500));
+        /* §23.7's deadline: the one thing that guarantees a station that moved
+         * comes back. Cheap, so it runs on the fast tick, not the log's. */
+        xprschan_tick();
+        if (++n % 120 == 0) air_identity();       /* every 60 s */
+        if (n % 30) continue;                     /* the rest every 15 s */
+
         uint32_t rx = 0, tx = 0, cancelled = 0, dropped = 0;
         xprsnow_stats(&rx, &tx, &cancelled, &dropped);
         ESP_LOGW(TAG, "alive %us heap=%u call=%s ch=%u espnow rx=%u tx=%u "
@@ -129,6 +266,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id,
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        /* Leaving the access point's channel on purpose (§23.7) looks exactly
+         * like losing the link. Reconnecting here would drag us home before the
+         * far side arrives, which is what it did the first time. */
+        if (xprschan_busy()) return;
         ESP_LOGW(TAG, "wifi disconnected — retrying");
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_wifi_connect();
@@ -180,7 +321,17 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
+    if (nostr_keys_init() != ESP_OK || !nostr_keys_available()) {
+        ESP_LOGE(TAG, "no signing key — this station cannot take part in §23.7, "
+                      "which follows only invitations it can check");
+    }
     derive_callsign();
+    /* §3: an X3 callsign derives from the signing key, so a receiver can
+     * re-derive it. This board keeps its MAC-derived X5 name only when there is
+     * no key to derive from. */
+    if (nostr_keys_get_callsign() && nostr_keys_get_callsign()[0]) {
+        snprintf(s_call, sizeof s_call, "%s", nostr_keys_get_callsign());
+    }
     ESP_LOGI(TAG, "M5Stack XPRS station %s (ESP-NOW + LAN, no BLE5 on this chip)",
              s_call);
 
@@ -202,6 +353,8 @@ void app_main(void)
         /* Faster than the dongle's 300 s: this board exists to be measured, and
          * a minute between beacons is a long time to watch a serial console. */
         xprsnow_set_beacon(espnow_beacon, 60, 5);
+        xprschan_init(s_call, &k_chan_ops);
+        air_identity();
     }
 
     xTaskCreate(status_task, "status", 3072, NULL, 1, NULL);

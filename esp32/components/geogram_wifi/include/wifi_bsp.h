@@ -52,6 +52,16 @@ typedef struct {
  *
  * @return esp_err_t ESP_OK on success
  */
+/**
+ * @brief Stop the automatic reconnect while this station is deliberately off
+ *        the access point's channel (XPRS.md §23.7).
+ *
+ * Leaving the channel is indistinguishable from losing the link, so without
+ * this the reconnect logic drags the station home in under a second and the
+ * meeting never happens. Always paired: hold before moving, release on return.
+ */
+void geogram_wifi_hold_reconnect(bool hold);
+
 esp_err_t geogram_wifi_init(void);
 
 /**

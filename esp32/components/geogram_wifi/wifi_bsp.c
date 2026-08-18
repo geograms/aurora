@@ -27,9 +27,25 @@ static int s_retry_count = 0;
 static const int MAX_RETRY_COUNT = 10;  // Max retries before giving up
 static esp_timer_handle_t s_reconnect_timer = NULL;
 
+/* Set while this station has deliberately left the access point's channel to
+ * meet somebody on a working channel (XPRS.md §23.7).
+ *
+ * Without this the move undoes itself in under a second: leaving the channel
+ * looks exactly like a dropped link, the reconnect fires, and the station is
+ * back on the AP's channel before the far side can say it arrived. Measured
+ * doing precisely that. */
+static volatile bool s_hold_reconnect = false;
+
+void geogram_wifi_hold_reconnect(bool hold)
+{
+    s_hold_reconnect = hold;
+    if (hold && s_reconnect_timer) esp_timer_stop(s_reconnect_timer);
+}
+
 static void reconnect_timer_cb(void *arg)
 {
     (void)arg;
+    if (s_hold_reconnect) return;
     esp_wifi_connect();
 }
 
@@ -97,7 +113,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                             }
                         }
                     }
-                    if (s_reconnect_timer) {
+                    if (s_hold_reconnect) {
+                        /* We left on purpose; this is not a lost link. */
+                    } else if (s_reconnect_timer) {
                         esp_timer_start_once(s_reconnect_timer, delay_us);
                     }
                 } else {

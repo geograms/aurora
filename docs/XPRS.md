@@ -501,7 +501,10 @@ The type is fixed by this document and is never transmitted.
 | `text` | any bytes, spaces included | `heading south on the N8` |
 
 A value that does not match its declared type is skipped, as an unknown key is.
-A packet is never rejected as a whole because one field is malformed.
+A packet is never rejected as a whole because one field is malformed. One
+character is removed before the type is checked: the block character `█`
+marks a redacted portion (section 9.2.1), and a reader strips it and reads
+what remains.
 
 ### 4.4 Numbers
 
@@ -1666,43 +1669,50 @@ A later cipher suite takes a new key rather than changing this one.
 
 ### 9.2.1 Hiding parts of a message
 
-`x:` seals a whole body. This section hides PARTS of one, the way a released
-government document does: the reader sees bars where the secrets sit, how
-long they are and where, and everything around them stays readable. Those
-with the passphrase recover the hidden parts; everyone else still gets a
-useful message.
+`x:` seals a whole body. This section hides PARTS of one, the way a
+released government document does: the reader sees bars where the secrets
+sit, how long they are and where, and everything around them stays
+readable. Those with the passphrase recover the hidden parts; everyone
+else still gets a useful packet.
 
 The author marks each secret in double parentheses -- in the text or inside
-any field's value:
+a field's value:
 
 ```
 m:meet ((Max)) at ((pier2))
 pos:38.7((223)),-9.1((393))
 ```
 
-What goes on the wire differs by where the secret sits, and the difference
-is forced by the grammar:
+On the wire, every marked span becomes a run of the block character
+`█` (U+2588), one per hidden character, in place:
 
-- **In `m:`**, each marked span becomes a run of the block character
-  `█` (U+2588), one per hidden character: `m:meet ███ at █████`. Length and
-  position stay visible. A bar costs 3 bytes in UTF-8, which the author is
-  paying for the look.
-- **In any other field**, there are no bars, because a bar inside a value
-  would fail its type (section 4.3) and a keyless receiver would skip the
-  field entirely -- losing even the coarse reading. The marked content is
-  instead DELETED from the wire value, which must remain valid for its
-  type. That is the accuracy dial: the wire carries `pos:38.7,-9.1`, good
-  to about ten kilometres and readable by everyone; the passphrase recovers
-  `pos:38.7223,-9.1393`, good to about ten metres.
+```
+m:meet ███ at █████
+pos:38.7███,-9.1███
+```
+
+Redaction is visible wherever it happens -- which field, where in the
+value, and how long. A bar costs 3 bytes in UTF-8, which the author is
+paying for the look.
+
+**Parsers learn the bar.** When interpreting a value, a reader removes the
+block characters first and reads what remains against the declared type as
+usual (an amendment to the reading rule of section 4.3, and the only one).
+`pos:38.7███,-9.1███` therefore parses as `38.7,-9.1` for everyone -- a
+valid position, good to about ten kilometres -- while the passphrase
+recovers the metre scale. The author decides what the stripped value says,
+because the author decides what stays outside the parentheses. A value
+still invalid after the bars are removed is skipped like any malformed
+value. Display keeps the bars; interpretation drops them.
 
 The hidden parts travel in `xr:`, built like this:
 
-1. The plaintext is `->` followed by the hidden pieces, one per line. When
-   `m:` shows N bar runs, the FIRST N lines fill those runs in reading
-   order; every line after them has the form `key=value` and replaces that
-   field's wire value whole. The order rule keeps the framing unambiguous:
-   a hidden text containing `=` cannot be mistaken for a field line,
-   because the run count is already known from `m:`.
+1. The plaintext is `->` followed by the hidden pieces, one line per bar
+   run, IN PACKET ORDER: field runs first, in the order the fields appear
+   and the runs appear within each value, and the `m:` runs last -- which
+   is the packet's own order, since `m:` is last by grammar. Nothing else
+   is carried: no field names, no offsets, no lengths. The wire's bars
+   already say where and how big.
 2. The key is derived slowly and salted:
    `key = first 16 bytes of PBKDF2-HMAC-SHA256(passphrase, "xprs-xr" || nonce, 100000 iterations)`.
    The nonce is fresh per packet, so a fresh derivation is paid per message
@@ -1717,9 +1727,16 @@ The hidden parts travel in `xr:`, built like this:
 
 Decryption succeeds when the plaintext starts with `->`. That sentinel
 detects the RIGHT KEY and nothing else; tampering is the signature's job,
-because `sig:` covers `m:` with its bars and `xr:` like every other field.
-A packet whose signature verifies but whose decryption yields garbage was
-not forged -- the passphrase was wrong.
+because `sig:` covers the bars and `xr:` like every other field. A packet
+whose signature verifies but whose decryption yields garbage was not
+forged -- the passphrase was wrong.
+
+**Restoration is defended twice.** Line i substitutes bar run i, and a
+line must have exactly the run's character count -- a hundred-letter line
+cannot fill a three-bar hole. After substitution the field's value must
+still pass its type check. A restoration failing either test is discarded
+and the barred wire value stands. The blob can only ever fill the holes
+the wire visibly declares, at the sizes the wire declares.
 
 **The default passphrase is `################`** (sixteen number signs),
 and the spec is plain about what it buys: obfuscation, not secrecy. Anyone
@@ -1728,29 +1745,68 @@ is what keeps a bot from harvesting a thousand redacted email addresses
 for free. A secret that matters takes a real passphrase, and releasing a
 passphrase later is an ordinary message or file, needing nothing new.
 
+**Where bars are permitted.** The rule: a field that third parties act on
+-- routing, relaying, custody, reassembly, verification, transfers,
+channel tuning -- is never redacted; a field that only informs the reader
+may be. Bars also only belong where the stripped value stays honest, which
+excludes the enumerated words (half a word is no word).
+
+Redaction is permitted in:
+
+| Fields | What they are |
+|---|---|
+| `m:` | the text |
+| `pos:` `alt:` `spd:` `h:` `o:` `acc:` | position and movement -- the accuracy dial |
+| `dest:` | a coarse destination still steers a carried packet (13.4) |
+| `temp:` `hum:` `press:` `wind:` `wdir:` `intemp:` `inhum:` | weather readings |
+| `batt:` `dose:` `lifedose:` `radon:` `rf:` `efield:` `mfield:` `odometer:` | telemetry readings |
+| `tag:` `title:` `name:` | content labels; unfindable without the key is the author's choice |
+| `price:` `onboard:` | information between people |
+
+Redaction is refused everywhere else, and a receiver ignores bars found
+where they are not permitted (the stripped value is read; nothing is
+restored there). The refusals, by reason:
+
+- **Envelope and identity**: `t:` `f:` `d:` `ts:` `tz:` `n:` `via:` `sig:`
+  `x:` `xr:` `k:` -- parsing, routing, reassembly and the crypto itself.
+- **References**: `r:` `root:` -- a coarse identifier references nothing.
+- **Commands and answers**: `q:` `s:` `cmd:` `arg:` `code:` `only:`
+  `since:` `until:` -- stations act on these.
+- **Relay and custody control**: `scope:` `urg:` `hold:` `near:` `route:`
+  `serve:` -- carriers and gateways obey them.
+- **Group governance**: `add:` `remove:` `grant:` `revoke:` `role:`
+  `hide:` `vote:` `opt:` -- signed authority records.
+- **File machinery**: `file:` `ph:` `ih:` `b:` `have:` `off:` `size:`
+  `count:` -- a coarse hash is garbage and a coarse size mis-sizes a
+  transfer.
+- **Channel tuning**: `freq:` `mode:` `bw:` `shift:` `input:` `tone:`
+  `power:` `ch:` `every:` `for:` `at:` -- a barred frequency tunes the
+  wrong radio.
+- **Radio diagnostics**: `link:` `busy:` `txtime:` `hears:` `peers:`
+  `mail:` `lx:` `uptime:` `lifetime:` `epoch:` `seq:` `track:` -- other
+  stations route by these.
+- **Safety**: `cw:` `sev:` `rad:` `kind:` -- a warning warns everyone, and
+  a content warning stays readable precisely when the content is not.
+- **Display meta**: `lang:` `mood:` `site:` `supply:` `range:` --
+  enumerated words, nothing gained.
+
 A worked packet, with the nonce fixed to `000102030405060708090a0b` so
 every value reproduces (a real sender draws it randomly). Author input as
-above; hidden pieces `Max`, `pier2`, and the full position; plaintext
-`->Max`, `pier2`, `pos=38.7223,-9.1393` on three lines; derived key
-`e7d6ef612e71fb09fd65dc71efd832c7`:
+above; four bar runs in packet order; plaintext `->223`, `393`, `Max`,
+`pier2` on four lines; derived key `e7d6ef612e71fb09fd65dc71efd832c7`:
 
 ```
-162  t:message f:X1QZ3N d:X1RD89 pos:38.7,-9.1 ts:2026-08-18_17:00:00 xr:AAECAwQFBgcICQoL5trPILdiT2M3VS-WaNXxfc-ho_rPVqMZHfa4NXFjFA m:meet ███ at █████
+164  t:message f:X1QZ3N d:X1RD89 pos:38.7███,-9.1███ ts:2026-08-18_17:00:00 xr:AAECAwQFBgcICQoL5tqwc_xiDDNhLVD9YLDyKZnrvw m:meet ███ at █████
 ```
 
-Everyone in range reads a meeting near 38.7,-9.1 between two stations.
+Everyone in range reads a meeting near 38.7,-9.1 between two stations,
+with the position visibly coarsened and two words visibly withheld.
 Holders of the passphrase read who, which pier, and where to ten metres.
 
-Two properties are deliberate and worth stating. The bars leak the LENGTH
-of a secret -- that is the redacted-document look doing its job -- and
-an author who
-must hide length pads inside the parentheses before marking. And a
-redacted packet degrades honestly: a receiver that has never heard of
-`xr:` skips it (section 4) and still shows the bars and the coarse fields,
-which is the whole point of hiding parts instead of the whole.
-
-Text larger than a packet is a file (section 6.7) and redacts the same
-way; nothing new travels.
+The bars leak the LENGTH of a secret -- deliberately, that is the
+redacted-document look doing its job -- and an author who must hide length
+pads inside the parentheses before marking. Text larger than a packet is a
+file (section 6.7) and redacts the same way; nothing new travels.
 
 ### 9.3 Identity
 

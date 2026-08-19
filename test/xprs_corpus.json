@@ -1050,6 +1050,26 @@
 "id": "1d2841"
 },
 {
+"wire": "t:service f:X3RLY7 serve:relay,devices ts:2026-08-19_18:40:00 sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": 126,
+"id": "32a30b"
+},
+{
+"wire": "t:identity f:X4PL3M ts:2026-08-19_18:40:00 k:npub1pl3m7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f nick:yard-pump sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": 186,
+"id": "ac0d6a"
+},
+{
+"wire": "t:command f:X1A67X d:X4PL3M ts:2026-08-19_18:41:00 cmd:set state:on sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": 132,
+"id": "44df54"
+},
+{
+"wire": "t:result f:X4PL3M d:X1A67X ts:2026-08-19_18:41:02 r:44df54 code:200 state:on sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
+"bytes": 141,
+"id": "c587af"
+},
+{
 "wire": "t:identity f:X5A3F2 ts:2026-08-08_14:26:40 k:npub1qz3n7fu9j9uenmyva7ha6x9eqwymytv2847ccv4vxdmn45y50q7h7k5f nick:lisboa-net sig:KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK",
 "bytes": 187,
 "id": "37defc"
